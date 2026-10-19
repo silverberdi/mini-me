@@ -310,6 +310,7 @@ const showToast = createToastController();
         } : null;
       }
       detailPanel?.classList.toggle('drawer-open', isOpen);
+      detailPanel?.parentElement?.classList.toggle('drawer-closed', desktop && !isOpen);
       document.body.classList.toggle('detail-drawer-open', isOpen);
       if (detailDrawerBackdrop) detailDrawerBackdrop.hidden = !isOpen;
       if (isOpen) window.requestAnimationFrame(() => closeDetailDrawerButton?.focus());
@@ -418,6 +419,7 @@ const showToast = createToastController();
     closeDetailDrawer: () => {
       if (!detailPanel?.classList.contains('drawer-open')) return false;
       detailPanel.classList.remove('drawer-open');
+      detailPanel.parentElement?.classList.add('drawer-closed');
       document.body.classList.remove('detail-drawer-open');
       if (detailDrawerBackdrop) detailDrawerBackdrop.hidden = true;
       window.requestAnimationFrame(() => {

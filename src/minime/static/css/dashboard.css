@@ -2101,6 +2101,12 @@ body.theme-light {
     border-radius: var(--radius-md) 0 0 0;
     box-shadow: -12px 0 36px rgb(0 0 0 / 40%);
   }
+  #viewExecutions .content-split.drawer-closed {
+    grid-template-columns: minmax(0, 1fr);
+  }
+  #viewExecutions .content-split.drawer-closed > .master-panel { grid-column: 1; }
+  #viewExecutions .content-split.drawer-closed > .pane-divider,
+  #viewExecutions .content-split.drawer-closed > .detail-panel { display: none !important; }
   .detail-drawer-close { display: inline-flex; }
   body.detail-drawer-open { overflow: hidden; }
 }

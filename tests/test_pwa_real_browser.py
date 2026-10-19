@@ -2627,15 +2627,12 @@ async def test_real_browser_authenticated_control_plane_cancel_persists_in_dispo
             }
 
             selected_detail = ""
-            for _ in range(40):
-                selected_detail = await client.eval_js(
-                    "document.getElementById('detailPanel').innerText"
-                )
-                if change_name in selected_detail and run_id in selected_detail:
-                    break
-                await asyncio.sleep(0.1)
-            assert change_name in selected_detail and run_id in selected_detail, (
-                "The UI did not bind detail/actions to the selected durable Run identity."
+            selected_row = await client.eval_js(f"""
+              (() => [...document.querySelectorAll('#changesTableBody tr[data-project-id]')]
+                .find(item => item.dataset.changeName === {json.dumps(change_name)})?.classList.contains('selected'))()
+            """)
+            assert selected_row, (
+                "The landing must select the durable Run without opening its drawer."
             )
 
             # Capture exact-candidate screenshots from the authenticated container
@@ -2651,11 +2648,20 @@ async def test_real_browser_authenticated_control_plane_cancel_persists_in_dispo
                 )
             )
             preview_evidence_dir.mkdir(parents=True, exist_ok=True)
-            # Reference 01 is the operational landing with its selected real Run
-            # but without the contextual drawer; reference 03 is captured after
-            # explicitly reopening the same durable selection.
-            await client.eval_js("document.getElementById('closeDetailDrawer').click()")
+            # Reference 01 is the operational landing with a selected real Run
+            # in the master list and no detail panel competing for dashboard space.
+            # Reference 03 opens that exact durable selection explicitly.
             await client.set_viewport(1440, 900)
+            drawer_open = await client.eval_js(
+                "document.getElementById('detailPanel').classList.contains('drawer-open')"
+            )
+            detail_display = await client.eval_js(
+                "getComputedStyle(document.getElementById('detailPanel')).display"
+            )
+            assert not drawer_open and detail_display == "none", {
+                "drawer_open": drawer_open,
+                "detail_display": detail_display,
+            }
             await asyncio.sleep(0.15)
             capture = await client.send_cmd(
                 "Page.captureScreenshot", {"format": "png", "captureBeyondViewport": False}
@@ -2668,13 +2674,18 @@ async def test_real_browser_authenticated_control_plane_cancel_persists_in_dispo
                 .find(item => item.dataset.changeName === {json.dumps(change_name)})?.click())()
             """)
             for _ in range(40):
+                selected_detail = await client.eval_js(
+                    "document.getElementById('detailPanel').innerText"
+                )
                 drawer_open = await client.eval_js(
                     "document.getElementById('detailPanel').classList.contains('drawer-open')"
                 )
-                if drawer_open:
+                if drawer_open and change_name in selected_detail and run_id in selected_detail:
                     break
                 await asyncio.sleep(0.05)
-            assert drawer_open, "Desktop reference drawer must open from the selected real Run."
+            assert drawer_open and change_name in selected_detail and run_id in selected_detail, (
+                "Desktop drawer must open from and remain bound to the selected durable Run."
+            )
             await asyncio.sleep(0.15)
             capture = await client.send_cmd(
                 "Page.captureScreenshot", {"format": "png", "captureBeyondViewport": False}
