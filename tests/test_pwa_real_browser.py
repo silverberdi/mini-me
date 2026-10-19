@@ -2652,6 +2652,7 @@ async def test_real_browser_authenticated_control_plane_cancel_persists_in_dispo
             # in the master list and no detail panel competing for dashboard space.
             # Reference 03 opens that exact durable selection explicitly.
             await client.set_viewport(1440, 900)
+            await client.eval_js("document.getElementById('closeDetailDrawer').click()")
             drawer_open = await client.eval_js(
                 "document.getElementById('detailPanel').classList.contains('drawer-open')"
             )
