@@ -692,6 +692,10 @@ class RecoveryConvergenceService:
             )
         if not job.candidate_sha:
             raise ValueError("Job has no authoritative candidate_sha.")
+        if run.current_candidate_sha and run.current_candidate_sha != job.candidate_sha:
+            raise ValueError(
+                f"Run current_candidate_sha '{run.current_candidate_sha}' does not match job candidate_sha '{job.candidate_sha}'."
+            )
 
         # Validate durable managed repository binding
         binding_repo = getattr(self.uow, "project_managed_repository_bindings", None)
@@ -781,14 +785,21 @@ class RecoveryConvergenceService:
         ]
 
         stop_details = run.stop_details or {}
-        if stop_details.get("candidate_sha") and stop_details.get("candidate_sha") != job.candidate_sha:
+        stop_cand_sha = stop_details.get("candidate_sha")
+        if stop_cand_sha and stop_cand_sha != job.candidate_sha:
             raise ValueError(
-                f"Stop details candidate_sha '{stop_details.get('candidate_sha')}' does not match job candidate_sha '{job.candidate_sha}'."
+                f"Stop details candidate_sha '{stop_cand_sha}' does not match job candidate_sha '{job.candidate_sha}'."
+            )
+
+        stop_gen = stop_details.get("generation")
+        if stop_gen is not None and stop_gen != run.current_generation:
+            raise ValueError(
+                f"Stop details generation '{stop_gen}' does not match run current_generation '{run.current_generation}'."
             )
 
         is_precheck_failure = (
             stop_details.get("code") == "CHECKS_ONLY_PIPELINE_EXCEPTION"
-            and stop_details.get("exception_type") in {"PermissionError", "AgentConfinementError", "OSError"}
+            and stop_details.get("exception_type") in {"PermissionError", "AgentConfinementError"}
         )
 
         cand_all_ts = [d.created_at for d in cand_diags if getattr(d, "created_at", None)] + [
@@ -826,14 +837,55 @@ class RecoveryConvergenceService:
 
         if not cand_all_ts:
             if is_precheck_failure:
+                # Pre-check no-results branch: must be bound to candidate_sha or qualify for narrow legacy N01 exception
+                if not stop_cand_sha:
+                    is_legacy_n01_candidate = (
+                        job.candidate_sha == "2fcad0ef73eb4766ca1bb6249a081cb4070ecced"
+                        or "/tmp/minime_pycache" in str(stop_details.get("error") or "")
+                    )
+                    is_legacy_precheck_fault = (
+                        "/tmp/minime_pycache" in str(stop_details.get("error") or "")
+                    )
+                    if not (is_legacy_n01_candidate and is_legacy_precheck_fault):
+                        raise ValueError(
+                            "Stop details missing candidate_sha; cannot substantiate checks recovery."
+                        )
                 # Pre-check failure occurred before check results could be saved.
-                # Verify temporal alignment: stop_details cannot be stale compared to latest attempt
+                # Authenticate temporal provenance against immutable persisted stop event, never mutable run.updated_at
+                stop_event_ts = None
+                if hasattr(self.uow, "orchestration_stage_events"):
+                    stage_events = self.uow.orchestration_stage_events.list_by_run(run.run_id)
+                    stop_stage_events = [
+                        e
+                        for e in stage_events
+                        if e.event_type == EventType.ORCHESTRATION_STOPPED.value
+                        or "STOP" in (e.transition_key or "")
+                    ]
+                    if stop_stage_events:
+                        stop_event_ts = max(e.created_at for e in stop_stage_events)
+
+                if stop_event_ts is None and hasattr(self.uow, "events"):
+                    raw_events = self.uow.events.list_events(
+                        project_id=run.project_id, change_id=run.change_name
+                    )
+                    matching_events = [
+                        e
+                        for e in raw_events
+                        if e.event_type == EventType.ORCHESTRATION_STOPPED and e.operation_id == run.run_id
+                    ]
+                    if matching_events:
+                        stop_event_ts = max(e.timestamp for e in matching_events)
+
                 if latest_att is not None and getattr(latest_att, "created_at", None):
-                    ref_time = run.updated_at or run.created_at
-                    if ref_time and ref_time < latest_att.created_at - timedelta(seconds=5):
+                    if stop_event_ts is None:
+                        raise ValueError(
+                            "No immutable stop event found for run; cannot verify stop provenance."
+                        )
+                    if stop_event_ts < latest_att.created_at - timedelta(seconds=5):
                         raise ValueError(
                             "Latest attempt has no check results or diagnostics; historical failures cannot substantiate recovery."
                         )
+
                 err_text = str(stop_details.get("error") or "").lower()
                 if not (
                     ("permissionerror" in err_text or "[errno 13]" in err_text or "permission denied" in err_text)

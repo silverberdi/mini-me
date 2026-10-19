@@ -83,7 +83,10 @@ class ChecksRunner:
                 # Isolate bytecode compilation to a secure, process-private directory outside candidate worktree
                 import tempfile
 
-                from minime.services.agent_confinement import validate_secure_cache_path
+                from minime.services.agent_confinement import (
+                    safe_prepare_cache_dir,
+                    validate_secure_cache_path,
+                )
 
                 current_uid = os.getuid()
                 pycache_dir: Path | None = None
@@ -97,9 +100,9 @@ class ChecksRunner:
 
                 try:
                     target = base_path / "minime" / "pycache" / job_id
-                    target.mkdir(parents=True, exist_ok=True, mode=0o700)
-                    os.chmod(target, 0o700)
-                    pycache_dir = validate_secure_cache_path(target, expected_uid=current_uid)
+                    pycache_dir = safe_prepare_cache_dir(
+                        target, expected_uid=current_uid, job_id=job_id
+                    )
                 except (OSError, PermissionError):
                     pycache_dir = None
 
@@ -108,7 +111,9 @@ class ChecksRunner:
                     tmp_dir = tempfile.mkdtemp(prefix=f"minime_cache_{current_uid}_", suffix=f"_{job_id}")
                     os.chmod(tmp_dir, 0o700)
                     target = Path(tmp_dir)
-                    pycache_dir = validate_secure_cache_path(target, expected_uid=current_uid)
+                    pycache_dir = validate_secure_cache_path(
+                        target, expected_uid=current_uid, job_id=job_id
+                    )
                     if pycache_dir not in ephemeral_caches:
                         ephemeral_caches.append(pycache_dir)
 

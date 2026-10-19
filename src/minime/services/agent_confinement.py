@@ -137,34 +137,122 @@ class AgentRuntimeState:
         return False
 
 
-def validate_secure_cache_path(path: str | Path, expected_uid: int | None = None) -> Path:
+def is_authorized_cache_shape(
+    path: str | Path, expected_uid: int, job_id: str | None = None
+) -> bool:
+    """Validate that the path strictly conforms to an authorized minime bytecode cache shape.
+
+    Authorized shapes:
+    1. Primary under ~/.cache (or XDG_CACHE_HOME):
+       Must contain 'minime/pycache' in components, and if job_id is provided, match that job_id.
+    2. Ephemeral under /tmp or gettempdir():
+       A directory component must start with 'minime_cache_{expected_uid}_', and if job_id is provided, contain job_id.
+    """
+    raw_path = Path(path)
+    parts = raw_path.parts
+
+    # Ephemeral check
+    prefix = f"minime_cache_{expected_uid}_"
+    for part in parts:
+        if part.startswith(prefix):
+            if job_id is None or job_id in part:
+                return True
+
+    # Primary check: 'minime' followed by 'pycache'
+    for i in range(len(parts) - 2):
+        if parts[i] == "minime" and parts[i + 1] == "pycache":
+            if job_id is None or parts[i + 2] == job_id or job_id in parts[i + 2]:
+                return True
+
+    return False
+
+
+def validate_secure_cache_path(
+    path: str | Path,
+    expected_uid: int | None = None,
+    job_id: str | None = None,
+) -> Path:
     """Strictly validate a private bytecode cache path and all its ancestor components.
 
     Enforces:
+    - Path matches authoritative dedicated bytecode cache shape (not arbitrary home/temp dir).
+    - Every original component from filesystem root down is inspected without following symlinks.
     - Path exists, is a directory, and is NOT a symlink.
     - Owner strictly matches expected_uid (defaults to current process UID).
     - Permissions are strictly 0700 (no group or others permissions).
-    - Path is located inside an authorized base root (user home or system temp directory).
+    - Inode identity matches between un-followed and resolved path.
+    - Path is located inside an authorized base root (user cache or system temp directory).
     - Path is not an allowed root itself.
-    - Every ancestor component up to root:
-      - Must NOT be a symlink.
-      - If under user home: must be owned by expected_uid and not group/world writable.
-      - If system temp: must be sticky (+t) if world-writable.
     """
-    raw_path = Path(path)
-    if raw_path.is_symlink() or os.path.islink(raw_path):
-        raise PermissionError(f"Secure cache path cannot be a symlink: {raw_path}")
-    p = raw_path.resolve()
     target_uid = os.getuid() if expected_uid is None else expected_uid
+    raw_path = Path(path)
 
-    if not p.exists() or not p.is_dir():
-        raise PermissionError(f"Secure cache path does not exist or is not a directory: {p}")
+    # 1. Authoritative shape check
+    if not is_authorized_cache_shape(raw_path, expected_uid=target_uid, job_id=job_id):
+        raise PermissionError(
+            f"Path '{raw_path}' is not an authorized dedicated minime bytecode cache path shape."
+        )
 
-    # Allowed roots containment
-    home_root = Path.home().resolve()
     temp_roots = [Path(tempfile.gettempdir()).resolve(), Path("/tmp").resolve()]
-    allowed_roots = [home_root] + temp_roots
+    home_root = Path.home().resolve()
 
+    # 2. Inspect all UNRESOLVED original ancestor components without following symlinks
+    current_walk = Path(raw_path.parts[0]) if raw_path.is_absolute() else Path.cwd()
+    for part in raw_path.parts[1:]:
+        current_walk = current_walk / part
+        try:
+            st = os.lstat(current_walk)
+        except FileNotFoundError:
+            break
+        except OSError as e:
+            raise PermissionError(f"Failed to lstat cache path component '{current_walk}': {e}") from e
+
+        if stat.S_ISLNK(st.st_mode):
+            raise PermissionError(f"Secure cache path component cannot be a symlink: '{current_walk}'")
+
+        try:
+            resolved_walk = current_walk.resolve()
+        except OSError:
+            resolved_walk = current_walk
+
+        if home_root in resolved_walk.parents or resolved_walk == home_root:
+            if st.st_uid != target_uid:
+                raise PermissionError(
+                    f"Secure cache ancestor '{current_walk}' owned by UID {st.st_uid}, expected {target_uid}."
+                )
+            if stat.S_IMODE(st.st_mode) & 0o022 != 0:
+                raise PermissionError(
+                    f"Secure cache ancestor '{current_walk}' has insecure permissions (group or world writable)."
+                )
+
+        if any(resolved_walk == tr or current_walk == tr for tr in temp_roots):
+            mode = stat.S_IMODE(st.st_mode)
+            if (mode & 0o002 != 0) and not (st.st_mode & stat.S_ISVTX):
+                raise PermissionError(
+                    f"World-writable temporary ancestor '{current_walk}' lacks sticky bit (+t)."
+                )
+
+    if not raw_path.exists() or not raw_path.is_dir():
+        raise PermissionError(f"Secure cache path does not exist or is not a directory: {raw_path}")
+
+    st_leaf = os.lstat(raw_path)
+    if stat.S_ISLNK(st_leaf.st_mode):
+        raise PermissionError(f"Secure cache path cannot be a symlink: {raw_path}")
+    if st_leaf.st_uid != target_uid:
+        raise PermissionError(
+            f"Secure cache path '{raw_path}' owned by UID {st_leaf.st_uid}, expected {target_uid}."
+        )
+    if stat.S_IMODE(st_leaf.st_mode) & 0o077 != 0:
+        raise PermissionError(
+            f"Secure cache path '{raw_path}' mode must be strictly 0700, got {oct(stat.S_IMODE(st_leaf.st_mode))}."
+        )
+
+    p = raw_path.resolve()
+    st_resolved = os.stat(p)
+    if st_resolved.st_dev != st_leaf.st_dev or st_resolved.st_ino != st_leaf.st_ino:
+        raise PermissionError(f"Secure cache path resolved to a different inode: {p}")
+
+    allowed_roots = [home_root] + temp_roots
     if p in allowed_roots:
         raise PermissionError(f"Cache path cannot be a root directory: {p}")
 
@@ -173,50 +261,114 @@ def validate_secure_cache_path(path: str | Path, expected_uid: int | None = None
         if root in p.parents:
             is_under_allowed = True
             break
-
     if not is_under_allowed:
         raise PermissionError(
             f"Refusing to mount cache path outside authorized roots (~/.cache or /tmp): {p}"
         )
 
-    st = os.stat(p)
-    if st.st_uid != target_uid:
-        raise PermissionError(
-            f"Secure cache path '{p}' owned by UID {st.st_uid}, expected {target_uid}."
-        )
-    if stat.S_IMODE(st.st_mode) & 0o077 != 0:
-        raise PermissionError(
-            f"Secure cache path '{p}' mode must be strictly 0700, got {oct(stat.S_IMODE(st.st_mode))}."
-        )
+    authorized_home_caches = [(Path.home() / ".cache").resolve()]
+    if os.environ.get("XDG_CACHE_HOME"):
+        authorized_home_caches.append(Path(os.environ["XDG_CACHE_HOME"]).expanduser().resolve())
 
-    for ancestor in p.parents:
-        if ancestor == Path("/"):
-            continue
-        if os.path.islink(ancestor):
-            raise PermissionError(f"Secure cache path ancestor is a symlink: {ancestor}")
-        try:
-            st_anc = os.stat(ancestor)
-        except OSError as e:
-            raise PermissionError(f"Failed to stat cache path ancestor '{ancestor}': {e}") from e
-
-        if home_root in ancestor.parents or ancestor == home_root:
-            if st_anc.st_uid != target_uid:
-                raise PermissionError(
-                    f"Secure cache ancestor '{ancestor}' owned by UID {st_anc.st_uid}, expected {target_uid}."
-                )
-            if stat.S_IMODE(st_anc.st_mode) & 0o022 != 0:
-                raise PermissionError(
-                    f"Secure cache ancestor '{ancestor}' has insecure permissions (group or world writable)."
-                )
-
-        if any(ancestor == tr for tr in temp_roots):
-            mode = stat.S_IMODE(st_anc.st_mode)
-            if (mode & 0o002 != 0) and not (st_anc.st_mode & stat.S_ISVTX):
-                raise PermissionError(
-                    f"World-writable temporary ancestor '{ancestor}' lacks sticky bit (+t)."
-                )
+    if home_root in p.parents:
+        if not any(auth_c in p.parents or p == auth_c for auth_c in authorized_home_caches):
+            raise PermissionError(
+                f"Primary cache path under home must be located inside authorized cache directory (~/.cache or $XDG_CACHE_HOME): {p}"
+            )
 
     return p
+
+
+def safe_prepare_cache_dir(
+    target_path: Path | str,
+    expected_uid: int,
+    job_id: str | None = None,
+) -> Path:
+    """Safely validate ancestors and create missing directory components without following symlinks.
+
+    Enforces:
+    - Path must match an authorized cache shape.
+    - No existing component can be a symlink.
+    - Existing components must be owned by expected_uid with secure permissions.
+    - If the target directory already exists: must be owned by expected_uid and mode 0700. If not, fail-closed
+      without modifying or repairing foreign/unsafe directories.
+    - Missing components are created component-by-component with mode 0700 and verified via lstat.
+    """
+    raw_path = Path(target_path)
+    target_uid = expected_uid
+
+    if not is_authorized_cache_shape(raw_path, expected_uid=target_uid, job_id=job_id):
+        raise PermissionError(
+            f"Path '{raw_path}' is not an authorized dedicated minime bytecode cache path shape."
+        )
+
+    current_walk = Path(raw_path.parts[0]) if raw_path.is_absolute() else Path.cwd()
+    temp_roots = [Path(tempfile.gettempdir()).resolve(), Path("/tmp").resolve()]
+    home_root = Path.home().resolve()
+
+    for part in raw_path.parts[1:]:
+        current_walk = current_walk / part
+        try:
+            st = os.lstat(current_walk)
+            exists = True
+        except FileNotFoundError:
+            exists = False
+        except OSError as e:
+            raise PermissionError(f"Failed to lstat cache component '{current_walk}': {e}") from e
+
+        if exists:
+            if stat.S_ISLNK(st.st_mode):
+                raise PermissionError(f"Secure cache path component cannot be a symlink: '{current_walk}'")
+            if not stat.S_ISDIR(st.st_mode):
+                raise PermissionError(f"Secure cache path component is not a directory: '{current_walk}'")
+
+            try:
+                resolved_walk = current_walk.resolve()
+            except OSError:
+                resolved_walk = current_walk
+
+            if home_root in resolved_walk.parents or resolved_walk == home_root:
+                if st.st_uid != target_uid:
+                    raise PermissionError(
+                        f"Secure cache ancestor '{current_walk}' owned by UID {st.st_uid}, expected {target_uid}."
+                    )
+                if stat.S_IMODE(st.st_mode) & 0o022 != 0:
+                    raise PermissionError(
+                        f"Secure cache ancestor '{current_walk}' has insecure permissions."
+                    )
+            if any(resolved_walk == tr or current_walk == tr for tr in temp_roots):
+                mode = stat.S_IMODE(st.st_mode)
+                if (mode & 0o002 != 0) and not (st.st_mode & stat.S_ISVTX):
+                    raise PermissionError(
+                        f"World-writable temporary ancestor '{current_walk}' lacks sticky bit (+t)."
+                    )
+
+            if current_walk == raw_path:
+                # Existing target directory: must already have mode 0700 and correct owner.
+                # DO NOT chmod or repair an existing unsafe target. Fail closed!
+                if st.st_uid != target_uid:
+                    raise PermissionError(
+                        f"Existing cache directory '{current_walk}' owned by UID {st.st_uid}, expected {target_uid}."
+                    )
+                if stat.S_IMODE(st.st_mode) & 0o077 != 0:
+                    raise PermissionError(
+                        f"Existing cache directory '{current_walk}' mode must be strictly 0700, got {oct(stat.S_IMODE(st.st_mode))}."
+                    )
+        else:
+            # Component does not exist: create with mode 0700
+            try:
+                os.mkdir(current_walk, mode=0o700)
+                os.chmod(current_walk, 0o700)
+            except OSError as exc:
+                raise PermissionError(f"Failed to create secure cache directory '{current_walk}': {exc}") from exc
+
+            st = os.lstat(current_walk)
+            if stat.S_ISLNK(st.st_mode) or not stat.S_ISDIR(st.st_mode):
+                raise PermissionError(f"Created cache component is not a directory: '{current_walk}'")
+            if st.st_uid != target_uid:
+                raise PermissionError(f"Created cache component owned by wrong UID: {st.st_uid}")
+
+    return validate_secure_cache_path(raw_path, expected_uid=target_uid, job_id=job_id)
 
 
 class AgentProcessConfinement:
