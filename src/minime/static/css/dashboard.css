@@ -1999,7 +1999,7 @@ body.theme-light {
   #viewExecutions > .content-split {
     display: grid !important;
     grid-column: 1 / -1;
-    grid-row: 1;
+    grid-row: 2;
     grid-template-columns: minmax(240px, var(--master-pane-width, 42%)) 28px minmax(240px, 1fr);
     gap: 12px;
     min-width: 0;
@@ -2008,12 +2008,13 @@ body.theme-light {
   #viewExecutions > .content-split > .master-panel { grid-column: 1; grid-row: 1; }
   #viewExecutions > .content-split > .pane-divider { grid-column: 2; grid-row: 1; display: flex !important; }
   #viewExecutions > .content-split > .detail-panel { grid-column: 3; grid-row: 1; order: 0; }
-  #viewExecutions > .attention-banner { grid-column: 2; grid-row: 2; order: 2; }
-  #viewExecutions > .queue-panel { grid-column: 1; grid-row: 2; order: 1; }
-  #viewExecutions > .activity-panel { grid-column: 1; grid-row: 3; order: 3; }
-  #viewExecutions > .provider-panel { grid-column: 2; grid-row: 3; order: 4; }
-  #viewExecutions > .kpi-grid { grid-column: 1 / -1; grid-row: 4; order: 5; }
-  #viewExecutions > #overviewFreshness, #viewExecutions > #healthFreshness { grid-column: 1 / -1; order: 6; }
+  #viewExecutions > .kpi-grid { grid-column: 1 / -1; grid-row: 1; order: 0; }
+  #viewExecutions > .attention-banner { grid-column: 2; grid-row: 3; order: 2; }
+  #viewExecutions > .queue-panel { grid-column: 1; grid-row: 3; order: 1; }
+  #viewExecutions > .activity-panel { grid-column: 1; grid-row: 4; order: 3; }
+  #viewExecutions > .provider-panel { grid-column: 2; grid-row: 4; order: 4; }
+  #viewExecutions > #overviewFreshness { grid-column: 1; grid-row: 5; order: 6; }
+  #viewExecutions > #healthFreshness { grid-column: 2; grid-row: 5; order: 7; }
   #viewExecutions > .kpi-grid .kpi-card { min-height: 88px; padding: 12px 14px; }
 }
 
@@ -2103,6 +2104,7 @@ body.theme-light {
   }
   #viewExecutions .content-split.drawer-closed {
     grid-template-columns: minmax(0, 1fr);
+    min-height: 0;
   }
   #viewExecutions .content-split.drawer-closed > .master-panel { grid-column: 1; }
   #viewExecutions .content-split.drawer-closed > .pane-divider,
