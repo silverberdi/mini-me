@@ -3,20 +3,20 @@
 See `proposal.md` for background and motivation regarding the pilot N01 incident on Ubuntu 192.168.0.194.
 
 Currently:
-1. `ChecksRunner` constructs `pycache_dir = Path(tempfile.gettempdir()) / "minime_pycache" / job_id` and executes `pycache_dir.mkdir(parents=True, exist_ok=True)`. In Linux environments where multiple users run commands (such as verification operator `silverman` and daemon service user `minime`), the parent directory `/tmp/minime_pycache` created by one user (mode `0775`) causes an immediate `PermissionError: [Errno 13] Permission denied` when another user attempts to create a job-specific subdirectory.
-2. In `AgentProcessConfinement.wrap_command()`, Bubblewrap is invoked with `--ro-bind / /`, `--bind <worktree> <worktree>`, and `--ro-bind <runtime_root> <runtime_root>`. The host `/tmp` is not bound or is hidden, or if an isolated cache is used outside the worktree, it must be explicitly mounted read-write into the container so Python can write compiled bytecode without permission or isolation errors.
-3. In `ExecutionPipelineService.run_checks_only()`, the job status transitions from `CHECKS_FAILED` to `CHECKS_RUNNING` prior to calling `checks_runner.run()`. When an unhandled exception occurs (such as the `PermissionError` above), the exception bubbles up to `OrchestrationService.drive_coordinator()`. The coordinator catches it, logs it, and stops the `Run` via `_stop_coordinator_run()` with `stop_outcome=NEEDS_HUMAN` and `human_gate=NEEDS_HUMAN`, but does not update the `Job` status. The `Job` remains trapped in `CHECKS_RUNNING` indefinitely with an empty `error_message`.
-4. In `RecoveryConvergenceService._validate_checks_only_eligibility()`, the preflight checks require that `run.is_active == True`, `run.current_stage == IMPLEMENTING`, and `job.status == CHECKS_FAILED`. Because the incident left the system in `RUNNING_CHECKS` / `NEEDS_HUMAN` (`is_active=False`) and `job.status == CHECKS_RUNNING`, the eligibility check fails-closed and blocks recovery, even though the failure was an environmental fault and the preserved candidate is intact.
+1. **Runner Path and Sandbox Mounts (C04)**: `ChecksRunner` constructs `pycache_dir = Path(tempfile.gettempdir()) / "minime_pycache" / job_id` and executes `pycache_dir.mkdir(parents=True, exist_ok=True)`. In Linux environments where multiple users run commands (such as verification operator `silverman` and daemon service user `minime`), the parent directory `/tmp/minime_pycache` created by one user (mode `0775`) causes an immediate `PermissionError: [Errno 13] Permission denied` when another user attempts to create a job-specific subdirectory. Merely using `0700` with predictable names in `/tmp` is vulnerable to pre-creation and symlink attacks.
+2. **Exception Rollback Boundaries and Job Trapping (C02)**: In `ExecutionPipelineService.run_checks_only()`, the job status transitions from `CHECKS_FAILED` to `CHECKS_RUNNING` prior to calling `checks_runner.run()`. When an unhandled exception occurs (such as the `PermissionError` above), an outer `except Exception: self.uow.rollback(); raise` in `run_checks_only()` can erase internal job updates. The exception bubbles up to `OrchestrationService.drive_coordinator()`, which stops the `Run` via `_stop_coordinator_run()` with `stop_outcome=NEEDS_HUMAN` and `human_gate=NEEDS_HUMAN`, leaving the `Job` in an orphaned `CHECKS_RUNNING` status without an error message.
+3. **Latest Environmental Fault Proof (C03)**: In `RecoveryConvergenceService._validate_checks_only_eligibility()`, the preflight checks require that `run.is_active == True`, `run.current_stage == IMPLEMENTING`, and `job.status == CHECKS_FAILED`. The observed production tuple is `RUNNING_CHECKS` / `NEEDS_HUMAN` (`is_active=False`) and `job.status == CHECKS_RUNNING`. The preflight check must recognize the latest pre-check environmental failure (`CHECKS_ONLY_PIPELINE_EXCEPTION` with `PermissionError` before any `CheckResult` was saved), rather than relying on stale `/dev/null` failures from older attempts, while fail-closing against application code errors.
+4. **Missing Checks Execution Branch at RUNNING_CHECKS (C01)**: In `OrchestrationService.drive_coordinator()`, `pipeline.run_checks_only()` is only invoked when `stage == OrchestrationStage.IMPLEMENTING` and `checks_only=True`. The `RUNNING_CHECKS` stage branch (~lines 2026–2080) assumes that checks have ALREADY been executed and stored in the database. When a run resumes from `RUNNING_CHECKS` with `checks_only=True`, the coordinator attempts to validate the current batch, fails because no batch was written, and immediately fail-closes with `INCOMPLETE_AUTHORITATIVE_CHECKS` without ever running the runner.
+5. **One-Shot Governance and State Freezing (C05)**: The recovery edge must hold strictly at `NEEDS_HUMAN` / `REVIEW_AUTHORIZATION_PENDING` upon checks success, without advancing to model review, implementer replay, or automated merge.
 
 ## Goals / Non-Goals
 
 **Goals:**
-- Provide a UID-private, process-isolated, and worktree/runtime-safe bytecode cache directory for `ChecksRunner` that works under Linux for service user `minime` and operator users without permission conflicts or cross-user contamination.
-- Ensure Bubblewrap mounts the private cache path read-write into the container when confinement is active, without compromising filesystem isolation.
-- Strictly prohibit `chown -R` or `chmod 1777` on shared host directories.
-- Ensure that any unhandled pipeline exception during `run_checks_only` transactionally transitions the `Job` to `CHECKS_FAILED` with sanitized error details under claim fencing.
-- Permit `RecoveryConvergenceService` to safely and authoritatively validate eligibility and admit a run interrupted in `RUNNING_CHECKS` / `NEEDS_HUMAN` with `CHECKS_FAILED` (or interrupted `CHECKS_RUNNING`) when proven environmental fault evidence is present, preserving candidate SHA `2fcad0ef73eb4766ca1bb6249a081cb4070ecced` intact.
-- Enforce zero model invocation / zero inferential quota consumption and zero OpenSpec APPLY re-execution.
+- Provide a secure, UID-scoped or securely generated private bytecode cache path with no-follow and ownership verification, mounted read-write into Bubblewrap without broad writable host paths or `chmod 1777` on shared directories (C04).
+- Ensure explicit transaction boundaries so that non-fence runner exceptions commit both `Job=CHECKS_FAILED` and `Run=NEEDS_HUMAN` under active claim fence, while claim fence loss triggers full rollback with zero database writes (C02).
+- Authenticate the latest failure as a proven runner environmental fault (`Run.stop_details.code == CHECKS_ONLY_PIPELINE_EXCEPTION` and allowlisted exception type), rejecting application code errors, and require explicit one-shot human authorization (C03).
+- Implement an explicit checks-only replay edge when resuming at `RUNNING_CHECKS` that invokes `pipeline.run_checks_only()` to execute a fresh checks batch, binds results to the frozen candidate SHA, validates batch completeness, and stops at `REVIEW_AUTHORIZATION_PENDING` (C01).
+- Prevent duplicate/unapproved recovery attempts, maintain monotonic fencing, and guarantee zero model calls (C05).
 
 **Non-Goals:**
 - Do not redesign the overall recovery architecture or introduce multi-stage rewrites.
@@ -26,54 +26,62 @@ Currently:
 
 ## Decisions
 
-### Decision 1: UID-Private / User-Scoped Bytecode Cache Path
-**Rationale:** Rather than placing a shared folder in `/tmp/minime_pycache`, each execution should isolate its cache under a path scoped to the process's effective UID or user runtime directory. Specifically:
-- Prefer `os.environ.get("XDG_CACHE_HOME")` or Path `~/.cache/minime/pycache/<job_id>`. For systemd service user `minime`, this maps to `/var/lib/minime/.cache/minime/pycache/<job_id>`, where `minime:minime` has full read-write permissions.
-- Fallback for non-home environments: `Path(tempfile.gettempdir()) / f"minime_pycache_{os.getuid()}" / job_id`, ensuring no collision between distinct OS UIDs.
-- Directory creation permissions are set to `0700` (`mode=0o700`), guaranteeing private ownership.
-- *Alternatives considered:*
-  - `chmod 1777 /tmp/minime_pycache`: Rejected by canonical security rules and issue review; shared sticky directories on host paths risk symlink attacks and pollution.
-  - Putting `.pycache` inside the worktree: Rejected because the worktree must remain clean and pristine according to candidate integrity checks (`git status --porcelain` must be empty).
+### Decision 1: Secure Cache Identity and Bubblewrap Mount (C04)
+**Rationale:** Rather than using predictable paths in `/tmp` like `/tmp/minime_pycache_<uid>`, `ChecksRunner` will resolve a private directory:
+1. Primary: `~/.cache/minime/pycache/<job_id>`. For user `minime`, this resolves to `/var/lib/minime/.cache/minime/pycache/<job_id>`.
+2. Fallback: If `HOME` or `XDG_CACHE_HOME` is not usable or unwritable, generate a secure temporary directory using `tempfile.mkdtemp(prefix=f"minime_cache_{os.getuid()}_")`.
+3. Validation: Verify that the path exists, is NOT a symlink (`os.path.islink(path) == False`), is owned by the current process UID (`os.stat(path).st_uid == os.getuid()`), and has permissions restricted to `0700`. If invalid or contaminated, reject fail-closed and create a secure fallback.
+4. Confinement Mount: In `AgentProcessConfinement.wrap_command()`, accept `cache_bind_path: str | Path | None` (or infer from runtime state) and add `--dir <cache_path>` and `--bind <cache_path> <cache_path>` to Bubblewrap. Prohibit arbitrary, unrestricted caller-supplied bind paths.
 
-### Decision 2: Explicit Read-Write Bind Mount in Bubblewrap for Private Cache
-**Rationale:** Bubblewrap mounts `/` as read-only (`--ro-bind / /`). Any directory that Python needs to write `.pyc` files into must be mounted read-write.
-- `AgentProcessConfinement` will accept an optional `extra_bind_paths` or `pycache_path` argument, or `ChecksRunner` will pass the private cache path to `wrap_command()`.
-- Bubblewrap will add `--dir <cache_path>` and `--bind <cache_path> <cache_path>` so the sandboxed Python process has write access to its private bytecode cache.
-- *Alternatives considered:*
-  - Setting `PYTHONDONTWRITEBYTECODE=1`: While this avoids writing `.pyc` files, large pytest runs against complex codebases and imports suffer performance penalties, and pytest/tools may still attempt to create temporary directories if not strictly isolated. Providing a clean, confined private cache path preserves performance and isolates the subprocess safely.
+### Decision 2: Durable Job+Run Consistency Under Exceptions (C02)
+**Rationale:** Transaction boundaries must distinguish between fence loss and runner exceptions:
+1. In `ExecutionPipelineService.run_checks_only()`:
+   - Catch runner exceptions in a dedicated `except Exception as runner_exc:` block BEFORE the outer fence check.
+   - Re-check claim fence: `validate_claim_context_authoritative(self.uow, claim_context, for_update=True)`.
+   - If claim is valid: transition `job` to `JobStatus.CHECKS_FAILED` with `error_message=redact_secrets(str(runner_exc))`, persist an `EvidenceDiagnostic` with `candidate_sha=job.candidate_sha` and `candidate_generation=candidate_generation`, flush to database, and re-raise.
+   - If claim fence was lost or heartbeat failed: execute `self.uow.rollback()` and raise `StaleClaimError`.
+2. In `OrchestrationService.drive_coordinator()`:
+   - If `StaleClaimError`: rollback immediately (`self.uow.rollback()`) and exit with ZERO database writes.
+   - If non-fence runner exception: verify that `job.status` is `CHECKS_FAILED`. Commit `_stop_coordinator_run(run, stop_outcome=NEEDS_HUMAN, human_gate=NEEDS_HUMAN, ...)` in the same transaction as the job failure.
 
-### Decision 3: Atomic Claim-Fenced Job Error Transition
-**Rationale:** In `run_checks_only()`, if `checks_runner.run()` raises an unhandled exception before returning a `CheckRunResult`:
-- The exception is caught within `run_checks_only()`.
-- Validate that the recovery claim is still held (`validate_claim_context_authoritative(self.uow, claim_context, for_update=True)`).
-- Transition the `Job` to `JobStatus.CHECKS_FAILED` with `error_message=redact_secrets(str(exc))`.
-- Persist an `evidence_diagnostic` record documenting the runner exception and candidate SHA.
-- Re-raise the exception (or return the failed job) so `OrchestrationService` can stop the `Run` into `NEEDS_HUMAN` coherently.
-- *Alternatives considered:*
-  - Letting the coordinator only update the Run: Rejected because it left the Job in `CHECKS_RUNNING`, creating an inconsistent database tuple and blocking recovery.
+### Decision 3: Proven Latest Pre-Check Environmental Fault (C03)
+**Rationale:** In `RecoveryConvergenceService._validate_checks_only_eligibility()`:
+1. Check candidate and worktree integrity: candidate SHA must match worktree HEAD, worktree must be porcelain-clean, base SHA must match, and managed repository binding must be valid.
+2. Accept `run.current_stage == OrchestrationStage.RUNNING_CHECKS` with `run.stop_outcome == OrchestrationStopOutcome.NEEDS_HUMAN` and `run.human_gate == HumanGate.NEEDS_HUMAN`, with `job.status` in `[JobStatus.CHECKS_FAILED, JobStatus.CHECKS_RUNNING]`.
+3. Inspect the LATEST attempt / stop reason:
+   - If failure occurred before `CheckResult` records were published: verify `run.stop_details.get("code") == "CHECKS_ONLY_PIPELINE_EXCEPTION"` and `run.stop_details.get("exception_type") in ALLOWLISTED_ENVIRONMENTAL_EXCEPTIONS` (e.g. `"PermissionError"`, `"AgentConfinementError"`), with error message detailing runner path or permissions.
+   - If checks ran: verify that all non-zero exit codes in the latest execution batch have proven environmental faults (e.g. sandbox preflight failure, `/dev/null` permission denied).
+   - Reject if any application code error is present (e.g. `AssertionError`, `SyntaxError`, `TypeError`, pytest failure).
+4. Require separate explicit human one-shot authorization before `recover_checks_only` executes.
 
-### Decision 4: Governed Re-Entry Eligibility in RecoveryConvergenceService
-**Rationale:** In `_validate_checks_only_eligibility()`:
-- Accept `run.current_stage` in `[OrchestrationStage.IMPLEMENTING, OrchestrationStage.RUNNING_CHECKS]`.
-- For `RUNNING_CHECKS`, accept `run.is_active == False` provided `run.stop_outcome == OrchestrationStopOutcome.NEEDS_HUMAN` and `run.human_gate == HumanGate.NEEDS_HUMAN`.
-- Accept `job.status` in `[JobStatus.CHECKS_FAILED, JobStatus.CHECKS_RUNNING]`. If `CHECKS_RUNNING`, verify that the stop reason or latest evidence records a proven runner environmental fault (such as `PermissionError`, `/dev/null`, or confinement failure), and transition the job to `CHECKS_FAILED` during claim acquisition or eligibility resolution.
-- Verify candidate SHA, base SHA, worktree clean status, and managed binding as before.
-- In `recover_checks_only()`, re-activate the run (`is_active=True`, clear `stop_outcome` and `human_gate`) only under active claim fence before calling `drive_coordinator()`.
-- *Alternatives considered:*
-  - Forcing the operator to run `orchestrate resolve --continue-preserved-candidate`: Rejected because there is no frozen candidate manifest for a job that failed before review, and manual SQL mutation is strictly prohibited.
+### Decision 4: Fresh Checks Batch Execution at RUNNING_CHECKS (C01)
+**Rationale:** In `OrchestrationService.drive_coordinator()`:
+1. When `stage == OrchestrationStage.RUNNING_CHECKS` and `checks_only=True`:
+   - Inspect whether a valid passing check batch exists for the current candidate SHA and generation.
+   - If NO passing batch exists (as in the interrupted runner incident where checks never executed or failed): invoke `self.pipeline.run_checks_only(job.job_id, candidate_generation=run.current_generation, claim_context=claim_context)` directly from `RUNNING_CHECKS`.
+   - This executes the runner, writes fresh `CheckResult` records with current timestamps, validates batch completeness, transitions `Job` to `CHECKS_PASSED`, freezes the candidate, and stops at `NEEDS_HUMAN` / `REVIEW_AUTHORIZATION_PENDING`.
+   - Prevents `drive_coordinator` from treating missing checks as `INCOMPLETE_AUTHORITATIVE_CHECKS` on re-entry.
+   - Ensures `pipeline.run_checks_only()` is executed exactly once per authorized recovery cycle.
+
+### Decision 5: One-Shot Governance and Adversarial Protection (C05)
+**Rationale:**
+- Claim acquisition increments monotonic fence token, rendering stale workers obsolete.
+- Re-entry stops immediately after freezing candidate at `REVIEW_AUTHORIZATION_PENDING`.
+- No model inference is configured or called anywhere in the checks-only pipeline.
+- Tests will assert rejection for dirty worktrees, mismatched candidate SHA, missing binding, stale claims, and application code errors.
 
 ## Risks / Trade-offs
 
-- **[Risk]** `XDG_CACHE_HOME` or `~/.cache` might not be writable if `HOME` is unset or points to an unwritable location in minimal container environments.
-  - **Mitigation:** Implement fallback to `Path(tempfile.gettempdir()) / f"minime_pycache_{os.getuid()}" / job_id`, ensuring the directory is always creatable and isolated by UID.
-- **[Risk]** Bubblewrap execution might fail if the cache directory does not exist on host before `bwrap` is called.
-  - **Mitigation:** `ChecksRunner` creates the host cache directory before invoking `AgentProcessConfinement.wrap_command()`, and `bwrap` receives both `--dir` and `--bind` arguments.
-- **[Risk]** Concurrency race during recovery re-entry if another process attempts recovery at the same time.
-  - **Mitigation:** Protected by the canonical PostgreSQL recovery claim lock and monotonic fencing token (`validate_claim_context_authoritative(..., for_update=True)`).
+- **[Risk]** `~/.cache` might not exist or might be mounted read-only in unusual container environments.
+  - **Mitigation:** Fallback to securely generated `tempfile.mkdtemp` with strict 0700 permissions and UID ownership verification.
+- **[Risk]** Two rapid `recover-checks` invocations by an operator could race.
+  - **Mitigation:** Serialized and fenced by PostgreSQL row lock on the recovery claim (`validate_claim_context_authoritative(..., for_update=True)`).
+- **[Risk]** A previous run might have failed from an application bug, but the operator attempts to bypass via `recover-checks`.
+  - **Mitigation:** Strict allowlist in `_validate_checks_only_eligibility` fail-closes against application error patterns in `stop_details` and check outputs.
 
 ## Removal Ledger
 
-- **Replaced**: Unscoped `/tmp/minime_pycache/<job_id>` in `src/minime/services/checks_runner.py`.
-- **Replaced by**: UID-scoped / XDG-scoped private directory with 0700 permissions and Bubblewrap read-write bind mount.
-- **Removed**: Inflexible check in `_validate_checks_only_eligibility` requiring `IMPLEMENTING` stage only.
-- **Replaced by**: Governed check admitting `RUNNING_CHECKS` with environmental fault evidence and candidate integrity validation.
+- **Replaced**: Hardcoded `/tmp/minime_pycache` in `src/minime/services/checks_runner.py`.
+- **Replaced by**: UID-scoped verified private path (`~/.cache/minime/pycache/<job_id>` or `mkdtemp` with 0700 permissions).
+- **Removed**: Assumption in `drive_coordinator()` that `RUNNING_CHECKS` only validates pre-existing batches.
+- **Replaced by**: Replay edge invoking `run_checks_only` when resuming an interrupted run at `RUNNING_CHECKS`.

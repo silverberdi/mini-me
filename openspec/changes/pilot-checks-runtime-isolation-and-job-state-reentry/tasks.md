@@ -1,24 +1,33 @@
-## 1. Process-Private Bytecode Cache Isolation
+## 1. Secure Bytecode Cache Isolation & Sandbox Mount (C04)
 
-- [ ] 1.1 In `src/minime/services/checks_runner.py`, replace the shared `/tmp/minime_pycache` path with a UID-scoped / XDG-scoped private directory (`~/.cache/minime/pycache/<job_id>` or `/tmp/minime_pycache_<uid>/<job_id>`) created with `0700` permissions.
-- [ ] 1.2 Prohibit `chown -R` or `chmod 1777` on shared directories and verify graceful handling of existing paths.
-- [ ] 1.3 In `src/minime/services/agent_confinement.py`, update `wrap_command()` to bind-mount the private bytecode cache path read-write into the Bubblewrap sandbox profile.
+- [ ] 1.1 In `src/minime/services/checks_runner.py`, implement secure private cache directory resolution: check `~/.cache/minime/pycache/<job_id>` or fallback to `tempfile.mkdtemp(prefix=f"minime_cache_{os.getuid()}_")`.
+- [ ] 1.2 Enforce fail-closed verification on the resolved cache directory: verify path is not a symlink, verify ownership matches process UID, and verify mode is restricted to `0700`.
+- [ ] 1.3 Prohibit `chown -R` or `chmod 1777` on shared directories and verify graceful handling of existing paths.
+- [ ] 1.4 In `src/minime/services/agent_confinement.py`, update `wrap_command()` to bind-mount only the validated dedicated bytecode cache path read-write (`--dir` and `--bind`) into Bubblewrap, prohibiting arbitrary unrestricted bind paths.
 
-## 2. Claim-Fenced Job Error Transitions on Checks Exceptions
+## 2. Claim-Fenced Job Error Transitions & Rollback Boundaries (C02)
 
-- [ ] 2.1 In `src/minime/services/execution_pipeline.py::run_checks_only()`, wrap runner invocation in a try/except block to catch unhandled exceptions, re-validate the recovery claim fence (`for_update=True`), transition the `Job` to `CHECKS_FAILED` with sanitized error details, and record diagnostic evidence.
-- [ ] 2.2 In `src/minime/services/orchestration_service.py::drive_coordinator()`, ensure consistent error recording and verify that the coordinator does not leave `Job` in `CHECKS_RUNNING` when stopping `Run` in `NEEDS_HUMAN`.
+- [ ] 2.1 In `src/minime/services/execution_pipeline.py::run_checks_only()`, catch runner exceptions before outer fence check, re-validate recovery claim fence with row lock (`for_update=True`), transition `Job` to `CHECKS_FAILED` with sanitized error details, persist an `EvidenceDiagnostic`, and commit atomically.
+- [ ] 2.2 On claim fence loss (`StaleClaimError` or heartbeat failure), execute `uow.rollback()` and ensure ZERO database writes occur after fence loss.
+- [ ] 2.3 In `src/minime/services/orchestration_service.py::drive_coordinator()`, ensure consistent error recording and verify that coordinator stops `Run` in `NEEDS_HUMAN` alongside `Job` in `CHECKS_FAILED` under valid fence.
 
-## 3. Governed Checks-Only Recovery Re-Entry
+## 3. Proven Latest Environmental Fault Validation (C03)
 
-- [ ] 3.1 In `src/minime/services/recovery_convergence_service.py::_validate_checks_only_eligibility()`, expand eligibility to admit runs in `RUNNING_CHECKS` / `NEEDS_HUMAN` when substantiated by proven runner environmental fault evidence (e.g. runner permissions or confinement errors).
-- [ ] 3.2 Ensure candidate SHA, worktree cleanliness, base SHA, and valid repository binding are strictly re-verified upon re-entry.
-- [ ] 3.3 In `recover_checks_only()`, transition the Run back to active execution under claim fencing, advance directly to `RUNNING_CHECKS`, and invoke `run_checks_only()` without creating an implementer attempt or invoking AI models.
+- [ ] 3.1 In `src/minime/services/recovery_convergence_service.py::_validate_checks_only_eligibility()`, validate latest pre-check failure from `Run.stop_details` (`CHECKS_ONLY_PIPELINE_EXCEPTION` with allowlisted exception type e.g. `PermissionError`) before `CheckResult` publication.
+- [ ] 3.2 Ensure fail-closed rejection of application code errors (e.g. `AssertionError`, `SyntaxError`, pytest failures) in latest execution batch and diagnostics.
+- [ ] 3.3 Re-verify candidate SHA `2fcad0ef73eb4766ca1bb6249a081cb4070ecced`, worktree porcelain cleanliness, base SHA, and valid repository binding.
+- [ ] 3.4 Require separate explicit human one-shot authorization before `recover_checks_only` admission.
 
-## 4. Adversarial PostgreSQL & Bubblewrap Verification Suite
+## 4. Fresh Checks Batch Execution at RUNNING_CHECKS Replay Edge (C01, C05)
 
-- [ ] 4.1 Create test in `tests/test_pilot_checks_recovery_postgres.py` with two distinct simulated UIDs verifying that user B cannot be blocked by user A's preexisting cache files and that no shared chmod 1777 is used.
-- [ ] 4.2 Add test asserting that an unhandled runner exception atomically transitions `Job` to `CHECKS_FAILED` under claim fence while stopping `Run` in `NEEDS_HUMAN`.
-- [ ] 4.3 Add test asserting that `RecoveryConvergenceService` successfully admits an interrupted `RUNNING_CHECKS` / `NEEDS_HUMAN` run and re-runs deterministic checks without model calls.
-- [ ] 4.4 Add adversarial tests verifying rejection if candidate SHA differs, worktree is dirty, claim is lost/superseded, or prior failure was an application code error.
-- [ ] 4.5 Execute disposable PostgreSQL and Bubblewrap test suite and produce deterministic verification report.
+- [ ] 4.1 In `src/minime/services/orchestration_service.py::drive_coordinator()`, implement checks-only execution replay edge at `RUNNING_CHECKS` stage when resuming an interrupted run without a passed batch.
+- [ ] 4.2 Invoke `pipeline.run_checks_only()` exactly once, record fresh `CheckResult` records with new timestamps bound to candidate generation, validate batch completeness, and freeze unchanged candidate.
+- [ ] 4.3 Stop run at `NEEDS_HUMAN` / `REVIEW_AUTHORIZATION_PENDING` without calling `execute_queued_job`, replaying OpenSpec APPLY, or dispatching AI models.
+
+## 5. Adversarial PostgreSQL & Bubblewrap Verification Suite (C01–C05)
+
+- [ ] 5.1 Create test in `tests/test_pilot_checks_recovery_postgres.py` with two distinct simulated UIDs verifying that user B cannot be blocked by user A's preexisting cache files and that symlink/wrong-owner cache paths are rejected.
+- [ ] 5.2 Add test asserting that an unhandled runner exception atomically commits `Job` to `CHECKS_FAILED` and `Run` to `NEEDS_HUMAN` under claim fence, and that fence loss causes rollback with zero writes.
+- [ ] 5.3 Add test asserting that `RecoveryConvergenceService` admits an interrupted `RUNNING_CHECKS` / `NEEDS_HUMAN` run and executes exactly ONE fresh checks batch from `RUNNING_CHECKS`, validating the new results without model calls.
+- [ ] 5.4 Add negative adversarial tests verifying rejection if candidate SHA differs, worktree is dirty, claim is lost/superseded, or prior failure was an application code error.
+- [ ] 5.5 Execute disposable PostgreSQL and Bubblewrap test suite and produce deterministic verification report.
