@@ -2008,9 +2008,19 @@ async def test_real_browser_keyboard_tabs_focus_names_and_reduced_motion(
             "focused": True,
         }
 
-        await client.eval_js(
-            "document.getElementById('navTabExecutions').click(); document.getElementById('tabOverview').focus()"
+        detail_ready = await client.eval_js("""
+          (() => {
+            document.getElementById('navTabExecutions').click();
+            const row = document.querySelector('#changesTableBody tr[data-project-id]');
+            if (!row) return false;
+            row.click();
+            return document.getElementById('detailPanel').classList.contains('drawer-open');
+          })()
+        """)
+        assert detail_ready, (
+            "Keyboard detail-tab verification requires opening a real displayed Run row."
         )
+        await client.eval_js("document.getElementById('tabOverview').focus()")
         await client.send_cmd(
             "Input.dispatchKeyEvent",
             {
