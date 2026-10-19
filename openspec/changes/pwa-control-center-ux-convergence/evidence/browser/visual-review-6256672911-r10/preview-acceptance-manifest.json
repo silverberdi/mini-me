@@ -1,0 +1,33 @@
+{
+  "base_sha": "8564afc51069bd334a67fd19a2a4f51cc0659f5e",
+  "candidate_source_sha": "619d044c366a665c8ed670464229343e40b4296f",
+  "change_name": "control-center-action-2f8a58dd3b0a",
+  "classification": "QA-seeded disposable PostgreSQL preview; not production evidence",
+  "database": "minime_pwa_visual_review_20261018_r10 (disposable; loopback host + private Docker bridge)",
+  "durable_states_observed": [
+    "IMPLEMENTING/RUNNING",
+    "CANCELLED"
+  ],
+  "image_digest": "sha256:3ffe4f4ffd80f35b145d2920712bd27a964072482c354ec21d51703a852ab272",
+  "comparison_board": "comparison-board.png",
+  "comparison_board_sha256": "67ece1a54f55294605e6df2536566992858be530fbd72fbee9cc30ec07ace09a",
+  "comparison_source_html": "comparison.html",
+  "job_id": "qa-job-2f8a58dd3b0a",
+  "project_id": "qa-pwa-2f8a58dd3b0a",
+  "run_id": "qa-run-2f8a58dd3b0a",
+  "screenshots": [
+    "visual-review-active-desktop-1440x900-landing.png",
+    "visual-review-active-desktop-1440x900-drawer.png",
+    "visual-review-cancelled-mobile-390x844-toast.png",
+    "visual-review-active-tablet-1024x768.png",
+    "visual-review-active-tablet-768x1024.png",
+    "visual-review-active-mobile-390x844.png",
+    "visual-review-active-mobile-360x800.png",
+    "visual-review-cancelled-desktop-1440x900.png",
+    "visual-review-cancelled-tablet-1024x768.png",
+    "visual-review-cancelled-tablet-768x1024.png",
+    "visual-review-cancelled-mobile-390x844.png",
+    "visual-review-cancelled-mobile-360x800.png",
+    "comparison-board.png"
+  ]
+}

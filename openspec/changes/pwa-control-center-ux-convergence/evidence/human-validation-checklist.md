@@ -1,19 +1,21 @@
 # Human visual validation checklist — Control Center
 
-Status: **PREPARED / NOT RUN**. The reference assets and reproducible steps are ready, but there is no exact committed candidate identity, immutable preview image digest, or human result yet. Do not treat this document or mock-seeded screenshots as approval.
+Status: **PREPARED / HUMAN REVIEW PENDING**. Candidate source and immutable preview image identities are now recorded and fresh Chrome comparison captures are available. No human result has been recorded. Do not treat the captures or automated checks as approval.
 
 ## Candidate binding
 
-- Candidate HEAD SHA: `PENDING_COMMIT`
+- Candidate application source SHA: `619d044c366a665c8ed670464229343e40b4296f`
 - Base SHA: `8564afc51069bd334a67fd19a2a4f51cc0659f5e`
-- Container image digest: `PENDING_BUILD_FOR_EXACT_HEAD`
-- Preview URL: `PENDING_CONTAINERIZED_PREVIEW`
+- Container image digest: `sha256:3ffe4f4ffd80f35b145d2920712bd27a964072482c354ec21d51703a852ab272`
+- Preview URL: containerized preview was stopped after evidence capture; rerun the named disposable PostgreSQL browser test to create a live preview bound to this source identity.
+- Comparison board: `evidence/browser/visual-review-6256672911-r10/comparison-board.png` (SHA-256 `67ece1a54f55294605e6df2536566992858be530fbd72fbee9cc30ec07ace09a`)
+- Browser evidence manifest: `evidence/browser/visual-review-6256672911-r10/preview-acceptance-manifest.json`
 - Authenticated operator/session: use a disposable authorized test identity; do not record credentials or session tokens.
 - Result: `PENDING` (allowed values: PASS / FAIL / SKIP with reason / NOTE).
 
 ## Preconditions
 
-1. Verify the preview image was built from the exact candidate HEAD and record its immutable digest.
+1. Verify the preview image digest and source SHA against the bound manifest before review; do not reuse captures after application code changes.
 2. Verify the preview points only to disposable PostgreSQL and has a valid test ProjectBinding.
 3. Verify the approved reference files `docs/design/01..08-*.png` match the reviewed assets and have not changed.
 4. Use only backend-created states and evidence. Do not synthesize PAUSED, READY_FOR_HUMAN_MERGE, review, PR, provider capacity or cost values to fill a screenshot.
@@ -27,6 +29,6 @@ Status: **PREPARED / NOT RUN**. The reference assets and reproducible steps are 
 5. At 1024×768 and 768×1024 compare references 05/06. Verify master-detail selection, touch operation, candidate identity and review evidence where available. Record missing READY/review authority as `SKIP`; do not substitute mock values.
 6. At 390×844 and 360×800 compare references 07/08. Verify supervision-first hierarchy, bottom navigation, attention and readable vertical pipeline. Verify controls are operable without desktop-only actions.
 7. In dark and light themes, keyboard through navigation, selected Run, detail tabs and confirmation dialog. Verify visible focus, accessible names, focus containment/return, readable contrast, no clipped critical text and no horizontal overflow. Repeat reflow at 200% browser zoom on desktop/tablet and at a 320 CSS-pixel mobile width.
-8. Record each result and deviations in `evidence/visual-comparison.md`; bind screenshots and any browser trace to the exact candidate SHA and preview digest. Do not reuse evidence after either identity changes.
+8. Compare the native reference and candidate screenshots linked in `evidence/visual-comparison.md`. Record each result and deviations there, then enter the overall outcome below. Do not reuse evidence after either application source identity or image digest changes.
 
 Human outcome: `PENDING`. Automated accessibility verification for task 4.2 is recorded as passing in `tasks.md`; this does not replace the owner's visual validation. Tasks 4.1 and 6.4 remain open until the owner records a candidate-bound visual decision and checklist result. Task 6.6 additionally requires separately authorized merge/deployment and is not part of this checklist's completion.
