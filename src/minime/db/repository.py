@@ -1567,8 +1567,9 @@ class PostgresJobRepository(JobRepositoryInterface):
             raise ValueError(f"Invalid job status transition: {current.value} -> {target.value}.")
         if claim_context is not None:
             now = utc_now()
-            claim_subquery = (
-                select(1)
+            # Acquire row lock on recovery claim to serialize publication through commit
+            claim_stmt = (
+                select(RecoveryClaimModel)
                 .where(
                     RecoveryClaimModel.claim_key == claim_context.claim_key,
                     RecoveryClaimModel.owner_instance_id == claim_context.owner_instance_id,
@@ -1576,14 +1577,18 @@ class PostgresJobRepository(JobRepositoryInterface):
                     RecoveryClaimModel.released_at.is_(None),
                     RecoveryClaimModel.lease_expires_at > now,
                 )
-                .scalar_subquery()
+                .with_for_update()
             )
+            claim_model = self.session.scalars(claim_stmt).first()
+            if not claim_model:
+                raise StaleClaimError(
+                    f"Fenced transition for job '{job_id}' failed: recovery claim fence is stale, expired, or superseded."
+                )
             stmt_up = (
                 update(JobModel)
                 .where(
                     JobModel.id == job_id,
                     JobModel.status == current.value,
-                    exists(claim_subquery),
                 )
                 .values(
                     status=target.value,
@@ -1594,7 +1599,7 @@ class PostgresJobRepository(JobRepositoryInterface):
             res = self.session.execute(stmt_up)
             if res.rowcount == 0:
                 raise StaleClaimError(
-                    f"Fenced transition for job '{job_id}' failed: recovery claim fence is stale, expired, or superseded."
+                    f"Fenced transition for job '{job_id}' failed: job status was concurrently modified."
                 )
         else:
             model.status = target.value
@@ -5420,11 +5425,36 @@ class PostgresRecoveryClaimRepository(RecoveryClaimRepositoryInterface):
         res = self.session.execute(stmt)
         return res.rowcount > 0
 
+    def release_claim(
+        self,
+        claim_key_or_context: str | RecoveryClaimContext,
+        owner_instance_id: str | None = None,
+        fence_token: int | None = None,
+    ) -> bool:
+        """Strictly idempotent release of an operational recovery claim."""
+        if isinstance(claim_key_or_context, RecoveryClaimContext):
+            return self.release(
+                claim_key=claim_key_or_context.claim_key,
+                owner_instance_id=claim_key_or_context.owner_instance_id,
+                fence_token=claim_key_or_context.fence_token,
+            )
+        return self.release(
+            claim_key=str(claim_key_or_context),
+            owner_instance_id=owner_instance_id or "",
+            fence_token=fence_token or 0,
+        )
+
     def get_by_key(self, claim_key: str) -> RecoveryClaim | None:
         model = self.session.get(RecoveryClaimModel, claim_key)
         return recovery_claim_model_to_domain(model) if model else None
 
-    def validate_cas(self, claim_key: str, owner_instance_id: str, fence_token: int) -> bool:
+    def validate_cas(
+        self,
+        claim_key: str,
+        owner_instance_id: str,
+        fence_token: int,
+        for_update: bool = False,
+    ) -> bool:
         now = utc_now()
         stmt = select(RecoveryClaimModel).where(
             RecoveryClaimModel.claim_key == claim_key,
@@ -5433,6 +5463,8 @@ class PostgresRecoveryClaimRepository(RecoveryClaimRepositoryInterface):
             RecoveryClaimModel.released_at.is_(None),
             RecoveryClaimModel.lease_expires_at > now,
         )
+        if for_update:
+            stmt = stmt.with_for_update()
         model = self.session.scalars(stmt).first()
         return model is not None
 
@@ -5760,7 +5792,24 @@ class PostgresRecoveryDecisionRepository(RecoveryDecisionRepositoryInterface):
         models = self.session.scalars(stmt).all()
         return [recovery_decision_model_to_domain(m) for m in models]
 
-    def update_decision(self, decision: RecoveryDecision) -> RecoveryDecision:
+    def update_decision(
+        self, decision: RecoveryDecision, claim_context: RecoveryClaimContext | None = None
+    ) -> RecoveryDecision:
+        if claim_context is not None:
+            now = utc_now()
+            stmt = select(RecoveryClaimModel).where(
+                RecoveryClaimModel.claim_key == claim_context.claim_key,
+                RecoveryClaimModel.owner_instance_id == claim_context.owner_instance_id,
+                RecoveryClaimModel.fence_token == claim_context.fence_token,
+                RecoveryClaimModel.released_at.is_(None),
+                RecoveryClaimModel.lease_expires_at > now,
+            )
+            claim = self.session.scalars(stmt).first()
+            if not claim:
+                raise StaleClaimError(
+                    f"Claim fence lost for '{claim_context.claim_key}' during decision update."
+                )
+
         model = self.session.get(RecoveryDecisionModel, decision.decision_id)
         if model:
             model.status = (

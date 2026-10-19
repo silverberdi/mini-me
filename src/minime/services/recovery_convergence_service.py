@@ -43,6 +43,7 @@ from minime.domain.models import (
     ExternalActionAttempt,
     Job,
     OrchestrationExternalAction,
+    OrchestrationRun,
     RecoveryClaimContext,
     RecoveryDecision,
     generate_uuid,
@@ -75,6 +76,7 @@ class OperationalHeartbeat:
         uow: Any = None,
         lease_seconds: int = DEFAULT_LEASE_SECONDS,
         renew_claim: Any | None = None,
+        stop_timeout: float = 5.0,
     ):
         self.recovery_service = recovery_service
         self.uow = uow
@@ -82,44 +84,59 @@ class OperationalHeartbeat:
         self.interval_seconds = interval_seconds
         self.lease_seconds = lease_seconds
         self.renew_claim = renew_claim
+        self.stop_timeout = stop_timeout
         self._stop_event = threading.Event()
         self._thread: threading.Thread | None = None
         self.heartbeat_failed = False
+        self.stopped_cleanly = False
+        self._renewal_lock = threading.Lock()
+        self._renewal_in_progress = threading.Event()
 
     def start(self) -> OperationalHeartbeat:
         def _run():
             while not self._stop_event.wait(self.interval_seconds):
+                if self._stop_event.is_set():
+                    break
                 try:
-                    if not self.claim_context:
-                        break
-                    if self.renew_claim is not None:
-                        success = self.renew_claim(self.claim_context, self.lease_seconds)
-                    elif self.recovery_service is not None:
-                        success = self.recovery_service.heartbeat(self.claim_context)
-                    elif (
-                        self.uow is not None
-                        and hasattr(self.uow, "claims")
-                        and self.uow.claims is not None
-                    ):
-                        success = self.uow.claims.renew_heartbeat(
-                            claim_key=self.claim_context.claim_key,
-                            owner_instance_id=self.claim_context.owner_instance_id,
-                            fence_token=self.claim_context.fence_token,
-                            lease_seconds=self.lease_seconds,
-                        )
-                    else:
-                        success = True
-                    if not success:
-                        self.heartbeat_failed = True
-                        logger.warning(
-                            "Heartbeat renewal failed for claim '%s'; worker is now stale.",
-                            self.claim_context.claim_key,
-                        )
-                        break
-                    if self.claim_context is not None:
-                        self.claim_context.lease_expires_at = utc_now() + timedelta(
-                            seconds=self.lease_seconds
-                        )
+                    with self._renewal_lock:
+                        if not self.claim_context or self._stop_event.is_set():
+                            break
+                        context_snapshot = self.claim_context
+                        self._renewal_in_progress.set()
+                        try:
+                            if self.renew_claim is not None:
+                                success = self.renew_claim(context_snapshot, self.lease_seconds)
+                            elif self.recovery_service is not None:
+                                success = self.recovery_service.heartbeat(context_snapshot)
+                            elif (
+                                self.uow is not None
+                                and hasattr(self.uow, "claims")
+                                and self.uow.claims is not None
+                            ):
+                                success = self.uow.claims.renew_heartbeat(
+                                    claim_key=context_snapshot.claim_key,
+                                    owner_instance_id=context_snapshot.owner_instance_id,
+                                    fence_token=context_snapshot.fence_token,
+                                    lease_seconds=self.lease_seconds,
+                                )
+                            else:
+                                success = True
+                        finally:
+                            self._renewal_in_progress.clear()
+
+                        if self._stop_event.is_set():
+                            break
+                        if not success:
+                            self.heartbeat_failed = True
+                            logger.warning(
+                                "Heartbeat renewal failed for claim '%s'; worker is now stale.",
+                                getattr(context_snapshot, "claim_key", "unknown"),
+                            )
+                            break
+                        if self.claim_context is not None and not self._stop_event.is_set():
+                            self.claim_context.lease_expires_at = utc_now() + timedelta(
+                                seconds=self.lease_seconds
+                            )
                 except Exception as exc:
                     self.heartbeat_failed = True
                     logger.warning(
@@ -133,16 +150,42 @@ class OperationalHeartbeat:
         self._thread.start()
         return self
 
-    def stop(self) -> None:
+    def stop(self, timeout: float | None = None) -> bool:
+        """Reliably stop heartbeat background thread and guarantee no further renewals can occur."""
+        effective_timeout = timeout if timeout is not None else self.stop_timeout
         self._stop_event.set()
+        context_ref = self.claim_context
+        # Cease local claim context reference to guarantee no renewal attempt can proceed
+        self.claim_context = None
         if self._thread and self._thread.is_alive():
-            self._thread.join(timeout=2.0)
+            self._thread.join(timeout=effective_timeout)
+            if self._thread.is_alive() or self._renewal_in_progress.is_set():
+                self.heartbeat_failed = True
+                self.stopped_cleanly = False
+                logger.warning(
+                    "Heartbeat thread did not terminate within %ss for claim '%s'.",
+                    effective_timeout,
+                    getattr(context_ref, "claim_key", "unknown"),
+                )
+                return False
+        self.stopped_cleanly = True
+        return True
+
+    @property
+    def is_alive(self) -> bool:
+        return bool(self._thread and self._thread.is_alive())
+
+    @property
+    def is_renewing(self) -> bool:
+        return self._renewal_in_progress.is_set()
 
     def __enter__(self) -> OperationalHeartbeat:
         return self.start()
 
     def __exit__(self, exc_type, exc_val, exc_tb) -> None:
-        self.stop()
+        clean = self.stop()
+        if not clean or self.is_alive or self._renewal_in_progress.is_set():
+            self.heartbeat_failed = True
 
 
 class RecoveryConvergenceService:
@@ -172,6 +215,7 @@ class RecoveryConvergenceService:
         self.heartbeat_seconds = heartbeat_seconds
         self.post_merge_service = post_merge_service
         self.github_adapter = github_adapter
+        self.heartbeat_stop_timeout: float = 5.0
         # Reuse the coordinator already composed by the caller when one is
         # available. This preserves its configured runner/adapter boundaries
         # across canonical CONTINUE without changing claim/fencing authority.
@@ -601,6 +645,444 @@ class RecoveryConvergenceService:
                 )
             )
 
+    def _validate_checks_only_eligibility(
+        self, run: OrchestrationRun, job: Job, worktree_path: Path
+    ) -> None:
+        """Validate authoritative durable tuple, managed binding, and runner environmental fault before checks-only bypass."""
+        from minime.services.workspace_guard import is_binding_fully_valid
+
+        if not run.is_active:
+            raise ValueError("Run is not active.")
+        if run.current_stage != OrchestrationStage.IMPLEMENTING:
+            raise ValueError(
+                f"Run current_stage is '{run.current_stage.value}', expected IMPLEMENTING."
+            )
+        if run.active_job_id != job.job_id:
+            raise ValueError(
+                f"Run active_job_id '{run.active_job_id}' does not match job '{job.job_id}'."
+            )
+        if job.status != JobStatus.CHECKS_FAILED:
+            raise ValueError(f"Job status is '{job.status.value}', expected CHECKS_FAILED.")
+        if run.project_id != job.project_id:
+            raise ValueError("Run project_id does not match job project_id.")
+        if run.change_name != job.change_name:
+            raise ValueError("Run change_name does not match job change_name.")
+        if run.base_sha != job.base_sha:
+            raise ValueError(
+                f"Run base_sha '{run.base_sha}' does not match job base_sha '{job.base_sha}'."
+            )
+        if not job.candidate_sha:
+            raise ValueError("Job has no authoritative candidate_sha.")
+
+        # Validate durable managed repository binding
+        binding_repo = getattr(self.uow, "project_managed_repository_bindings", None)
+        if not binding_repo:
+            raise ValueError("project_managed_repository_bindings repository is missing in uow.")
+        binding = binding_repo.get_by_project_id(job.project_id)
+        if not binding or not is_binding_fully_valid(binding):
+            mismatches = (
+                getattr(binding, "mismatch_reasons", []) if binding else ["binding missing"]
+            )
+            raise ValueError(
+                f"No valid durable managed repository binding for project '{job.project_id}': {mismatches}"
+            )
+
+        # Validate worktree ownership if tracked
+        ownership_repo = getattr(self.uow, "orchestration_worktree_ownerships", None)
+        if ownership_repo and hasattr(ownership_repo, "get_by_job_id"):
+            ow = ownership_repo.get_by_job_id(job.job_id)
+            if ow and ow.run_id and ow.run_id != run.run_id:
+                raise ValueError(
+                    f"Worktree ownership run_id '{ow.run_id}' does not match run '{run.run_id}'."
+                )
+
+        # Validate worktree directory existence and git HEAD matching candidate_sha
+        if not worktree_path.exists() or not worktree_path.is_dir():
+            raise ValueError(
+                f"Preserved worktree path does not exist or is not a directory: {worktree_path}"
+            )
+
+        head_res = subprocess.run(
+            ["git", "-C", str(worktree_path), "rev-parse", "HEAD"],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        if head_res.returncode != 0:
+            raise ValueError(f"Failed to resolve git HEAD in worktree: {head_res.stderr.strip()}")
+        if head_res.stdout.strip() != job.candidate_sha:
+            raise ValueError(
+                f"Worktree HEAD '{head_res.stdout.strip()}' does not match job candidate_sha '{job.candidate_sha}'."
+            )
+
+        status_res = subprocess.run(
+            ["git", "-C", str(worktree_path), "status", "--porcelain"],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        if status_res.returncode != 0 or status_res.stdout.strip():
+            raise ValueError("Preserved worktree is not clean.")
+
+        # Verify candidate and latest attempt alignment
+        attempts = (
+            self.uow.job_attempts.list_by_job(job.job_id)
+            if hasattr(self.uow, "job_attempts")
+            else []
+        )
+        latest_att = None
+        if attempts:
+            attempts.sort(key=lambda a: a.attempt_number)
+            latest_att = attempts[-1]
+            if latest_att.end_sha and latest_att.end_sha != job.candidate_sha:
+                raise ValueError(
+                    f"Latest attempt end_sha '{latest_att.end_sha}' does not match job candidate_sha '{job.candidate_sha}'."
+                )
+
+        # Collect diagnostics and check results for this candidate
+        diagnostics = (
+            self.uow.evidence_diagnostics.list_by_job(job.job_id)
+            if hasattr(self.uow, "evidence_diagnostics")
+            else []
+        )
+        cand_diags = [d for d in diagnostics if d.candidate_sha == job.candidate_sha]
+
+        check_results = (
+            self.uow.check_results.list_by_job(job.job_id)
+            if hasattr(self.uow, "check_results")
+            else []
+        )
+        cand_crs = [
+            cr
+            for cr in check_results
+            if cr.candidate_sha == job.candidate_sha
+            and (
+                cr.candidate_generation is None or cr.candidate_generation == run.current_generation
+            )
+        ]
+
+        cand_all_ts = [d.created_at for d in cand_diags if getattr(d, "created_at", None)] + [
+            cr.created_at for cr in cand_crs if getattr(cr, "created_at", None)
+        ]
+        if not cand_all_ts:
+            raise ValueError("No check results or evidence diagnostics found for candidate.")
+
+        latest_ts = max(cand_all_ts)
+
+        # If attempts exist, ensure evidence is from the latest attempt, not older attempts
+        if latest_att is not None and getattr(latest_att, "created_at", None):
+            if latest_ts < latest_att.created_at - timedelta(seconds=5):
+                raise ValueError(
+                    "Latest attempt has no check results or diagnostics; historical failures cannot substantiate recovery."
+                )
+
+        # Isolate the authoritative latest execution batch within a 60-second window of the latest record
+        window_start = latest_ts - timedelta(seconds=60)
+
+        # If attempt_id is tracked on diagnostics, prefer diagnostics matching the latest attempt
+        if latest_att is not None and any(
+            getattr(d, "attempt_id", None) == latest_att.attempt_id for d in cand_diags
+        ):
+            batch_diags = [
+                d for d in cand_diags if getattr(d, "attempt_id", None) == latest_att.attempt_id
+            ]
+        else:
+            batch_diags = [
+                d
+                for d in cand_diags
+                if getattr(d, "created_at", None) and d.created_at >= window_start
+            ]
+
+        batch_crs = [
+            cr
+            for cr in cand_crs
+            if getattr(cr, "created_at", None) and cr.created_at >= window_start
+        ]
+
+        # Fail-closed rejection of application code errors in the latest execution
+        code_error_signals = [
+            "assertionerror",
+            "assertion error",
+            "syntaxerror",
+            "indentationerror",
+            "nameerror",
+            "attributeerror",
+            "typeerror",
+            "valueerror",
+            "importerror",
+            "modulenotfounderror",
+            "failed (failures=",
+            "failed (errors=",
+            "ruff failed",
+            "lint error",
+        ]
+        for diag in batch_diags:
+            reason = (diag.reason or "").lower()
+            details_str = str(diag.evidence_reference or "").lower()
+            if any(sig in reason or sig in details_str for sig in code_error_signals):
+                raise ValueError(
+                    "Prior check failure is an application code error, not a proven runner environmental fault in latest execution."
+                )
+        for cr in batch_crs:
+            snippet = (cr.output_snippet or "").lower()
+            if any(sig in snippet for sig in code_error_signals):
+                raise ValueError(
+                    "Prior check failure is an application code error, not a proven runner environmental fault in latest execution."
+                )
+
+        def _is_environmental_proven(text: str) -> bool:
+            t = text.lower()
+            return (
+                ("/dev/null" in t)
+                and ("permissionerror" in t or "[errno 13]" in t or "permission denied" in t)
+            ) or ("confinement preflight" in t or "runner environmental fault" in t)
+
+        # In the authoritative latest execution, verify that every failed check was due to an environmental fault
+        failed_crs = [cr for cr in batch_crs if cr.exit_code != 0]
+        for cr in failed_crs:
+            snippet = cr.output_snippet or ""
+            matching_diags = [d for d in batch_diags if d.check_name == cr.check_name]
+            cr_env_proven = _is_environmental_proven(snippet) or any(
+                _is_environmental_proven(f"{d.reason or ''} {str(d.evidence_reference or '')}")
+                for d in matching_diags
+            )
+            if not cr_env_proven:
+                raise ValueError(
+                    f"Prior check failure for '{cr.check_name}' (exit code {cr.exit_code}) is not a proven runner environmental fault in latest execution."
+                )
+
+        # Require at least one positive proof of runner environmental fault across the latest execution batch
+        environmental_proven = any(
+            _is_environmental_proven(f"{diag.reason or ''} {str(diag.evidence_reference or '')}")
+            for diag in batch_diags
+        ) or any(_is_environmental_proven(cr.output_snippet or "") for cr in batch_crs)
+
+        if not environmental_proven:
+            raise ValueError(
+                "Prior check failure does not substantiate a proven runner environmental fault (/dev/null or confinement preflight error) in latest execution."
+            )
+
+    def recover_checks_only(
+        self,
+        run_id: str,
+        project_root: str | Path | None = None,
+        force: bool = False,
+    ) -> RecoveryDecision:
+        """Execute narrow, fenced checks-only checkpoint recovery of a preserved candidate."""
+        from minime.services.worktree_manager import WorktreeManager
+
+        cycle_id = generate_uuid()
+        claim_key = f"run:{run_id}"
+        source = RecoverySource.CLI
+
+        claim = self.acquire_claim(claim_key=claim_key, lease_seconds=self.lease_seconds)
+        if not claim:
+            decision = RecoveryDecision(
+                cycle_id=cycle_id,
+                claim_key=claim_key,
+                identity_type="RUN",
+                identity_id=run_id,
+                source=source,
+                classification=RecoveryClassification.CLAIMED_ELSEWHERE,
+                planned_action="NO_ACTION",
+                status=RecoveryDecisionStatus.NO_ACTION,
+                reason_code="CLAIMED_ELSEWHERE",
+            )
+            self._create_decision(decision)
+            self.uow.commit()
+            return decision
+
+        context = RecoveryClaimContext(
+            claim_key=claim.claim_key,
+            owner_instance_id=claim.owner_instance_id,
+            fence_token=claim.fence_token,
+            lease_expires_at=claim.lease_expires_at,
+        )
+
+        decision = RecoveryDecision(
+            cycle_id=cycle_id,
+            claim_key=claim_key,
+            identity_type="RUN",
+            identity_id=run_id,
+            source=source,
+            fence_token=context.fence_token,
+            classification=RecoveryClassification.RESUME_SAFE_CHECKPOINT,
+            planned_action="RECOVER_CHECKS_ONLY",
+            status=RecoveryDecisionStatus.EXECUTING,
+            reason_code="CHECKS_ONLY_RECOVERY",
+        )
+        self._create_decision(decision)
+        self.uow.commit()
+
+        run = self.uow.orchestration_runs.get_by_id(run_id)
+        if not run:
+            decision.status = RecoveryDecisionStatus.NO_ACTION
+            decision.reason_code = "RUN_NOT_FOUND"
+            self._update_decision(decision)
+            self.uow.commit()
+            self.release_claim(context)
+            return decision
+
+        if not run.active_job_id:
+            decision.status = RecoveryDecisionStatus.BLOCKED
+            decision.reason_code = "NO_ACTIVE_JOB"
+            self._update_decision(decision)
+            self.uow.commit()
+            self.release_claim(context)
+            return decision
+
+        job = self.uow.jobs.get_by_id(run.active_job_id)
+        if not job:
+            decision.status = RecoveryDecisionStatus.BLOCKED
+            decision.reason_code = "JOB_NOT_FOUND"
+            self._update_decision(decision)
+            self.uow.commit()
+            self.release_claim(context)
+            return decision
+
+        # Resolve preserved worktree path strictly via WorktreeManager and durable managed binding
+        root = Path(project_root).resolve() if project_root else self.project_root
+        wt_manager = WorktreeManager(project_root=root, uow=self.uow)
+        try:
+            worktree_path = wt_manager.worktree_path(job.job_id, project_id=job.project_id)
+        except Exception as wt_err:
+            decision.status = RecoveryDecisionStatus.BLOCKED
+            decision.reason_code = f"PREFLIGHT_REJECTED: Worktree resolution failed: {wt_err}"[:128]
+            self._update_decision(decision)
+            self.uow.commit()
+            self.release_claim(context)
+            return decision
+
+        # Preflight verification
+        try:
+            self._validate_checks_only_eligibility(run, job, worktree_path)
+        except Exception as preflight_err:
+            logger.warning(
+                "Preflight checks-only eligibility rejected for run '%s': %s",
+                run.run_id,
+                preflight_err,
+            )
+            decision.status = RecoveryDecisionStatus.BLOCKED
+            decision.reason_code = f"PREFLIGHT_REJECTED: {preflight_err}"[:128]
+            self._update_decision(decision)
+            self.uow.commit()
+            self.release_claim(context)
+            return decision
+
+        # Setup and drive coordinator under single heartbeat ownership
+        if self.orchestration_service is None:
+            from minime.services.orchestration_service import OrchestrationService
+
+            orchestration_svc = OrchestrationService(self.uow, project_root=root)
+        else:
+            orchestration_svc = self.orchestration_service
+
+        renew_claim = getattr(self.uow, "renew_claim_heartbeat_isolated", None)
+        if renew_claim is None:
+
+            def renew_claim(claim_context: RecoveryClaimContext, lease_seconds: int) -> bool:
+                renewed = self.uow.claims.renew_heartbeat(
+                    claim_key=claim_context.claim_key,
+                    owner_instance_id=claim_context.owner_instance_id,
+                    fence_token=claim_context.fence_token,
+                    lease_seconds=lease_seconds,
+                )
+                if renewed:
+                    self.uow.commit()
+                return renewed
+
+        heartbeat = OperationalHeartbeat(
+            claim_context=context,
+            interval_seconds=self.heartbeat_seconds,
+            lease_seconds=self.lease_seconds,
+            renew_claim=renew_claim,
+            stop_timeout=getattr(self, "heartbeat_stop_timeout", 5.0),
+        )
+
+        try:
+            with heartbeat:
+                orchestration_svc.resume(
+                    run_id=run.run_id,
+                    project_root=root,
+                    force=False,
+                    claim_context=context,
+                    manage_heartbeat=False,
+                    checks_only=True,
+                )
+            if (
+                heartbeat.heartbeat_failed
+                or not heartbeat.stopped_cleanly
+                or heartbeat.is_alive
+                or heartbeat.is_renewing
+            ):
+                raise StaleClaimError("CLAIM_HEARTBEAT_RENEWAL_FAILED_OR_THREAD_ALIVE")
+            decision.status = RecoveryDecisionStatus.COMPLETED
+        except StaleClaimError as exc:
+            logger.warning(
+                "Run continuation fence lost during recover_checks_only for '%s': %s",
+                run.run_id,
+                exc,
+                exc_info=True,
+            )
+            self.uow.rollback()
+            decision.status = RecoveryDecisionStatus.BLOCKED
+            decision.reason_code = f"STALE_CLAIM: {exc}"[:128]
+            # ZERO DATABASE WRITES after claim loss: do not persist decision, do not commit, do not release claim
+            return decision
+        except Exception as exc:
+            if (
+                heartbeat.heartbeat_failed
+                or not heartbeat.stopped_cleanly
+                or heartbeat.is_alive
+                or heartbeat.is_renewing
+            ):
+                logger.warning(
+                    "Heartbeat failed during recover_checks_only for '%s': %s",
+                    run.run_id,
+                    exc,
+                )
+                self.uow.rollback()
+                decision.status = RecoveryDecisionStatus.BLOCKED
+                decision.reason_code = self._bounded_decision_failure_code(exc)
+                return decision
+            logger.exception(
+                "Unexpected error in recover_checks_only for '%s': %s", run.run_id, exc
+            )
+            decision.status = RecoveryDecisionStatus.BLOCKED
+            decision.reason_code = f"ERROR: {exc}"[:128]
+
+        # Before writing decision or releasing claim, verify heartbeat terminated cleanly
+        if (
+            heartbeat.heartbeat_failed
+            or not heartbeat.stopped_cleanly
+            or heartbeat.is_alive
+            or heartbeat.is_renewing
+        ):
+            self.uow.rollback()
+            decision.status = RecoveryDecisionStatus.BLOCKED
+            decision.reason_code = "HEARTBEAT_THREAD_TEARDOWN_FAILED"
+            return decision
+
+        try:
+            # Atomic point-of-persistence fencing: update decision with claim fence check, then release claim
+            self._update_decision(decision, claim_context=context)
+            released = self.release_claim(context)
+            if not released:
+                raise StaleClaimError("FAILED_TO_RELEASE_CLAIM_ATOMICALLY")
+            self.uow.commit()
+        except StaleClaimError as exc:
+            logger.warning(
+                "Claim fence lost during final decision persistence for '%s': %s",
+                run.run_id,
+                exc,
+            )
+            self.uow.rollback()
+            decision.status = RecoveryDecisionStatus.BLOCKED
+            decision.reason_code = f"STALE_CLAIM: {exc}"[:128]
+            return decision
+
+        return decision
+
     def request_run_continuation(
         self,
         run_id: str,
@@ -674,9 +1156,14 @@ class RecoveryConvergenceService:
         if hasattr(self.uow, "recovery_decisions") and self.uow.recovery_decisions is not None:
             self.uow.recovery_decisions.create_decision(decision)
 
-    def _update_decision(self, decision: RecoveryDecision) -> None:
+    def _update_decision(
+        self, decision: RecoveryDecision, claim_context: RecoveryClaimContext | None = None
+    ) -> None:
         if hasattr(self.uow, "recovery_decisions") and self.uow.recovery_decisions is not None:
-            self.uow.recovery_decisions.update_decision(decision)
+            try:
+                self.uow.recovery_decisions.update_decision(decision, claim_context=claim_context)
+            except TypeError:
+                self.uow.recovery_decisions.update_decision(decision)
 
     def acquire_claim(self, claim_key: str, lease_seconds: int = 60) -> RecoveryClaimContext | None:
         """Acquire or re-acquire a claim for this owner instance."""
@@ -1662,20 +2149,79 @@ class RecoveryConvergenceService:
                 interval_seconds=self.heartbeat_seconds,
                 lease_seconds=self.lease_seconds,
                 renew_claim=renew_claim,
+                stop_timeout=getattr(self, "heartbeat_stop_timeout", 5.0),
             ) as heartbeat:
                 orchestration_svc.resume(
-                    run_id=run.run_id, drain_mode=drain_mode, force=force, claim_context=context
+                    run_id=run.run_id,
+                    drain_mode=drain_mode,
+                    force=force,
+                    claim_context=context,
+                    manage_heartbeat=False,
                 )
-            if heartbeat.heartbeat_failed:
-                raise StaleClaimError("CLAIM_HEARTBEAT_RENEWAL_FAILED")
+            if (
+                heartbeat.heartbeat_failed
+                or not heartbeat.stopped_cleanly
+                or heartbeat.is_alive
+                or heartbeat.is_renewing
+            ):
+                raise StaleClaimError("CLAIM_HEARTBEAT_RENEWAL_FAILED_OR_THREAD_ALIVE")
             decision.status = RecoveryDecisionStatus.COMPLETED
+        except StaleClaimError as exc:
+            logger.warning("Run continuation fence lost for '%s': %s", run.run_id, exc)
+            self.uow.rollback()
+            decision.status = RecoveryDecisionStatus.BLOCKED
+            decision.reason_code = self._bounded_decision_failure_code(exc)
+            # ZERO DATABASE WRITES after claim loss: do not persist decision, do not release claim
+            return decision
         except Exception as exc:
+            if (
+                heartbeat.heartbeat_failed
+                or not heartbeat.stopped_cleanly
+                or heartbeat.is_alive
+                or heartbeat.is_renewing
+            ):
+                logger.warning(
+                    "Run continuation heartbeat failed or teardown incomplete for '%s': %s",
+                    run.run_id,
+                    exc,
+                )
+                self.uow.rollback()
+                decision.status = RecoveryDecisionStatus.BLOCKED
+                decision.reason_code = self._bounded_decision_failure_code(exc)
+                return decision
             logger.error("Run continuation failed for '%s': %s", run.run_id, exc)
             decision.status = RecoveryDecisionStatus.BLOCKED
             decision.reason_code = self._bounded_decision_failure_code(exc)
 
-        self._update_decision(decision)
-        self.release_claim(context)
+        # Before writing decision or releasing claim, verify heartbeat terminated cleanly
+        if (
+            heartbeat.heartbeat_failed
+            or not heartbeat.stopped_cleanly
+            or heartbeat.is_alive
+            or heartbeat.is_renewing
+        ):
+            self.uow.rollback()
+            decision.status = RecoveryDecisionStatus.BLOCKED
+            decision.reason_code = "HEARTBEAT_THREAD_TEARDOWN_FAILED"
+            return decision
+
+        try:
+            # Atomic point-of-persistence fencing: update decision with claim fence check, then release claim
+            self._update_decision(decision, claim_context=context)
+            released = self.release_claim(context)
+            if not released:
+                raise StaleClaimError("FAILED_TO_RELEASE_CLAIM_ATOMICALLY")
+            self.uow.commit()
+        except StaleClaimError as exc:
+            logger.warning(
+                "Claim fence lost during final decision persistence for '%s': %s",
+                run.run_id,
+                exc,
+            )
+            self.uow.rollback()
+            decision.status = RecoveryDecisionStatus.BLOCKED
+            decision.reason_code = self._bounded_decision_failure_code(exc)
+            return decision
         return decision
 
     def _converge_saga_identity(

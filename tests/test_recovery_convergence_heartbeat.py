@@ -17,7 +17,7 @@ class _SlowResume:
         self.uow = uow
         self.fence_valid_after_wait = False
 
-    def resume(self, *, run_id, drain_mode, force, claim_context):
+    def resume(self, *, run_id, drain_mode, force, claim_context, **kwargs):
         time.sleep(1.25)
         self.fence_valid_after_wait = self.uow.claims.validate_cas(
             claim_key=claim_context.claim_key,

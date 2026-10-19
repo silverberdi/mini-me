@@ -1178,7 +1178,6 @@ class AdmissionEvaluationResult(BaseModel):
     legacy_refusal_code: AdmissionRefusalCode | None = None
     refusal_details: dict[str, Any] = Field(default_factory=dict)
 
-
     def __iter__(self):
         return iter(
             (
@@ -1737,7 +1736,6 @@ class PublishedIntakeArtifact(BaseModel):
     canonical_repository_identity: str
 
 
-
 class WorkspaceMutationRequest(BaseModel):
     """Request payload submitted to ManagedWorkspaceGuard for policy evaluation."""
 
@@ -1840,7 +1838,7 @@ class RecoveryClaimContext(BaseModel):
 
 
 def validate_claim_context_authoritative(
-    uow: Any, claim_context: RecoveryClaimContext | None
+    uow: Any, claim_context: RecoveryClaimContext | None, for_update: bool = False
 ) -> None:
     """Validate claim context against PostgreSQL / repository authoritative current ownership."""
     from minime.domain.exceptions import MissingRecoveryClaimContextError, StaleClaimError
@@ -1853,11 +1851,20 @@ def validate_claim_context_authoritative(
         raise StaleClaimError("Recovery claim context is locally expired or invalid.")
     if not hasattr(uow, "claims") or uow.claims is None:
         return
-    if not uow.claims.validate_cas(
-        claim_key=claim_context.claim_key,
-        owner_instance_id=claim_context.owner_instance_id,
-        fence_token=claim_context.fence_token,
-    ):
+    try:
+        is_valid = uow.claims.validate_cas(
+            claim_key=claim_context.claim_key,
+            owner_instance_id=claim_context.owner_instance_id,
+            fence_token=claim_context.fence_token,
+            for_update=for_update,
+        )
+    except TypeError:
+        is_valid = uow.claims.validate_cas(
+            claim_key=claim_context.claim_key,
+            owner_instance_id=claim_context.owner_instance_id,
+            fence_token=claim_context.fence_token,
+        )
+    if not is_valid:
         raise StaleClaimError(
             f"Recovery claim context for '{claim_context.claim_key}' (fence token {claim_context.fence_token}) is stale, expired, or superseded in database."
         )
@@ -1974,5 +1981,3 @@ def evaluate_dispatch_authorization(
         is_authorized=False,
         authorization_reason=f"Unhandled action status '{action.status.value}'.",
     )
-
-

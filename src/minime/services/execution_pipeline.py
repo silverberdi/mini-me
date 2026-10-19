@@ -629,6 +629,197 @@ class ExecutionPipelineService:
             self.uow.commit()
         return await self.execute_queued_job(job.job_id, claim_context=claim_context)
 
+    async def run_checks_only(
+        self,
+        job_id: str,
+        candidate_generation: int = 1,
+        claim_context: RecoveryClaimContext | None = None,
+    ) -> Job:
+        """Execute deterministic checks against a preserved, unmutated candidate worktree."""
+        from minime.domain.exceptions import StaleClaimError
+        from minime.domain.models import MetricFact, validate_claim_context_authoritative
+
+        validate_claim_context_authoritative(self.uow, claim_context)
+
+        job = self._require_job(job_id)
+        project = self._require_project(job.project_id)
+        if not job.candidate_sha:
+            raise ValueError(f"Job '{job.job_id}' has no candidate_sha; checks cannot run.")
+
+        # Resolve worktree path strictly via WorktreeManager and durable managed repository binding
+        try:
+            worktree_path = self.worktree_manager.worktree_path(
+                job.job_id, project_id=job.project_id
+            )
+        except Exception as wt_err:
+            raise ValueError(
+                f"Failed to resolve worktree path for job '{job.job_id}': {wt_err}"
+            ) from wt_err
+
+        if not worktree_path.exists() or not worktree_path.is_dir():
+            raise ValueError(
+                f"Preserved candidate worktree does not exist or is not a directory: {worktree_path}"
+            )
+
+        # Validate git HEAD
+        head_res = subprocess.run(
+            ["git", "-C", str(worktree_path), "rev-parse", "HEAD"],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        if head_res.returncode != 0 or head_res.stdout.strip() != job.candidate_sha:
+            raise ValueError(
+                f"Worktree HEAD '{head_res.stdout.strip()}' does not match job candidate_sha '{job.candidate_sha}'."
+            )
+
+        # Validate git clean
+        status_res = subprocess.run(
+            ["git", "-C", str(worktree_path), "status", "--porcelain"],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        if status_res.returncode != 0 or status_res.stdout.strip():
+            raise ValueError("Preserved worktree is not clean.")
+
+        # Deterministic checks execution with fenced state transition
+        checks_started = utc_now()
+        job = self._transition(job, JobStatus.CHECKS_RUNNING, claim_context=claim_context)
+        try:
+            check_run = await self.checks_runner.run(
+                job.job_id,
+                project.checks or [],
+                worktree_path,
+                candidate_sha=job.candidate_sha,
+                candidate_generation=candidate_generation,
+            )
+        except TypeError:
+            check_run = await self.checks_runner.run(
+                job.job_id,
+                project.checks or [],
+                worktree_path,
+            )
+
+        # POST-CHECKS FENCE REVALIDATION: verify claim is still valid before writing ANY results
+        # Acquire short row lock on recovery claim to serialize evidence publication through commit
+        try:
+            validate_claim_context_authoritative(self.uow, claim_context, for_update=True)
+        except Exception as fence_exc:
+            self.uow.rollback()
+            raise StaleClaimError(
+                f"Claim fence lost during checks execution for job '{job.job_id}': {fence_exc}"
+            ) from fence_exc
+
+        # Persist results and diagnostics bound to candidate_sha and candidate_generation
+        try:
+            check_run_results = check_run.results
+            for index, check_result in enumerate(check_run.results):
+                if (
+                    check_result.candidate_sha != (job.candidate_sha or "")
+                    or check_result.candidate_generation != candidate_generation
+                ):
+                    check_result = check_result.model_copy(
+                        update={
+                            "candidate_sha": job.candidate_sha or "",
+                            "candidate_generation": candidate_generation,
+                        }
+                    )
+                check_run_results[index] = check_result
+                self.uow.check_results.save(check_result)
+
+            for diag in check_run.diagnostics:
+                self.uow.evidence_diagnostics.save(diag)
+
+            checks_duration = int((utc_now() - checks_started).total_seconds() * 1000)
+            self.uow.metrics.save(
+                MetricFact(
+                    metric_name="checks_duration_ms",
+                    project_id=job.project_id,
+                    change_id=job.change_name,
+                    duration_ms=checks_duration,
+                    details={"job_id": job.job_id, "recovery": True},
+                )
+            )
+
+            # Enforce single recovery batch completeness: all configured checks must be present,
+            # exact name+command matches, no duplicates, and all exit_code == 0 in this batch
+            configured_checks = project.checks or []
+            configured_names = [c.get("name") for c in configured_checks if c.get("name")]
+            executed_names = [r.check_name for r in check_run_results]
+
+            if not configured_checks:
+                err = "Project has no checks configured."
+                job = self._transition(
+                    job, JobStatus.CHECKS_FAILED, error_message=err, claim_context=claim_context
+                )
+                return self._require_job(job.job_id)
+
+            if len(configured_names) != len(set(configured_names)):
+                err = "Configuration error: duplicate check names configured in project."
+                job = self._transition(
+                    job, JobStatus.CHECKS_FAILED, error_message=err, claim_context=claim_context
+                )
+                return self._require_job(job.job_id)
+
+            if len(executed_names) != len(set(executed_names)):
+                err = "Execution error: duplicate check results in batch."
+                job = self._transition(
+                    job, JobStatus.CHECKS_FAILED, error_message=err, claim_context=claim_context
+                )
+                return self._require_job(job.job_id)
+
+            missing_in_batch = set(configured_names) - set(executed_names)
+            command_by_name = {
+                c["name"]: c.get("command") for c in configured_checks if c.get("name")
+            }
+            commands_match = all(
+                r.command == command_by_name.get(r.check_name) for r in check_run_results
+            )
+
+            all_passed = (
+                check_run.passed
+                and not missing_in_batch
+                and commands_match
+                and all(r.exit_code == 0 for r in check_run_results)
+            )
+
+            if not all_passed:
+                err = f"Deterministic checks failed or incomplete (missing={sorted(list(missing_in_batch))}, commands_match={commands_match})."
+                job = self._transition(
+                    job, JobStatus.CHECKS_FAILED, error_message=err, claim_context=claim_context
+                )
+                return self._require_job(job.job_id)
+
+            # Materialize CandidateManifest strictly within schema after successful checks
+            manifest = self.uow.candidate_manifests.get_by_candidate_sha(
+                job.job_id, job.candidate_sha
+            )
+            if not manifest or not manifest.manifest_hash or manifest.total_files_count <= 0:
+                validate_claim_context_authoritative(self.uow, claim_context)
+                manifest = self.manifest_service.generate_manifest(
+                    worktree_path,
+                    job.candidate_sha,
+                    job.job_id,
+                )
+                validate_claim_context_authoritative(self.uow, claim_context)
+                self.uow.candidate_manifests.save(manifest)
+                self._save_event(
+                    EventType.CANDIDATE_MANIFEST_CREATED,
+                    job,
+                    {
+                        "manifest_hash": manifest.manifest_hash,
+                        "total_files": manifest.total_files_count,
+                        "source": "checks_only_recovery",
+                    },
+                )
+
+            job = self._transition(job, JobStatus.CHECKS_PASSED, claim_context=claim_context)
+            return self._require_job(job.job_id)
+        except Exception:
+            self.uow.rollback()
+            raise
+
     async def execute_queued_job(
         self,
         job_id: str,
@@ -1040,8 +1231,7 @@ class ExecutionPipelineService:
                         corrective_prompt = (
                             "TARGETED REMEDIATION DIRECTIVE (Preserve Valid Working Code):\n"
                             "Valid incremental code in the worktree has been preserved. Do NOT reset or rewrite passing implementations.\n"
-                            "Address exclusively the failing checks below:\n"
-                            + "\n".join(lines)
+                            "Address exclusively the failing checks below:\n" + "\n".join(lines)
                         )
 
                 latest_blockers = self.uow.blocker_claims.list_by_job(job.job_id)
@@ -1686,8 +1876,7 @@ class ExecutionPipelineService:
                 )
                 can_reconcile = self.reconciliation_service.can_reconcile(
                     code_changed=bool(
-                        touched_files
-                        or (attempt_start_sha and current_sha != attempt_start_sha)
+                        touched_files or (attempt_start_sha and current_sha != attempt_start_sha)
                     ),
                     checks_passed=(
                         outcome == ExecutionOutcome.COMPLETED or not ver_res.failing_checks
@@ -2352,8 +2541,10 @@ class ExecutionPipelineService:
                 self.uow.commit()
                 return job
 
-            if self.reviewer_runner is None and self.code_review_service is None and (
-                review_profile is None or review_profile.provider != "deepseek"
+            if (
+                self.reviewer_runner is None
+                and self.code_review_service is None
+                and (review_profile is None or review_profile.provider != "deepseek")
             ):
                 reason = (
                     "R01 CODE_REVIEW requires DeepSeek Direct; reviewer substitution is forbidden."
@@ -2411,7 +2602,9 @@ class ExecutionPipelineService:
             # Candidate verification and worktree preparation can outlive the
             # earlier reviewer snapshot. Obtain one final observation immediately
             # before materializing the review workspace / persisting REVIEW_RUNNING.
-            if not reviewer_fallback_used and (self.reviewer_runner is None or self.code_review_service is not None):
+            if not reviewer_fallback_used and (
+                self.reviewer_runner is None or self.code_review_service is not None
+            ):
                 rev_health = await self._refresh_capacity_before_stage(
                     effective_reviewer,
                     model=review_profile.model if review_profile else None,
@@ -2571,7 +2764,9 @@ class ExecutionPipelineService:
             verdict_payload = None
 
             if self.code_review_service is not None or (
-                review_profile and review_profile.provider == "deepseek" and self.reviewer_runner is None
+                review_profile
+                and review_profile.provider == "deepseek"
+                and self.reviewer_runner is None
             ):
                 candidate = (
                     self.uow.orchestration_candidates.get_by_generation(
@@ -3434,10 +3629,22 @@ class ExecutionPipelineService:
             raise ValueError(f"Job '{job_id}' not found.")
         return job
 
-    def _transition(self, job: Job, status: JobStatus, error_message: str | None = None) -> Job:
-        updated = self.uow.jobs.transition(job.job_id, status.value, error_message=error_message)
+    def _transition(
+        self,
+        job: Job,
+        status: JobStatus,
+        error_message: str | None = None,
+        claim_context: RecoveryClaimContext | None = None,
+    ) -> Job:
+        updated = self.uow.jobs.transition(
+            job.job_id, status.value, error_message=error_message, claim_context=claim_context
+        )
         event_type = EVENT_BY_STATUS[status]
         self._save_event(event_type, updated, {"status": status.value, "error": error_message})
+        if claim_context is not None:
+            from minime.domain.models import validate_claim_context_authoritative
+
+            validate_claim_context_authoritative(self.uow, claim_context)
         self.uow.commit()
         return updated
 

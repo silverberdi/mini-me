@@ -6,6 +6,7 @@ import time
 from datetime import timedelta
 from pathlib import Path
 from typing import Generator
+from uuid import uuid4
 
 import pytest
 from sqlalchemy import Engine, create_engine, text
@@ -132,7 +133,11 @@ def pg_engine() -> Generator[Engine, None, None]:
     engine = create_engine(PG_TEST_URL, pool_size=10, max_overflow=20, pool_pre_ping=True)
 
     with engine.connect() as conn:
-        conn.execute(text("SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE datname = current_database() AND pid <> pg_backend_pid();"))
+        conn.execute(
+            text(
+                "SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE datname = current_database() AND pid <> pg_backend_pid();"
+            )
+        )
         conn.commit()
         conn.execute(text("DROP SCHEMA public CASCADE; CREATE SCHEMA public;"))
         conn.commit()
@@ -140,21 +145,37 @@ def pg_engine() -> Generator[Engine, None, None]:
     from minime.db.session import EXPECTED_ALEMBIC_HEAD
 
     with engine.connect() as conn:
-        conn.execute(text("CREATE TABLE IF NOT EXISTS alembic_version (version_num VARCHAR(64) PRIMARY KEY);"))
+        conn.execute(
+            text(
+                "CREATE TABLE IF NOT EXISTS alembic_version (version_num VARCHAR(64) PRIMARY KEY);"
+            )
+        )
         conn.execute(text("DELETE FROM alembic_version;"))
-        conn.execute(text(f"INSERT INTO alembic_version (version_num) VALUES ('{EXPECTED_ALEMBIC_HEAD}');"))
+        conn.execute(
+            text(f"INSERT INTO alembic_version (version_num) VALUES ('{EXPECTED_ALEMBIC_HEAD}');")
+        )
         conn.commit()
     yield engine
     with engine.connect() as conn:
-        conn.execute(text("SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE datname = current_database() AND pid <> pg_backend_pid();"))
+        conn.execute(
+            text(
+                "SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE datname = current_database() AND pid <> pg_backend_pid();"
+            )
+        )
         conn.commit()
         conn.execute(text("DROP SCHEMA public CASCADE; CREATE SCHEMA public;"))
         conn.commit()
     Base.metadata.create_all(engine)
     with engine.connect() as conn:
-        conn.execute(text("CREATE TABLE IF NOT EXISTS alembic_version (version_num VARCHAR(64) PRIMARY KEY);"))
+        conn.execute(
+            text(
+                "CREATE TABLE IF NOT EXISTS alembic_version (version_num VARCHAR(64) PRIMARY KEY);"
+            )
+        )
         conn.execute(text("DELETE FROM alembic_version;"))
-        conn.execute(text(f"INSERT INTO alembic_version (version_num) VALUES ('{EXPECTED_ALEMBIC_HEAD}');"))
+        conn.execute(
+            text(f"INSERT INTO alembic_version (version_num) VALUES ('{EXPECTED_ALEMBIC_HEAD}');")
+        )
         conn.commit()
     engine.dispose()
 
@@ -225,14 +246,18 @@ def test_g01_startup_vs_tick_same_run_contention(pg_session_factory: sessionmake
     session1.commit()
 
     # Worker 1 (Startup) acquires claim
-    service1 = RecoveryConvergenceService(PostgresPersistenceUnitOfWork(session1), owner_instance_id="worker-startup")
+    service1 = RecoveryConvergenceService(
+        PostgresPersistenceUnitOfWork(session1), owner_instance_id="worker-startup"
+    )
     claim1 = service1.acquire_claim("run:run-g01", lease_seconds=60)
     assert claim1 is not None
     assert claim1.fence_token == 1
     assert claim1.owner_instance_id == "worker-startup"
 
     # Worker 2 (Tick) attempts acquire while Worker 1's claim is active
-    service2 = RecoveryConvergenceService(PostgresPersistenceUnitOfWork(session2), owner_instance_id="worker-tick")
+    service2 = RecoveryConvergenceService(
+        PostgresPersistenceUnitOfWork(session2), owner_instance_id="worker-tick"
+    )
     claim2 = service2.acquire_claim("run:run-g01", lease_seconds=60)
     # Active claim refusal: cannot steal active claim before expiry
     assert claim2 is None
@@ -264,13 +289,19 @@ def test_g02_tick_vs_direct_resume_contention(pg_session_factory: sessionmaker[S
     session1.commit()
 
     # Tick acquires claim first
-    tick_rec = RecoveryConvergenceService(PostgresPersistenceUnitOfWork(session1), owner_instance_id="instance-tick")
+    tick_rec = RecoveryConvergenceService(
+        PostgresPersistenceUnitOfWork(session1), owner_instance_id="instance-tick"
+    )
     claim = tick_rec.acquire_claim("run:run-g02")
     assert claim is not None
 
     # Control plane attempts continuation request on same run
-    cp_service = RecoveryConvergenceService(PostgresPersistenceUnitOfWork(session2), owner_instance_id="instance-cp")
-    decision = cp_service.request_run_continuation(run_id="run-g02", source=RecoverySource.CONTROL_PLANE)
+    cp_service = RecoveryConvergenceService(
+        PostgresPersistenceUnitOfWork(session2), owner_instance_id="instance-cp"
+    )
+    decision = cp_service.request_run_continuation(
+        run_id="run-g02", source=RecoverySource.CONTROL_PLANE
+    )
     assert decision.classification == RecoveryClassification.CLAIMED_ELSEWHERE
     assert decision.reason_code == "CLAIMED_ELSEWHERE"
 
@@ -297,7 +328,9 @@ def test_g03_lease_expiry_and_stale_owner_rejection(pg_session_factory: sessionm
 
     # Simulate lease expiry by rewinding acquired_at and lease_expires_at in DB
     session.execute(
-        text("UPDATE recovery_claims SET lease_expires_at = NOW() - INTERVAL '10 seconds' WHERE claim_key = :k"),
+        text(
+            "UPDATE recovery_claims SET lease_expires_at = NOW() - INTERVAL '10 seconds' WHERE claim_key = :k"
+        ),
         {"k": claim_key},
     )
     session.commit()
@@ -310,7 +343,9 @@ def test_g03_lease_expiry_and_stale_owner_rejection(pg_session_factory: sessionm
     session.commit()
 
     # 1. Worker 1 heartbeat renewal fails (stale fence=1, stale owner)
-    heartbeat_ok = claim_repo.renew_heartbeat(claim_key, owner_instance_id="worker-1", fence_token=1)
+    heartbeat_ok = claim_repo.renew_heartbeat(
+        claim_key, owner_instance_id="worker-1", fence_token=1
+    )
     assert heartbeat_ok is False
 
     # 2. Worker 1 claim release fails
@@ -388,7 +423,9 @@ def test_g04_atomic_dispatch_intent_commit_boundary(pg_session_factory: sessionm
     # Verify intent persisted in DB immediately (before external I/O)
     session2 = pg_session_factory()
     uow2 = PostgresPersistenceUnitOfWork(session2)
-    saved_attempt = uow2.external_action_attempts.get_by_dispatch_intent_key(attempt.dispatch_intent_key)
+    saved_attempt = uow2.external_action_attempts.get_by_dispatch_intent_key(
+        attempt.dispatch_intent_key
+    )
     assert saved_attempt is not None
     assert saved_attempt.status == "EXECUTING"
 
@@ -511,7 +548,9 @@ def test_g08_waiting_external_direct_resume_reobserves(pg_session_factory: sessi
     uow.orchestration_external_actions.reserve(action)
     session.commit()
 
-    decision = rec_service.reconcile_action(action_key="action:git_push:run-g08", source=RecoverySource.CLI)
+    decision = rec_service.reconcile_action(
+        action_key="action:git_push:run-g08", source=RecoverySource.CLI
+    )
     assert decision is not None
 
     session.close()
@@ -557,7 +596,9 @@ def test_g09_intake_saga_resumes_from_checkpoint(pg_session_factory: sessionmake
     session.close()
 
 
-def test_g11_pr_closed_unmerged_never_enters_merge_closure(pg_session_factory: sessionmaker[Session]):
+def test_g11_pr_closed_unmerged_never_enters_merge_closure(
+    pg_session_factory: sessionmaker[Session],
+):
     """G11 / 10.11: PR closed-unmerged cleanup is idempotent and never enters merge closure."""
     session = pg_session_factory()
     project_id, change_name = _seed_base_project_and_change(session, "g11-change")
@@ -586,7 +627,9 @@ def test_g11_pr_closed_unmerged_never_enters_merge_closure(pg_session_factory: s
 # ============================================================================
 # G13: Terminal parent prevents execution resurrection
 # ============================================================================
-def test_g13_terminal_parent_prevents_execution_resurrection(pg_session_factory: sessionmaker[Session]):
+def test_g13_terminal_parent_prevents_execution_resurrection(
+    pg_session_factory: sessionmaker[Session],
+):
     """G13 / 10.13: CANCELLED/DONE/COMPLETED parent runs block job resurrection."""
     session = pg_session_factory()
     project_id, change_name = _seed_base_project_and_change(session, "g13-change")
@@ -607,7 +650,11 @@ def test_g13_terminal_parent_prevents_execution_resurrection(pg_session_factory:
     session.commit()
 
     decision = rec_service.request_run_continuation(run_id="run-g13", source=RecoverySource.TICK)
-    assert decision.status in {RecoveryDecisionStatus.NO_ACTION, RecoveryDecisionStatus.COMPLETED, RecoveryDecisionStatus.BLOCKED}
+    assert decision.status in {
+        RecoveryDecisionStatus.NO_ACTION,
+        RecoveryDecisionStatus.COMPLETED,
+        RecoveryDecisionStatus.BLOCKED,
+    }
 
     session.close()
 
@@ -632,7 +679,9 @@ def test_g15_recovery_converges_before_admission(pg_session_factory: sessionmake
 # ============================================================================
 # G16 & G22: Control Plane Routing & Primitive Claim Context Requirement
 # ============================================================================
-def test_g16_control_plane_routing_and_g22_primitive_claim_context(pg_session_factory: sessionmaker[Session]):
+def test_g16_control_plane_routing_and_g22_primitive_claim_context(
+    pg_session_factory: sessionmaker[Session],
+):
     """G16, G22 / 10.16, 10.23: Control plane CONTINUATION routes through RecoveryConvergenceService and direct primitives require valid claim context."""
     session = pg_session_factory()
     project_id, change_name = _seed_base_project_and_change(session, "g16-change")
@@ -652,7 +701,12 @@ def test_g16_control_plane_routing_and_g22_primitive_claim_context(pg_session_fa
     orch = OrchestrationService(uow)
 
     # Direct OrchestrationService.resume with stale/invalid claim_context raises StaleClaimError
-    stale_ctx = RecoveryClaimContext(claim_key="run:run-g16", owner_instance_id="stale", fence_token=0, lease_expires_at=utc_now())
+    stale_ctx = RecoveryClaimContext(
+        claim_key="run:run-g16",
+        owner_instance_id="stale",
+        fence_token=0,
+        lease_expires_at=utc_now(),
+    )
     with pytest.raises(StaleClaimError):
         orch.resume(run_id="run-g16", claim_context=stale_ctx)
 
@@ -706,7 +760,9 @@ def test_gr02_atomic_fenced_dispatch_intent_adversarial(pg_session_factory: sess
 
     uow = PostgresPersistenceUnitOfWork(session)
     rec_a = RecoveryConvergenceService(uow, owner_instance_id="worker-A")
-    rec_b = RecoveryConvergenceService(PostgresPersistenceUnitOfWork(pg_session_factory()), owner_instance_id="worker-B")
+    rec_b = RecoveryConvergenceService(
+        PostgresPersistenceUnitOfWork(pg_session_factory()), owner_instance_id="worker-B"
+    )
 
     claim_key = "run:run-gr02"
     action_key = "action:test_dispatch:run-gr02"
@@ -739,7 +795,9 @@ def test_gr02_atomic_fenced_dispatch_intent_adversarial(pg_session_factory: sess
 
     # 2. Simulate Worker A's lease expiring in DB
     session.execute(
-        text("UPDATE recovery_claims SET lease_expires_at = NOW() - INTERVAL '10 seconds' WHERE claim_key = :k"),
+        text(
+            "UPDATE recovery_claims SET lease_expires_at = NOW() - INTERVAL '10 seconds' WHERE claim_key = :k"
+        ),
         {"k": claim_key},
     )
     session.commit()
@@ -778,7 +836,9 @@ def test_gr03_db_authoritative_claim_context_validation(pg_session_factory: sess
 
     uow = PostgresPersistenceUnitOfWork(session)
     rec_a = RecoveryConvergenceService(uow, owner_instance_id="worker-A")
-    rec_b = RecoveryConvergenceService(PostgresPersistenceUnitOfWork(pg_session_factory()), owner_instance_id="worker-B")
+    rec_b = RecoveryConvergenceService(
+        PostgresPersistenceUnitOfWork(pg_session_factory()), owner_instance_id="worker-B"
+    )
 
     claim_key = "run:run-gr03"
 
@@ -802,7 +862,9 @@ def test_gr03_db_authoritative_claim_context_validation(pg_session_factory: sess
 
     # 2. Simulate Worker A's lease expiring in DB
     session.execute(
-        text("UPDATE recovery_claims SET lease_expires_at = NOW() - INTERVAL '10 seconds' WHERE claim_key = :k"),
+        text(
+            "UPDATE recovery_claims SET lease_expires_at = NOW() - INTERVAL '10 seconds' WHERE claim_key = :k"
+        ),
         {"k": claim_key},
     )
     session.commit()
@@ -827,7 +889,9 @@ def test_gr03_db_authoritative_claim_context_validation(pg_session_factory: sess
     session.close()
 
 
-def test_gr08_scheduler_drain_routes_through_recovery_convergence(pg_session_factory: sessionmaker[Session], tmp_path: Path):
+def test_gr08_scheduler_drain_routes_through_recovery_convergence(
+    pg_session_factory: sessionmaker[Session], tmp_path: Path
+):
     """BLOCKER G-R08 proof: Scheduler DRAIN decision routes through RecoveryConvergenceService and creates RecoveryClaim/Decision."""
     from minime.domain.enums import JobStatus
     from minime.domain.models import Job
@@ -870,12 +934,18 @@ def test_gr08_scheduler_drain_routes_through_recovery_convergence(pg_session_fac
     decisions = uow.recovery_decisions.list_by_claim_key("run:run-gr08")
     assert len(decisions) >= 1
     assert decisions[0].source == RecoverySource.TICK
-    assert decision_obj.status in {RecoveryDecisionStatus.COMPLETED, RecoveryDecisionStatus.PLANNED, RecoveryDecisionStatus.NO_ACTION}
+    assert decision_obj.status in {
+        RecoveryDecisionStatus.COMPLETED,
+        RecoveryDecisionStatus.PLANNED,
+        RecoveryDecisionStatus.NO_ACTION,
+    }
 
     session.close()
 
 
-def test_gr09_restart_recovery_service_delegates_to_recovery_convergence(pg_session_factory: sessionmaker[Session], tmp_path: Path):
+def test_gr09_restart_recovery_service_delegates_to_recovery_convergence(
+    pg_session_factory: sessionmaker[Session], tmp_path: Path
+):
     """BLOCKER G-R09 proof: RestartRecoveryService saga and run reconciliation delegate to RecoveryConvergenceService."""
     from minime.services.restart_recovery_service import RestartRecoveryService
 
@@ -917,7 +987,11 @@ def test_gr10_direct_entry_point_census():
         text_content = py_file.read_text(encoding="utf-8")
         lines = text_content.splitlines()
         for idx, line in enumerate(lines, 1):
-            if "orchestration_svc.resume(" in line or "orchestration_service.resume(" in line or "service.resume(" in line:
+            if (
+                "orchestration_svc.resume(" in line
+                or "orchestration_service.resume(" in line
+                or "service.resume(" in line
+            ):
                 if "def resume(" in line or "recovery_convergence_service.py" in str(py_file):
                     continue
                 violations.append(f"{py_file.name}:{idx}: {line.strip()}")
@@ -925,7 +999,9 @@ def test_gr10_direct_entry_point_census():
     assert violations == [], f"Found Category 4 resume() direct invocation violations: {violations}"
 
 
-def test_gr11_stale_owner_cannot_push_or_create_pr(pg_session_factory: sessionmaker[Session], tmp_path: Path):
+def test_gr11_stale_owner_cannot_push_or_create_pr(
+    pg_session_factory: sessionmaker[Session], tmp_path: Path
+):
     """BLOCKER G-R11 proof: Stale claim owner cannot push branch or create PR."""
     from minime.domain.enums import ExternalOutcome
     from minime.domain.models import ExternalActionResult
@@ -935,7 +1011,9 @@ def test_gr11_stale_owner_cannot_push_or_create_pr(pg_session_factory: sessionma
 
     uow = PostgresPersistenceUnitOfWork(session)
     rec_a = RecoveryConvergenceService(uow, owner_instance_id="worker-A")
-    rec_b = RecoveryConvergenceService(PostgresPersistenceUnitOfWork(pg_session_factory()), owner_instance_id="worker-B")
+    rec_b = RecoveryConvergenceService(
+        PostgresPersistenceUnitOfWork(pg_session_factory()), owner_instance_id="worker-B"
+    )
 
     claim_key = "run:run-gr11"
     ctx_a = rec_a.acquire_claim(claim_key, lease_seconds=3600)
@@ -943,7 +1021,9 @@ def test_gr11_stale_owner_cannot_push_or_create_pr(pg_session_factory: sessionma
 
     # Simulate Worker A lease expiry & Worker B acquisition in DB
     session.execute(
-        text("UPDATE recovery_claims SET lease_expires_at = NOW() - INTERVAL '10 seconds' WHERE claim_key = :k"),
+        text(
+            "UPDATE recovery_claims SET lease_expires_at = NOW() - INTERVAL '10 seconds' WHERE claim_key = :k"
+        ),
         {"k": claim_key},
     )
     session.commit()
@@ -961,7 +1041,9 @@ def test_gr11_stale_owner_cannot_push_or_create_pr(pg_session_factory: sessionma
             target_identity="silverberdi/mini-me:minime/gr11-change",
             request_fingerprint="push:cand123",
             run_id="run-gr11",
-            mutation_fn=lambda: ExternalActionResult(outcome=ExternalOutcome.SUCCESS, source_adapter="git"),
+            mutation_fn=lambda: ExternalActionResult(
+                outcome=ExternalOutcome.SUCCESS, source_adapter="git"
+            ),
         )
 
     session.close()
@@ -999,7 +1081,9 @@ def test_gr11_dispatch_intent_committed_before_adapter(pg_session_factory: sessi
         # Check that dispatch intent already exists in DB when mutation runs
         att = uow.external_action_attempts.list_by_action_key(action_key)
         executed_after_intent.append(len(att) >= 1)
-        return ExternalActionResult(outcome=ExternalOutcome.SUCCESS, source_adapter="github", data={"number": 42})
+        return ExternalActionResult(
+            outcome=ExternalOutcome.SUCCESS, source_adapter="github", data={"number": 42}
+        )
 
     res = saga_engine.execute_fenced_external_action(
         claim_context=ctx,
@@ -1017,7 +1101,9 @@ def test_gr11_dispatch_intent_committed_before_adapter(pg_session_factory: sessi
     session.close()
 
 
-def test_gr12_stale_intake_owner_cannot_write_openspec(pg_session_factory: sessionmaker[Session], tmp_path: Path):
+def test_gr12_stale_intake_owner_cannot_write_openspec(
+    pg_session_factory: sessionmaker[Session], tmp_path: Path
+):
     """BLOCKER G-R12 proof: Stale intake worker cannot write OpenSpec artifacts or advance phase."""
     from minime.services.intake_service import IntakeService
 
@@ -1026,7 +1112,9 @@ def test_gr12_stale_intake_owner_cannot_write_openspec(pg_session_factory: sessi
 
     uow = PostgresPersistenceUnitOfWork(session)
     rec_a = RecoveryConvergenceService(uow, owner_instance_id="worker-A")
-    rec_b = RecoveryConvergenceService(PostgresPersistenceUnitOfWork(pg_session_factory()), owner_instance_id="worker-B")
+    rec_b = RecoveryConvergenceService(
+        PostgresPersistenceUnitOfWork(pg_session_factory()), owner_instance_id="worker-B"
+    )
 
     claim_key = f"intake:{project_id}:gr12-change"
     ctx_a = rec_a.acquire_claim(claim_key, lease_seconds=3600)
@@ -1034,7 +1122,9 @@ def test_gr12_stale_intake_owner_cannot_write_openspec(pg_session_factory: sessi
 
     # Supersede fence in DB
     session.execute(
-        text("UPDATE recovery_claims SET lease_expires_at = NOW() - INTERVAL '10 seconds' WHERE claim_key = :k"),
+        text(
+            "UPDATE recovery_claims SET lease_expires_at = NOW() - INTERVAL '10 seconds' WHERE claim_key = :k"
+        ),
         {"k": claim_key},
     )
     session.commit()
@@ -1050,7 +1140,9 @@ def test_gr12_stale_intake_owner_cannot_write_openspec(pg_session_factory: sessi
     session.close()
 
 
-def test_gr13_adversarial_slow_io_fence_expiration_and_successor_adoption(pg_session_factory: sessionmaker[Session]):
+def test_gr13_adversarial_slow_io_fence_expiration_and_successor_adoption(
+    pg_session_factory: sessionmaker[Session],
+):
     """BLOCKER G-R13 proof: Worker A slow I/O fence expiration records remote evidence monotonically, denies A advancement, and Worker B adopts successor evidence without re-executing mutation."""
     from minime.domain.enums import ExternalOutcome
     from minime.domain.models import ExternalActionResult
@@ -1094,7 +1186,9 @@ def test_gr13_adversarial_slow_io_fence_expiration_and_successor_adoption(pg_ses
         # During slow I/O, Worker A's lease expires and Worker B acquires fence 2
         with pg_session_factory() as aux_session:
             aux_session.execute(
-                text("UPDATE recovery_claims SET lease_expires_at = NOW() - INTERVAL '10 seconds' WHERE claim_key = :k"),
+                text(
+                    "UPDATE recovery_claims SET lease_expires_at = NOW() - INTERVAL '10 seconds' WHERE claim_key = :k"
+                ),
                 {"k": claim_key},
             )
             aux_session.commit()
@@ -1194,7 +1288,9 @@ def test_root_cause_1_missing_claim_context_fails_closed(pg_session_factory: ses
 # ============================================================================
 # Root Cause 4: Cross-Parent Action Dispatch Rejected
 # ============================================================================
-def test_root_cause_4_cross_parent_action_dispatch_rejected(pg_session_factory: sessionmaker[Session]):
+def test_root_cause_4_cross_parent_action_dispatch_rejected(
+    pg_session_factory: sessionmaker[Session],
+):
     """commit_fenced_dispatch_intent must reject action belonging to parent A when dispatched under claim for parent B."""
     session = pg_session_factory()
     project_id, change_a = _seed_base_project_and_change(session, "rc4-change-a")
@@ -1253,7 +1349,9 @@ def test_root_cause_4_cross_parent_action_dispatch_rejected(pg_session_factory: 
 # ============================================================================
 # Root Cause 5: Atomic Fenced SQL Update Rejects Stale Claim
 # ============================================================================
-def test_root_cause_5_atomic_fenced_sql_update_stale_claim(pg_session_factory: sessionmaker[Session]):
+def test_root_cause_5_atomic_fenced_sql_update_stale_claim(
+    pg_session_factory: sessionmaker[Session],
+):
     """fenced stage/phase SQL update must affect 0 rows and raise StaleClaimError when claim is stale or released."""
     session = pg_session_factory()
     project_id, change_name = _seed_base_project_and_change(session, "rc5-change")
@@ -1281,6 +1379,7 @@ def test_root_cause_5_atomic_fenced_sql_update_stale_claim(pg_session_factory: s
 
     # Attempting update_stage with released claim context must raise StaleClaimError
     from minime.domain.exceptions import StaleClaimError
+
     with pytest.raises(StaleClaimError):
         uow.orchestration_runs.update_stage(
             run_id="run-rc5",
@@ -1295,7 +1394,9 @@ def test_root_cause_5_atomic_fenced_sql_update_stale_claim(pg_session_factory: s
 # ============================================================================
 # BLOCKER 1 & 2 Remediation Regression Tests
 # ============================================================================
-def test_blocker_1_missing_claim_context_raises_exception(pg_session_factory: sessionmaker[Session]):
+def test_blocker_1_missing_claim_context_raises_exception(
+    pg_session_factory: sessionmaker[Session],
+):
     """Low-level primitives MUST fail closed when claim_context is None."""
     session = pg_session_factory()
     project_id, change_name = _seed_base_project_and_change(session, "blocker1-change")
@@ -1330,12 +1431,14 @@ def test_blocker_1_missing_claim_context_raises_exception(pg_session_factory: se
 
     # 4. prepare_work_item(..., claim_context=None) fails immediately
     from minime.services.intake_service import IntakeService
+
     intake_svc = IntakeService(uow)
     with pytest.raises(MissingRecoveryClaimContextError):
         intake_svc.prepare_work_item(project_id, change_name, claim_context=None)
 
     # 5. reconcile_post_merge(..., claim_context=None) fails immediately
     from minime.services.post_merge_service import PostMergeReconciliationService
+
     pm_svc = PostMergeReconciliationService(uow, project_root=".")
     with pytest.raises(MissingRecoveryClaimContextError):
         pm_svc.reconcile_post_merge(project_id, change_name, claim_context=None)
@@ -1343,9 +1446,12 @@ def test_blocker_1_missing_claim_context_raises_exception(pg_session_factory: se
     session.close()
 
 
-def test_blocker_2_restart_recovery_service_delegates_to_convergence(pg_session_factory: sessionmaker[Session], tmp_path: Path):
+def test_blocker_2_restart_recovery_service_delegates_to_convergence(
+    pg_session_factory: sessionmaker[Session], tmp_path: Path
+):
     """RestartRecoveryService MUST delegate mutating recovery to RecoveryConvergenceService and contain ZERO Job/Run/Saga state writes."""
     import ast
+
     path = Path("src/minime/services/restart_recovery_service.py")
     tree = ast.parse(path.read_text(encoding="utf-8"))
 
@@ -1361,7 +1467,9 @@ def test_blocker_2_restart_recovery_service_delegates_to_convergence(pg_session_
                 if isinstance(node.func.value, ast.Attribute):
                     val_attr = node.func.value.attr
                     if val_attr in forbidden_targets:
-                        pytest.fail(f"RestartRecoveryService contains forbidden write call: uow.{val_attr}.{method_name}()")
+                        pytest.fail(
+                            f"RestartRecoveryService contains forbidden write call: uow.{val_attr}.{method_name}()"
+                        )
 
     session = pg_session_factory()
     project_id, change_name = _seed_base_project_and_change(session, "blocker2-change")
@@ -1384,10 +1492,14 @@ def test_blocker_2_restart_recovery_service_delegates_to_convergence(pg_session_
     session.close()
 
 
-def test_blocker_c_fresh_admission_passes_claim_context(pg_session_factory: sessionmaker[Session], tmp_path: Path):
+def test_blocker_c_fresh_admission_passes_claim_context(
+    pg_session_factory: sessionmaker[Session], tmp_path: Path
+):
     """Fresh admission with drive_admitted=True MUST acquire run claim and pass explicit claim_context to drive_coordinator."""
     session = pg_session_factory()
-    project_id, change_name = _seed_base_project_and_change(session, "blockerc-fresh", project_id="proj-blockerc")
+    project_id, change_name = _seed_base_project_and_change(
+        session, "blockerc-fresh", project_id="proj-blockerc"
+    )
     uow = PostgresPersistenceUnitOfWork(session)
 
     from datetime import datetime, timezone
@@ -1423,7 +1535,11 @@ def test_blocker_c_fresh_admission_passes_claim_context(pg_session_factory: sess
 
     ch = uow.changes.get_by_name(project_id, change_name)
     if ch:
-        uow.changes.save(ch.model_copy(update={"last_readiness_status": ReadinessState.READY, "status": ChangeStatus.READY}))
+        uow.changes.save(
+            ch.model_copy(
+                update={"last_readiness_status": ReadinessState.READY, "status": ChangeStatus.READY}
+            )
+        )
 
     pb = uow.bindings.get_by_project_and_change(project_id, change_name)
     if pb:
@@ -1486,7 +1602,10 @@ def test_blocker_c_fresh_admission_passes_claim_context(pg_session_factory: sess
         one_active_implementation_per_project=False,
     )
     from unittest.mock import AsyncMock
-    scheduler.provider_health_service.refresh_capacity_from_read_only_source = AsyncMock(return_value=True)
+
+    scheduler.provider_health_service.refresh_capacity_from_read_only_source = AsyncMock(
+        return_value=True
+    )
     scheduler.provider_health_service.has_fresh_capacity_evidence = lambda *args, **kwargs: True
 
     from minime.domain.models import ReadinessEvaluation
@@ -1514,7 +1633,9 @@ def test_blocker_c_fresh_admission_passes_claim_context(pg_session_factory: sess
 
     dec, record, run = scheduler.admit_work_item(project_id, change_name, drive_admitted=True)
 
-    assert dec == AdmissionDecision.ADMITTED, f"REFUSED: {getattr(record, 'reason_summary', None)} {getattr(record, 'refusal_details', None)}"
+    assert dec == AdmissionDecision.ADMITTED, (
+        f"REFUSED: {getattr(record, 'reason_summary', None)} {getattr(record, 'refusal_details', None)}"
+    )
     assert run is not None
     assert len(received_claim_ctx) == 1
     assert received_claim_ctx[0] is not None
@@ -1528,7 +1649,9 @@ def test_blocker_c_fresh_admission_passes_claim_context(pg_session_factory: sess
     session.close()
 
 
-def test_rc01_fresh_admission_acquires_run_claim(pg_session_factory: sessionmaker[Session], tmp_path: Path):
+def test_rc01_fresh_admission_acquires_run_claim(
+    pg_session_factory: sessionmaker[Session], tmp_path: Path
+):
     """RC01: Fresh Stage F admission acquires run claim before driving coordinator."""
     session = pg_session_factory()
     project_id, change_name = _seed_base_project_and_change(session, "rc01-change")
@@ -1540,9 +1663,12 @@ def test_rc01_fresh_admission_acquires_run_claim(pg_session_factory: sessionmake
     session.close()
 
 
-def test_rc02_drive_coordinator_fails_closed_without_claim(pg_session_factory: sessionmaker[Session], tmp_path: Path):
+def test_rc02_drive_coordinator_fails_closed_without_claim(
+    pg_session_factory: sessionmaker[Session], tmp_path: Path
+):
     """RC02: drive_coordinator fails closed immediately when claim_context is None."""
     from minime.domain.exceptions import MissingRecoveryClaimContextError
+
     session = pg_session_factory()
     project_id, change_name = _seed_base_project_and_change(session, "rc02-change")
     uow = PostgresPersistenceUnitOfWork(session)
@@ -1585,20 +1711,29 @@ def test_rc03_zero_manually_constructed_claim_context_in_production():
                     func_name = func.attr
                 if func_name == "RecoveryClaimContext":
                     # Check if inside repository DB reconstruction methods
-                    if str(rel) == "db/repository.py" or str(rel) == "services/recovery_convergence_service.py":
+                    if (
+                        str(rel) == "db/repository.py"
+                        or str(rel) == "services/recovery_convergence_service.py"
+                    ):
                         continue
                     fabricated.append(f"{rel}:{node.lineno}")
-    assert len(fabricated) == 0, f"Found manually constructed RecoveryClaimContext in production paths: {fabricated}"
+    assert len(fabricated) == 0, (
+        f"Found manually constructed RecoveryClaimContext in production paths: {fabricated}"
+    )
 
 
-def test_rc04_reconcile_post_merge_fails_closed_when_claimed_elsewhere(pg_session_factory: sessionmaker[Session], tmp_path: Path):
+def test_rc04_reconcile_post_merge_fails_closed_when_claimed_elsewhere(
+    pg_session_factory: sessionmaker[Session], tmp_path: Path
+):
     """RC04: ControlPlaneService._execute_reconcile_post_merge fails closed with AUTHORITY_MISMATCH when claimed elsewhere."""
     session = pg_session_factory()
     project_id, change_name = _seed_base_project_and_change(session, "rc04-change")
     uow = PostgresPersistenceUnitOfWork(session)
 
     # Acquire claim under another owner
-    uow.claims.acquire_or_reacquire("run:run-rc04", owner_instance_id="other-worker", lease_seconds=60)
+    uow.claims.acquire_or_reacquire(
+        "run:run-rc04", owner_instance_id="other-worker", lease_seconds=60
+    )
     session.commit()
 
     run = OrchestrationRun(
@@ -1649,16 +1784,21 @@ def test_rc05_restart_recovery_service_zero_job_run_saga_writes():
         "resume_saga",
     ]
     for forbidden in forbidden_calls:
-        assert forbidden not in content, f"RestartRecoveryService contains forbidden state mutation '{forbidden}'"
+        assert forbidden not in content, (
+            f"RestartRecoveryService contains forbidden state mutation '{forbidden}'"
+        )
 
 
-def test_rc06_restart_recovery_evidence_consumed_by_convergence(pg_session_factory: sessionmaker[Session], tmp_path: Path):
+def test_rc06_restart_recovery_evidence_consumed_by_convergence(
+    pg_session_factory: sessionmaker[Session], tmp_path: Path
+):
     """RC06: RestartRecoveryService emits restart evidence consumed by RecoveryConvergenceService."""
     session = pg_session_factory()
     project_id, change_name = _seed_base_project_and_change(session, "rc06-change")
     uow = PostgresPersistenceUnitOfWork(session)
 
     from minime.domain.models import Job
+
     job = Job(
         job_id="job-rc06",
         project_id=project_id,
@@ -1681,7 +1821,9 @@ def test_rc06_restart_recovery_evidence_consumed_by_convergence(pg_session_facto
     session.close()
 
 
-def test_rc07_action_observer_dispatch_by_action_type(pg_session_factory: sessionmaker[Session], tmp_path: Path):
+def test_rc07_action_observer_dispatch_by_action_type(
+    pg_session_factory: sessionmaker[Session], tmp_path: Path
+):
     """RC07: Action observer dispatches by ExternalActionType for unresolved actions."""
     session = pg_session_factory()
     project_id, change_name = _seed_base_project_and_change(session, "rc07-change")
@@ -1712,13 +1854,20 @@ def test_rc07_action_observer_dispatch_by_action_type(pg_session_factory: sessio
     session.commit()
 
     from minime.services.recovery_convergence_service import ActionObservationOutcome
+
     rec_svc = RecoveryConvergenceService(uow, project_root=tmp_path)
     outcome = rec_svc.observe_external_action(action)
-    assert outcome in {ActionObservationOutcome.OBSERVED_ABSENT, ActionObservationOutcome.UNOBSERVABLE, ActionObservationOutcome.OBSERVED_PRESENT}
+    assert outcome in {
+        ActionObservationOutcome.OBSERVED_ABSENT,
+        ActionObservationOutcome.UNOBSERVABLE,
+        ActionObservationOutcome.OBSERVED_PRESENT,
+    }
     session.close()
 
 
-def test_rc08_reconcile_action_executes_observed_update(pg_session_factory: sessionmaker[Session], tmp_path: Path):
+def test_rc08_reconcile_action_executes_observed_update(
+    pg_session_factory: sessionmaker[Session], tmp_path: Path
+):
     """RC08: reconcile_action executes observation and returns structured decision."""
     session = pg_session_factory()
     project_id, change_name = _seed_base_project_and_change(session, "rc08-change")
@@ -1755,7 +1904,9 @@ def test_rc08_reconcile_action_executes_observed_update(pg_session_factory: sess
     session.close()
 
 
-def test_rc09_orchestration_resume_preserves_waiting_external(pg_session_factory: sessionmaker[Session], tmp_path: Path):
+def test_rc09_orchestration_resume_preserves_waiting_external(
+    pg_session_factory: sessionmaker[Session], tmp_path: Path
+):
     """RC09: OrchestrationService.resume without force preserves WAITING_EXTERNAL outcome."""
     session = pg_session_factory()
     project_id, change_name = _seed_base_project_and_change(session, "rc09-change")
@@ -1782,16 +1933,21 @@ def test_rc09_orchestration_resume_preserves_waiting_external(pg_session_factory
     session.close()
 
 
-def test_rc10_control_plane_continuation_requires_and_fences_claim(pg_session_factory: sessionmaker[Session], tmp_path: Path):
+def test_rc10_control_plane_continuation_requires_and_fences_claim(
+    pg_session_factory: sessionmaker[Session], tmp_path: Path
+):
     """RC10: Control Plane continuation operations fail closed with AUTHORITY_MISMATCH when claim is held elsewhere."""
     session = pg_session_factory()
     project_id, change_name = _seed_base_project_and_change(session, "rc10-change")
     uow = PostgresPersistenceUnitOfWork(session)
 
-    uow.claims.acquire_or_reacquire("run:run-rc10", owner_instance_id="other-node", lease_seconds=60)
+    uow.claims.acquire_or_reacquire(
+        "run:run-rc10", owner_instance_id="other-node", lease_seconds=60
+    )
     session.commit()
 
     from minime.domain.enums import HumanGate, OperatorActionErrorCode, OperatorActionType
+
     run = OrchestrationRun(
         run_id="run-rc10",
         project_id=project_id,
@@ -1825,7 +1981,9 @@ def test_rc10_control_plane_continuation_requires_and_fences_claim(pg_session_fa
     session.close()
 
 
-def test_rc11_apply_lifecycle_result_fenced_cas_failure(pg_session_factory: sessionmaker[Session], tmp_path: Path):
+def test_rc11_apply_lifecycle_result_fenced_cas_failure(
+    pg_session_factory: sessionmaker[Session], tmp_path: Path
+):
     """RC11: apply_lifecycle_result fails with StaleClaimError when claim is invalid."""
     session = pg_session_factory()
     project_id, change_name = _seed_base_project_and_change(session, "rc11-change")
@@ -1843,7 +2001,9 @@ def test_rc11_apply_lifecycle_result_fenced_cas_failure(pg_session_factory: sess
     session.close()
 
 
-def test_rc12_advance_stage_enforces_claim_context_and_sql_cas(pg_session_factory: sessionmaker[Session], tmp_path: Path):
+def test_rc12_advance_stage_enforces_claim_context_and_sql_cas(
+    pg_session_factory: sessionmaker[Session], tmp_path: Path
+):
     """RC12: _advance_stage enforces claim_context with SQL CAS and raises StaleClaimError when stale."""
     session = pg_session_factory()
     project_id, change_name = _seed_base_project_and_change(session, "rc12-change")
@@ -1868,17 +2028,22 @@ def test_rc12_advance_stage_enforces_claim_context_and_sql_cas(pg_session_factor
         lease_expires_at=utc_now() + timedelta(seconds=60),
     )
     with pytest.raises(StaleClaimError):
-        orch_svc._advance_stage(run, OrchestrationStage.PREPARING_EXECUTION, claim_context=stale_ctx)
+        orch_svc._advance_stage(
+            run, OrchestrationStage.PREPARING_EXECUTION, claim_context=stale_ctx
+        )
     session.close()
 
 
-def test_rc13_saga_transitions_enforce_claim_context_and_sql_cas(pg_session_factory: sessionmaker[Session], tmp_path: Path):
+def test_rc13_saga_transitions_enforce_claim_context_and_sql_cas(
+    pg_session_factory: sessionmaker[Session], tmp_path: Path
+):
     """RC13: SagaEngine transitions enforce claim_context and raise StaleClaimError when claim is stale."""
     session = pg_session_factory()
     project_id, change_name = _seed_base_project_and_change(session, "rc13-change")
     uow = PostgresPersistenceUnitOfWork(session)
 
     from minime.domain.models import DurableSaga
+
     saga = DurableSaga(
         id="saga-rc13",
         saga_type=SagaType.INTAKE,
@@ -1891,6 +2056,7 @@ def test_rc13_saga_transitions_enforce_claim_context_and_sql_cas(pg_session_fact
     session.commit()
 
     from minime.services.saga_engine import SagaEngine
+
     engine = SagaEngine(uow)
     stale_ctx = RecoveryClaimContext(
         claim_key="intake:saga-rc13",
@@ -1903,13 +2069,16 @@ def test_rc13_saga_transitions_enforce_claim_context_and_sql_cas(pg_session_fact
     session.close()
 
 
-def test_rc14_release_claim_includes_lease_not_expired_fence(pg_session_factory: sessionmaker[Session]):
+def test_rc14_release_claim_includes_lease_not_expired_fence(
+    pg_session_factory: sessionmaker[Session],
+):
     """RC14: release claim SQL includes lease_expires_at > now fence predicate."""
     session = pg_session_factory()
     uow = PostgresPersistenceUnitOfWork(session)
 
     # Create expired claim manually in DB
     from minime.db.models import RecoveryClaimModel
+
     expired_time = utc_now() - timedelta(seconds=120)
     session.add(
         RecoveryClaimModel(
@@ -1928,7 +2097,9 @@ def test_rc14_release_claim_includes_lease_not_expired_fence(pg_session_factory:
     session.close()
 
 
-def test_rc15_commit_fenced_dispatch_intent_validates_parent_saga(pg_session_factory: sessionmaker[Session]):
+def test_rc15_commit_fenced_dispatch_intent_validates_parent_saga(
+    pg_session_factory: sessionmaker[Session],
+):
     """RC15: commit_fenced_dispatch_intent re-reads parent saga and fails closed if completed/missing."""
     session = pg_session_factory()
     project_id, change_name = _seed_base_project_and_change(session, "rc15-change")
@@ -1941,6 +2112,7 @@ def test_rc15_commit_fenced_dispatch_intent_validates_parent_saga(pg_session_fac
 
     # Save completed closure saga
     from minime.domain.models import DurableSaga
+
     saga = DurableSaga(
         id="saga-rc15",
         saga_type=SagaType.CLOSURE,
@@ -2022,6 +2194,7 @@ def test_rc01_restart_matrix_implementation_and_checks(pg_session_factory: sessi
     )
 
     from minime.domain.models import CheckResult
+
     uow.check_results.save(
         CheckResult(
             job_id="job-rc01-checks",
@@ -2045,7 +2218,9 @@ def test_rc01_restart_matrix_implementation_and_checks(pg_session_factory: sessi
     session.close()
 
 
-def test_rc01_restart_matrix_implementation_checks_review(pg_session_factory: sessionmaker[Session]):
+def test_rc01_restart_matrix_implementation_checks_review(
+    pg_session_factory: sessionmaker[Session],
+):
     """RC-01 Restart Matrix: Implementation + checks + review -> resumes in AUDIT_RUNNING (preserving review)."""
     session = pg_session_factory()
     project_id, change_name = _seed_base_project_and_change(session, "rc01-imp-checks-review")
@@ -2076,6 +2251,7 @@ def test_rc01_restart_matrix_implementation_checks_review(pg_session_factory: se
 
     from minime.domain.enums import ReviewStatus, ReviewVerdict
     from minime.domain.models import CheckResult, Review
+
     uow.check_results.save(
         CheckResult(
             job_id="job-rc01-review",
@@ -2112,7 +2288,9 @@ def test_rc01_restart_matrix_implementation_checks_review(pg_session_factory: se
     session.close()
 
 
-def test_rc01_restart_matrix_implementation_checks_review_audit(pg_session_factory: sessionmaker[Session]):
+def test_rc01_restart_matrix_implementation_checks_review_audit(
+    pg_session_factory: sessionmaker[Session],
+):
     """RC-01 Restart Matrix: Implementation + checks + review + audit -> resumes in READY_TO_MERGE."""
     session = pg_session_factory()
     project_id, change_name = _seed_base_project_and_change(session, "rc01-imp-checks-review-audit")
@@ -2140,6 +2318,7 @@ def test_rc01_restart_matrix_implementation_checks_review_audit(pg_session_facto
 
     from minime.domain.enums import AuditStatus, ReviewStatus, ReviewVerdict
     from minime.domain.models import AuditRecord, CheckResult, Review
+
     uow.check_results.save(
         CheckResult(
             job_id="job-rc01-audit",
@@ -2190,6 +2369,7 @@ def test_rc01_restart_matrix_implementation_checks_review_audit(pg_session_facto
 def test_rc04_ast_drive_coordinator_advance_stage_claim_context_propagation():
     """RC-04 AST Assertion: Every _advance_stage invocation inside drive_coordinator passes claim_context."""
     import ast
+
     path = Path("src/minime/services/orchestration_service.py")
     tree = ast.parse(path.read_text())
 
@@ -2222,7 +2402,9 @@ def test_rc04_ast_drive_coordinator_advance_stage_claim_context_propagation():
     )
 
 
-def test_rc04_postgres_fence_mismatch_during_stage_advance(pg_session_factory: sessionmaker[Session]):
+def test_rc04_postgres_fence_mismatch_during_stage_advance(
+    pg_session_factory: sessionmaker[Session],
+):
     """RC-04 PostgreSQL Adversarial Proof: worker A attempts next stage with fence N after worker B supersedes with N+1."""
     session = pg_session_factory()
     project_id, change_name = _seed_base_project_and_change(session, "rc04-fence-adv")
@@ -2235,7 +2417,11 @@ def test_rc04_postgres_fence_mismatch_during_stage_advance(pg_session_factory: s
     assert claim_ctx_A is not None
     assert claim_ctx_A.fence_token == 1
 
-    session.execute(text("UPDATE recovery_claims SET lease_expires_at = NOW() - INTERVAL '1 second' WHERE claim_key = 'run:run-rc04-adv'"))
+    session.execute(
+        text(
+            "UPDATE recovery_claims SET lease_expires_at = NOW() - INTERVAL '1 second' WHERE claim_key = 'run:run-rc04-adv'"
+        )
+    )
     session.commit()
 
     claim_ctx_B = rec_svc2.acquire_claim("run:run-rc04-adv")
@@ -2255,12 +2441,16 @@ def test_rc04_postgres_fence_mismatch_during_stage_advance(pg_session_factory: s
 
     orchestration_svc = OrchestrationService(uow)
     with pytest.raises(StaleClaimError):
-        orchestration_svc._advance_stage(run, OrchestrationStage.PREPARING_EXECUTION, claim_context=claim_ctx_A)
+        orchestration_svc._advance_stage(
+            run, OrchestrationStage.PREPARING_EXECUTION, claim_context=claim_ctx_A
+        )
 
     session.close()
 
 
-def test_contract_closure_saga_recovery_non_zero_checkpoint(pg_session_factory: sessionmaker[Session]):
+def test_contract_closure_saga_recovery_non_zero_checkpoint(
+    pg_session_factory: sessionmaker[Session],
+):
     """Contract Closure: Prove saga recovery resumes from non-zero checkpoint without re-executing completed phases."""
     from unittest.mock import MagicMock
 
@@ -2313,7 +2503,9 @@ def test_contract_closure_saga_recovery_non_zero_checkpoint(pg_session_factory: 
     session.close()
 
 
-def test_contract_closure_action_parent_identity_matching(pg_session_factory: sessionmaker[Session]):
+def test_contract_closure_action_parent_identity_matching(
+    pg_session_factory: sessionmaker[Session],
+):
     """Contract Closure: Prove run-backed closure action succeeds with matching run/saga parent, and cross-parent dispatch fails."""
     session = pg_session_factory()
     project_id, change_name = _seed_base_project_and_change(session, "contract-parent-id")
@@ -2395,7 +2587,9 @@ def test_contract_closure_action_parent_identity_matching(pg_session_factory: se
     session.close()
 
 
-def test_contract_closure_reconcile_action_claim_derivation(pg_session_factory: sessionmaker[Session]):
+def test_contract_closure_reconcile_action_claim_derivation(
+    pg_session_factory: sessionmaker[Session],
+):
     """Contract Closure: Prove reconcile_action derives claim key for run, intake saga, and closure saga."""
     session = pg_session_factory()
     project_id, change_name = _seed_base_project_and_change(session, "contract-claim-deriv")
@@ -2465,7 +2659,9 @@ def test_contract_closure_reconcile_action_claim_derivation(pg_session_factory: 
     session.close()
 
 
-def test_contract_closure_pipeline_entry_point_rejects_missing_claim(pg_session_factory: sessionmaker[Session]):
+def test_contract_closure_pipeline_entry_point_rejects_missing_claim(
+    pg_session_factory: sessionmaker[Session],
+):
     """Contract Closure: Prove validate_claim_context_authoritative fails closed without claim context."""
     from minime.domain.exceptions import MissingRecoveryClaimContextError
     from minime.domain.models import validate_claim_context_authoritative
@@ -2473,7 +2669,9 @@ def test_contract_closure_pipeline_entry_point_rejects_missing_claim(pg_session_
     session = pg_session_factory()
     uow = PostgresPersistenceUnitOfWork(session)
 
-    with pytest.raises(MissingRecoveryClaimContextError, match="Recovery claim context is required"):
+    with pytest.raises(
+        MissingRecoveryClaimContextError, match="Recovery claim context is required"
+    ):
         validate_claim_context_authoritative(uow, None)
     session.close()
 
@@ -2481,6 +2679,7 @@ def test_contract_closure_pipeline_entry_point_rejects_missing_claim(pg_session_
 def test_contract_closure_recovery_failure_isolation(pg_session_factory: sessionmaker[Session]):
     """Contract Closure: Prove exception in one target produces BLOCKED decision while allowing other targets to converge."""
     from minime.domain.models import Change
+
     session = pg_session_factory()
     project_id, change_name1 = _seed_base_project_and_change(session, "contract-fail-iso-1")
     uow = PostgresPersistenceUnitOfWork(session)
@@ -2539,7 +2738,9 @@ def test_contract_closure_recovery_failure_isolation(pg_session_factory: session
     session.close()
 
 
-def test_contract_closure_intake_recovery_advances_from_non_zero_checkpoint(pg_session_factory: sessionmaker[Session]):
+def test_contract_closure_intake_recovery_advances_from_non_zero_checkpoint(
+    pg_session_factory: sessionmaker[Session],
+):
     """Mandatory Test: Prove INTAKE recovery actually advances from non-zero checkpoint."""
     from unittest.mock import MagicMock
 
@@ -2577,7 +2778,9 @@ def test_contract_closure_intake_recovery_advances_from_non_zero_checkpoint(pg_s
     session.close()
 
 
-def test_contract_closure_closure_recovery_advances_from_non_zero_checkpoint(pg_session_factory: sessionmaker[Session]):
+def test_contract_closure_closure_recovery_advances_from_non_zero_checkpoint(
+    pg_session_factory: sessionmaker[Session],
+):
     """Mandatory Test: Prove CLOSURE recovery actually advances from non-zero checkpoint."""
     from unittest.mock import MagicMock
 
@@ -2630,7 +2833,9 @@ def test_contract_closure_closure_recovery_advances_from_non_zero_checkpoint(pg_
     session.close()
 
 
-def test_contract_closure_saga_bound_issue_create_observer(pg_session_factory: sessionmaker[Session]):
+def test_contract_closure_saga_bound_issue_create_observer(
+    pg_session_factory: sessionmaker[Session],
+):
     """ISSUE_CREATE requires authoritative remote evidence, never a local binding alone."""
     session = pg_session_factory()
     project_id, change_name = _seed_base_project_and_change(session, "saga-issue-obs")
@@ -2688,6 +2893,7 @@ def test_contract_closure_remote_branch_push_observer(pg_session_factory: sessio
     """Mandatory Test: Prove remote BRANCH_PUSH observer compares remote ref to exact candidate SHA."""
     from minime.domain.models import OrchestrationExternalAction, OrchestrationRun
     from minime.services.recovery_convergence_service import ActionObservationOutcome
+
     session = pg_session_factory()
     project_id, change_name = _seed_base_project_and_change(session, "push-obs")
     uow = PostgresPersistenceUnitOfWork(session)
@@ -2720,7 +2926,9 @@ def test_contract_closure_remote_branch_push_observer(pg_session_factory: sessio
     session.close()
 
 
-def test_contract_closure_remote_project_item_edit_status_observer(pg_session_factory: sessionmaker[Session]):
+def test_contract_closure_remote_project_item_edit_status_observer(
+    pg_session_factory: sessionmaker[Session],
+):
     """PROJECT_ITEM_EDIT fails closed until the adapter supports remote observation."""
     from unittest.mock import MagicMock
 
@@ -2769,7 +2977,9 @@ def test_contract_closure_remote_project_item_edit_status_observer(pg_session_fa
     session.close()
 
 
-def test_contract_closure_proven_absence_without_retry_authorization_denied(pg_session_factory: sessionmaker[Session]):
+def test_contract_closure_proven_absence_without_retry_authorization_denied(
+    pg_session_factory: sessionmaker[Session],
+):
     """Mandatory Test: Prove absence without retry authorization does not dispatch for EXECUTING/FAILED action."""
     session = pg_session_factory()
     project_id, change_name = _seed_base_project_and_change(session, "no-retry-auth")
@@ -2799,12 +3009,16 @@ def test_contract_closure_proven_absence_without_retry_authorization_denied(pg_s
     session.commit()
 
     from minime.domain.models import evaluate_dispatch_authorization
+
     auth = evaluate_dispatch_authorization(
         action=action,
         observation_proven_absent=True,
     )
     assert auth.is_authorized is False
-    assert "requires both observation proving absence AND explicit retry authorization" in auth.authorization_reason
+    assert (
+        "requires both observation proving absence AND explicit retry authorization"
+        in auth.authorization_reason
+    )
     session.close()
 
 
@@ -2848,7 +3062,9 @@ def test_contract_closure_stale_writes_fail_atomically(pg_session_factory: sessi
     session.close()
 
 
-def test_contract_closure_pipeline_invocation_without_claim_fails_before_mutation(pg_session_factory: sessionmaker[Session]):
+def test_contract_closure_pipeline_invocation_without_claim_fails_before_mutation(
+    pg_session_factory: sessionmaker[Session],
+):
     """Mandatory Test: Prove pipeline invocation without claim fails before any mutation."""
     import asyncio
 
@@ -2859,12 +3075,16 @@ def test_contract_closure_pipeline_invocation_without_claim_fails_before_mutatio
     uow = PostgresPersistenceUnitOfWork(session)
     pipeline = ExecutionPipelineService(uow, project_root=".")
 
-    with pytest.raises(MissingRecoveryClaimContextError, match="Recovery claim context is required"):
+    with pytest.raises(
+        MissingRecoveryClaimContextError, match="Recovery claim context is required"
+    ):
         asyncio.run(pipeline.execute_queued_job("job-no-claim", claim_context=None))
     session.close()
 
 
-def test_contract_closure_heartbeat_renews_during_blocked_external_work(pg_session_factory: sessionmaker[Session]):
+def test_contract_closure_heartbeat_renews_during_blocked_external_work(
+    pg_session_factory: sessionmaker[Session],
+):
     """Mandatory Test: Prove heartbeat renews lease during blocked external work."""
     session = pg_session_factory()
     uow = PostgresPersistenceUnitOfWork(session)
@@ -2875,8 +3095,429 @@ def test_contract_closure_heartbeat_renews_during_blocked_external_work(pg_sessi
     initial_exp = claim_ctx.lease_expires_at
 
     from minime.services.recovery_convergence_service import OperationalHeartbeat
+
     with OperationalHeartbeat(rec_svc, claim_ctx, interval_seconds=1):
         time.sleep(1.1)
 
     assert claim_ctx.lease_expires_at > initial_exp
+    session.close()
+
+
+def test_postgres_recovery_claim_repository_release_claim_idempotency(
+    pg_session_factory: sessionmaker[Session],
+):
+    """Task 2.5: Verify release_claim is strictly idempotent and safe on expired/superseded/released claims."""
+    session = pg_session_factory()
+    uow = PostgresPersistenceUnitOfWork(session)
+
+    # 1. Acquire claim
+    claim = uow.claims.acquire_or_reacquire("run:idempotent-test", "owner-1", lease_seconds=60)
+    assert claim is not None
+    session.commit()
+
+    # 2. First release succeeds
+    first_rel = uow.claims.release_claim("run:idempotent-test", "owner-1", claim.fence_token)
+    session.commit()
+    assert first_rel is True
+
+    # 3. Second release on already released claim safely returns False
+    second_rel = uow.claims.release_claim("run:idempotent-test", "owner-1", claim.fence_token)
+    session.commit()
+    assert second_rel is False
+
+    # 4. Non-matching owner safely returns False
+    assert (
+        uow.claims.release_claim("run:idempotent-test", "wrong-owner", claim.fence_token) is False
+    )
+
+    # 5. Non-matching fence safely returns False
+    assert uow.claims.release_claim("run:idempotent-test", "owner-1", 999) is False
+
+    # 6. Non-existent claim safely returns False
+    assert uow.claims.release_claim("run:does-not-exist", "owner-1", 1) is False
+
+    # 7. RecoveryClaimContext object interface safely returns False
+    ctx = RecoveryClaimContext(
+        claim_key="run:idempotent-test",
+        owner_instance_id="owner-1",
+        fence_token=claim.fence_token,
+        lease_expires_at=utc_now() + timedelta(seconds=60),
+    )
+    assert uow.claims.release_claim(ctx) is False
+    session.close()
+
+
+def test_postgres_drive_coordinator_stage_exceeding_lease_duration_via_heartbeat(
+    pg_session_factory: sessionmaker[Session], tmp_path: Path
+):
+    """Task 2.6 / Bucket 2: drive_coordinator during stage exceeding base lease maintains renewal via heartbeat and completes CAS advance."""
+    import asyncio
+
+    from minime.domain.enums import ContinuationDecision
+
+    session = pg_session_factory()
+    project_id, change_name = _seed_base_project_and_change(session, "change-heartbeat-drive")
+    uow = PostgresPersistenceUnitOfWork(session)
+
+    job = Job(
+        job_id=f"job-{uuid4().hex[:8]}",
+        project_id=project_id,
+        change_name=change_name,
+        implementer_role="codex",
+        status=JobStatus.RUNNING,
+    )
+    uow.jobs.save(job)
+
+    run = OrchestrationRun(
+        run_id=f"run-drive-long-{uuid4().hex[:8]}",
+        project_id=project_id,
+        change_name=change_name,
+        base_sha="0123456789abcdef0123456789abcdef01234567",
+        current_stage=OrchestrationStage.IMPLEMENTING,
+        active_job_id=job.job_id,
+        current_generation=1,
+        is_active=True,
+    )
+    uow.orchestration_runs.save(run)
+    session.commit()
+
+    rec_svc = RecoveryConvergenceService(uow)
+    claim_ctx = rec_svc.acquire_claim(f"run:{run.run_id}", lease_seconds=2)
+    assert claim_ctx is not None
+    initial_exp = claim_ctx.lease_expires_at
+
+    service = OrchestrationService(uow, project_root=tmp_path)
+    service.heartbeat_interval_seconds = 0.3
+    service.heartbeat_lease_seconds = 2
+
+    # Simulate slow execute_queued_job taking 2.5s (> 2.0s lease)
+    async def _mock_execute_slow(job_id, **kwargs):
+        await asyncio.sleep(2.5)
+        updated_job = uow.jobs.get_by_id(job_id)
+        assert updated_job is not None
+        updated_job.status = JobStatus.RUNNING
+        updated_job.continuation_decision = ContinuationDecision.WAIT_EXTERNAL
+        updated_job.escalation_reason = (
+            "Test stage advance completed under continuous heartbeat renewal"
+        )
+        uow.jobs.save(updated_job)
+        session.commit()
+        return updated_job
+
+    service.pipeline.execute_queued_job = _mock_execute_slow
+
+    # drive_coordinator executes through IMPLEMENTING and EVALUATING_ATTEMPT
+    # Heartbeat maintains valid claim in PostgreSQL despite 2.5s execution > 2.0s lease
+    final_run = service.drive_coordinator(
+        run.run_id, claim_context=claim_ctx, manage_heartbeat=True
+    )
+    assert final_run is not None
+
+    session.rollback()
+    refreshed_run = uow.orchestration_runs.get_by_id(run.run_id)
+    assert refreshed_run is not None
+    assert refreshed_run.stop_outcome == OrchestrationStopOutcome.WAITING_EXTERNAL
+    assert claim_ctx.lease_expires_at > initial_exp
+    session.close()
+
+
+def test_postgres_concurrent_supersession_during_slow_stage_commits_zero_mutations(
+    pg_session_factory: sessionmaker[Session], tmp_path: Path
+):
+    """Task 2.7 / Bucket 2: Concurrent supersession across distinct UoWs/owners during slow stage raises StaleClaimError and commits zero mutations."""
+    from minime.db.models import RecoveryClaimModel
+
+    session_A = pg_session_factory()
+    session_B = pg_session_factory()
+
+    project_id, change_name = _seed_base_project_and_change(
+        session_A, "change-concurrent-supersede"
+    )
+    uow_A = PostgresPersistenceUnitOfWork(session_A)
+    uow_B = PostgresPersistenceUnitOfWork(session_B)
+
+    job = Job(
+        job_id=f"job-{uuid4().hex[:8]}",
+        project_id=project_id,
+        change_name=change_name,
+        implementer_role="codex",
+        status=JobStatus.RUNNING,
+    )
+    uow_A.jobs.save(job)
+
+    run = OrchestrationRun(
+        run_id=f"run-supersede-{uuid4().hex[:8]}",
+        project_id=project_id,
+        change_name=change_name,
+        base_sha="0123456789abcdef0123456789abcdef01234567",
+        current_stage=OrchestrationStage.IMPLEMENTING,
+        active_job_id=job.job_id,
+        current_generation=1,
+        is_active=True,
+    )
+    uow_A.orchestration_runs.save(run)
+    session_A.commit()
+
+    claim_key = f"run:{run.run_id}"
+
+    # Worker A acquires initial claim with fence_token=1 on session_A
+    rec_svc_A = RecoveryConvergenceService(uow_A, owner_instance_id="worker-A")
+    claim_A = rec_svc_A.acquire_claim(claim_key, lease_seconds=60)
+    assert claim_A is not None
+    assert claim_A.fence_token == 1
+    assert claim_A.owner_instance_id == "worker-A"
+
+    service_A = OrchestrationService(uow_A, project_root=tmp_path)
+
+    # While Worker A is inside execute_queued_job, Worker B supersedes the claim on session_B
+    async def _mock_slow_job_superseded_by_b(job_id, **kwargs):
+        expired = utc_now() - timedelta(seconds=10)
+        session_B.query(RecoveryClaimModel).filter_by(claim_key=claim_key).update(
+            {"lease_expires_at": expired}
+        )
+        session_B.commit()
+
+        rec_svc_B = RecoveryConvergenceService(uow_B, owner_instance_id="worker-B")
+        claim_B = rec_svc_B.acquire_claim(claim_key, lease_seconds=60)
+        assert claim_B is not None
+        assert claim_B.fence_token == 2
+        assert claim_B.owner_instance_id == "worker-B"
+
+        updated_job = uow_A.jobs.get_by_id(job_id)
+        assert updated_job is not None
+        updated_job.status = JobStatus.COMPLETED
+        return updated_job
+
+    service_A.pipeline.execute_queued_job = _mock_slow_job_superseded_by_b
+
+    # Worker A executes drive_coordinator; post-job claim validation detects supersession and raises StaleClaimError
+    with pytest.raises(StaleClaimError):
+        service_A.drive_coordinator(run.run_id, claim_context=claim_A, manage_heartbeat=False)
+
+    # Worker A rolled back and committed ZERO mutations to the database
+    session_A.rollback()
+    refreshed_run = uow_A.orchestration_runs.get_by_id(run.run_id)
+    assert refreshed_run is not None
+    assert refreshed_run.current_stage == OrchestrationStage.IMPLEMENTING  # Untouched!
+    assert refreshed_run.stop_outcome is None  # No outcome written!
+
+    # Worker B's claim remains intact and was NOT released by Worker A
+    session_B.rollback()
+    claim_db = uow_B.claims.get_by_key(claim_key)
+    assert claim_db is not None
+    assert claim_db.fence_token == 2
+    assert claim_db.owner_instance_id == "worker-B"
+    assert claim_db.released_at is None
+
+    session_A.close()
+    session_B.close()
+
+
+def test_postgres_interleaved_coordinator_drives_isolated_claim_contexts_no_cross_contamination(
+    pg_session_factory: sessionmaker[Session], tmp_path: Path
+):
+    """C1: Shared OrchestrationService instance drives two interleaved runs without claim context bleeding."""
+    session_A = pg_session_factory()
+    session_B = pg_session_factory()
+
+    project_id, change_A = _seed_base_project_and_change(session_A, "change-interleaved-A")
+    _, change_B = _seed_base_project_and_change(session_B, "change-interleaved-B")
+    uow_A = PostgresPersistenceUnitOfWork(session_A)
+    uow_B = PostgresPersistenceUnitOfWork(session_B)
+
+    run_A = OrchestrationRun(
+        run_id=f"run-A-{uuid4().hex[:8]}",
+        project_id=project_id,
+        change_name=change_A,
+        base_sha="0123456789abcdef0123456789abcdef01234567",
+        current_stage=OrchestrationStage.PREPARING_EXECUTION,
+        current_generation=1,
+        is_active=True,
+    )
+    uow_A.orchestration_runs.save(run_A)
+    session_A.commit()
+
+    run_B = OrchestrationRun(
+        run_id=f"run-B-{uuid4().hex[:8]}",
+        project_id=project_id,
+        change_name=change_B,
+        base_sha="0123456789abcdef0123456789abcdef01234567",
+        current_stage=OrchestrationStage.PREPARING_EXECUTION,
+        current_generation=1,
+        is_active=True,
+    )
+    uow_B.orchestration_runs.save(run_B)
+    session_B.commit()
+
+    rec_A = RecoveryConvergenceService(uow_A, owner_instance_id="worker-A")
+    claim_A = rec_A.acquire_claim(f"run:{run_A.run_id}", lease_seconds=60)
+    assert claim_A is not None
+
+    rec_B = RecoveryConvergenceService(uow_B, owner_instance_id="worker-B")
+    claim_B = rec_B.acquire_claim(f"run:{run_B.run_id}", lease_seconds=60)
+    assert claim_B is not None
+
+    shared_service = OrchestrationService(uow_A, project_root=tmp_path)
+
+    from minime.db.models import RecoveryClaimModel
+
+    session_B.query(RecoveryClaimModel).filter_by(claim_key=f"run:{run_B.run_id}").update(
+        {"fence_token": 99, "owner_instance_id": "other-node"}
+    )
+    session_B.commit()
+
+    with pytest.raises(StaleClaimError):
+        shared_service.drive_coordinator(
+            run_B.run_id, claim_context=claim_B, manage_heartbeat=False
+        )
+
+    def _mock_queue_job(*a, **kw):
+        raise ValueError("waiting for capacity recovery")
+
+    shared_service.pipeline.queue_job = _mock_queue_job
+
+    final_run_A = shared_service.drive_coordinator(
+        run_A.run_id, claim_context=claim_A, manage_heartbeat=False
+    )
+    assert final_run_A.stop_outcome == OrchestrationStopOutcome.WAITING_CAPACITY
+
+    session_B.rollback()
+    refreshed_B = uow_B.orchestration_runs.get_by_id(run_B.run_id)
+    assert refreshed_B.stop_outcome is None
+
+    session_A.rollback()
+    refreshed_A = uow_A.orchestration_runs.get_by_id(run_A.run_id)
+    assert refreshed_A.stop_outcome == OrchestrationStopOutcome.WAITING_CAPACITY
+
+    session_A.close()
+    session_B.close()
+
+
+def test_postgres_recovery_heartbeat_blocked_renewal_teardown_suppresses_release(
+    pg_session_factory: sessionmaker[Session], tmp_path: Path
+):
+    """C2: Recovery outer heartbeat with blocked renewal times out teardown, suppresses release, and commits zero writes."""
+    import threading
+
+    session = pg_session_factory()
+    project_id, change_name = _seed_base_project_and_change(session, "change-rec-blocked-teardown")
+    uow = PostgresPersistenceUnitOfWork(session)
+
+    run = OrchestrationRun(
+        run_id=f"run-rec-block-{uuid4().hex[:8]}",
+        project_id=project_id,
+        change_name=change_name,
+        base_sha="0123456789abcdef0123456789abcdef01234567",
+        current_stage=OrchestrationStage.PREPARING_EXECUTION,
+        resumable_stage=OrchestrationStage.PREPARING_EXECUTION,
+        current_generation=1,
+        is_active=True,
+    )
+    uow.orchestration_runs.save(run)
+    session.commit()
+
+    rec_svc = RecoveryConvergenceService(uow, owner_instance_id="worker-recovery")
+    rec_svc.heartbeat_seconds = 0.05
+    rec_svc.heartbeat_stop_timeout = 0.02  # Fast timeout, zero 5-second delay
+    claim_key = f"run:{run.run_id}"
+    cycle_id = f"cycle-{uuid4().hex[:8]}"
+
+    renew_started = threading.Event()
+    unblock_renew = threading.Event()
+
+    def _blocking_renew(claim_context, lease):
+        renew_started.set()
+        unblock_renew.wait(timeout=0.3)
+        return True
+
+    uow.renew_claim_heartbeat_isolated = _blocking_renew
+
+    class FastResumeOrchService:
+        def resume(self, *args, **kwargs):
+            renew_started.wait(timeout=0.2)
+
+    rec_svc.orchestration_service = FastResumeOrchService()
+
+    res_decision = rec_svc._converge_run_identity(
+        run_id=run.run_id,
+        cycle_id=cycle_id,
+        claim_key=claim_key,
+        source=RecoverySource.STARTUP,
+    )
+
+    unblock_renew.set()
+
+    assert res_decision.status == RecoveryDecisionStatus.BLOCKED
+    assert res_decision.reason_code in {
+        "CLAIM_HEARTBEAT_FAILED",
+        "CLAIM_HEARTBEAT_RENEWAL_FAILED_OR_THREAD_ALIVE",
+        "HEARTBEAT_THREAD_TEARDOWN_FAILED",
+    }
+
+    session.rollback()
+    claim_db = uow.claims.get_by_key(claim_key)
+    assert claim_db is not None
+    assert claim_db.released_at is None
+
+    session.close()
+
+
+def test_postgres_recovery_convergence_atomic_decision_fencing_prevents_stale_write(
+    pg_session_factory: sessionmaker[Session], tmp_path: Path
+):
+    """C3: Supersession between resume and decision persistence raises StaleClaimError and preserves exact pre-convergence state."""
+    from minime.db.models import RecoveryClaimModel, RecoveryDecisionModel
+
+    session = pg_session_factory()
+    project_id, change_name = _seed_base_project_and_change(session, "change-rec-atomic-fence")
+    uow = PostgresPersistenceUnitOfWork(session)
+
+    run = OrchestrationRun(
+        run_id=f"run-atomic-fence-{uuid4().hex[:8]}",
+        project_id=project_id,
+        change_name=change_name,
+        base_sha="0123456789abcdef0123456789abcdef01234567",
+        current_stage=OrchestrationStage.PREPARING_EXECUTION,
+        resumable_stage=OrchestrationStage.PREPARING_EXECUTION,
+        current_generation=1,
+        is_active=True,
+    )
+    uow.orchestration_runs.save(run)
+    session.commit()
+
+    rec_svc = RecoveryConvergenceService(uow, owner_instance_id="worker-recovery")
+    claim_key = f"run:{run.run_id}"
+    cycle_id = f"cycle-{uuid4().hex[:8]}"
+
+    class SupersedingOrchService:
+        def resume(self, *args, **kwargs):
+            session_B = pg_session_factory()
+            session_B.query(RecoveryClaimModel).filter_by(claim_key=claim_key).update(
+                {"fence_token": 99, "owner_instance_id": "successor-node"}
+            )
+            session_B.commit()
+            session_B.close()
+
+    rec_svc.orchestration_service = SupersedingOrchService()
+
+    res_decision = rec_svc._converge_run_identity(
+        run_id=run.run_id,
+        cycle_id=cycle_id,
+        claim_key=claim_key,
+        source=RecoverySource.STARTUP,
+    )
+
+    assert res_decision.status == RecoveryDecisionStatus.BLOCKED
+
+    session.rollback()
+    persisted_decision = session.query(RecoveryDecisionModel).filter_by(cycle_id=cycle_id).first()
+    assert persisted_decision is not None
+    assert persisted_decision.status != RecoveryDecisionStatus.COMPLETED.value
+
+    claim_db = uow.claims.get_by_key(claim_key)
+    assert claim_db is not None
+    assert claim_db.fence_token == 99
+    assert claim_db.owner_instance_id == "successor-node"
+    assert claim_db.released_at is None
+
     session.close()
