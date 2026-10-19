@@ -2020,7 +2020,19 @@ async def test_real_browser_keyboard_tabs_focus_names_and_reduced_motion(
         assert detail_ready, (
             "Keyboard detail-tab verification requires opening a real displayed Run row."
         )
+        for _ in range(40):
+            detail_tabs_visible = await client.eval_js(
+                "document.getElementById('tabOverview').getClientRects().length > 0"
+            )
+            if detail_tabs_visible:
+                break
+            await asyncio.sleep(0.05)
+        assert detail_tabs_visible, (
+            "Selected Run detail tabs must become visible after drawer open."
+        )
         await client.eval_js("document.getElementById('tabOverview').focus()")
+        focused_detail_tab = await client.eval_js("document.activeElement.id")
+        assert focused_detail_tab == "tabOverview"
         await client.send_cmd(
             "Input.dispatchKeyEvent",
             {
@@ -2074,7 +2086,16 @@ async def test_real_browser_keyboard_tabs_focus_names_and_reduced_motion(
         assert motion["reduced"] is True
         assert motion["animation"] <= 0.00001 and motion["transition"] <= 0.00001
 
+        await client.eval_js("document.getElementById('closeDetailDrawer').click()")
+        drawer_closed = await client.eval_js(
+            "!document.getElementById('detailPanel').classList.contains('drawer-open')"
+        )
+        assert drawer_closed, (
+            "Close the contextual drawer before testing dialog focus return to navigation."
+        )
+        await asyncio.sleep(0.05)
         await client.eval_js("document.getElementById('navTabExecutions').focus()")
+        assert await client.eval_js("document.activeElement.id") == "navTabExecutions"
         dialog_state = await client.eval_js("""
           (async () => {
             const {openConfirmModal} = await import('/static/js/components/action_dialog.js');
