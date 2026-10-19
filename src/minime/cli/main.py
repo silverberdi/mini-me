@@ -1118,6 +1118,11 @@ def orchestrate_resume_cmd(
     force: bool = typer.Option(
         False, "--force", "-f", help="Force resumption even if waiting or gated"
     ),
+    checks_only: bool = typer.Option(
+        False,
+        "--checks-only",
+        help="Resume exclusively in checks-only recovery mode without model inference",
+    ),
     json_output: bool = typer.Option(False, "--json", help="Output result as JSON"),
 ) -> None:
     """Resume an existing orchestration run from its persisted checkpoint."""
@@ -1128,7 +1133,10 @@ def orchestrate_resume_cmd(
             from minime.services.recovery_convergence_service import RecoveryConvergenceService
 
             rec_svc = RecoveryConvergenceService(uow, project_root=project_root)
-            rec_svc.request_run_continuation(run_id, source=RecoverySource.CLI, force=force)
+            if checks_only:
+                rec_svc.recover_checks_only(run_id, project_root=project_root, force=force)
+            else:
+                rec_svc.request_run_continuation(run_id, source=RecoverySource.CLI, force=force)
             service = OrchestrationService(uow, project_root=project_root)
             status_view = service.get_status(run_id)
 
@@ -1153,6 +1161,55 @@ def orchestrate_resume_cmd(
                 typer.echo(f"Stop Reason: {status_view.stop_reason}")
     except Exception as e:
         typer.secho(f"Orchestration resume error: {e}", fg=typer.colors.RED)
+        raise typer.Exit(code=1)
+
+
+@orchestrate_app.command("recover-checks")
+def orchestrate_recover_checks_cmd(
+    run_id: str = typer.Argument(..., help="Orchestration run identifier"),
+    project_root: str = typer.Option(".", "--path", "-p", help="Filesystem path to project root"),
+    force: bool = typer.Option(False, "--force", "-f", help="Force recovery execution"),
+    json_output: bool = typer.Option(False, "--json", help="Output result as JSON"),
+) -> None:
+    """Execute fenced checks-only checkpoint recovery of a preserved candidate without model inference."""
+    try:
+        with db_manager.session() as session:
+            uow = PostgresPersistenceUnitOfWork(session)
+            from minime.services.recovery_convergence_service import RecoveryConvergenceService
+
+            rec_svc = RecoveryConvergenceService(uow, project_root=project_root)
+            decision = rec_svc.recover_checks_only(run_id, project_root=project_root, force=force)
+            service = OrchestrationService(uow, project_root=project_root)
+            status_view = service.get_status(run_id)
+
+            if json_output:
+                result_payload = {
+                    "decision": decision.model_dump(),
+                    "status_view": status_view.model_dump(),
+                }
+                typer.echo(json.dumps(result_payload, indent=2, default=str))
+                return
+
+            typer.secho(
+                f"\n=== Checks-Only Recovery Decision for Run {run_id} ===",
+                fg=typer.colors.CYAN,
+                bold=True,
+            )
+            typer.echo(f"Decision Status: {decision.status.value}")
+            typer.echo(f"Planned Action: {decision.planned_action}")
+            if decision.reason_code:
+                typer.echo(f"Reason Code: {decision.reason_code}")
+            typer.echo(f"Current Stage: {status_view.current_stage.value}")
+            outcome_str = (
+                status_view.stop_outcome.value if status_view.stop_outcome else "IN_PROGRESS"
+            )
+            typer.echo(f"Stop Outcome: {outcome_str}")
+            if status_view.human_gate:
+                typer.echo(f"Human Gate: {status_view.human_gate.value}")
+            if status_view.stop_reason:
+                typer.echo(f"Stop Reason: {status_view.stop_reason}")
+    except Exception as e:
+        typer.secho(f"Checks-only recovery error: {e}", fg=typer.colors.RED)
         raise typer.Exit(code=1)
 
 

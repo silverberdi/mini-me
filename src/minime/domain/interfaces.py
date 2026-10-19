@@ -1248,7 +1248,13 @@ class RecoveryClaimRepositoryInterface(ABC):
     def get_by_key(self, claim_key: str) -> RecoveryClaim | None: ...
 
     @abstractmethod
-    def validate_cas(self, claim_key: str, owner_instance_id: str, fence_token: int) -> bool: ...
+    def validate_cas(
+        self,
+        claim_key: str,
+        owner_instance_id: str,
+        fence_token: int,
+        for_update: bool = False,
+    ) -> bool: ...
 
     @abstractmethod
     def commit_fenced_dispatch_intent(
