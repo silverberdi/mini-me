@@ -1195,20 +1195,6 @@ body.theme-light {
   #viewExecutions .pipeline-stepper-container .step-label { min-width: 0; text-align: left; overflow-wrap: normal; word-break: normal; }
   #viewExecutions .detail-tabs { padding-inline: 8px; }
   #viewExecutions .overview-meta-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 7px; }
-  .toast-notification {
-    left: 12px;
-    right: 12px;
-    bottom: calc(72px + env(safe-area-inset-bottom));
-    width: auto;
-    max-width: 520px;
-    max-height: min(24vh, 160px);
-    margin-inline: auto;
-    overflow: auto;
-    padding: 9px 12px;
-    font-size: 0.8rem;
-    line-height: 1.35;
-    overflow-wrap: anywhere;
-  }
 }
 
 .activity-list { list-style: none; display: grid; gap: 0; margin: 0; padding: 0; }
@@ -2165,6 +2151,26 @@ body.theme-light {
   .step-item { flex-direction: row; justify-content: flex-start; gap: 10px; min-width: 0; }
   .step-bubble { flex: 0 0 28px; margin-bottom: 0; }
   .step-label { text-align: left; overflow-wrap: anywhere; }
+}
+
+/* Mobile notices must remain above the fixed bottom navigation. Keep this
+   override after the base toast declaration so the cascade cannot put them
+   back underneath the navigation. */
+@media (max-width: 767px) {
+  .toast-notification {
+    left: 12px;
+    right: 12px;
+    bottom: calc(72px + env(safe-area-inset-bottom));
+    width: auto;
+    max-width: 520px;
+    max-height: min(24vh, 160px);
+    margin-inline: auto;
+    overflow: auto;
+    padding: 9px 12px;
+    font-size: 0.8rem;
+    line-height: 1.35;
+    overflow-wrap: anywhere;
+  }
 }
 
 
