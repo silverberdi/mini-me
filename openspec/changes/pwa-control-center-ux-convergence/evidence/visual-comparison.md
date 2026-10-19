@@ -33,3 +33,13 @@ The focused patch addresses only mobile supervision hierarchy, desktop header/de
 | Human comparison | `browser/visual-review-6257258048-r13/comparison-board.png`; source `browser/visual-review-6257258048-r13/comparison.html` | Board pairs approved references 01/07 with the real Chrome captures and includes the terminal toast evidence. Visual approval remains pending; 4.1 and 6.4 are not closed. |
 
 The test-owned database and evidence distinguish QA-generated states from product observations. Only `IMPLEMENTING/RUNNING` and the canonical test `CANCELLED` state were exercised; no other lifecycle state was fabricated. Human visual acceptance, missing lifecycle-state E2E, and post-deployment validation remain pending.
+
+## Human owner approval — 2026-10-18 (supersedes historical "pending" for visual UX only)
+
+**Outcome:** `PASS_WITH_KNOWN_DIFFERENCES`. The owner explicitly approved the R13 UX as sufficiently usable to continue, despite intentional visual differences from reference mocks: "aprobado. no son iguales pero iremos validando por el camino". See [PR #156 human visual decision](https://github.com/silverberdi/mini-me/pull/156#issuecomment-6257505220) and the authoritative `evidence/human-validation-checklist.md`.
+
+Reviewed original PR source HEAD: `b60be52a33d5c7c19b5acd643cb939578997078e`.
+R13 approved comparison: `browser/visual-review-6257258048-r13/comparison-board.png`. Disposable image digest: `sha256:6ab91632d40990b286c9cd6c9854fdee51950ab8db59aeb89abb07cb13140621`; precommit source patch SHA-256 `fe2265139cc79a3edc92f64f043e7cfb61a46dd2e703cf1bb055f676b7c89c88`.
+Refs 01, 03, 05 and 07: human PASS with acknowledged visual differences. Refs 02, 04, 06 and 08: SKIP/DEFER because the disposable backend lacks genuine intentional PAUSED or candidate-bound independent review state. This acceptance closes only scoped UX visual/human gates 4.1 and 6.4; **6.3 remains explicitly open for the missing genuine lifecycle E2E**, and 6.6 remains open for post-authorized merge/deploy. No fictitious data, merge permission or release approval was inferred.
+
+**Integration caution:** R13 screenshots were taken before synchronizing PR #156 with newer `main`; refresh and verify on the exact integrated source SHA before any merge.
