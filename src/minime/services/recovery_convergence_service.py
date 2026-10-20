@@ -1181,15 +1181,20 @@ class RecoveryConvergenceService:
 
         try:
             with heartbeat:
-                # If narrow historical reconciliation is required, durably persist it under active claim fence
+                from minime.domain.models import validate_claim_context_authoritative
+
+                # If narrow historical reconciliation is required, durably persist it strictly under active claim fence
                 if (
                     reconciled_candidate_sha
                     and run.current_candidate_sha != reconciled_candidate_sha
                 ):
+                    validate_claim_context_authoritative(self.uow, context, for_update=True)
                     run.current_candidate_sha = reconciled_candidate_sha
                     if hasattr(self.uow, "orchestration_runs"):
                         self.uow.orchestration_runs.save(run)
                         self.uow.commit()
+
+                validate_claim_context_authoritative(self.uow, context)
 
                 orchestration_svc.resume(
                     run_id=run.run_id,

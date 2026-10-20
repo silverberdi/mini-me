@@ -12,7 +12,7 @@ import uuid
 from datetime import timedelta
 from pathlib import Path
 from typing import Generator
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 from sqlalchemy import Engine, create_engine, make_url, text
@@ -2449,6 +2449,205 @@ def test_preflight_rejection_leaves_n01_current_candidate_sha_unmutated_in_db(
         assert persisted_run.current_candidate_sha is None, (
             f"Preflight rejection MUST NOT mutate current_candidate_sha in DB! Expected None, got {persisted_run.current_candidate_sha}"
         )
+    finally:
+        independent_session.close()
+
+    session.close()
+
+
+def test_pilot_checks_recovery_fence_loss_aborts_n01_reconciliation_and_resume(
+    pg_session_factory: sessionmaker[Session], tmp_path: Path
+):
+    """Verify that if Worker 1's claim fence is lost/superseded right before N01 candidate
+
+    reconciliation persistence or before resume, ZERO writes are committed (current_candidate_sha
+    remains None in PostgreSQL) and orchestration_service.resume is NEVER invoked.
+    """
+    session = pg_session_factory()
+    uow = PostgresPersistenceUnitOfWork(session)
+
+    project_id = "test-proj-fence-reconciliation"
+    change_name = "test-change-fence"
+    legacy_run_id = "8e7ebec8-9eff-478b-bae3-cf686ea91be2"
+    legacy_cand_sha = "2fcad0ef73eb4766ca1bb6249a081cb4070ecced"
+    base_sha = "b4012abbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+
+    # Clean up any residual data for legacy_run_id from previous tests
+    session.execute(
+        text("DELETE FROM orchestration_stage_events WHERE run_id = :r"), {"r": legacy_run_id}
+    )
+    session.execute(text("DELETE FROM orchestration_runs WHERE id = :r"), {"r": legacy_run_id})
+    session.execute(
+        text("DELETE FROM recovery_claims WHERE claim_key = :k"), {"k": f"run:{legacy_run_id}"}
+    )
+    session.execute(text("DELETE FROM jobs WHERE id LIKE :j"), {"j": f"%{legacy_run_id}%"})
+    session.commit()
+
+    # Setup git repo and worktree
+    repo_dir = tmp_path / "repo"
+    repo_dir.mkdir()
+    subprocess.run(["git", "init", "-b", "main"], cwd=repo_dir, check=True, capture_output=True)
+    subprocess.run(["git", "config", "user.name", "Tester"], cwd=repo_dir, check=True)
+    subprocess.run(["git", "config", "user.email", "tester@example.com"], cwd=repo_dir, check=True)
+    (repo_dir / "README.md").write_text("# Repo")
+    subprocess.run(["git", "add", "README.md"], cwd=repo_dir, check=True)
+    subprocess.run(
+        ["git", "commit", "-m", "Initial commit"], cwd=repo_dir, check=True, capture_output=True
+    )
+
+    wt_dir = repo_dir / ".minime" / "worktrees" / f"job-{legacy_run_id}"
+    wt_dir.parent.mkdir(parents=True, exist_ok=True)
+    subprocess.run(
+        ["git", "worktree", "add", "-b", f"feature-{legacy_run_id}", str(wt_dir), "HEAD"],
+        cwd=repo_dir,
+        check=True,
+        capture_output=True,
+    )
+
+    proj = Project(
+        project_id=project_id,
+        display_name="Test Project",
+        repository=str(repo_dir),
+        base_branch="main",
+    )
+    uow.projects.save(proj)
+    binding = ProjectManagedRepositoryBinding(
+        project_id=project_id,
+        canonical_repository_identity=str(repo_dir),
+        managed_repository_root=str(repo_dir),
+        worktree_parent_dir=str(wt_dir.parent),
+        is_valid=True,
+    )
+    uow.project_managed_repository_bindings.save(binding)
+
+    job = Job(
+        job_id=f"job-{legacy_run_id}",
+        project_id=project_id,
+        change_name=change_name,
+        base_sha=base_sha,
+        candidate_sha=legacy_cand_sha,
+        status=JobStatus.CHECKS_FAILED,
+        current_generation=1,
+        implementer_role="codex",
+        current_executor="codex",
+    )
+    uow.jobs.save(job)
+
+    # N01 legacy run with current_candidate_sha=None in DB
+    run = OrchestrationRun(
+        run_id=legacy_run_id,
+        project_id=project_id,
+        change_name=change_name,
+        base_sha=base_sha,
+        current_candidate_sha=None,
+        current_stage=OrchestrationStage.RUNNING_CHECKS,
+        resumable_stage=OrchestrationStage.RUNNING_CHECKS,
+        active_job_id=job.job_id,
+        is_active=False,
+        current_generation=1,
+        stop_outcome=OrchestrationStopOutcome.NEEDS_HUMAN,
+        human_gate=HumanGate.NEEDS_HUMAN,
+        stop_reason="Checks-only pipeline execution failed.",
+        stop_details={
+            "code": "CHECKS_ONLY_PIPELINE_EXCEPTION",
+            "exception_type": "PermissionError",
+            "error": "[Errno 13] Permission denied: '/tmp/minime_pycache/test'",
+        },
+    )
+    uow.orchestration_runs.save(run)
+
+    stop_trans_key = f"{legacy_run_id}:STOP:NEEDS_HUMAN:gen1"
+    existing_stop = uow.orchestration_stage_events.get_by_transition_key(stop_trans_key)
+    if not existing_stop:
+        stop_event_legacy = OrchestrationStageEvent(
+            run_id=legacy_run_id,
+            from_stage=OrchestrationStage.RUNNING_CHECKS,
+            to_stage=OrchestrationStage.RUNNING_CHECKS,
+            event_type=EventType.ORCHESTRATION_STOPPED.value,
+            transition_key=stop_trans_key,
+            evidence_references={"reason": "Checks-only pipeline execution failed."},
+            actor="system",
+            created_at=utc_now(),
+        )
+        uow.orchestration_stage_events.save(stop_event_legacy)
+    uow.commit()
+
+    mock_resume = MagicMock()
+    fake_orch_svc = MagicMock()
+    fake_orch_svc.resume = mock_resume
+
+    rec_svc = RecoveryConvergenceService(
+        uow=uow,
+        project_root=repo_dir,
+        owner_instance_id="worker-superseded-1",
+        orchestration_service=fake_orch_svc,
+    )
+
+    orig_subproc_run = subprocess.run
+
+    # Inject fence supersession right after preflight validation succeeds, before reconciliation save
+    orig_validate = rec_svc._validate_checks_only_eligibility
+
+    def superseding_validate(*args, **kwargs):
+        res = orig_validate(*args, **kwargs)
+        # Supersede the claim by incrementing fence_token in an independent DB session
+        sup_session = pg_session_factory()
+        sup_session.execute(
+            text(
+                "UPDATE recovery_claims SET fence_token = fence_token + 1, owner_instance_id = 'rival-worker' WHERE claim_key = :k"
+            ),
+            {"k": f"run:{legacy_run_id}"},
+        )
+        sup_session.commit()
+        sup_session.close()
+        return res
+
+    with patch.object(
+        rec_svc, "_validate_checks_only_eligibility", side_effect=superseding_validate
+    ):
+        with patch("subprocess.run") as mock_subproc:
+
+            def fake_git(cmd, *args, **kwargs):
+                from unittest.mock import MagicMock
+
+                if isinstance(cmd, list) and "rev-parse" in cmd:
+                    m = MagicMock()
+                    m.returncode = 0
+                    m.stdout = f"{legacy_cand_sha}\n"
+                    return m
+                elif isinstance(cmd, list) and "status" in cmd:
+                    m = MagicMock()
+                    m.returncode = 0
+                    m.stdout = ""
+                    return m
+                return orig_subproc_run(cmd, *args, **kwargs)
+
+            mock_subproc.side_effect = fake_git
+            decision = rec_svc.recover_checks_only(legacy_run_id, project_root=repo_dir)
+
+    # 1. Decision is BLOCKED due to STALE_CLAIM
+    assert decision.status == RecoveryDecisionStatus.BLOCKED
+    assert "STALE_CLAIM" in decision.reason_code
+
+    # 2. OrchestrationService.resume was NEVER called
+    mock_resume.assert_not_called()
+
+    # 3. CRITICAL DB ASSERTION: Verify from an independent fresh session that current_candidate_sha
+    # was NEVER mutated and remains None in PostgreSQL!
+    independent_session = pg_session_factory()
+    try:
+        fresh_uow = PostgresPersistenceUnitOfWork(independent_session)
+        persisted_run = fresh_uow.orchestration_runs.get_by_id(legacy_run_id)
+        assert persisted_run is not None
+        assert persisted_run.current_candidate_sha is None, (
+            f"Fenced supersession MUST prevent any write to current_candidate_sha! Expected None, got {persisted_run.current_candidate_sha}"
+        )
+
+        # 4. Verify rival worker's claim was NOT modified or released
+        rival_claim = fresh_uow.claims.get_by_key(f"run:{legacy_run_id}")
+        assert rival_claim is not None
+        assert rival_claim.owner_instance_id == "rival-worker"
+        assert rival_claim.released_at is None
     finally:
         independent_session.close()
 

@@ -1463,6 +1463,8 @@ class PostgresJobRepository(JobRepositoryInterface):
     def save(self, job: Job) -> None:
         existing = self.session.get(JobModel, job.job_id)
         if existing:
+            existing.project_id = job.project_id
+            existing.change_name = job.change_name
             existing.status = job.status.value
             existing.implementer_role = job.implementer_role
             existing.candidate_sha = job.candidate_sha
