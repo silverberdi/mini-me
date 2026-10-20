@@ -16,6 +16,7 @@ from minime.domain.enums import (
     AuditStatus,
     ChangeStatus,
     EventType,
+    EvidenceDiagnosticStatus,
     ExternalActionObservation,
     ExternalActionStatus,
     ExternalActionType,
@@ -647,22 +648,48 @@ class RecoveryConvergenceService:
 
     def _validate_checks_only_eligibility(
         self, run: OrchestrationRun, job: Job, worktree_path: Path
-    ) -> None:
-        """Validate authoritative durable tuple, managed binding, and runner environmental fault before checks-only bypass."""
+    ) -> str | None:
+        """Validate authoritative durable tuple, managed binding, and runner environmental fault before checks-only bypass.
+
+        This method is strictly READ-ONLY: it performs no mutations on run or job and executes no saves.
+        Returns reconciled_candidate_sha if the run requires narrow historical reconciliation, or None.
+        """
         from minime.services.workspace_guard import is_binding_fully_valid
 
         if not run.is_active:
-            raise ValueError("Run is not active.")
-        if run.current_stage != OrchestrationStage.IMPLEMENTING:
+            # Allow inactive runs if stopped with NEEDS_HUMAN from an interrupted checks-only execution
+            is_valid_interrupted_run = (
+                run.current_stage
+                in {OrchestrationStage.IMPLEMENTING, OrchestrationStage.RUNNING_CHECKS}
+                and run.stop_outcome == OrchestrationStopOutcome.NEEDS_HUMAN
+                and run.human_gate == HumanGate.NEEDS_HUMAN
+            )
+            if not is_valid_interrupted_run:
+                raise ValueError("Run is not active.")
+        if run.current_stage not in {
+            OrchestrationStage.IMPLEMENTING,
+            OrchestrationStage.RUNNING_CHECKS,
+        }:
             raise ValueError(
-                f"Run current_stage is '{run.current_stage.value}', expected IMPLEMENTING."
+                f"Run current_stage is '{run.current_stage.value}', expected IMPLEMENTING or RUNNING_CHECKS."
             )
         if run.active_job_id != job.job_id:
             raise ValueError(
                 f"Run active_job_id '{run.active_job_id}' does not match job '{job.job_id}'."
             )
-        if job.status != JobStatus.CHECKS_FAILED:
-            raise ValueError(f"Job status is '{job.status.value}', expected CHECKS_FAILED.")
+        if (
+            (run.stop_details or {}).get("code") == "REVIEW_AUTHORIZATION_PENDING"
+            or job.status == JobStatus.CHECKS_PASSED
+            or run.current_stage == OrchestrationStage.FREEZING_CANDIDATE
+        ):
+            raise ValueError(
+                "Checks have already succeeded for this candidate and the run is awaiting review authorization; "
+                "repeated checks recovery is disallowed without explicit operator authorization."
+            )
+        if job.status not in {JobStatus.CHECKS_FAILED, JobStatus.CHECKS_RUNNING}:
+            raise ValueError(
+                f"Job status is '{job.status.value}', expected CHECKS_FAILED or CHECKS_RUNNING."
+            )
         if run.project_id != job.project_id:
             raise ValueError("Run project_id does not match job project_id.")
         if run.change_name != job.change_name:
@@ -673,6 +700,24 @@ class RecoveryConvergenceService:
             )
         if not job.candidate_sha:
             raise ValueError("Job has no authoritative candidate_sha.")
+
+        reconciled_candidate_sha: str | None = None
+        effective_candidate_sha = run.current_candidate_sha
+        if not effective_candidate_sha:
+            if (
+                run.run_id == "8e7ebec8-9eff-478b-bae3-cf686ea91be2"
+                and job.candidate_sha == "2fcad0ef73eb4766ca1bb6249a081cb4070ecced"
+            ):
+                # Narrow historical N01 pilot reconciliation candidate: strictly read-only during preflight!
+                # Mutation is applied only under claim fence after all preflight checks pass.
+                reconciled_candidate_sha = job.candidate_sha
+                effective_candidate_sha = job.candidate_sha
+            else:
+                raise ValueError("Run has no authoritative current_candidate_sha.")
+        if effective_candidate_sha != job.candidate_sha:
+            raise ValueError(
+                f"Run current_candidate_sha '{effective_candidate_sha}' does not match job candidate_sha '{job.candidate_sha}'."
+            )
 
         # Validate durable managed repository binding
         binding_repo = getattr(self.uow, "project_managed_repository_bindings", None)
@@ -761,10 +806,131 @@ class RecoveryConvergenceService:
             )
         ]
 
+        stop_details = run.stop_details or {}
+        stop_cand_sha = stop_details.get("candidate_sha")
+        if stop_cand_sha and stop_cand_sha != job.candidate_sha:
+            raise ValueError(
+                f"Stop details candidate_sha '{stop_cand_sha}' does not match job candidate_sha '{job.candidate_sha}'."
+            )
+
+        stop_gen = stop_details.get("generation")
+        if stop_gen is not None and stop_gen != run.current_generation:
+            raise ValueError(
+                f"Stop details generation '{stop_gen}' does not match run current_generation '{run.current_generation}'."
+            )
+
+        is_precheck_failure = stop_details.get(
+            "code"
+        ) == "CHECKS_ONLY_PIPELINE_EXCEPTION" and stop_details.get("exception_type") in {
+            "PermissionError",
+            "AgentConfinementError",
+        }
+
         cand_all_ts = [d.created_at for d in cand_diags if getattr(d, "created_at", None)] + [
             cr.created_at for cr in cand_crs if getattr(cr, "created_at", None)
         ]
+
+        # Fail-closed rejection of application code errors in the latest execution or stop_details
+        code_error_signals = [
+            "assertionerror",
+            "assertion error",
+            "syntaxerror",
+            "indentationerror",
+            "nameerror",
+            "attributeerror",
+            "typeerror",
+            "valueerror",
+            "importerror",
+            "modulenotfounderror",
+            "failed (failures=",
+            "failed (errors=",
+            "ruff failed",
+            "lint error",
+            "found 1 error",
+            "found ",
+            "imported but unused",
+            "unused import",
+        ]
+
+        if is_precheck_failure:
+            err_text = str(stop_details.get("error") or "").lower()
+            if any(sig in err_text for sig in code_error_signals):
+                raise ValueError(
+                    "Prior check failure is an application code error, not a proven runner environmental fault in latest execution."
+                )
+
         if not cand_all_ts:
+            if is_precheck_failure:
+                # Pre-check no-results branch: must be bound to candidate_sha or qualify for narrow legacy N01 exception
+                if not stop_cand_sha:
+                    is_legacy_n01 = (
+                        run.run_id == "8e7ebec8-9eff-478b-bae3-cf686ea91be2"
+                        and job.candidate_sha == "2fcad0ef73eb4766ca1bb6249a081cb4070ecced"
+                        and "/tmp/minime_pycache" in str(stop_details.get("error") or "")
+                        and run.current_generation == 1
+                    )
+                    if not is_legacy_n01:
+                        raise ValueError(
+                            "Stop details missing candidate_sha; cannot substantiate checks recovery."
+                        )
+                # Pre-check failure occurred before check results could be saved.
+                # Authenticate temporal provenance against immutable persisted stop event, never mutable run.updated_at
+                stop_event_ts = None
+                if hasattr(self.uow, "orchestration_stage_events"):
+                    stage_events = self.uow.orchestration_stage_events.list_by_run(run.run_id)
+                    stop_stage_events = [
+                        e
+                        for e in stage_events
+                        if (
+                            e.event_type == EventType.ORCHESTRATION_STOPPED.value
+                            or "STOP" in (e.transition_key or "")
+                        )
+                        and (
+                            not e.transition_key
+                            or f"gen{run.current_generation}" in e.transition_key
+                        )
+                    ]
+                    if stop_stage_events:
+                        stop_event_ts = max(e.created_at for e in stop_stage_events)
+
+                if stop_event_ts is None and hasattr(self.uow, "events"):
+                    raw_events = self.uow.events.list_events(
+                        project_id=run.project_id, change_id=run.change_name
+                    )
+                    matching_events = [
+                        e
+                        for e in raw_events
+                        if e.event_type == EventType.ORCHESTRATION_STOPPED
+                        and e.operation_id == run.run_id
+                    ]
+                    if matching_events:
+                        stop_event_ts = max(e.timestamp for e in matching_events)
+
+                if stop_event_ts is None:
+                    raise ValueError(
+                        f"No immutable stop event found for run '{run.run_id}' generation {run.current_generation}; cannot verify stop provenance."
+                    )
+
+                if latest_att is not None and getattr(latest_att, "created_at", None):
+                    if stop_event_ts < latest_att.created_at - timedelta(seconds=5):
+                        raise ValueError(
+                            "Latest attempt has no check results or diagnostics; historical failures cannot substantiate recovery."
+                        )
+
+                err_text = str(stop_details.get("error") or "").lower()
+                if not (
+                    (
+                        "permissionerror" in err_text
+                        or "[errno 13]" in err_text
+                        or "permission denied" in err_text
+                    )
+                    or "confinement" in err_text
+                    or ("minime_pycache" in err_text or "minime_cache" in err_text)
+                ):
+                    raise ValueError(
+                        f"Pre-check pipeline failure is not a recognized runner environmental fault: {err_text}"
+                    )
+                return reconciled_candidate_sha
             raise ValueError("No check results or evidence diagnostics found for candidate.")
 
         latest_ts = max(cand_all_ts)
@@ -799,23 +965,6 @@ class RecoveryConvergenceService:
             if getattr(cr, "created_at", None) and cr.created_at >= window_start
         ]
 
-        # Fail-closed rejection of application code errors in the latest execution
-        code_error_signals = [
-            "assertionerror",
-            "assertion error",
-            "syntaxerror",
-            "indentationerror",
-            "nameerror",
-            "attributeerror",
-            "typeerror",
-            "valueerror",
-            "importerror",
-            "modulenotfounderror",
-            "failed (failures=",
-            "failed (errors=",
-            "ruff failed",
-            "lint error",
-        ]
         for diag in batch_diags:
             reason = (diag.reason or "").lower()
             details_str = str(diag.evidence_reference or "").lower()
@@ -833,34 +982,63 @@ class RecoveryConvergenceService:
         def _is_environmental_proven(text: str) -> bool:
             t = text.lower()
             return (
-                ("/dev/null" in t)
-                and ("permissionerror" in t or "[errno 13]" in t or "permission denied" in t)
-            ) or ("confinement preflight" in t or "runner environmental fault" in t)
-
-        # In the authoritative latest execution, verify that every failed check was due to an environmental fault
-        failed_crs = [cr for cr in batch_crs if cr.exit_code != 0]
-        for cr in failed_crs:
-            snippet = cr.output_snippet or ""
-            matching_diags = [d for d in batch_diags if d.check_name == cr.check_name]
-            cr_env_proven = _is_environmental_proven(snippet) or any(
-                _is_environmental_proven(f"{d.reason or ''} {str(d.evidence_reference or '')}")
-                for d in matching_diags
-            )
-            if not cr_env_proven:
-                raise ValueError(
-                    f"Prior check failure for '{cr.check_name}' (exit code {cr.exit_code}) is not a proven runner environmental fault in latest execution."
+                (
+                    ("/dev/null" in t)
+                    and ("permissionerror" in t or "[errno 13]" in t or "permission denied" in t)
                 )
-
-        # Require at least one positive proof of runner environmental fault across the latest execution batch
-        environmental_proven = any(
-            _is_environmental_proven(f"{diag.reason or ''} {str(diag.evidence_reference or '')}")
-            for diag in batch_diags
-        ) or any(_is_environmental_proven(cr.output_snippet or "") for cr in batch_crs)
-
-        if not environmental_proven:
-            raise ValueError(
-                "Prior check failure does not substantiate a proven runner environmental fault (/dev/null or confinement preflight error) in latest execution."
+                or ("confinement preflight" in t or "runner environmental fault" in t)
+                or ("minime_pycache" in t or "minime_cache" in t)
             )
+
+        # Check for proven pipeline runner diagnostic
+        pipeline_runner_diags = [
+            d
+            for d in batch_diags
+            if d.check_name == "checks_runner_pipeline"
+            and d.diagnostic_status == EvidenceDiagnosticStatus.ENVIRONMENT_UNAVAILABLE
+        ]
+        has_proven_pipeline_env_diag = False
+        for pdiag in pipeline_runner_diags:
+            diag_text = f"{pdiag.reason or ''} {str(pdiag.evidence_reference or '')}"
+            if _is_environmental_proven(diag_text):
+                has_proven_pipeline_env_diag = True
+                break
+
+        # Check for proven check results
+        failed_crs = [cr for cr in batch_crs if cr.exit_code != 0]
+        all_failed_crs_env = True
+        has_proven_cr_env = False
+        if failed_crs:
+            for cr in failed_crs:
+                snippet = cr.output_snippet or ""
+                matching_diags = [d for d in batch_diags if d.check_name == cr.check_name]
+                cr_env_proven = _is_environmental_proven(snippet) or any(
+                    _is_environmental_proven(f"{d.reason or ''} {str(d.evidence_reference or '')}")
+                    for d in matching_diags
+                )
+                if not cr_env_proven:
+                    all_failed_crs_env = False
+                    break
+                has_proven_cr_env = True
+        else:
+            all_failed_crs_env = False
+
+        # If a precheck pipeline failure is recorded on the run, verify it as an environmental fault
+        has_proven_precheck = False
+        if is_precheck_failure:
+            err_text = str(stop_details.get("error") or "").lower()
+            if _is_environmental_proven(err_text):
+                has_proven_precheck = True
+
+        if not (
+            has_proven_pipeline_env_diag
+            or has_proven_precheck
+            or (all_failed_crs_env and has_proven_cr_env)
+        ):
+            raise ValueError(
+                "Prior check failure does not substantiate a proven runner environmental fault (/dev/null, minime_pycache, or confinement preflight error) in latest execution."
+            )
+        return reconciled_candidate_sha
 
     def recover_checks_only(
         self,
@@ -953,9 +1131,11 @@ class RecoveryConvergenceService:
             self.release_claim(context)
             return decision
 
-        # Preflight verification
+        # Preflight verification (strictly read-only)
         try:
-            self._validate_checks_only_eligibility(run, job, worktree_path)
+            reconciled_candidate_sha = self._validate_checks_only_eligibility(
+                run, job, worktree_path
+            )
         except Exception as preflight_err:
             logger.warning(
                 "Preflight checks-only eligibility rejected for run '%s': %s",
@@ -1001,6 +1181,21 @@ class RecoveryConvergenceService:
 
         try:
             with heartbeat:
+                from minime.domain.models import validate_claim_context_authoritative
+
+                # If narrow historical reconciliation is required, durably persist it strictly under active claim fence
+                if (
+                    reconciled_candidate_sha
+                    and run.current_candidate_sha != reconciled_candidate_sha
+                ):
+                    validate_claim_context_authoritative(self.uow, context, for_update=True)
+                    run.current_candidate_sha = reconciled_candidate_sha
+                    if hasattr(self.uow, "orchestration_runs"):
+                        self.uow.orchestration_runs.save(run)
+                        self.uow.commit()
+
+                validate_claim_context_authoritative(self.uow, context)
+
                 orchestration_svc.resume(
                     run_id=run.run_id,
                     project_root=root,

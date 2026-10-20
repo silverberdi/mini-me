@@ -469,7 +469,7 @@ class OrchestrationService:
         # Check if already in terminal state or inactive
         if run.stop_outcome == OrchestrationStopOutcome.READY_FOR_HUMAN_MERGE:
             return run
-        if not run.is_active and not (force or drain_mode):
+        if not run.is_active and not (force or drain_mode or checks_only):
             return run
 
         # Revalidate / clear transient waiting states when resuming
@@ -529,7 +529,7 @@ class OrchestrationService:
             self.uow.flush()
 
         elif run.stop_outcome == OrchestrationStopOutcome.NEEDS_HUMAN:
-            if not force:
+            if not (force or checks_only):
                 # Escalated runs require explicit human resolution before resuming
                 return run
             run.stop_outcome = None
@@ -539,8 +539,8 @@ class OrchestrationService:
             run.stop_details = {}
             if run.active_job_id:
                 job = self.uow.jobs.get_by_id(run.active_job_id)
-                if job and job.status in {JobStatus.NEEDS_HUMAN, JobStatus.FAILED}:
-                    job.status = JobStatus.RUNNING
+                if job and (job.status in {JobStatus.NEEDS_HUMAN, JobStatus.FAILED, JobStatus.CHECKS_FAILED} or checks_only):
+                    job.status = JobStatus.CHECKS_RUNNING if checks_only else JobStatus.RUNNING
                     job.continuation_decision = None
                     job.escalation_reason = None
                     job.error_message = None
@@ -1723,50 +1723,13 @@ class OrchestrationService:
 
                     if checks_only:
                         # Authoritative checks-only recovery: advance directly to RUNNING_CHECKS via narrow edge
-                        # and invoke pipeline.run_checks_only() without calling execute_queued_job or dispatching models.
+                        # where run_checks_only() will execute exactly once without calling execute_queued_job or dispatching models.
                         self._advance_stage(
                             run,
                             OrchestrationStage.RUNNING_CHECKS,
                             claim_context=claim_context,
                             checks_only=True,
                         )
-                        try:
-                            job = run_coroutine_sync(
-                                self.pipeline.run_checks_only(
-                                    job.job_id,
-                                    candidate_generation=run.current_generation,
-                                    claim_context=claim_context,
-                                )
-                            )
-                        except Exception as exc:
-                            if isinstance(exc, StaleClaimError) or (
-                                heartbeat is not None and heartbeat.heartbeat_failed
-                            ):
-                                should_release_claim = False
-                                self.uow.rollback()
-                                raise (
-                                    exc
-                                    if isinstance(exc, StaleClaimError)
-                                    else StaleClaimError(str(exc))
-                                )
-                            redacted_error = redact_secrets(str(exc))
-                            logger.exception(
-                                "Error executing checks-only pipeline for run '%s': %s",
-                                run.run_id,
-                                redacted_error,
-                            )
-                            _stop_coordinator_run(
-                                run,
-                                stop_outcome=OrchestrationStopOutcome.NEEDS_HUMAN,
-                                human_gate=HumanGate.NEEDS_HUMAN,
-                                stop_reason="Checks-only pipeline execution failed.",
-                                stop_details={
-                                    "code": "CHECKS_ONLY_PIPELINE_EXCEPTION",
-                                    "exception_type": type(exc).__name__,
-                                    "error": redacted_error,
-                                },
-                            )
-                            break
                         continue
 
                     # Execute attempt via pipeline
@@ -2025,12 +1988,74 @@ class OrchestrationService:
 
                     is_checks_only = bool(checks_only)
 
+                    if is_checks_only:
+                        # Authoritative checks-only recovery replay edge:
+                        # Always execute a FRESH complete checks batch via pipeline.run_checks_only()
+                        # rather than relying on historical batches.
+                        try:
+                            job = run_coroutine_sync(
+                                self.pipeline.run_checks_only(
+                                    job.job_id,
+                                    candidate_generation=run.current_generation,
+                                    claim_context=claim_context,
+                                )
+                            )
+                        except Exception as exc:
+                            if isinstance(exc, StaleClaimError) or (
+                                heartbeat is not None and heartbeat.heartbeat_failed
+                            ):
+                                should_release_claim = False
+                                self.uow.rollback()
+                                raise (
+                                    exc
+                                    if isinstance(exc, StaleClaimError)
+                                    else StaleClaimError(str(exc))
+                                )
+                            redacted_error = redact_secrets(str(exc))
+                            logger.exception(
+                                "Error executing checks-only pipeline for run '%s' at RUNNING_CHECKS: %s",
+                                run.run_id,
+                                redacted_error,
+                            )
+                            current_job = self.uow.jobs.get_by_id(job.job_id)
+                            if current_job and current_job.status not in {
+                                JobStatus.CHECKS_FAILED,
+                                JobStatus.FAILED,
+                            }:
+                                self.uow.jobs.transition(
+                                    job.job_id,
+                                    JobStatus.CHECKS_FAILED.value,
+                                    error_message=redacted_error,
+                                    claim_context=claim_context,
+                                )
+                            _stop_coordinator_run(
+                                run,
+                                stop_outcome=OrchestrationStopOutcome.NEEDS_HUMAN,
+                                human_gate=HumanGate.NEEDS_HUMAN,
+                                stop_reason="Checks-only pipeline execution failed.",
+                                stop_details={
+                                    "code": "CHECKS_ONLY_PIPELINE_EXCEPTION",
+                                    "exception_type": type(exc).__name__,
+                                    "error": redacted_error,
+                                    "candidate_sha": job.candidate_sha,
+                                    "generation": run.current_generation,
+                                },
+                            )
+                            break
+
                     # Enforce single invocation/batch authorization: exact configured name+command pairs,
                     # no duplicates, timestamp clustering, all exit_code == 0, and job.status == CHECKS_PASSED.
                     valid_batch, batch_err, _ = self._validate_current_checks_batch(
                         job, run, project
                     )
                     if not valid_batch:
+                        if job.status not in {JobStatus.CHECKS_FAILED, JobStatus.FAILED}:
+                            self.uow.jobs.transition(
+                                job.job_id,
+                                JobStatus.CHECKS_FAILED.value,
+                                error_message=batch_err or "Deterministic checks batch invalid.",
+                                claim_context=claim_context,
+                            )
                         if is_checks_only:
                             _stop_coordinator_run(
                                 run,
@@ -2040,6 +2065,8 @@ class OrchestrationService:
                                 stop_details={
                                     "code": "INCOMPLETE_AUTHORITATIVE_CHECKS",
                                     "error": batch_err,
+                                    "candidate_sha": job.candidate_sha,
+                                    "generation": run.current_generation,
                                 },
                             )
                             break

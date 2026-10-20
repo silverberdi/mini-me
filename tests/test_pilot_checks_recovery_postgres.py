@@ -3,14 +3,16 @@
 from __future__ import annotations
 
 import os
+import shutil
 import subprocess
+import tempfile
 import threading
 import time
 import uuid
 from datetime import timedelta
 from pathlib import Path
 from typing import Generator
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 from sqlalchemy import Engine, create_engine, make_url, text
@@ -24,6 +26,7 @@ from minime.domain.enums import (
     ChangeStatus,
     EventType,
     EvidenceDiagnosticStatus,
+    ExecutionOutcome,
     HumanGate,
     JobStatus,
     OrchestrationStage,
@@ -38,11 +41,14 @@ from minime.domain.models import (
     CheckResult,
     EvidenceDiagnostic,
     Job,
+    JobAttempt,
     OrchestrationRun,
+    OrchestrationStageEvent,
     OrchestrationWorktreeOwnership,
     Project,
     ProjectBinding,
     ProjectManagedRepositoryBinding,
+    RecoveryClaimContext,
     utc_now,
 )
 from minime.services.checks_runner import ChecksRunner, ChecksRunResult
@@ -293,6 +299,7 @@ def _seed_pilot_state(
         project_id=project_id,
         change_name=change_name,
         base_sha=base_sha,
+        current_candidate_sha=candidate_sha,
         current_stage=OrchestrationStage.IMPLEMENTING,
         active_job_id=job_id,
         current_generation=1,
@@ -1330,4 +1337,1318 @@ def test_pilot_checks_recovery_full_route_real_checks_runner(
     # Claim released
     claim = uow.claims.get_by_key(f"run:{run.run_id}")
     assert claim is None or claim.released_at is not None
+    session.close()
+
+
+def test_checks_runner_cache_isolation_and_ownership(tmp_path: Path):
+    """Test C04: ChecksRunner generates secure private cache paths with mode 0700 and rejects insecure paths."""
+    runner = ChecksRunner()
+    current_uid = os.getuid()
+
+    # Pre-create a contaminated directory simulating another user or insecure permissions
+    insecure_dir = tmp_path / "insecure_cache"
+    insecure_dir.mkdir(parents=True, mode=0o777)
+
+    # Calling check runner under custom XDG_CACHE_HOME
+    custom_cache = tmp_path / "custom_xdg_cache"
+    with patch.dict(os.environ, {"XDG_CACHE_HOME": str(custom_cache)}):
+        worktree = tmp_path / "wt"
+        worktree.mkdir()
+        (worktree / ".git").mkdir()
+
+        # Test private resolution: when custom_cache exists with current_uid
+        custom_cache.mkdir(mode=0o700)
+        import asyncio
+
+        async def run_dummy():
+            return await runner.run(
+                job_id="test-sec-job",
+                checks=[{"name": "test-true", "command": "true"}],
+                worktree_path=worktree,
+                candidate_sha="abc123",
+            )
+
+        # Should succeed without permission error
+        res = asyncio.run(run_dummy())
+        assert res is not None
+        job_cache = custom_cache / "minime" / "pycache" / "test-sec-job"
+        assert job_cache.exists()
+        st = os.stat(job_cache)
+        assert st.st_uid == current_uid
+        assert (st.st_mode & 0o077) == 0  # Mode 0700
+
+
+def test_exception_atomically_commits_checks_failed_and_run_needs_human(
+    pg_session_factory: sessionmaker[Session],
+    tmp_path: Path,
+):
+    """Test C02: An unhandled runner exception commits Job=CHECKS_FAILED and Run=NEEDS_HUMAN under valid claim."""
+    session = pg_session_factory()
+    repo_dir, wt_dir, base_sha, candidate_sha, test_id = _setup_repo_and_worktree(tmp_path)
+    uow = PostgresPersistenceUnitOfWork(session)
+
+    project_id = f"test-proj-exc-{test_id}"
+    change_name = f"test-change-exc-{test_id}"
+    run_id = f"run-exc-{test_id}"
+    job_id = wt_dir.name
+
+    proj = Project(
+        project_id=project_id,
+        name="Test Exc",
+        display_name="Test Exc",
+        repository=str(repo_dir),
+        base_branch="main",
+        checks=[{"name": "failing-check", "command": "python -c 'exit(1)'"}],
+    )
+    uow.projects.save(proj)
+
+    binding = ProjectManagedRepositoryBinding(
+        project_id=project_id,
+        managed_repository_root=str(repo_dir),
+        canonical_repository_identity=str(repo_dir),
+        remote_name="origin",
+        default_base_branch="main",
+        worktree_parent_dir=str(wt_dir.parent),
+        is_valid=True,
+    )
+    uow.project_managed_repository_bindings.save(binding)
+
+    job = Job(
+        job_id=job_id,
+        project_id=project_id,
+        change_name=change_name,
+        status=JobStatus.CHECKS_FAILED,
+        base_sha=base_sha,
+        candidate_sha=candidate_sha,
+        implementer_role="codex",
+    )
+    uow.jobs.save(job)
+
+    run = OrchestrationRun(
+        run_id=run_id,
+        project_id=project_id,
+        change_name=change_name,
+        base_sha=base_sha,
+        current_candidate_sha=candidate_sha,
+        current_stage=OrchestrationStage.RUNNING_CHECKS,
+        resumable_stage=OrchestrationStage.RUNNING_CHECKS,
+        active_job_id=job_id,
+        is_active=False,
+        stop_outcome=OrchestrationStopOutcome.NEEDS_HUMAN,
+        human_gate=HumanGate.NEEDS_HUMAN,
+        stop_reason="Checks-only pipeline execution failed.",
+        stop_details={
+            "code": "CHECKS_ONLY_PIPELINE_EXCEPTION",
+            "exception_type": "PermissionError",
+            "error": "[Errno 13] Permission denied: '/tmp/minime_pycache/test'",
+            "candidate_sha": candidate_sha,
+        },
+    )
+    uow.orchestration_runs.save(run)
+    stop_event = OrchestrationStageEvent(
+        run_id=run_id,
+        from_stage=OrchestrationStage.RUNNING_CHECKS,
+        to_stage=OrchestrationStage.RUNNING_CHECKS,
+        event_type=EventType.ORCHESTRATION_STOPPED.value,
+        transition_key=f"{run_id}:STOP:NEEDS_HUMAN:gen1",
+        evidence_references={"reason": "Checks-only pipeline execution failed."},
+        actor="system",
+        created_at=utc_now(),
+    )
+    uow.orchestration_stage_events.save(stop_event)
+    uow.commit()
+
+    rec_svc = RecoveryConvergenceService(uow=uow, project_root=repo_dir)
+
+    # Mock runner to raise an environmental PermissionError simulating /tmp/minime_pycache
+    with patch(
+        "minime.services.checks_runner.ChecksRunner.run",
+        new=AsyncMock(
+            side_effect=PermissionError("[Errno 13] Permission denied: '/tmp/minime_pycache/test'")
+        ),
+    ):
+        decision = rec_svc.recover_checks_only(run.run_id, project_root=repo_dir)
+
+    assert decision is not None
+    assert decision.status in {
+        RecoveryDecisionStatus.BLOCKED,
+        RecoveryDecisionStatus.NO_ACTION,
+        RecoveryDecisionStatus.COMPLETED,
+    }
+
+    # In independent session, verify Job is CHECKS_FAILED and Run is NEEDS_HUMAN
+    sess2 = pg_session_factory()
+    uow2 = PostgresPersistenceUnitOfWork(sess2)
+    j2 = uow2.jobs.get_by_id(job_id)
+    assert j2.status == JobStatus.CHECKS_FAILED
+    assert "Permission denied" in (j2.error_message or "")
+    r2 = uow2.orchestration_runs.get_by_id(run_id)
+    assert r2.is_active is False
+    assert r2.stop_outcome == OrchestrationStopOutcome.NEEDS_HUMAN
+    sess2.close()
+    session.close()
+
+
+def test_reentry_from_running_checks_executes_fresh_batch(
+    pg_session_factory: sessionmaker[Session],
+    tmp_path: Path,
+):
+    """Test C01: Re-entry from RUNNING_CHECKS executes a FRESH checks batch even if an old batch exists."""
+    session = pg_session_factory()
+    repo_dir, wt_dir, base_sha, candidate_sha, test_id = _setup_repo_and_worktree(tmp_path)
+    uow = PostgresPersistenceUnitOfWork(session)
+
+    project_id = f"test-proj-fresh-{test_id}"
+    change_name = f"test-change-fresh-{test_id}"
+    run_id = f"run-fresh-{test_id}"
+    job_id = wt_dir.name
+
+    proj = Project(
+        project_id=project_id,
+        name="Test Fresh",
+        display_name="Test Fresh",
+        repository=str(repo_dir),
+        base_branch="main",
+        checks=[{"name": "fresh-check", "command": "echo fresh"}],
+    )
+    uow.projects.save(proj)
+
+    binding = ProjectManagedRepositoryBinding(
+        project_id=project_id,
+        managed_repository_root=str(repo_dir),
+        canonical_repository_identity=str(repo_dir),
+        remote_name="origin",
+        default_base_branch="main",
+        worktree_parent_dir=str(wt_dir.parent),
+        is_valid=True,
+    )
+    uow.project_managed_repository_bindings.save(binding)
+
+    job = Job(
+        job_id=job_id,
+        project_id=project_id,
+        change_name=change_name,
+        status=JobStatus.CHECKS_FAILED,
+        base_sha=base_sha,
+        candidate_sha=candidate_sha,
+        implementer_role="codex",
+    )
+    uow.jobs.save(job)
+
+    # Simulate an OLD passing check result from 1 hour ago
+    old_cr = CheckResult(
+        job_id=job_id,
+        check_name="fresh-check",
+        command="echo fresh",
+        exit_code=0,
+        duration_ms=100,
+        output_snippet="fresh",
+        candidate_sha=candidate_sha,
+        candidate_generation=1,
+        created_at=utc_now() - timedelta(hours=1),
+    )
+    uow.check_results.save(old_cr)
+
+    run = OrchestrationRun(
+        run_id=run_id,
+        project_id=project_id,
+        change_name=change_name,
+        base_sha=base_sha,
+        current_candidate_sha=candidate_sha,
+        current_stage=OrchestrationStage.RUNNING_CHECKS,
+        resumable_stage=OrchestrationStage.RUNNING_CHECKS,
+        active_job_id=job_id,
+        is_active=False,
+        stop_outcome=OrchestrationStopOutcome.NEEDS_HUMAN,
+        human_gate=HumanGate.NEEDS_HUMAN,
+        stop_reason="Checks-only pipeline execution failed.",
+        stop_details={
+            "code": "CHECKS_ONLY_PIPELINE_EXCEPTION",
+            "exception_type": "PermissionError",
+            "error": "[Errno 13] Permission denied: '/tmp/minime_pycache/test'",
+        },
+    )
+    uow.orchestration_runs.save(run)
+    uow.commit()
+
+    rec_svc = RecoveryConvergenceService(uow=uow, project_root=repo_dir)
+
+    runner_called = False
+
+    async def mock_runner_run(*args, **kwargs):
+        nonlocal runner_called
+        runner_called = True
+        return ChecksRunResult(
+            passed=True,
+            results=[
+                CheckResult(
+                    job_id=job_id,
+                    check_name="fresh-check",
+                    command="echo fresh",
+                    exit_code=0,
+                    duration_ms=100,
+                    output_snippet="fresh",
+                    candidate_sha=candidate_sha,
+                    candidate_generation=1,
+                    created_at=utc_now(),
+                )
+            ],
+            diagnostics=[],
+        )
+
+    with patch("minime.services.checks_runner.ChecksRunner.run", new=mock_runner_run):
+        decision = rec_svc.recover_checks_only(run.run_id, project_root=repo_dir)
+
+    assert decision.status == RecoveryDecisionStatus.COMPLETED
+    assert runner_called is True, "ChecksRunner MUST be invoked on re-entry from RUNNING_CHECKS!"
+
+    # Assert new batch was validated and run is held at REVIEW_AUTHORIZATION_PENDING
+    sess3 = pg_session_factory()
+    uow3 = PostgresPersistenceUnitOfWork(sess3)
+    r3 = uow3.orchestration_runs.get_by_id(run_id)
+    assert r3.stop_details.get("code") == "REVIEW_AUTHORIZATION_PENDING"
+    assert r3.current_candidate_sha == candidate_sha
+    sess3.close()
+    session.close()
+
+
+def test_atomic_stop_fault_injection_prevents_partial_commit(
+    pg_session_factory: sessionmaker[Session],
+    tmp_path: Path,
+):
+    """Test A01: Fault injection before atomic commit guarantees ZERO partial state committed.
+
+    Proves in an independent PostgreSQL readback session that if a failure occurs between
+    runner exception and the atomic commit of Run stop outcome, Job is NOT committed to
+    CHECKS_FAILED while Run remains RUNNING_CHECKS.
+    """
+    session = pg_session_factory()
+    repo_dir, wt_dir, base_sha, candidate_sha, test_id = _setup_repo_and_worktree(tmp_path)
+    uow = PostgresPersistenceUnitOfWork(session)
+
+    project_id = f"test-proj-fault-{test_id}"
+    change_name = f"test-change-fault-{test_id}"
+    run_id = f"run-fault-{test_id}"
+    job_id = wt_dir.name
+
+    proj = Project(
+        project_id=project_id,
+        name="Test Fault",
+        display_name="Test Fault",
+        repository=str(repo_dir),
+        base_branch="main",
+        checks=[{"name": "check-1", "command": "echo 1"}],
+    )
+    uow.projects.save(proj)
+
+    binding = ProjectManagedRepositoryBinding(
+        project_id=project_id,
+        managed_repository_root=str(repo_dir),
+        canonical_repository_identity=str(repo_dir),
+        remote_name="origin",
+        default_base_branch="main",
+        worktree_parent_dir=str(wt_dir.parent),
+        is_valid=True,
+    )
+    uow.project_managed_repository_bindings.save(binding)
+
+    job = Job(
+        job_id=job_id,
+        project_id=project_id,
+        change_name=change_name,
+        status=JobStatus.CHECKS_RUNNING,
+        base_sha=base_sha,
+        candidate_sha=candidate_sha,
+        implementer_role="codex",
+    )
+    uow.jobs.save(job)
+
+    run = OrchestrationRun(
+        run_id=run_id,
+        project_id=project_id,
+        change_name=change_name,
+        base_sha=base_sha,
+        current_candidate_sha=candidate_sha,
+        current_stage=OrchestrationStage.RUNNING_CHECKS,
+        resumable_stage=OrchestrationStage.RUNNING_CHECKS,
+        active_job_id=job_id,
+        is_active=True,
+    )
+    uow.orchestration_runs.save(run)
+    uow.commit()
+
+    rec_svc = RecoveryConvergenceService(uow=uow, project_root=repo_dir)
+    claim = rec_svc.acquire_claim(claim_key=f"run:{run_id}", lease_seconds=60)
+    assert claim is not None
+    claim_context = RecoveryClaimContext(
+        claim_key=claim.claim_key,
+        owner_instance_id=claim.owner_instance_id,
+        fence_token=claim.fence_token,
+        lease_expires_at=claim.lease_expires_at,
+    )
+
+    pipeline = ExecutionPipelineService(uow=uow, project_root=repo_dir)
+
+    # Mock checks_runner to raise an environmental error
+    pipeline.checks_runner = ChecksRunner()
+    pipeline.checks_runner.run = AsyncMock(
+        side_effect=PermissionError("[Errno 13] Permission denied: '/tmp/minime_pycache/fault'")
+    )
+
+    # Call run_checks_only directly: verify that it updates Job in session (auto_commit=False)
+    # but does NOT commit to PostgreSQL when raising runner_exc!
+    with pytest.raises(PermissionError):
+        import asyncio
+
+        asyncio.run(
+            pipeline.run_checks_only(job_id, candidate_generation=1, claim_context=claim_context)
+        )
+
+    # Read back from an INDEPENDENT PostgreSQL session:
+    # Proves zero two-phase commit gap: Job is STILL CHECKS_RUNNING in the committed database!
+    read_sess = pg_session_factory()
+    read_uow = PostgresPersistenceUnitOfWork(read_sess)
+    committed_job = read_uow.jobs.get_by_id(job_id)
+    assert committed_job is not None
+    assert committed_job.status == JobStatus.CHECKS_RUNNING, (
+        "Job MUST NOT be committed to CHECKS_FAILED before Run is stopped! Found partial commit."
+    )
+    committed_run = read_uow.orchestration_runs.get_by_id(run_id)
+    assert committed_run is not None
+    assert committed_run.is_active is True
+    assert committed_run.stop_outcome is None
+
+    # Roll back the staged uncommitted pipeline changes
+    uow.rollback()
+    read_sess.close()
+    session.close()
+
+
+def test_runner_typeerror_invoked_exactly_once(
+    pg_session_factory: sessionmaker[Session],
+    tmp_path: Path,
+):
+    """Test A02: Internal TypeError in ChecksRunner.run is invoked EXACTLY ONCE and not retried."""
+    session = pg_session_factory()
+    repo_dir, wt_dir, base_sha, candidate_sha, test_id = _setup_repo_and_worktree(tmp_path)
+    uow = PostgresPersistenceUnitOfWork(session)
+
+    project_id = f"test-proj-typeerr-{test_id}"
+    change_name = f"test-change-typeerr-{test_id}"
+    run_id = f"run-typeerr-{test_id}"
+    job_id = wt_dir.name
+
+    proj = Project(
+        project_id=project_id,
+        name="Test TypeError",
+        display_name="Test TypeError",
+        repository=str(repo_dir),
+        base_branch="main",
+        checks=[{"name": "check-1", "command": "echo 1"}],
+    )
+    uow.projects.save(proj)
+
+    binding = ProjectManagedRepositoryBinding(
+        project_id=project_id,
+        managed_repository_root=str(repo_dir),
+        canonical_repository_identity=str(repo_dir),
+        remote_name="origin",
+        default_base_branch="main",
+        worktree_parent_dir=str(wt_dir.parent),
+        is_valid=True,
+    )
+    uow.project_managed_repository_bindings.save(binding)
+
+    job = Job(
+        job_id=job_id,
+        project_id=project_id,
+        change_name=change_name,
+        status=JobStatus.CHECKS_RUNNING,
+        base_sha=base_sha,
+        candidate_sha=candidate_sha,
+        implementer_role="codex",
+    )
+    uow.jobs.save(job)
+    uow.commit()
+
+    rec_svc = RecoveryConvergenceService(uow=uow, project_root=repo_dir)
+    claim = rec_svc.acquire_claim(claim_key=f"run:{run_id}", lease_seconds=60)
+    assert claim is not None
+    claim_context = RecoveryClaimContext(
+        claim_key=claim.claim_key,
+        owner_instance_id=claim.owner_instance_id,
+        fence_token=claim.fence_token,
+        lease_expires_at=claim.lease_expires_at,
+    )
+
+    pipeline = ExecutionPipelineService(uow=uow, project_root=repo_dir)
+
+    call_count = 0
+
+    async def mock_run_with_internal_type_error(*args, **kwargs):
+        nonlocal call_count
+        call_count += 1
+        # Raise a real internal TypeError from inside runner logic
+        raise TypeError("Unexpected NoneType encountered in runner argument unpacking")
+
+    pipeline.checks_runner = ChecksRunner()
+    pipeline.checks_runner.run = mock_run_with_internal_type_error
+
+    with pytest.raises(TypeError) as exc_info:
+        import asyncio
+
+        asyncio.run(
+            pipeline.run_checks_only(job_id, candidate_generation=1, claim_context=claim_context)
+        )
+
+    assert "Unexpected NoneType" in str(exc_info.value)
+    assert call_count == 1, (
+        f"ChecksRunner MUST be invoked exactly once, but was called {call_count} times!"
+    )
+    uow.rollback()
+    session.close()
+
+
+def test_cache_confinement_trusted_path_validation_and_lifecycle(tmp_path: Path):
+    """Test B01: validate_secure_cache_path, safe_prepare_cache_dir and wrap_command deny untrusted/insecure/non-cache paths."""
+    from minime.services.agent_confinement import (
+        AgentConfinementError,
+        AgentProcessConfinement,
+        safe_prepare_cache_dir,
+        validate_secure_cache_path,
+    )
+
+    current_uid = os.getuid()
+
+    # 1. Deny path outside authorized roots (e.g. /etc)
+    with pytest.raises(PermissionError) as exc_info:
+        validate_secure_cache_path(Path("/etc"))
+    assert (
+        "not an authorized dedicated minime bytecode cache path shape" in str(exc_info.value)
+        or "outside authorized roots" in str(exc_info.value)
+        or "cannot be a symlink" in str(exc_info.value)
+    )
+
+    # 2. Deny authorized root itself
+    with pytest.raises(PermissionError) as exc_info:
+        validate_secure_cache_path(Path.home())
+    assert "not an authorized dedicated minime bytecode cache path shape" in str(
+        exc_info.value
+    ) or "root directory" in str(exc_info.value)
+
+    # 3. Deny private non-cache directory (e.g. ~/.ssh or ~/Documents) even if mode 0700
+    noncache_dir = tmp_path / "private_noncache"
+    noncache_dir.mkdir(mode=0o700)
+    with pytest.raises(PermissionError) as exc_info:
+        validate_secure_cache_path(noncache_dir, expected_uid=current_uid)
+    assert "not an authorized dedicated minime bytecode cache path shape" in str(exc_info.value)
+
+    ssh_dir = Path.home() / ".ssh"
+    if ssh_dir.exists():
+        with pytest.raises(PermissionError) as exc_info:
+            validate_secure_cache_path(ssh_dir, expected_uid=current_uid)
+        assert "not an authorized dedicated minime bytecode cache path shape" in str(exc_info.value)
+
+    # 4. Deny insecure permissions on authorized shape (mode 0755)
+    os.environ["XDG_CACHE_HOME"] = str(tmp_path)
+    try:
+        insecure_dir = tmp_path / "minime" / "pycache" / "insecure_job"
+        insecure_dir.mkdir(parents=True, mode=0o755)
+        os.chmod(insecure_dir, 0o755)
+        with pytest.raises(PermissionError) as exc_info:
+            validate_secure_cache_path(
+                insecure_dir, expected_uid=current_uid, job_id="insecure_job"
+            )
+        assert "mode must be strictly 0700" in str(exc_info.value)
+
+        # 5. Existing target directory with 0755 mode: safe_prepare_cache_dir fails closed without chmod repair
+        with pytest.raises(PermissionError) as exc_info:
+            safe_prepare_cache_dir(insecure_dir, expected_uid=current_uid, job_id="insecure_job")
+        assert "mode must be strictly 0700" in str(exc_info.value)
+
+        # 6. Deny symlink cache path
+        target_dir = tmp_path / "minime" / "pycache" / "real_job"
+        target_dir.mkdir(parents=True, mode=0o700)
+        os.chmod(target_dir, 0o700)
+        symlink_path = tmp_path / "minime" / "pycache" / "symlink_job"
+        symlink_path.symlink_to(target_dir)
+        with pytest.raises(PermissionError) as exc_info:
+            validate_secure_cache_path(symlink_path, expected_uid=current_uid, job_id="symlink_job")
+        assert "cannot be a symlink" in str(exc_info.value)
+
+        # 7. Deny symlink intermediate ancestor under primary cache and leaf under /tmp
+        temp_dir = Path(tempfile.gettempdir())
+        real_anc = temp_dir / f"minime_real_anc_{uuid.uuid4().hex[:6]}"
+        real_anc.mkdir(mode=0o700)
+        sym_leaf = temp_dir / f"minime_cache_{current_uid}_symleaf"
+        sym_leaf.symlink_to(real_anc)
+        try:
+            with pytest.raises(PermissionError) as exc_info:
+                validate_secure_cache_path(sym_leaf, expected_uid=current_uid, job_id="symleaf")
+            assert "cannot be a symlink" in str(exc_info.value)
+
+            # Intermediate component symlink in primary hierarchy
+            sym_cache_root = tmp_path / "sym_cache_root"
+            sym_cache_root.mkdir(mode=0o700)
+            sym_minime = sym_cache_root / "minime"
+            sym_minime.symlink_to(real_anc)
+            os.environ["XDG_CACHE_HOME"] = str(sym_cache_root)
+            sym_cache_target = sym_cache_root / "minime" / "pycache" / "job_anc"
+            with pytest.raises(PermissionError) as exc_info:
+                safe_prepare_cache_dir(sym_cache_target, expected_uid=current_uid, job_id="job_anc")
+            assert "component cannot be a symlink" in str(exc_info.value)
+        finally:
+            os.environ["XDG_CACHE_HOME"] = str(tmp_path)
+            if sym_leaf.is_symlink() or sym_leaf.exists():
+                sym_leaf.unlink(missing_ok=True)
+            if real_anc.exists():
+                shutil.rmtree(real_anc, ignore_errors=True)
+
+        # 8. Deny wrong UID
+        with pytest.raises(PermissionError) as exc_info:
+            validate_secure_cache_path(
+                target_dir, expected_uid=current_uid + 999, job_id="real_job"
+            )
+        assert "owned by UID" in str(exc_info.value)
+
+        # 9. Valid primary cache directory succeeds
+        valid_path = safe_prepare_cache_dir(target_dir, expected_uid=current_uid, job_id="real_job")
+        assert valid_path == target_dir.resolve()
+
+        # 9b. Valid ephemeral cache directory succeeds
+        ephemeral_target = temp_dir / f"minime_cache_{current_uid}_ephem_job"
+        ephemeral_target.mkdir(mode=0o700, exist_ok=True)
+        os.chmod(ephemeral_target, 0o700)
+        try:
+            valid_ephem = validate_secure_cache_path(
+                ephemeral_target, expected_uid=current_uid, job_id="ephem_job"
+            )
+            assert valid_ephem == ephemeral_target.resolve()
+        finally:
+            shutil.rmtree(ephemeral_target, ignore_errors=True)
+
+        # 9c. Adversarial B01 shapes: reject non-compliant nesting or spoofed locations
+        with pytest.raises(PermissionError) as exc_info:
+            validate_secure_cache_path(
+                Path("/tmp/other/minime/pycache/real_job"), expected_uid=current_uid
+            )
+        assert "not an authorized dedicated minime bytecode cache path shape" in str(exc_info.value)
+
+        with pytest.raises(PermissionError) as exc_info:
+            validate_secure_cache_path(
+                tmp_path / "other" / "minime" / "pycache" / "real_job", expected_uid=current_uid
+            )
+        assert "not an authorized dedicated minime bytecode cache path shape" in str(exc_info.value)
+
+        with pytest.raises(PermissionError) as exc_info:
+            validate_secure_cache_path(
+                temp_dir / f"minime_cache_{current_uid}_real_job" / "nested",
+                expected_uid=current_uid,
+            )
+        assert "not an authorized dedicated minime bytecode cache path shape" in str(exc_info.value)
+
+        # 9d. Adversarial B01: World-writable ancestor lacking sticky bit (+t) must be rejected
+        nosticky_root = tmp_path / "nosticky_root"
+        nosticky_root.mkdir(mode=0o700)
+        nosticky_minime = nosticky_root / "minime"
+        nosticky_minime.mkdir(mode=0o777)
+        os.chmod(nosticky_minime, 0o777)
+        os.environ["XDG_CACHE_HOME"] = str(nosticky_root)
+        try:
+            bad_cache = nosticky_root / "minime" / "pycache" / "badsticky"
+            with pytest.raises(PermissionError) as exc_info:
+                safe_prepare_cache_dir(bad_cache, expected_uid=current_uid, job_id="badsticky")
+            assert "lacks sticky bit" in str(exc_info.value)
+        finally:
+            os.environ["XDG_CACHE_HOME"] = str(tmp_path)
+
+        # 10. AgentProcessConfinement.wrap_command strictly rejects non-cache, insecure, and mismatched job_id
+        confinement = AgentProcessConfinement(
+            allowed_worktree_path=str(tmp_path),
+        )
+        if confinement.is_confinement_available():
+            with pytest.raises(AgentConfinementError) as conf_exc:
+                confinement.wrap_command(["echo", "hi"], secure_cache_path=noncache_dir)
+            assert "Secure cache path rejected by confinement" in str(conf_exc.value)
+
+            with pytest.raises(AgentConfinementError) as conf_exc2:
+                confinement.wrap_command(["echo", "hi"], secure_cache_path=insecure_dir)
+            assert "Secure cache path rejected by confinement" in str(conf_exc2.value)
+
+            # Mismatched job_id rejected
+            with pytest.raises(AgentConfinementError) as conf_exc3:
+                confinement.wrap_command(
+                    ["echo", "hi"], secure_cache_path=valid_path, job_id="wrong_job_id"
+                )
+            assert "Secure cache path rejected by confinement" in str(conf_exc3.value)
+
+            # Valid cache mounts safely
+            wrapped = confinement.wrap_command(
+                ["echo", "hi"], secure_cache_path=valid_path, job_id="real_job"
+            )
+            assert len(wrapped) > 0
+    finally:
+        os.environ.pop("XDG_CACHE_HOME", None)
+
+    # 11. Test ChecksRunner ephemeral cache cleanup lifecycle with hostile XDG_CACHE_HOME
+    runner = ChecksRunner()
+    fake_job_id = f"cleanuptest_{uuid.uuid4().hex[:8]}"
+    os.environ["XDG_CACHE_HOME"] = str(noncache_dir)
+    try:
+        import asyncio
+
+        asyncio.run(
+            runner.run(
+                job_id=fake_job_id,
+                checks=[{"name": "test-cleanup", "command": "echo clean"}],
+                worktree_path=tmp_path,
+            )
+        )
+    finally:
+        os.environ.pop("XDG_CACHE_HOME", None)
+
+    # Verify that no leftover temporary directory matching the job_id remains in /tmp
+    leftovers = list(temp_dir.glob(f"minime_cache_*_{fake_job_id}"))
+    assert len(leftovers) == 0, f"Ephemeral cache directory leaked: {leftovers}"
+
+
+def test_anti_spoofing_rejects_mismatched_candidate_and_serial_repeats(
+    pg_session_factory: sessionmaker[Session],
+    tmp_path: Path,
+):
+    """Test B02: _validate_checks_only_eligibility rejects spoofed stop_details, generation/SHA drift, and admits legacy N01."""
+    session = pg_session_factory()
+    repo_dir, wt_dir, base_sha, candidate_sha, test_id = _setup_repo_and_worktree(tmp_path)
+    uow = PostgresPersistenceUnitOfWork(session)
+    rec_svc = RecoveryConvergenceService(uow=uow, project_root=repo_dir)
+
+    project_id = f"test-proj-spoof-{test_id}"
+    change_name = f"test-change-spoof-{test_id}"
+    run_id = f"run-spoof-{test_id}"
+    job_id = wt_dir.name
+
+    proj = Project(
+        project_id=project_id,
+        name="Test Spoof",
+        display_name="Test Spoof",
+        repository=str(repo_dir),
+        base_branch="main",
+        checks=[{"name": "check-1", "command": "echo 1"}],
+    )
+    uow.projects.save(proj)
+
+    binding = ProjectManagedRepositoryBinding(
+        project_id=project_id,
+        managed_repository_root=str(repo_dir),
+        canonical_repository_identity=str(repo_dir),
+        remote_name="origin",
+        default_base_branch="main",
+        worktree_parent_dir=str(wt_dir.parent),
+        is_valid=True,
+    )
+    uow.project_managed_repository_bindings.save(binding)
+
+    job = Job(
+        job_id=job_id,
+        project_id=project_id,
+        change_name=change_name,
+        status=JobStatus.CHECKS_FAILED,
+        base_sha=base_sha,
+        candidate_sha=candidate_sha,
+        implementer_role="codex",
+    )
+    uow.jobs.save(job)
+
+    # 1. Test run.current_candidate_sha mismatch with job.candidate_sha
+    run = OrchestrationRun(
+        run_id=run_id,
+        project_id=project_id,
+        change_name=change_name,
+        base_sha=base_sha,
+        current_candidate_sha="badsha0000000000000000000000000000000000",
+        current_stage=OrchestrationStage.RUNNING_CHECKS,
+        resumable_stage=OrchestrationStage.RUNNING_CHECKS,
+        active_job_id=job_id,
+        is_active=False,
+        stop_outcome=OrchestrationStopOutcome.NEEDS_HUMAN,
+        human_gate=HumanGate.NEEDS_HUMAN,
+        stop_reason="Checks-only pipeline execution failed.",
+        stop_details={
+            "code": "CHECKS_ONLY_PIPELINE_EXCEPTION",
+            "exception_type": "PermissionError",
+            "error": "[Errno 13] Permission denied: '/tmp/minime_pycache/spoof'",
+            "candidate_sha": candidate_sha,
+        },
+    )
+    uow.orchestration_runs.save(run)
+    uow.commit()
+
+    decision_cand_mismatch = rec_svc.recover_checks_only(run.run_id, project_root=repo_dir)
+    assert decision_cand_mismatch.status == RecoveryDecisionStatus.BLOCKED
+    assert "does not match job candidate_sha" in decision_cand_mismatch.reason_code
+
+    # Reset current_candidate_sha to valid candidate_sha
+    run.current_candidate_sha = candidate_sha
+
+    # 2. Test spoofed candidate_sha in stop_details
+    run.stop_details = {
+        "code": "CHECKS_ONLY_PIPELINE_EXCEPTION",
+        "exception_type": "PermissionError",
+        "error": "[Errno 13] Permission denied: '/tmp/minime_pycache/spoof'",
+        "candidate_sha": "0000000000000000000000000000000000000000",  # Spoofed!
+    }
+    uow.orchestration_runs.save(run)
+    uow.commit()
+
+    decision_spoof = rec_svc.recover_checks_only(run.run_id, project_root=repo_dir)
+    assert decision_spoof.status == RecoveryDecisionStatus.BLOCKED
+    assert "does not match job candidate_sha" in decision_spoof.reason_code
+
+    # 3. Test generation mismatch in stop_details
+    run.current_generation = 2
+    run.stop_details = {
+        "code": "CHECKS_ONLY_PIPELINE_EXCEPTION",
+        "exception_type": "PermissionError",
+        "error": "[Errno 13] Permission denied: '/tmp/minime_pycache/spoof'",
+        "candidate_sha": candidate_sha,
+        "generation": 1,  # Mismatched generation!
+    }
+    uow.orchestration_runs.save(run)
+    uow.commit()
+
+    decision_gen = rec_svc.recover_checks_only(run.run_id, project_root=repo_dir)
+    assert decision_gen.status == RecoveryDecisionStatus.BLOCKED
+    assert "does not match run current_generation" in decision_gen.reason_code
+    run.current_generation = 1
+
+    # 4. Test application code error in stop_details
+    run.stop_details = {
+        "code": "CHECKS_ONLY_PIPELINE_EXCEPTION",
+        "exception_type": "PermissionError",
+        "error": "AssertionError: expected 1 got 2",
+        "candidate_sha": candidate_sha,
+    }
+    uow.orchestration_runs.save(run)
+    uow.commit()
+
+    decision_app_err = rec_svc.recover_checks_only(run.run_id, project_root=repo_dir)
+    assert decision_app_err.status == RecoveryDecisionStatus.BLOCKED
+    assert "application code error" in decision_app_err.reason_code
+
+    # 5. Test generic unrelated OSError (fail-closed, not recognized environmental fault)
+    run.stop_details = {
+        "code": "CHECKS_ONLY_PIPELINE_EXCEPTION",
+        "exception_type": "OSError",
+        "error": "[Errno 28] No space left on device",
+        "candidate_sha": candidate_sha,
+    }
+    uow.orchestration_runs.save(run)
+    uow.commit()
+
+    decision_oserror = rec_svc.recover_checks_only(run.run_id, project_root=repo_dir)
+    assert decision_oserror.status == RecoveryDecisionStatus.BLOCKED
+    assert (
+        "not a recognized runner environmental fault" in decision_oserror.reason_code
+        or "No check results or evidence diagnostics found" in decision_oserror.reason_code
+    )
+
+    # 6. Test missing candidate_sha on non-legacy arbitrary stop
+    run.stop_details = {
+        "code": "CHECKS_ONLY_PIPELINE_EXCEPTION",
+        "exception_type": "PermissionError",
+        "error": "Arbitrary permission error on other file",
+    }
+    uow.orchestration_runs.save(run)
+    uow.commit()
+
+    decision_missing_cand = rec_svc.recover_checks_only(run.run_id, project_root=repo_dir)
+    assert decision_missing_cand.status == RecoveryDecisionStatus.BLOCKED
+    assert "Stop details missing candidate_sha" in decision_missing_cand.reason_code
+
+    # 6b. Reject arbitrary candidate attempting to bypass candidate_sha by mentioning /tmp/minime_pycache
+    run.stop_details = {
+        "code": "CHECKS_ONLY_PIPELINE_EXCEPTION",
+        "exception_type": "PermissionError",
+        "error": "[Errno 13] Permission denied: '/tmp/minime_pycache/fake'",
+    }
+    uow.orchestration_runs.save(run)
+    uow.commit()
+
+    decision_fake_pycache = rec_svc.recover_checks_only(run.run_id, project_root=repo_dir)
+    assert decision_fake_pycache.status == RecoveryDecisionStatus.BLOCKED
+    assert "Stop details missing candidate_sha" in decision_fake_pycache.reason_code
+
+    # 6c. Missing stop event on any run (even without attempts) must be rejected
+    run.stop_details = {
+        "code": "CHECKS_ONLY_PIPELINE_EXCEPTION",
+        "exception_type": "PermissionError",
+        "error": "[Errno 13] Permission denied: '/tmp/minime_pycache/nostop'",
+        "candidate_sha": candidate_sha,
+    }
+    uow.orchestration_runs.save(run)
+    uow.commit()
+
+    decision_no_stop = rec_svc.recover_checks_only(run.run_id, project_root=repo_dir)
+    assert decision_no_stop.status == RecoveryDecisionStatus.BLOCKED
+    assert "No immutable stop event found" in decision_no_stop.reason_code
+
+    # 7. Test historical legacy N01 stop exception (run_id 8e7ebec8, candidate 2fcad0, durable stop event, reconcile current_candidate_sha)
+    legacy_run_id = "8e7ebec8-9eff-478b-bae3-cf686ea91be2"
+    legacy_cand_sha = "2fcad0ef73eb4766ca1bb6249a081cb4070ecced"
+    job.candidate_sha = legacy_cand_sha
+    uow.jobs.save(job)
+    run_legacy = OrchestrationRun(
+        run_id=legacy_run_id,
+        project_id=project_id,
+        change_name=change_name,
+        base_sha=base_sha,
+        current_candidate_sha=None,  # Missing in historical DB row; must be reconciled!
+        current_stage=OrchestrationStage.RUNNING_CHECKS,
+        resumable_stage=OrchestrationStage.RUNNING_CHECKS,
+        active_job_id=job.job_id,
+        is_active=False,
+        current_generation=1,
+        stop_outcome=OrchestrationStopOutcome.NEEDS_HUMAN,
+        human_gate=HumanGate.NEEDS_HUMAN,
+        stop_reason="Checks-only pipeline execution failed.",
+        stop_details={
+            "code": "CHECKS_ONLY_PIPELINE_EXCEPTION",
+            "exception_type": "PermissionError",
+            "error": "[Errno 13] Permission denied: '/tmp/minime_pycache/test'",
+        },
+    )
+    uow.orchestration_runs.save(run_legacy)
+    stop_event_legacy = OrchestrationStageEvent(
+        run_id=legacy_run_id,
+        from_stage=OrchestrationStage.RUNNING_CHECKS,
+        to_stage=OrchestrationStage.RUNNING_CHECKS,
+        event_type=EventType.ORCHESTRATION_STOPPED.value,
+        transition_key=f"{legacy_run_id}:STOP:NEEDS_HUMAN:gen1",
+        evidence_references={"reason": "Checks-only pipeline execution failed."},
+        actor="system",
+        created_at=utc_now(),
+    )
+    uow.orchestration_stage_events.save(stop_event_legacy)
+    uow.commit()
+
+    orig_subproc_run = subprocess.run
+    with patch("subprocess.run") as mock_subproc:
+
+        def fake_git(cmd, *args, **kwargs):
+            from unittest.mock import MagicMock
+
+            if isinstance(cmd, list) and "rev-parse" in cmd:
+                m = MagicMock()
+                m.returncode = 0
+                m.stdout = f"{legacy_cand_sha}\n"
+                return m
+            elif isinstance(cmd, list) and "status" in cmd:
+                m = MagicMock()
+                m.returncode = 0
+                m.stdout = ""
+                return m
+            return orig_subproc_run(cmd, *args, **kwargs)
+
+        mock_subproc.side_effect = fake_git
+        with patch(
+            "minime.services.checks_runner.ChecksRunner.run",
+            new=AsyncMock(return_value=ChecksRunResult(passed=True, results=[], diagnostics=[])),
+        ):
+            decision_legacy = rec_svc.recover_checks_only(legacy_run_id, project_root=repo_dir)
+
+    assert decision_legacy.status in {
+        RecoveryDecisionStatus.EXECUTING,
+        RecoveryDecisionStatus.COMPLETED,
+    }
+    # Verify current_candidate_sha was durably reconciled
+    reconciled_run = uow.orchestration_runs.get_by_id(legacy_run_id)
+    assert reconciled_run.current_candidate_sha == legacy_cand_sha
+
+    # 8. Test latest-attempt temporal drift (attempt created after stop event)
+    job.candidate_sha = candidate_sha
+    job.status = JobStatus.CHECKS_FAILED
+    uow.jobs.save(job)
+    run.current_stage = OrchestrationStage.RUNNING_CHECKS
+    run.stop_outcome = OrchestrationStopOutcome.NEEDS_HUMAN
+    run.human_gate = HumanGate.NEEDS_HUMAN
+    run.stop_details = {
+        "code": "CHECKS_ONLY_PIPELINE_EXCEPTION",
+        "exception_type": "PermissionError",
+        "error": "[Errno 13] Permission denied: '/tmp/minime_pycache/test'",
+        "candidate_sha": candidate_sha,
+    }
+    uow.orchestration_runs.save(run)
+    stop_event_drift = OrchestrationStageEvent(
+        run_id=run.run_id,
+        from_stage=OrchestrationStage.RUNNING_CHECKS,
+        to_stage=OrchestrationStage.RUNNING_CHECKS,
+        event_type=EventType.ORCHESTRATION_STOPPED.value,
+        transition_key=f"{run.run_id}:STOP:NEEDS_HUMAN:gen1",
+        evidence_references={"reason": "Checks-only pipeline execution failed."},
+        actor="system",
+        created_at=utc_now(),
+    )
+    uow.orchestration_stage_events.save(stop_event_drift)
+    drift_attempt = JobAttempt(
+        job_id=job.job_id,
+        attempt_number=2,
+        executor_role="codex",
+        model_identity="codex",
+        normalized_outcome=ExecutionOutcome.ENVIRONMENT_UNAVAILABLE,
+        start_sha=candidate_sha,
+        end_sha=candidate_sha,
+        created_at=utc_now() + timedelta(minutes=10),
+    )
+    uow.job_attempts.save(drift_attempt)
+    uow.commit()
+
+    decision_drift = rec_svc.recover_checks_only(run.run_id, project_root=repo_dir)
+    assert decision_drift.status == RecoveryDecisionStatus.BLOCKED
+    assert "historical failures cannot substantiate recovery" in decision_drift.reason_code
+
+    # 9. Test serial repeat prevention when candidate already passed
+    run.stop_details = {
+        "code": "REVIEW_AUTHORIZATION_PENDING",
+        "candidate_sha": candidate_sha,
+    }
+    job.status = JobStatus.CHECKS_PASSED
+    uow.jobs.save(job)
+    uow.orchestration_runs.save(run)
+    uow.commit()
+
+    decision_repeat = rec_svc.recover_checks_only(run.run_id, project_root=repo_dir)
+    assert decision_repeat.status == RecoveryDecisionStatus.BLOCKED
+    assert "Checks have already succeeded" in decision_repeat.reason_code
+
+    session.close()
+
+
+def test_preflight_rejection_leaves_n01_current_candidate_sha_unmutated_in_db(
+    pg_session_factory: sessionmaker[Session], tmp_path: Path
+):
+    """G2 Requirement: Preflight eligibility inspection must be strictly read-only.
+
+    If preflight validation rejects an N01 run (e.g. dirty worktree or missing stop event),
+    PostgreSQL must remain completely unmutated: run.current_candidate_sha must remain None
+    in an independent database session.
+    """
+    session = pg_session_factory()
+    uow = PostgresPersistenceUnitOfWork(session)
+
+    project_id = "test-proj-g2-preflight"
+    change_name = "test-change-g2"
+    legacy_run_id = "8e7ebec8-9eff-478b-bae3-cf686ea91be2"
+    legacy_cand_sha = "2fcad0ef73eb4766ca1bb6249a081cb4070ecced"
+    base_sha = "b4012abbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+
+    # Setup git repo and worktree
+    repo_dir = tmp_path / "repo"
+    repo_dir.mkdir()
+    subprocess.run(["git", "init", "-b", "main"], cwd=repo_dir, check=True, capture_output=True)
+    subprocess.run(["git", "config", "user.name", "Tester"], cwd=repo_dir, check=True)
+    subprocess.run(["git", "config", "user.email", "tester@example.com"], cwd=repo_dir, check=True)
+    (repo_dir / "README.md").write_text("# Repo")
+    subprocess.run(["git", "add", "README.md"], cwd=repo_dir, check=True)
+    subprocess.run(
+        ["git", "commit", "-m", "Initial commit"], cwd=repo_dir, check=True, capture_output=True
+    )
+
+    wt_dir = repo_dir / ".minime" / "worktrees" / f"job-{legacy_run_id}"
+    wt_dir.parent.mkdir(parents=True, exist_ok=True)
+    subprocess.run(
+        ["git", "worktree", "add", "-b", f"feature-{legacy_run_id}", str(wt_dir), "HEAD"],
+        cwd=repo_dir,
+        check=True,
+        capture_output=True,
+    )
+
+    proj = Project(
+        project_id=project_id,
+        display_name="Test Project",
+        repository=str(repo_dir),
+        base_branch="main",
+    )
+    uow.projects.save(proj)
+    binding = ProjectManagedRepositoryBinding(
+        project_id=project_id,
+        canonical_repository_identity=str(repo_dir),
+        managed_repository_root=str(repo_dir),
+        worktree_parent_dir=str(wt_dir.parent),
+        is_valid=True,
+    )
+    uow.project_managed_repository_bindings.save(binding)
+
+    job = Job(
+        job_id=f"job-{legacy_run_id}",
+        project_id=project_id,
+        change_name=change_name,
+        base_sha=base_sha,
+        candidate_sha=legacy_cand_sha,
+        status=JobStatus.CHECKS_FAILED,
+        current_generation=1,
+        implementer_role="codex",
+        current_executor="codex",
+    )
+    uow.jobs.save(job)
+
+    # N01 legacy run with current_candidate_sha=None in DB
+    run = OrchestrationRun(
+        run_id=legacy_run_id,
+        project_id=project_id,
+        change_name=change_name,
+        base_sha=base_sha,
+        current_candidate_sha=None,
+        current_stage=OrchestrationStage.RUNNING_CHECKS,
+        resumable_stage=OrchestrationStage.RUNNING_CHECKS,
+        active_job_id=job.job_id,
+        is_active=False,
+        current_generation=1,
+        stop_outcome=OrchestrationStopOutcome.NEEDS_HUMAN,
+        human_gate=HumanGate.NEEDS_HUMAN,
+        stop_reason="Checks-only pipeline execution failed.",
+        stop_details={
+            "code": "CHECKS_ONLY_PIPELINE_EXCEPTION",
+            "exception_type": "PermissionError",
+            "error": "[Errno 13] Permission denied: '/tmp/minime_pycache/test'",
+        },
+    )
+    uow.orchestration_runs.save(run)
+    uow.commit()
+
+    # Preflight failure condition 1: Worktree is dirty!
+    (wt_dir / "dirty_file.txt").write_text("untracked dirt")
+
+    rec_svc = RecoveryConvergenceService(uow=uow, project_root=repo_dir)
+
+    orig_subproc_run = subprocess.run
+    # Mock git rev-parse to return the candidate SHA so it passes git HEAD check and hits dirty worktree check
+    with patch("subprocess.run") as mock_subproc:
+
+        def fake_git(cmd, *args, **kwargs):
+            from unittest.mock import MagicMock
+
+            if isinstance(cmd, list) and "rev-parse" in cmd:
+                m = MagicMock()
+                m.returncode = 0
+                m.stdout = f"{legacy_cand_sha}\n"
+                return m
+            return orig_subproc_run(cmd, *args, **kwargs)
+
+        mock_subproc.side_effect = fake_git
+        decision = rec_svc.recover_checks_only(legacy_run_id, project_root=repo_dir)
+
+    assert decision.status == RecoveryDecisionStatus.BLOCKED
+    assert "Preserved worktree is not clean" in decision.reason_code
+
+    # CRITICAL G2 ASSERTION: Verify from an independent, fresh Session that PostgreSQL is UNMUTATED!
+    independent_session = pg_session_factory()
+    try:
+        fresh_uow = PostgresPersistenceUnitOfWork(independent_session)
+        persisted_run = fresh_uow.orchestration_runs.get_by_id(legacy_run_id)
+        assert persisted_run is not None
+        assert persisted_run.current_candidate_sha is None, (
+            f"Preflight rejection MUST NOT mutate current_candidate_sha in DB! Expected None, got {persisted_run.current_candidate_sha}"
+        )
+    finally:
+        independent_session.close()
+
+    session.close()
+
+
+def test_pilot_checks_recovery_fence_loss_aborts_n01_reconciliation_and_resume(
+    pg_session_factory: sessionmaker[Session], tmp_path: Path
+):
+    """Verify that if Worker 1's claim fence is lost/superseded right before N01 candidate
+
+    reconciliation persistence or before resume, ZERO writes are committed (current_candidate_sha
+    remains None in PostgreSQL) and orchestration_service.resume is NEVER invoked.
+    """
+    session = pg_session_factory()
+    uow = PostgresPersistenceUnitOfWork(session)
+
+    project_id = "test-proj-fence-reconciliation"
+    change_name = "test-change-fence"
+    legacy_run_id = "8e7ebec8-9eff-478b-bae3-cf686ea91be2"
+    legacy_cand_sha = "2fcad0ef73eb4766ca1bb6249a081cb4070ecced"
+    base_sha = "b4012abbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+
+    # Clean up any residual data for legacy_run_id from previous tests
+    session.execute(
+        text("DELETE FROM orchestration_stage_events WHERE run_id = :r"), {"r": legacy_run_id}
+    )
+    session.execute(text("DELETE FROM orchestration_runs WHERE id = :r"), {"r": legacy_run_id})
+    session.execute(
+        text("DELETE FROM recovery_claims WHERE claim_key = :k"), {"k": f"run:{legacy_run_id}"}
+    )
+    session.execute(text("DELETE FROM jobs WHERE id LIKE :j"), {"j": f"%{legacy_run_id}%"})
+    session.commit()
+
+    # Setup git repo and worktree
+    repo_dir = tmp_path / "repo"
+    repo_dir.mkdir()
+    subprocess.run(["git", "init", "-b", "main"], cwd=repo_dir, check=True, capture_output=True)
+    subprocess.run(["git", "config", "user.name", "Tester"], cwd=repo_dir, check=True)
+    subprocess.run(["git", "config", "user.email", "tester@example.com"], cwd=repo_dir, check=True)
+    (repo_dir / "README.md").write_text("# Repo")
+    subprocess.run(["git", "add", "README.md"], cwd=repo_dir, check=True)
+    subprocess.run(
+        ["git", "commit", "-m", "Initial commit"], cwd=repo_dir, check=True, capture_output=True
+    )
+
+    wt_dir = repo_dir / ".minime" / "worktrees" / f"job-{legacy_run_id}"
+    wt_dir.parent.mkdir(parents=True, exist_ok=True)
+    subprocess.run(
+        ["git", "worktree", "add", "-b", f"feature-{legacy_run_id}", str(wt_dir), "HEAD"],
+        cwd=repo_dir,
+        check=True,
+        capture_output=True,
+    )
+
+    proj = Project(
+        project_id=project_id,
+        display_name="Test Project",
+        repository=str(repo_dir),
+        base_branch="main",
+    )
+    uow.projects.save(proj)
+    binding = ProjectManagedRepositoryBinding(
+        project_id=project_id,
+        canonical_repository_identity=str(repo_dir),
+        managed_repository_root=str(repo_dir),
+        worktree_parent_dir=str(wt_dir.parent),
+        is_valid=True,
+    )
+    uow.project_managed_repository_bindings.save(binding)
+
+    job = Job(
+        job_id=f"job-{legacy_run_id}",
+        project_id=project_id,
+        change_name=change_name,
+        base_sha=base_sha,
+        candidate_sha=legacy_cand_sha,
+        status=JobStatus.CHECKS_FAILED,
+        current_generation=1,
+        implementer_role="codex",
+        current_executor="codex",
+    )
+    uow.jobs.save(job)
+
+    # N01 legacy run with current_candidate_sha=None in DB
+    run = OrchestrationRun(
+        run_id=legacy_run_id,
+        project_id=project_id,
+        change_name=change_name,
+        base_sha=base_sha,
+        current_candidate_sha=None,
+        current_stage=OrchestrationStage.RUNNING_CHECKS,
+        resumable_stage=OrchestrationStage.RUNNING_CHECKS,
+        active_job_id=job.job_id,
+        is_active=False,
+        current_generation=1,
+        stop_outcome=OrchestrationStopOutcome.NEEDS_HUMAN,
+        human_gate=HumanGate.NEEDS_HUMAN,
+        stop_reason="Checks-only pipeline execution failed.",
+        stop_details={
+            "code": "CHECKS_ONLY_PIPELINE_EXCEPTION",
+            "exception_type": "PermissionError",
+            "error": "[Errno 13] Permission denied: '/tmp/minime_pycache/test'",
+        },
+    )
+    uow.orchestration_runs.save(run)
+
+    stop_trans_key = f"{legacy_run_id}:STOP:NEEDS_HUMAN:gen1"
+    existing_stop = uow.orchestration_stage_events.get_by_transition_key(stop_trans_key)
+    if not existing_stop:
+        stop_event_legacy = OrchestrationStageEvent(
+            run_id=legacy_run_id,
+            from_stage=OrchestrationStage.RUNNING_CHECKS,
+            to_stage=OrchestrationStage.RUNNING_CHECKS,
+            event_type=EventType.ORCHESTRATION_STOPPED.value,
+            transition_key=stop_trans_key,
+            evidence_references={"reason": "Checks-only pipeline execution failed."},
+            actor="system",
+            created_at=utc_now(),
+        )
+        uow.orchestration_stage_events.save(stop_event_legacy)
+    uow.commit()
+
+    mock_resume = MagicMock()
+    fake_orch_svc = MagicMock()
+    fake_orch_svc.resume = mock_resume
+
+    rec_svc = RecoveryConvergenceService(
+        uow=uow,
+        project_root=repo_dir,
+        owner_instance_id="worker-superseded-1",
+        orchestration_service=fake_orch_svc,
+    )
+
+    orig_subproc_run = subprocess.run
+
+    # Inject fence supersession right after preflight validation succeeds, before reconciliation save
+    orig_validate = rec_svc._validate_checks_only_eligibility
+
+    def superseding_validate(*args, **kwargs):
+        res = orig_validate(*args, **kwargs)
+        # Supersede the claim by incrementing fence_token in an independent DB session
+        sup_session = pg_session_factory()
+        sup_session.execute(
+            text(
+                "UPDATE recovery_claims SET fence_token = fence_token + 1, owner_instance_id = 'rival-worker' WHERE claim_key = :k"
+            ),
+            {"k": f"run:{legacy_run_id}"},
+        )
+        sup_session.commit()
+        sup_session.close()
+        return res
+
+    with patch.object(
+        rec_svc, "_validate_checks_only_eligibility", side_effect=superseding_validate
+    ):
+        with patch("subprocess.run") as mock_subproc:
+
+            def fake_git(cmd, *args, **kwargs):
+                from unittest.mock import MagicMock
+
+                if isinstance(cmd, list) and "rev-parse" in cmd:
+                    m = MagicMock()
+                    m.returncode = 0
+                    m.stdout = f"{legacy_cand_sha}\n"
+                    return m
+                elif isinstance(cmd, list) and "status" in cmd:
+                    m = MagicMock()
+                    m.returncode = 0
+                    m.stdout = ""
+                    return m
+                return orig_subproc_run(cmd, *args, **kwargs)
+
+            mock_subproc.side_effect = fake_git
+            decision = rec_svc.recover_checks_only(legacy_run_id, project_root=repo_dir)
+
+    # 1. Decision is BLOCKED due to STALE_CLAIM
+    assert decision.status == RecoveryDecisionStatus.BLOCKED
+    assert "STALE_CLAIM" in decision.reason_code
+
+    # 2. OrchestrationService.resume was NEVER called
+    mock_resume.assert_not_called()
+
+    # 3. CRITICAL DB ASSERTION: Verify from an independent fresh session that current_candidate_sha
+    # was NEVER mutated and remains None in PostgreSQL!
+    independent_session = pg_session_factory()
+    try:
+        fresh_uow = PostgresPersistenceUnitOfWork(independent_session)
+        persisted_run = fresh_uow.orchestration_runs.get_by_id(legacy_run_id)
+        assert persisted_run is not None
+        assert persisted_run.current_candidate_sha is None, (
+            f"Fenced supersession MUST prevent any write to current_candidate_sha! Expected None, got {persisted_run.current_candidate_sha}"
+        )
+
+        # 4. Verify rival worker's claim was NOT modified or released
+        rival_claim = fresh_uow.claims.get_by_key(f"run:{legacy_run_id}")
+        assert rival_claim is not None
+        assert rival_claim.owner_instance_id == "rival-worker"
+        assert rival_claim.released_at is None
+    finally:
+        independent_session.close()
+
     session.close()
