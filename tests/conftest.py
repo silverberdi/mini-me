@@ -2515,6 +2515,13 @@ class InMemoryRecoveryClaimRepository(RecoveryClaimRepositoryInterface):
                 action_key=action_key,
                 status=ExternalActionStatus.EXECUTING,
             )
+            # Match PostgreSQL's durable link from the action to its unique
+            # dispatch-intent attempt so in-memory fence tests exercise the
+            # same recovery evidence contract.
+            for action in uow.orchestration_external_actions._store.values():
+                if action.action_key == action_key:
+                    action.last_dispatch_intent_id = attempt.attempt_id
+                    break
         return attempt
 
     def get_by_key(self, claim_key: str) -> RecoveryClaim | None:

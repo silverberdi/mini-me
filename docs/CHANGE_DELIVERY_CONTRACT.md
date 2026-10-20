@@ -9,7 +9,8 @@
 - **mini me:** identifica proyecto y autoridad, asigna stage/ejecutor/reviewer, selecciona capacidades, prepara sandbox/worktree, controla tiempo/cuota, dispara el workflow del agente, observa evidencia, persiste intentos y avanza gates, entrega GitHub/PR y acciones determinísticas seguras.
 - **PostgreSQL:** estado/eventos/intentos/locks/cuota/evidencia durable; jamás autoridad de especificación.
 - **Git:** modificaciones, worktrees, candidatos/SHAs, historia/entrega.
-- **DeepSeek/OpenRouter:** alternativas solo cuando ambos primarios no puedan cubrir una etapa, tras autorización explícita con presupuesto y compatibilidad real de herramientas; no imponer auditoría DeepSeek rutinaria. DeepSeek API **no equivale** por sí misma a ejecutor coding-tool con invocación de skills.
+- **DeepSeek Direct:** revisor independiente de solo lectura para CONTRACT REVIEW y CODE REVIEW, en etapas y evidencias separadas, sujeto a cuenta, capacidad, compatibilidad y política de gasto del propietario verificadas. No implementa ni planifica, y sus findings no autorizan APPLY ni merge.
+- **OpenRouter:** rescate excepcional de trabajo ya iniciado únicamente cuando Codex y Antigravity estén ambos bloqueados por cuota, conforme a su propia cuenta y política de gasto; no es revisor ni inicia trabajo READY nuevo. La API DeepSeek no equivale por sí misma a un ejecutor coding-tool con invocación de skills.
 - **Qwen local:** diagnóstico/ayuda acotados y no autoritativos; no reemplaza agente SDD ni review de calidad.
 
 **Guard invariable:** mini me NO construye `proposal.md`, `design.md`, `tasks.md`, `specs/*.md` ni código como sustituto del workflow del agente. Puede crear scaffolding o verificar/registrar artefactos sin decidir su contenido. No debe reimplementar `sync`/`archive` semánticos. Solo se autoriza excepción de bootstrap/migración explícitamente aprobada en OpenSpec, documentada y reversible; sin desviaciones implícitas.

@@ -104,6 +104,18 @@ The new spec is the acceptance authority and maps FCR-01–09 to observable requ
 
 The final verification must include ordinary autonomous-flow recovery (E11), N01 history preservation, and no unintended `JobAttempt`/APPLY/check rerun. The final N01 review is a separate operational gate after implementation, merge, deployment, fresh authority/capacity/budget checks, and explicit authorization; this proposal does not grant it.
 
+## Separately gated N01 post-deployment procedure
+
+This procedure is documentation only; it is not a test fixture, deployment step, or authorization to dispatch N01.
+
+1. After a human-authorized merge and deployment, verify the deployed application SHA and service health without enabling the scheduler. Confirm the original Run/Job, candidate SHA/base SHA/generation, candidate manifest, authorship, branch/worktree ownership, historical attempts, checks, and existing review/accounting evidence remain unchanged.
+2. Perform a read-only preflight against the exact durable project/Run/Job binding. Revalidate the frozen candidate and manifest from the owned worktree, the current complete configured check batch, independent reviewer eligibility, DeepSeek Direct account/model/effort/price/capacity freshness, and the owner's standing spending policy. Treat unknown, stale, contradictory, or unresolved authority as a stop; do not rerun checks or change the candidate to repair a mismatch.
+3. Obtain a new explicit operator authorization through Control Plane, bound to the exact Run, Job, candidate/base SHA, generation, manifest, DeepSeek Direct account/model/effort, verified price snapshot, expiry, and applicable maximum. The existing CONTRACT_REVIEW authorization is not CODE_REVIEW authority.
+4. Execute at most one review-only Control Plane action with a fresh `action_request_id` under the canonical Run claim and fence. If dispatch or response is ambiguous, preserve the review checkpoint and reservation exposure and stop; do not issue another review request or fall back to another provider.
+5. Observe the durable review, usage/settlement, current status projection, and human gate. `READY_TO_MERGE` ends at review completion until a separate authorized post-review continuation is approved; `CHANGES_REQUIRED` preserves findings and requires a distinct remediation decision. Neither verdict authorizes merge, and no automated step may merge.
+
+No step above has been executed for N01 in this Change. Its operational execution remains a separate post-deployment authorization gate.
+
 ## Removal Ledger
 
 No known implementation is approved for removal at proposal time. APPLY must inventory actual consumers and prove parity before retiring any superseded branch.
@@ -115,6 +127,36 @@ No known implementation is approved for removal at proposal time. APPLY must inv
 | REMOVE (only after E2E parity) | Any weaker `any passing row` authorization predicate, duplicate check-batch predicate, or route that can funnel this exceptional review-only continuation into generic APPLY/check/audit/PR execution. Identify all callers first; remove only after stage E2E and repeat all affected regressions after removal. |
 | RETAIN WITH REASON | Ordinary autonomous review/verification pipeline; historic `CheckResult`, review, reservation, action and candidate evidence; general `execute_queued_job`; current OpenRouter rescue authorities for their separately defined role. |
 | OUT OF SCOPE | OpenSpec generation/sync/archive, provider onboarding or selector redesign, generic budget refactor, unrelated intake/lifecycle changes, broad PWA redesign, production scheduler behavior. |
+
+## Implementation authority and call-site census
+
+The implementation is constrained to these existing authorities and their callers; the inventory is verified against the approved base `5b0a8736c4efb981549f477a4e8931a96b1168ed` before changes:
+
+| Contract concern | Existing authority / call site | APPLY disposition |
+|---|---|---|
+| Action discovery, optimistic state and idempotent requests | `ControlPlaneService.get_available_actions`, `execute_action`, `_check_optimistic_concurrency`; `/control-plane` API and CLI callers | Extend descriptors/dispatch only for explicit review authorization and post-review continuation; reject generic continuation at the exceptional hold. |
+| Claim, heartbeat, fencing and recovery decisions | `RecoveryConvergenceService` and `RecoveryClaimRepository` | Reuse the `run:<id>` claim and recovery decision/checkpoint; no parallel coordinator. |
+| Frozen candidate and repository identity | `OrchestrationCandidate`, `CandidateManifest`, managed repository binding, `WorktreeManager` and `DeepSeekCodeReviewService` candidate reader | Revalidate the same Run/Job/project/change, generation, candidate/base SHA, manifest and managed worktree before dispatch and continuation. |
+| Current deterministic checks | `OrchestrationService._validate_current_checks_batch`; called by stage transition, while Control Plane currently discovers authorization from any passing row | Replace the weaker authorization/readiness consumer with the shared latest-complete batch predicate and retain historical rows. |
+| Direct review and usage | `DeepSeekCodeReviewService.review_candidate`, `DeepSeekContractReviewRunner`, provider adapter | Add an exceptional one-shot authority input and preserve ordinary autonomous calls; tests intercept HTTP and never contact a provider. |
+| Spending and durable linkage | `BudgetService.reserve_review_budget`, `BudgetReservation.authorization_id`/`idempotency_key`, `Review` authorization/reservation identity | Prove unique reservation and review linkage in one PostgreSQL transaction before I/O; do not reuse OpenRouter reservations. |
+| Dispatch ambiguity | `RecoveryConvergenceService.atomic_commit_dispatch_intent`, `ExternalActionAttempt` and unique dispatch-intent key | Reuse only if a claim-fenced review dispatch can be atomically bound to its authorization/reservation/review checkpoint; otherwise add the smallest migration-backed linkage and document rollback. |
+| Review result and downstream gates | `ExecutionPipelineService` safe post-review integrity/finalization collaborators and `COMPLEMENTARY_REVIEW` transitions | Extract/reuse only the safe finalization boundary; a separate authorized continuation resumes at the existing post-review stage and then existing audit/PR gates. |
+| Current vs historical status | Existing run/job, review, check, action and recovery read models | Add no duplicate projection; expose truthful current batch/review checkpoint using existing projection surfaces where necessary. |
+
+`tests/test_deepseek_code_review_postgres.py`, `tests/test_control_plane_service.py`, `tests/test_control_plane_api.py`, `tests/test_review_pipeline.py`, and `tests/test_scheduler_recovery_convergence_postgres.py` are the regression consumers preserved and extended. The integrated PostgreSQL/Git scenarios and focused regressions have been rerun after migration of the exceptional route.
+
+### Removal Ledger — applied disposition
+
+| Disposition | Superseded behavior / consumers | Replacement or retained reason | Post-change evidence |
+|---|---|---|---|
+| REMOVE | Control Plane discovery and authorization checks that treated any candidate-bound `exit_code == 0` row as sufficient; duplicate private latest-batch selectors in orchestration/review readiness. | All exceptional authorization/discovery, review preflight, stage validation and operational current-check projections delegate to `current_check_batch.validate_current_checks_batch`; historical rows remain queryable and immutable. | `tests/test_current_check_batch.py`; PostgreSQL/Git `test_code_review_authorization_reservation_settlement_and_idempotency_in_postgres`; dashboard/status regressions. |
+| MODIFY | Review-only and post-review routes that could enter general `execute_queued_job`/implementation flow. | One Control Plane review-only dispatcher and one distinct `CONTINUE_AFTER_CODE_REVIEW`; the latter validates the completed review and resumes only at `COMPLEMENTARY_REVIEW` under the canonical claim/fence and existing audit/PR gates. | PostgreSQL/Git integration asserts one reviewer call, one attempt, unchanged check/candidate history, separate authorization, audit gate, and local downstream PR authority; generic CONTINUE and fault tests reject unsafe paths. |
+| RETAIN-WITH-REASON | `DeepSeekCodeReviewService._read_exact_checks` fallback. | Retained only for the ordinary standing-policy path when no exceptional authorization is supplied; the exceptional path requires a non-empty configured current batch and cannot use this fallback. | `test_latest_complete_batch_rejects_new_failure_and_empty_exceptional_config`; exceptional authorization preflight tests. |
+| RETAIN-WITH-REASON | `ExecutionPipelineService` ordinary check execution, `candidate_integrity.verify_pre_audit`, `handoff_manager` pass summaries, and `RecoveryConvergenceService` checkpoint reconstruction. | These remain separate pipeline, integrity, reporting, and recovery authorities; none can authorize exceptional review from an isolated passing row. The post-review audit receives the validated current batch. | Consolidated coordinator, pipeline, status, recovery and PostgreSQL/Git regressions; `execute_post_review_audit` validates the shared current batch before audit. |
+| RETAIN-WITH-REASON | `RecoveryConvergenceService`'s canonical calls into `OrchestrationService.resume`. | Existing recovery authority remains the only general recovery entry point. The sole new Control Plane call to `resume` is inside `_execute_continue_after_code_review`, passes the acquired `claim_context`, and reuses the already-running heartbeat (`manage_heartbeat=False`). | `test_gr10_direct_entry_point_census_allows_only_fenced_post_review_resume`; Control Plane and PostgreSQL/Git continuation tests. |
+| RETAIN-WITH-REASON | Historic CheckResult, Review, BudgetReservation/ledger, CandidateManifest, JobAttempt, operator action, external-action intent, audit, and recovery rows. | Durable evidence is preserved; no delete or in-place rewriting of historical evidence is part of the replacement. | PostgreSQL integration compares the historical failed check, frozen SHA/manifest, attempt count, reservation, ledger, review, and dispatch identities before and after continuation. |
+| NONE | Schema objects. | Existing uniqueness/CAS structures express authorization linkage, reservation idempotency, and dispatch intent; no new persistence structure is required. | Disposable PostgreSQL asserts the existing migration head and unique indexes and exercises concurrent authorization and dispatch. |
 
 ## Risks / Trade-offs
 

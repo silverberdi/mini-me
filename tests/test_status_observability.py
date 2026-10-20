@@ -2,6 +2,7 @@
 
 import platform
 import sys
+from datetime import timedelta
 
 from fastapi.testclient import TestClient
 from typer.testing import CliRunner
@@ -14,6 +15,9 @@ from minime.domain.enums import (
     AuditStatus,
     ExternalActionStatus,
     ExternalActionType,
+    JobStatus,
+    OperatorActionStatus,
+    OperatorActionType,
     OrchestrationStage,
     ReadinessState,
     ReviewStatus,
@@ -25,10 +29,12 @@ from minime.domain.models import (
     CheckResult,
     Job,
     JobLog,
+    OperatorActionRecord,
     OrchestrationExternalAction,
     OrchestrationRun,
     Project,
     Review,
+    utc_now,
 )
 from minime.services.status_service import StatusService
 
@@ -256,6 +262,139 @@ def test_fastapi_job_observability_endpoints(in_memory_uow):
     assert res.status_code == 200
     assert res.json()[0]["message"] == "ok"
 
+    app.dependency_overrides.clear()
+
+
+def test_job_projection_separates_current_check_batch_from_history(in_memory_uow):
+    app.dependency_overrides[get_uow] = lambda: in_memory_uow
+    client = TestClient(app)
+    project = Project(
+        project_id="checks-projection-project",
+        display_name="Checks projection",
+        repository="org/checks-projection",
+        checks=[{"name": "pytest", "command": "pytest -q"}],
+    )
+    job = Job(
+        job_id="checks-projection-job",
+        project_id=project.project_id,
+        change_name="checks-projection-change",
+        implementer_role="codex",
+        status=JobStatus.CHECKS_PASSED,
+        candidate_sha="candidate-sha",
+    )
+    run = OrchestrationRun(
+        run_id="checks-projection-run",
+        project_id=project.project_id,
+        change_name=job.change_name,
+        base_sha="base-sha",
+        active_job_id=job.job_id,
+        current_generation=2,
+        current_candidate_sha=job.candidate_sha,
+        stop_details={"code": "CODE_REVIEW_COMPLETED_REQUIRES_SEPARATE_AUTHORIZED_CONTINUATION"},
+    )
+    now = utc_now()
+    old_failed = CheckResult(
+        job_id=job.job_id,
+        check_name="pytest",
+        command="pytest -q",
+        exit_code=1,
+        duration_ms=5,
+        output_snippet="historical failure",
+        candidate_sha=job.candidate_sha,
+        candidate_generation=2,
+        created_at=now - timedelta(minutes=1),
+    )
+    latest_passed = CheckResult(
+        job_id=job.job_id,
+        check_name="pytest",
+        command="pytest -q",
+        exit_code=0,
+        duration_ms=5,
+        output_snippet="passed",
+        candidate_sha=job.candidate_sha,
+        candidate_generation=2,
+        created_at=now,
+    )
+    review_id = "checks-projection-review"
+    authorization_id = "checks-projection-authorization"
+    review = Review(
+        review_id=review_id,
+        job_id=job.job_id,
+        project_id=project.project_id,
+        change_name=job.change_name,
+        reviewer_role="deepseek",
+        reviewer_model="deepseek-flash",
+        review_stage="CODE_REVIEW",
+        provider="deepseek",
+        account_fingerprint="account-fingerprint",
+        budget_authorization_id=authorization_id,
+        orchestration_run_id=run.run_id,
+        candidate_generation=2,
+        candidate_sha=job.candidate_sha,
+        base_sha=run.base_sha,
+        manifest_id="manifest-id",
+        manifest_hash="manifest-hash",
+        status=ReviewStatus.REVIEW_COMPLETED,
+        verdict=ReviewVerdict.READY_TO_MERGE,
+    )
+    authorization = OperatorActionRecord(
+        action_request_id=authorization_id,
+        project_id=project.project_id,
+        change_name=job.change_name,
+        run_id=run.run_id,
+        job_id=job.job_id,
+        action_type=OperatorActionType.AUTHORIZE_DEEPSEEK_CODE_REVIEW,
+        status=OperatorActionStatus.COMPLETED,
+    )
+    dispatch_key = f"deepseek-code-review:{authorization_id}"
+    dispatch = OrchestrationExternalAction(
+        run_id=run.run_id,
+        action_key=dispatch_key,
+        action_type=ExternalActionType.DEEPSEEK_CODE_REVIEW_DISPATCH,
+        target_identity="deepseek:account-fingerprint:deepseek-flash:REVIEW",
+        request_fingerprint="dispatch-fingerprint",
+        candidate_sha=job.candidate_sha,
+        generation=2,
+        status=ExternalActionStatus.COMPLETED,
+        remote_identifier=review_id,
+        last_dispatch_intent_id="durable-dispatch-intent",
+    )
+    in_memory_uow.projects.save(project)
+    in_memory_uow.jobs.save(job)
+    in_memory_uow.orchestration_runs.save(run)
+    in_memory_uow.check_results.save(old_failed)
+    in_memory_uow.check_results.save(latest_passed)
+    in_memory_uow.reviews.save(review)
+    in_memory_uow.operator_actions.save(authorization)
+    in_memory_uow.orchestration_external_actions.reserve(dispatch)
+
+    response = client.get(f"/jobs/{job.job_id}")
+    assert response.status_code == 200
+    payload = response.json()
+    assert [item["exit_code"] for item in payload["checks"]] == [1, 0]
+    assert payload["current_check_batch"] == {
+        "status": "PASSED",
+        "candidate_sha": job.candidate_sha,
+        "generation": 2,
+        "check_result_ids": [latest_passed.result_id],
+        "reason": None,
+    }
+    assert payload["code_review_checkpoint"] == {
+        "review_id": review_id,
+        "status": "REVIEW_COMPLETED",
+        "verdict": "READY_TO_MERGE",
+        "candidate_sha": job.candidate_sha,
+        "base_sha": run.base_sha,
+        "generation": 2,
+        "manifest_id": "manifest-id",
+        "manifest_hash": "manifest-hash",
+        "authorization_id": authorization_id,
+        "authorization_status": "COMPLETED",
+        "dispatch_status": "COMPLETED",
+        "dispatch_intent_present": True,
+        "dispatch_attempt_count": 0,
+        "gate_code": "CODE_REVIEW_COMPLETED_REQUIRES_SEPARATE_AUTHORIZED_CONTINUATION",
+    }
     app.dependency_overrides.clear()
 
 

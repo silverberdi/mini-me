@@ -225,6 +225,7 @@ class BudgetService:
         manifest_hash: str | None = None,
         maximum_stage_usd: Decimal | str | None = None,
         maximum_combined_usd: Decimal | str | None = None,
+        authorization_id: str | None = None,
     ) -> tuple[BudgetReservation | None, str | None]:
         """Enforce optional owner-configured DeepSeek review limits.
 
@@ -245,6 +246,7 @@ class BudgetService:
                 and existing.canonical_model_identity == model
                 and existing.stage == stage
                 and existing.billing_origin == billing_origin
+                and existing.authorization_id == authorization_id
             )
             if exact and existing.status == "RESERVED":
                 return existing, None
@@ -316,7 +318,7 @@ class BudgetService:
             account_fingerprint=account_fingerprint,
             stage=stage,
             billing_origin=billing_origin,
-            authorization_id=None,
+            authorization_id=authorization_id,
             idempotency_key=idempotency_key,
             created_at=utc_now(),
             updated_at=utc_now(),
@@ -330,7 +332,7 @@ class BudgetService:
                 operation_id=job_id,
                 payload={
                     "reservation_id": reservation.reservation_id,
-                    "authorization_id": None,
+                    "authorization_id": authorization_id,
                     "provider": provider,
                     "account_fingerprint": account_fingerprint,
                     "model": model,

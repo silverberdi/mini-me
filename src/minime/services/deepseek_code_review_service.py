@@ -5,7 +5,9 @@ from __future__ import annotations
 import hashlib
 import json
 import subprocess
+import time
 from dataclasses import dataclass
+from datetime import datetime
 from decimal import Decimal
 from pathlib import Path, PurePosixPath
 from typing import Any
@@ -19,17 +21,27 @@ from minime.config import (
     load_config,
     resolve_stage_profile,
 )
-from minime.domain.enums import ProviderHealthStatus, ReviewStatus, ReviewVerdict
+from minime.domain.enums import (
+    EventType,
+    ExternalActionStatus,
+    JobStatus,
+    ProviderHealthStatus,
+    ReviewStatus,
+    ReviewVerdict,
+)
 from minime.domain.interfaces import PersistenceUnitOfWork
 from minime.domain.models import (
     CandidateManifest,
+    Event,
     Job,
+    MetricFact,
     OrchestrationCandidate,
     OrchestrationRun,
     Project,
     Review,
     ReviewFinding,
     ReviewVerdictPayload,
+    utc_now,
 )
 from minime.logging import redact_secrets
 from minime.services.authorship_service import AuthorshipService
@@ -40,6 +52,7 @@ from minime.services.contract_review_service import (
     DeepSeekReviewResponse,
     persist_deepseek_response_diagnostic,
 )
+from minime.services.current_check_batch import validate_current_checks_batch
 from minime.services.provider_health_service import ProviderHealthService
 from minime.services.review_verdict_parser import parse_review_verdict
 
@@ -97,6 +110,9 @@ class DeepSeekCodeReviewService:
         manifest: CandidateManifest,
         candidate_worktree: str | Path,
         authorship_evidence: dict[str, Any],
+        authorization_id: str | None = None,
+        claim_context: Any | None = None,
+        dispatch_action_key: str | None = None,
     ) -> CodeReviewResult:
         sha = candidate.candidate_sha
         identity_mismatches = self._identity_mismatches(project, run, job, candidate, manifest)
@@ -111,7 +127,29 @@ class DeepSeekCodeReviewService:
             source_files, git_diff = self._read_exact_candidate(
                 candidate_worktree, candidate, manifest, change_name=job.change_name
             )
-            checks = self._read_exact_checks(job, candidate)
+            checks_valid, checks_error, current_check_batch = validate_current_checks_batch(
+                check_results=self.uow.check_results.list_by_job(job.job_id),
+                job=job,
+                run=run,
+                project=project,
+                require_configured_checks=authorization_id is not None,
+            )
+            if not checks_valid:
+                raise ValueError(checks_error or "Current configured check batch is invalid.")
+            if authorization_id is not None and not current_check_batch:
+                raise ValueError(
+                    "Exceptional code review requires a non-empty current check batch."
+                )
+            checks = [
+                {
+                    "check_name": item.check_name,
+                    "command": item.command,
+                    "exit_code": item.exit_code,
+                    "duration_ms": item.duration_ms,
+                    "output_snippet": redact_secrets(item.output_snippet),
+                }
+                for item in current_check_batch
+            ] or self._read_exact_checks(job, candidate)
         except (OSError, ValueError, subprocess.SubprocessError) as exc:
             return CodeReviewResult(
                 False, None, sha, reason=f"CODE_REVIEW_PREFLIGHT_BLOCKED:{type(exc).__name__}"
@@ -207,12 +245,92 @@ class DeepSeekCodeReviewService:
             model=profile.model,
             billing_origin="deepseek_direct",
         )
+        deepseek_config = self.app_config.providers.get("deepseek")
+        configured_budget = deepseek_config.budget if deepseek_config else {}
+        exceptional_authorization = None
+        if authorization_id is not None:
+            action = self.uow.operator_actions.get_by_request_id(authorization_id)
+            authorization = action.result_payload_json.get("authorization", {}) if action else {}
+            expected_authority = {
+                "provider": "deepseek",
+                "account_fingerprint": account,
+                "model": profile.model,
+                "effort": profile.effort,
+                "stage": "REVIEW",
+                "billing_origin": "deepseek_direct",
+                "run_id": run.run_id,
+                "job_id": job.job_id,
+                "candidate_sha": candidate.candidate_sha,
+                "base_sha": candidate.base_sha,
+                "generation": candidate.generation,
+                "manifest_id": manifest.manifest_id,
+                "manifest_hash": manifest.manifest_hash,
+                "action_request_id": authorization_id,
+            }
+            valid_authorization = bool(
+                action
+                and action.action_type.value == "AUTHORIZE_DEEPSEEK_CODE_REVIEW"
+                and action.status.value == "COMPLETED"
+                and action.project_id == project.project_id
+                and action.change_name == job.change_name
+                and action.run_id == run.run_id
+                and action.job_id == job.job_id
+                and all(
+                    authorization.get(key) == value for key, value in expected_authority.items()
+                )
+                and authorization.get("authorized_by")
+                and authorization.get("pricing_snapshot_id")
+                and authorization.get("expires_at")
+                and authorization.get("max_spend_usd")
+            )
+            try:
+                authorization_expiry = datetime.fromisoformat(str(authorization.get("expires_at")))
+                authorization_maximum = Decimal(str(authorization.get("max_spend_usd")))
+            except (TypeError, ValueError, ArithmeticError):
+                valid_authorization = False
+                authorization_expiry = None
+                authorization_maximum = Decimal("0")
+            pricing = (
+                self.uow.pricing_snapshots.get_by_id(str(authorization.get("pricing_snapshot_id")))
+                if valid_authorization
+                else None
+            )
+            configured_maximum = configured_budget.get("maximum_code_review_usd")
+            if configured_maximum is not None:
+                try:
+                    authorization_maximum = min(
+                        authorization_maximum, Decimal(str(configured_maximum))
+                    )
+                except ArithmeticError:
+                    valid_authorization = False
+            if (
+                not valid_authorization
+                or not authorization_expiry
+                or authorization_expiry.tzinfo is None
+                or authorization_expiry <= utc_now()
+                or authorization_maximum <= 0
+                or authorization.get("pricing_snapshot_id") != getattr(pricing, "snapshot_id", None)
+                or not pricing
+                or not pricing.is_verified
+                or pricing.provider != "deepseek"
+                or pricing.account_fingerprint != account
+                or pricing.canonical_model_identity != profile.model
+                or pricing.billing_origin != "deepseek_direct"
+                or not claim_context
+                or claim_context.claim_key != f"run:{run.run_id}"
+                or not dispatch_action_key
+            ):
+                return CodeReviewResult(
+                    False,
+                    None,
+                    sha,
+                    reason="CODE_REVIEW_EXCEPTIONAL_AUTHORITY_MISSING_OR_MISMATCHED",
+                )
+            exceptional_authorization = authorization
         if not pricing:
             return CodeReviewResult(
                 False, None, sha, reason="DEEPSEEK_DIRECT_PRICE_SNAPSHOT_UNAVAILABLE", waiting=True
             )
-        deepseek_config = self.app_config.providers.get("deepseek")
-        configured_budget = deepseek_config.budget if deepseek_config else {}
         request_json = json.dumps(
             {
                 "stage": "CODE_REVIEW",
@@ -271,6 +389,18 @@ class DeepSeekCodeReviewService:
                     ReviewVerdict.READY_TO_MERGE,
                     ReviewVerdict.CHANGES_REQUIRED,
                 }
+                and (
+                    authorization_id is None
+                    or prior.budget_authorization_id == authorization_id
+                    and prior.budget_reservation_id is not None
+                    and (
+                        reservation := self.uow.budget_reservations.get_by_id(
+                            prior.budget_reservation_id
+                        )
+                    )
+                    is not None
+                    and reservation.authorization_id == authorization_id
+                )
             ):
                 findings = self.uow.review_findings.list_by_review(prior.review_id)
                 payload = ReviewVerdictPayload(
@@ -288,7 +418,8 @@ class DeepSeekCodeReviewService:
                 )
                 return CodeReviewResult(True, prior.review_id, sha, payload)
             resumable_placeholder = bool(
-                prior.status == ReviewStatus.REVIEW_RUNNING
+                authorization_id is None
+                and prior.status == ReviewStatus.REVIEW_RUNNING
                 and prior.review_stage == "CODE_REVIEW"
                 and prior.project_id == project.project_id
                 and prior.job_id == job.job_id
@@ -314,6 +445,11 @@ class DeepSeekCodeReviewService:
                     in {ReviewStatus.REVIEW_PENDING, ReviewStatus.REVIEW_RUNNING},
                 )
 
+        reservation_key = _reservation_key(
+            run.run_id, job.job_id, candidate.candidate_sha, manifest.manifest_hash
+        )
+        if authorization_id:
+            reservation_key = f"{reservation_key}:{authorization_id}"
         reservation, denial = self.budget.reserve_review_budget(
             project_id=project.project_id,
             run_id=run.run_id,
@@ -327,15 +463,18 @@ class DeepSeekCodeReviewService:
             pricing_snapshot_id=pricing.snapshot_id,
             prompt_token_upper_bound=input_size,
             max_output_tokens=MAX_REVIEW_OUTPUT_TOKENS,
-            idempotency_key=_reservation_key(
-                run.run_id, job.job_id, candidate.candidate_sha, manifest.manifest_hash
-            ),
+            idempotency_key=reservation_key,
             candidate_sha=candidate.candidate_sha,
             candidate_generation=candidate.generation,
             manifest_id=manifest.manifest_id,
             manifest_hash=manifest.manifest_hash,
-            maximum_stage_usd=configured_budget.get("maximum_code_review_usd"),
+            maximum_stage_usd=(
+                str(authorization_maximum)
+                if exceptional_authorization is not None
+                else configured_budget.get("maximum_code_review_usd")
+            ),
             maximum_combined_usd=configured_budget.get("maximum_combined_review_usd"),
+            authorization_id=authorization_id,
         )
         if denial:
             return CodeReviewResult(False, None, sha, reason=denial, waiting=True)
@@ -346,7 +485,7 @@ class DeepSeekCodeReviewService:
                     "reviewer_model": profile.model,
                     "provider": "deepseek",
                     "account_fingerprint": account,
-                    "budget_authorization_id": None,
+                    "budget_authorization_id": authorization_id,
                     "budget_reservation_id": reservation.reservation_id if reservation else None,
                     "billing_origin": "deepseek_direct",
                     "status": ReviewStatus.REVIEW_RUNNING,
@@ -364,7 +503,7 @@ class DeepSeekCodeReviewService:
                 review_stage="CODE_REVIEW",
                 provider="deepseek",
                 account_fingerprint=account,
-                budget_authorization_id=None,
+                budget_authorization_id=authorization_id,
                 budget_reservation_id=reservation.reservation_id if reservation else None,
                 billing_origin="deepseek_direct",
                 orchestration_run_id=run.run_id,
@@ -379,7 +518,94 @@ class DeepSeekCodeReviewService:
             )
         )
         self.uow.reviews.save(review)
-        self.uow.commit()
+        if exceptional_authorization is not None:
+            if self.uow.claims.get_by_key(claim_context.claim_key) is None:
+                self.uow.rollback()
+                return CodeReviewResult(
+                    False, review.review_id, sha, reason="CODE_REVIEW_CLAIM_MISSING"
+                )
+            existing_action = self.uow.orchestration_external_actions.get_by_action_key(
+                dispatch_action_key
+            )
+            attempts = self.uow.external_action_attempts.list_by_action_key(dispatch_action_key)
+            if existing_action and (
+                existing_action.status.value != "RESERVED"
+                or existing_action.last_dispatch_intent_id
+                or existing_action.remote_identifier
+                or attempts
+            ):
+                self.uow.rollback()
+                return CodeReviewResult(
+                    False,
+                    review.review_id,
+                    sha,
+                    reason="CODE_REVIEW_DISPATCH_ALREADY_POSSIBLE; refusing repeat",
+                    waiting=True,
+                )
+            if not existing_action:
+                import hashlib
+
+                from minime.domain.enums import ExternalActionType
+                from minime.domain.models import OrchestrationExternalAction
+
+                action_fingerprint = hashlib.sha256(
+                    json.dumps(
+                        [
+                            run.run_id,
+                            job.job_id,
+                            candidate.candidate_sha,
+                            manifest.manifest_hash,
+                            authorization_id,
+                        ],
+                        separators=(",", ":"),
+                    ).encode()
+                ).hexdigest()
+                self.uow.orchestration_external_actions.reserve(
+                    OrchestrationExternalAction(
+                        run_id=run.run_id,
+                        action_key=dispatch_action_key,
+                        action_type=ExternalActionType.DEEPSEEK_CODE_REVIEW_DISPATCH,
+                        target_identity=f"deepseek:{account}:{profile.model}:REVIEW",
+                        request_fingerprint=action_fingerprint,
+                        candidate_sha=candidate.candidate_sha,
+                        generation=candidate.generation,
+                    )
+                )
+            try:
+                current_run = self.uow.orchestration_runs.get_by_id(run.run_id)
+                current_job = self.uow.jobs.get_by_id(job.job_id)
+                if not current_run or not current_job:
+                    raise ValueError("Review Run/Job disappeared before dispatch.")
+                current_run.is_active = True
+                current_run.stop_outcome = None
+                current_run.human_gate = None
+                current_run.stop_reason = None
+                current_run.stop_details = {"code": "CODE_REVIEW_DISPATCHING"}
+                current_job.status = JobStatus.REVIEW_RUNNING
+                self.uow.orchestration_runs.save(current_run)
+                self.uow.jobs.save(current_job)
+                # The production UOW disables autoflush. Make the reserved
+                # external action visible to the fenced repository read while
+                # keeping reservation, Review, checkpoint, and intent in this
+                # same uncommitted PostgreSQL transaction.
+                self.uow.flush()
+                self.uow.claims.commit_fenced_dispatch_intent(
+                    claim_key=claim_context.claim_key,
+                    owner_instance_id=claim_context.owner_instance_id,
+                    fence_token=claim_context.fence_token,
+                    action_key=dispatch_action_key,
+                    attempt_number=1,
+                )
+            except Exception as exc:
+                self.uow.rollback()
+                return CodeReviewResult(
+                    False,
+                    review.review_id,
+                    sha,
+                    reason=f"CODE_REVIEW_DISPATCH_FENCE_REJECTED:{type(exc).__name__}",
+                )
+        else:
+            self.uow.commit()
         # A committed RUNNING checkpoint prevents a billed request from being replayed blindly.
         if review.status == ReviewStatus.REVIEW_PENDING:
             self.uow.reviews.transition(review.review_id, ReviewStatus.REVIEW_RUNNING.value)
@@ -399,6 +625,19 @@ class DeepSeekCodeReviewService:
         ):
             if reservation:
                 self.budget.release_reservation(reservation.reservation_id, "profile_mismatch")
+            if exceptional_authorization is not None:
+                self.uow.orchestration_external_actions.update_status(
+                    dispatch_action_key,
+                    ExternalActionStatus.FAILED,
+                    error_message="Reviewer profile mismatch before provider request.",
+                )
+                attempts = self.uow.external_action_attempts.list_by_action_key(dispatch_action_key)
+                if attempts:
+                    self.uow.external_action_attempts.update_status(
+                        attempts[0].attempt_id,
+                        "FAILED",
+                        error_message="Reviewer profile mismatch before provider request.",
+                    )
             self.uow.reviews.transition(
                 review.review_id,
                 ReviewStatus.REVIEW_FAILED.value,
@@ -409,14 +648,44 @@ class DeepSeekCodeReviewService:
                 False, review.review_id, sha, reason="CODE_REVIEW_RUNNER_PROFILE_MISMATCH"
             )
         try:
+            review_started_at = time.monotonic()
             response: DeepSeekReviewResponse = await runner.review(
                 request_json, self.timeout_seconds
             )
         except Exception as exc:
+            if exceptional_authorization is not None:
+                from minime.domain.models import validate_claim_context_authoritative
+
+                try:
+                    validate_claim_context_authoritative(self.uow, claim_context, for_update=True)
+                except Exception:
+                    # A request may have reached the provider, but a superseded
+                    # owner cannot settle, finalize, or relabel its dispatch.
+                    # Leave the committed intent/checkpoint for canonical recovery.
+                    return CodeReviewResult(
+                        False,
+                        review.review_id,
+                        sha,
+                        reason="CODE_REVIEW_CLAIM_LOST_AFTER_DISPATCH",
+                        waiting=True,
+                    )
             # The request may have reached DeepSeek and been billed. Preserve the
             # running checkpoint and unresolved reservation; never replay blindly.
             if reservation:
                 self.budget.mark_unresolved(reservation.reservation_id)
+            if exceptional_authorization is not None:
+                self.uow.orchestration_external_actions.update_status(
+                    dispatch_action_key,
+                    ExternalActionStatus.AMBIGUOUS,
+                    error_message=f"Provider outcome uncertain: {type(exc).__name__}",
+                )
+                attempts = self.uow.external_action_attempts.list_by_action_key(dispatch_action_key)
+                if attempts:
+                    self.uow.external_action_attempts.update_status(
+                        attempts[0].attempt_id,
+                        "AMBIGUOUS",
+                        error_message=f"Provider outcome uncertain: {type(exc).__name__}",
+                    )
             self.uow.commit()
             return CodeReviewResult(
                 False,
@@ -424,6 +693,37 @@ class DeepSeekCodeReviewService:
                 sha,
                 reason=f"CODE_REVIEW_OUTCOME_AMBIGUOUS:{type(exc).__name__}",
             )
+        if exceptional_authorization is not None:
+            from minime.domain.models import validate_claim_context_authoritative
+
+            try:
+                validate_claim_context_authoritative(self.uow, claim_context, for_update=True)
+            except Exception:
+                # The remote result cannot be applied by a stale owner. Keep the
+                # one-shot checkpoint non-replayable for authoritative recovery.
+                return CodeReviewResult(
+                    False,
+                    review.review_id,
+                    sha,
+                    reason="CODE_REVIEW_CLAIM_LOST_AFTER_DISPATCH",
+                    waiting=True,
+                )
+        self.uow.metrics.save(
+            MetricFact(
+                metric_name="review_duration_ms",
+                project_id=project.project_id,
+                change_id=job.change_name,
+                stage="CODE_REVIEW",
+                duration_ms=max(0, int((time.monotonic() - review_started_at) * 1000)),
+                details={
+                    "job_id": job.job_id,
+                    "reviewer": "deepseek",
+                    "model": profile.model,
+                    "candidate_sha": candidate.candidate_sha,
+                    "review_id": review.review_id,
+                },
+            )
+        )
         persist_deepseek_response_diagnostic(self.uow, review, response)
         diagnostics = response.response_diagnostics
         usage_verified = bool(
@@ -480,6 +780,19 @@ class DeepSeekCodeReviewService:
             or not response.content
             or not usage_verified
         ):
+            if exceptional_authorization is not None:
+                self.uow.orchestration_external_actions.update_status(
+                    dispatch_action_key,
+                    ExternalActionStatus.FAILED,
+                    error_message="DeepSeek response failed strict identity, content, or usage validation.",
+                )
+                attempts = self.uow.external_action_attempts.list_by_action_key(dispatch_action_key)
+                if attempts:
+                    self.uow.external_action_attempts.update_status(
+                        attempts[0].attempt_id,
+                        "FAILED",
+                        error_message="DeepSeek response failed strict identity, content, or usage validation.",
+                    )
             self.uow.reviews.transition(
                 review.review_id,
                 ReviewStatus.REVIEW_FAILED.value,
@@ -497,6 +810,19 @@ class DeepSeekCodeReviewService:
         try:
             verdict = parse_review_verdict(response.content)
         except (ValueError, TypeError):
+            if exceptional_authorization is not None:
+                self.uow.orchestration_external_actions.update_status(
+                    dispatch_action_key,
+                    ExternalActionStatus.FAILED,
+                    error_message="DeepSeek response did not match the strict review schema.",
+                )
+                attempts = self.uow.external_action_attempts.list_by_action_key(dispatch_action_key)
+                if attempts:
+                    self.uow.external_action_attempts.update_status(
+                        attempts[0].attempt_id,
+                        "FAILED",
+                        error_message="DeepSeek response did not match the strict review schema.",
+                    )
             self.uow.reviews.transition(
                 review.review_id,
                 ReviewStatus.REVIEW_FAILED.value,
@@ -506,6 +832,19 @@ class DeepSeekCodeReviewService:
             return CodeReviewResult(False, review.review_id, sha, reason="CODE_REVIEW_MALFORMED")
 
         if not usage_settled:
+            if exceptional_authorization is not None:
+                self.uow.orchestration_external_actions.update_status(
+                    dispatch_action_key,
+                    ExternalActionStatus.FAILED,
+                    error_message="DeepSeek usage could not be reconciled within authority.",
+                )
+                attempts = self.uow.external_action_attempts.list_by_action_key(dispatch_action_key)
+                if attempts:
+                    self.uow.external_action_attempts.update_status(
+                        attempts[0].attempt_id,
+                        "FAILED",
+                        error_message="DeepSeek usage could not be reconciled within authority.",
+                    )
             self.uow.reviews.transition(
                 review.review_id,
                 ReviewStatus.REVIEW_FAILED.value,
@@ -530,6 +869,58 @@ class DeepSeekCodeReviewService:
                     location=item.location,
                     violated_requirement=item.violated_requirement,
                     expected_correction=item.expected_correction,
+                )
+            )
+        if exceptional_authorization is not None:
+            self.uow.reviews.transition(review.review_id, ReviewStatus.REVIEW_COMPLETED.value)
+            self.uow.orchestration_external_actions.update_status(
+                dispatch_action_key,
+                ExternalActionStatus.COMPLETED,
+                remote_identifier=review.review_id,
+                result_payload={
+                    "review_id": review.review_id,
+                    "candidate_sha": candidate.candidate_sha,
+                    "generation": candidate.generation,
+                    "manifest_hash": manifest.manifest_hash,
+                    "verdict": verdict.verdict.value,
+                    "authorization_id": authorization_id,
+                },
+            )
+            attempts = self.uow.external_action_attempts.list_by_action_key(dispatch_action_key)
+            if attempts:
+                self.uow.external_action_attempts.update_status(
+                    attempts[0].attempt_id,
+                    "COMPLETED",
+                    result_payload={
+                        "review_id": review.review_id,
+                        "candidate_sha": candidate.candidate_sha,
+                        "verdict": verdict.verdict.value,
+                    },
+                )
+            self.uow.events.save(
+                Event(
+                    event_type=EventType.CODE_REVIEW_COMPLETED,
+                    project_id=project.project_id,
+                    change_id=job.change_name,
+                    operation_id=job.job_id,
+                    payload={
+                        "run_id": run.run_id,
+                        "job_id": job.job_id,
+                        "review_id": review.review_id,
+                        "review_stage": "CODE_REVIEW",
+                        "provider": "deepseek",
+                        "model": review.reviewer_model,
+                        "account_fingerprint": review.account_fingerprint,
+                        "authorization_id": authorization_id,
+                        "reservation_id": reservation.reservation_id if reservation else None,
+                        "candidate_sha": candidate.candidate_sha,
+                        "base_sha": candidate.base_sha,
+                        "generation": candidate.generation,
+                        "manifest_id": manifest.manifest_id,
+                        "manifest_hash": manifest.manifest_hash,
+                        "verdict": verdict.verdict.value,
+                    },
+                    timestamp=utc_now(),
                 )
             )
         self.uow.commit()

@@ -31,6 +31,7 @@ from minime.domain.enums import (
     OrchestrationStopOutcome,
     ProviderHealthStatus,
     ReadinessState,
+    RecoveryDecisionStatus,
     ReviewVerdict,
     WorkItemStatus,
 )
@@ -58,6 +59,7 @@ from minime.services.authorship_service import AuthorshipService
 from minime.services.candidate_integrity import resolve_base_branch_sha
 from minime.services.candidate_remediation import CandidateRemediationService
 from minime.services.container_preview_service import ContainerPreviewService
+from minime.services.current_check_batch import validate_current_checks_batch
 from minime.services.efficiency_telemetry_service import EfficiencyTelemetryService
 from minime.services.execution_pipeline import ExecutionPipelineService
 from minime.services.lifecycle_gates import (
@@ -539,7 +541,10 @@ class OrchestrationService:
             run.stop_details = {}
             if run.active_job_id:
                 job = self.uow.jobs.get_by_id(run.active_job_id)
-                if job and (job.status in {JobStatus.NEEDS_HUMAN, JobStatus.FAILED, JobStatus.CHECKS_FAILED} or checks_only):
+                if job and (
+                    job.status in {JobStatus.NEEDS_HUMAN, JobStatus.FAILED, JobStatus.CHECKS_FAILED}
+                    or checks_only
+                ):
                     job.status = JobStatus.CHECKS_RUNNING if checks_only else JobStatus.RUNNING
                     job.continuation_decision = None
                     job.escalation_reason = None
@@ -2207,6 +2212,82 @@ class OrchestrationService:
                         )
                         break
 
+                    post_review_continuation = self._has_post_review_continuation_authority(
+                        run, claim_context
+                    )
+                    existing_audit = self.uow.audits.get_by_job_id(job.job_id)
+                    project = self.uow.projects.get_by_id(run.project_id)
+                    if (
+                        post_review_continuation
+                        and project
+                        and project.independent_audit_required
+                        and existing_audit is None
+                    ):
+                        try:
+                            job = run_coroutine_sync(
+                                self.pipeline.execute_post_review_audit(
+                                    run=run, job=job, claim_context=claim_context
+                                )
+                            )
+                            validate_claim_context_authoritative(self.uow, claim_context)
+                        except Exception as exc:
+                            logger.warning(
+                                "Post-review audit failed closed for run '%s': %s",
+                                run.run_id,
+                                redact_secrets(str(exc)),
+                            )
+                            _stop_coordinator_run(
+                                run,
+                                stop_outcome=OrchestrationStopOutcome.NEEDS_HUMAN,
+                                human_gate=HumanGate.NEEDS_HUMAN,
+                                stop_reason="Post-review audit did not complete; frozen candidate is preserved.",
+                                stop_details={
+                                    "code": "POST_REVIEW_AUDIT_FAILED",
+                                    "audit_status": (
+                                        self.uow.audits.get_by_job_id(job.job_id).status.value
+                                        if self.uow.audits.get_by_job_id(job.job_id)
+                                        else None
+                                    ),
+                                    "error_type": type(exc).__name__,
+                                },
+                            )
+                            break
+                        if job.status != JobStatus.READY_TO_MERGE:
+                            _stop_coordinator_run(
+                                run,
+                                stop_outcome=OrchestrationStopOutcome.NEEDS_HUMAN,
+                                human_gate=HumanGate.NEEDS_HUMAN,
+                                stop_reason="Post-review audit is not passing; frozen candidate is preserved.",
+                                stop_details={
+                                    "code": "POST_REVIEW_AUDIT_NOT_PASSING",
+                                    "audit_status": (
+                                        self.uow.audits.get_by_job_id(job.job_id).status.value
+                                        if self.uow.audits.get_by_job_id(job.job_id)
+                                        else None
+                                    ),
+                                },
+                            )
+                            break
+                        continue
+
+                    if post_review_continuation and existing_audit is not None:
+                        valid_existing_audit, passing_existing_audit, _ = (
+                            self._validate_audit_authority(run, job, current_cand)
+                        )
+                        if not valid_existing_audit or not passing_existing_audit:
+                            _stop_coordinator_run(
+                                run,
+                                stop_outcome=OrchestrationStopOutcome.NEEDS_HUMAN,
+                                human_gate=HumanGate.NEEDS_HUMAN,
+                                stop_reason="Existing post-review audit evidence is incomplete or non-passing; no repeat is allowed.",
+                                stop_details={
+                                    "code": "POST_REVIEW_AUDIT_EVIDENCE_REQUIRES_REMEDIATION",
+                                    "audit_id": existing_audit.audit_id,
+                                    "audit_status": existing_audit.status.value,
+                                },
+                            )
+                            break
+
                     valid, is_passing, reason = self._validate_audit_authority(
                         run, job, current_cand
                     )
@@ -2221,6 +2302,19 @@ class OrchestrationService:
                         self._advance_stage(
                             run, OrchestrationStage.PREPARING_PR, claim_context=claim_context
                         )
+                    elif post_review_continuation:
+                        _stop_coordinator_run(
+                            run,
+                            stop_outcome=OrchestrationStopOutcome.NEEDS_HUMAN,
+                            human_gate=HumanGate.NEEDS_HUMAN,
+                            stop_reason=reason or "Post-review audit authority is unavailable.",
+                            stop_details={
+                                "code": "POST_REVIEW_AUDIT_AUTHORITY_UNAVAILABLE",
+                                "candidate_sha": current_cand.candidate_sha,
+                                "generation": current_cand.generation,
+                            },
+                        )
+                        break
                     else:
                         # Audit failed or missing/invalid audit authority -> route to audit remediation
                         self._advance_stage(
@@ -2925,6 +3019,33 @@ class OrchestrationService:
         """Deterministically validate review authority against the current candidate."""
         return validate_review_authority(self.uow, run, job, cand, self.authorship_service)
 
+    def _has_post_review_continuation_authority(
+        self, run: OrchestrationRun, claim_context: RecoveryClaimContext | None
+    ) -> bool:
+        """Identify the exact durable post-review continuation without trusting request text."""
+        if not claim_context or claim_context.claim_key != f"run:{run.run_id}":
+            return False
+        decisions = self.uow.recovery_decisions.list_by_claim_key(claim_context.claim_key)
+        return any(
+            decision.planned_action == "CONTINUE_AFTER_CODE_REVIEW"
+            and decision.identity_type == "RUN"
+            and decision.identity_id == run.run_id
+            and decision.project_id == run.project_id
+            and decision.change_name == run.change_name
+            and decision.fence_token == claim_context.fence_token
+            and decision.prior_checkpoint.get("stage")
+            == OrchestrationStage.COMPLEMENTARY_REVIEW.value
+            and decision.prior_checkpoint.get("candidate_sha") == run.current_candidate_sha
+            and decision.prior_checkpoint.get("generation") == run.current_generation
+            and decision.status
+            in {
+                RecoveryDecisionStatus.EXECUTING,
+                RecoveryDecisionStatus.COMPLETED,
+                RecoveryDecisionStatus.BLOCKED,
+            }
+            for decision in decisions
+        )
+
     def _candidate_changed_paths(
         self,
         run: OrchestrationRun,
@@ -3384,89 +3505,21 @@ class OrchestrationService:
         return None
 
     def _validate_current_checks_batch(
-        self, job: Job, run: OrchestrationRun, project: Project | None
+        self,
+        job: Job,
+        run: OrchestrationRun,
+        project: Project | None,
+        *,
+        require_configured_checks: bool = False,
     ) -> tuple[bool, str | None, list[CheckResult]]:
-        """Validate that the latest execution batch for candidate/generation is complete and passed."""
-        if not project or not project.checks:
-            return True, None, []
-
-        expected_checks = [c for c in project.checks if isinstance(c, dict) and c.get("name")]
-        if not expected_checks:
-            return True, None, []
-
-        k = len(expected_checks)
-        all_results = [
-            r
-            for r in self.uow.check_results.list_by_job(job.job_id)
-            if r.candidate_sha == job.candidate_sha
-            and r.candidate_generation == run.current_generation
-        ]
-        if not all_results:
-            return False, "No deterministic check results found for current candidate.", []
-
-        if len(all_results) < k:
-            return (
-                False,
-                f"Insufficient check results for candidate: got {len(all_results)}, expected at least {k}.",
-                [],
-            )
-
-        # Sort descending by created_at (newest first)
-        sorted_results = sorted(
-            all_results, key=lambda r: (r.created_at, r.result_id), reverse=True
+        """Delegate to the shared latest-batch predicate used by review gates."""
+        return validate_current_checks_batch(
+            check_results=self.uow.check_results.list_by_job(job.job_id),
+            job=job,
+            run=run,
+            project=project,
+            require_configured_checks=require_configured_checks,
         )
-        latest_batch = sorted_results[:k]
-
-        # 1. Check names must match expected_checks 1-to-1 with no duplicates
-        expected_names = [c["name"] for c in expected_checks]
-        expected_commands = {c["name"]: str(c.get("command") or "") for c in expected_checks}
-
-        batch_names = [r.check_name for r in latest_batch]
-        if len(set(batch_names)) != k:
-            return (
-                False,
-                f"Latest checks batch has duplicate or missing check names: {batch_names}",
-                [],
-            )
-
-        if set(batch_names) != set(expected_names):
-            missing = set(expected_names) - set(batch_names)
-            unexpected = set(batch_names) - set(expected_names)
-            return (
-                False,
-                f"Latest checks batch does not match configured checks. Missing: {missing}, unexpected: {unexpected}",
-                [],
-            )
-
-        # 2. Check commands must match configured commands
-        for r in latest_batch:
-            expected_cmd = expected_commands.get(r.check_name, "")
-            if r.command != expected_cmd:
-                return (
-                    False,
-                    f"Check '{r.check_name}' command mismatch: expected '{expected_cmd}', got '{r.command}'.",
-                    [],
-                )
-
-        # 3. Check timestamp clustering: all results in batch must have run within a reasonable batch window
-        min_ts = min(r.created_at for r in latest_batch)
-        max_ts = max(r.created_at for r in latest_batch)
-        total_duration_sec = sum(r.duration_ms for r in latest_batch) / 1000.0
-        max_allowed_spread = max(60.0, total_duration_sec + 60.0)
-        spread_sec = (max_ts - min_ts).total_seconds()
-        if spread_sec > max_allowed_spread:
-            return (
-                False,
-                f"Latest checks batch timestamp spread ({spread_sec:.1f}s) exceeds allowable window ({max_allowed_spread:.1f}s).",
-                [],
-            )
-
-        # 4. All checks in the batch must have exit_code == 0
-        failed_checks = [r.check_name for r in latest_batch if r.exit_code != 0]
-        if failed_checks:
-            return False, f"Checks in latest batch failed: {failed_checks}", latest_batch
-
-        return True, None, latest_batch
 
     def _bind_current_authority_records(
         self, run: OrchestrationRun, job: Job, candidate: OrchestrationCandidate
