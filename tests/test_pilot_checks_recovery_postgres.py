@@ -1359,6 +1359,7 @@ def test_checks_runner_cache_isolation_and_ownership(tmp_path: Path):
         # Test private resolution: when custom_cache exists with current_uid
         custom_cache.mkdir(mode=0o700)
         import asyncio
+
         async def run_dummy():
             return await runner.run(
                 job_id="test-sec-job",
@@ -1366,6 +1367,7 @@ def test_checks_runner_cache_isolation_and_ownership(tmp_path: Path):
                 worktree_path=worktree,
                 candidate_sha="abc123",
             )
+
         # Should succeed without permission error
         res = asyncio.run(run_dummy())
         assert res is not None
@@ -1461,12 +1463,18 @@ def test_exception_atomically_commits_checks_failed_and_run_needs_human(
     # Mock runner to raise an environmental PermissionError simulating /tmp/minime_pycache
     with patch(
         "minime.services.checks_runner.ChecksRunner.run",
-        new=AsyncMock(side_effect=PermissionError("[Errno 13] Permission denied: '/tmp/minime_pycache/test'")),
+        new=AsyncMock(
+            side_effect=PermissionError("[Errno 13] Permission denied: '/tmp/minime_pycache/test'")
+        ),
     ):
         decision = rec_svc.recover_checks_only(run.run_id, project_root=repo_dir)
 
     assert decision is not None
-    assert decision.status in {RecoveryDecisionStatus.BLOCKED, RecoveryDecisionStatus.NO_ACTION, RecoveryDecisionStatus.COMPLETED}
+    assert decision.status in {
+        RecoveryDecisionStatus.BLOCKED,
+        RecoveryDecisionStatus.NO_ACTION,
+        RecoveryDecisionStatus.COMPLETED,
+    }
 
     # In independent session, verify Job is CHECKS_FAILED and Run is NEEDS_HUMAN
     sess2 = pg_session_factory()
@@ -1692,7 +1700,9 @@ def test_atomic_stop_fault_injection_prevents_partial_commit(
     with pytest.raises(PermissionError):
         import asyncio
 
-        asyncio.run(pipeline.run_checks_only(job_id, candidate_generation=1, claim_context=claim_context))
+        asyncio.run(
+            pipeline.run_checks_only(job_id, candidate_generation=1, claim_context=claim_context)
+        )
 
     # Read back from an INDEPENDENT PostgreSQL session:
     # Proves zero two-phase commit gap: Job is STILL CHECKS_RUNNING in the committed database!
@@ -1787,7 +1797,9 @@ def test_runner_typeerror_invoked_exactly_once(
     with pytest.raises(TypeError) as exc_info:
         import asyncio
 
-        asyncio.run(pipeline.run_checks_only(job_id, candidate_generation=1, claim_context=claim_context))
+        asyncio.run(
+            pipeline.run_checks_only(job_id, candidate_generation=1, claim_context=claim_context)
+        )
 
     assert "Unexpected NoneType" in str(exc_info.value)
     assert call_count == 1, (
@@ -1820,10 +1832,9 @@ def test_cache_confinement_trusted_path_validation_and_lifecycle(tmp_path: Path)
     # 2. Deny authorized root itself
     with pytest.raises(PermissionError) as exc_info:
         validate_secure_cache_path(Path.home())
-    assert (
-        "not an authorized dedicated minime bytecode cache path shape" in str(exc_info.value)
-        or "root directory" in str(exc_info.value)
-    )
+    assert "not an authorized dedicated minime bytecode cache path shape" in str(
+        exc_info.value
+    ) or "root directory" in str(exc_info.value)
 
     # 3. Deny private non-cache directory (e.g. ~/.ssh or ~/Documents) even if mode 0700
     noncache_dir = tmp_path / "private_noncache"
@@ -1845,7 +1856,9 @@ def test_cache_confinement_trusted_path_validation_and_lifecycle(tmp_path: Path)
         insecure_dir.mkdir(parents=True, mode=0o755)
         os.chmod(insecure_dir, 0o755)
         with pytest.raises(PermissionError) as exc_info:
-            validate_secure_cache_path(insecure_dir, expected_uid=current_uid, job_id="insecure_job")
+            validate_secure_cache_path(
+                insecure_dir, expected_uid=current_uid, job_id="insecure_job"
+            )
         assert "mode must be strictly 0700" in str(exc_info.value)
 
         # 5. Existing target directory with 0755 mode: safe_prepare_cache_dir fails closed without chmod repair
@@ -1893,7 +1906,9 @@ def test_cache_confinement_trusted_path_validation_and_lifecycle(tmp_path: Path)
 
         # 8. Deny wrong UID
         with pytest.raises(PermissionError) as exc_info:
-            validate_secure_cache_path(target_dir, expected_uid=current_uid + 999, job_id="real_job")
+            validate_secure_cache_path(
+                target_dir, expected_uid=current_uid + 999, job_id="real_job"
+            )
         assert "owned by UID" in str(exc_info.value)
 
         # 9. Valid primary cache directory succeeds
@@ -1914,15 +1929,22 @@ def test_cache_confinement_trusted_path_validation_and_lifecycle(tmp_path: Path)
 
         # 9c. Adversarial B01 shapes: reject non-compliant nesting or spoofed locations
         with pytest.raises(PermissionError) as exc_info:
-            validate_secure_cache_path(Path("/tmp/other/minime/pycache/real_job"), expected_uid=current_uid)
+            validate_secure_cache_path(
+                Path("/tmp/other/minime/pycache/real_job"), expected_uid=current_uid
+            )
         assert "not an authorized dedicated minime bytecode cache path shape" in str(exc_info.value)
 
         with pytest.raises(PermissionError) as exc_info:
-            validate_secure_cache_path(tmp_path / "other" / "minime" / "pycache" / "real_job", expected_uid=current_uid)
+            validate_secure_cache_path(
+                tmp_path / "other" / "minime" / "pycache" / "real_job", expected_uid=current_uid
+            )
         assert "not an authorized dedicated minime bytecode cache path shape" in str(exc_info.value)
 
         with pytest.raises(PermissionError) as exc_info:
-            validate_secure_cache_path(temp_dir / f"minime_cache_{current_uid}_real_job" / "nested", expected_uid=current_uid)
+            validate_secure_cache_path(
+                temp_dir / f"minime_cache_{current_uid}_real_job" / "nested",
+                expected_uid=current_uid,
+            )
         assert "not an authorized dedicated minime bytecode cache path shape" in str(exc_info.value)
 
         # 9d. Adversarial B01: World-writable ancestor lacking sticky bit (+t) must be rejected
@@ -2209,9 +2231,12 @@ def test_anti_spoofing_rejects_mismatched_candidate_and_serial_repeats(
     uow.orchestration_stage_events.save(stop_event_legacy)
     uow.commit()
 
+    orig_subproc_run = subprocess.run
     with patch("subprocess.run") as mock_subproc:
+
         def fake_git(cmd, *args, **kwargs):
             from unittest.mock import MagicMock
+
             if isinstance(cmd, list) and "rev-parse" in cmd:
                 m = MagicMock()
                 m.returncode = 0
@@ -2222,10 +2247,13 @@ def test_anti_spoofing_rejects_mismatched_candidate_and_serial_repeats(
                 m.returncode = 0
                 m.stdout = ""
                 return m
-            return subprocess.run.__wrapped__(cmd, *args, **kwargs) if hasattr(subprocess.run, "__wrapped__") else subprocess.run(cmd, *args, **kwargs)
+            return orig_subproc_run(cmd, *args, **kwargs)
 
         mock_subproc.side_effect = fake_git
-        with patch("minime.services.checks_runner.ChecksRunner.run", new=AsyncMock(return_value=ChecksRunResult(passed=True, results=[], diagnostics=[]))):
+        with patch(
+            "minime.services.checks_runner.ChecksRunner.run",
+            new=AsyncMock(return_value=ChecksRunResult(passed=True, results=[], diagnostics=[])),
+        ):
             decision_legacy = rec_svc.recover_checks_only(legacy_run_id, project_root=repo_dir)
 
     assert decision_legacy.status in {
@@ -2294,3 +2322,134 @@ def test_anti_spoofing_rejects_mismatched_candidate_and_serial_repeats(
 
     session.close()
 
+
+def test_preflight_rejection_leaves_n01_current_candidate_sha_unmutated_in_db(
+    pg_session_factory: sessionmaker[Session], tmp_path: Path
+):
+    """G2 Requirement: Preflight eligibility inspection must be strictly read-only.
+
+    If preflight validation rejects an N01 run (e.g. dirty worktree or missing stop event),
+    PostgreSQL must remain completely unmutated: run.current_candidate_sha must remain None
+    in an independent database session.
+    """
+    session = pg_session_factory()
+    uow = PostgresPersistenceUnitOfWork(session)
+
+    project_id = "test-proj-g2-preflight"
+    change_name = "test-change-g2"
+    legacy_run_id = "8e7ebec8-9eff-478b-bae3-cf686ea91be2"
+    legacy_cand_sha = "2fcad0ef73eb4766ca1bb6249a081cb4070ecced"
+    base_sha = "b4012abbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+
+    # Setup git repo and worktree
+    repo_dir = tmp_path / "repo"
+    repo_dir.mkdir()
+    subprocess.run(["git", "init", "-b", "main"], cwd=repo_dir, check=True, capture_output=True)
+    subprocess.run(["git", "config", "user.name", "Tester"], cwd=repo_dir, check=True)
+    subprocess.run(["git", "config", "user.email", "tester@example.com"], cwd=repo_dir, check=True)
+    (repo_dir / "README.md").write_text("# Repo")
+    subprocess.run(["git", "add", "README.md"], cwd=repo_dir, check=True)
+    subprocess.run(
+        ["git", "commit", "-m", "Initial commit"], cwd=repo_dir, check=True, capture_output=True
+    )
+
+    wt_dir = repo_dir / ".minime" / "worktrees" / f"job-{legacy_run_id}"
+    wt_dir.parent.mkdir(parents=True, exist_ok=True)
+    subprocess.run(
+        ["git", "worktree", "add", "-b", f"feature-{legacy_run_id}", str(wt_dir), "HEAD"],
+        cwd=repo_dir,
+        check=True,
+        capture_output=True,
+    )
+
+    proj = Project(
+        project_id=project_id,
+        display_name="Test Project",
+        repository=str(repo_dir),
+        base_branch="main",
+    )
+    uow.projects.save(proj)
+    binding = ProjectManagedRepositoryBinding(
+        project_id=project_id,
+        canonical_repository_identity=str(repo_dir),
+        managed_repository_root=str(repo_dir),
+        worktree_parent_dir=str(wt_dir.parent),
+        is_valid=True,
+    )
+    uow.project_managed_repository_bindings.save(binding)
+
+    job = Job(
+        job_id=f"job-{legacy_run_id}",
+        project_id=project_id,
+        change_name=change_name,
+        base_sha=base_sha,
+        candidate_sha=legacy_cand_sha,
+        status=JobStatus.CHECKS_FAILED,
+        current_generation=1,
+        implementer_role="codex",
+        current_executor="codex",
+    )
+    uow.jobs.save(job)
+
+    # N01 legacy run with current_candidate_sha=None in DB
+    run = OrchestrationRun(
+        run_id=legacy_run_id,
+        project_id=project_id,
+        change_name=change_name,
+        base_sha=base_sha,
+        current_candidate_sha=None,
+        current_stage=OrchestrationStage.RUNNING_CHECKS,
+        resumable_stage=OrchestrationStage.RUNNING_CHECKS,
+        active_job_id=job.job_id,
+        is_active=False,
+        current_generation=1,
+        stop_outcome=OrchestrationStopOutcome.NEEDS_HUMAN,
+        human_gate=HumanGate.NEEDS_HUMAN,
+        stop_reason="Checks-only pipeline execution failed.",
+        stop_details={
+            "code": "CHECKS_ONLY_PIPELINE_EXCEPTION",
+            "exception_type": "PermissionError",
+            "error": "[Errno 13] Permission denied: '/tmp/minime_pycache/test'",
+        },
+    )
+    uow.orchestration_runs.save(run)
+    uow.commit()
+
+    # Preflight failure condition 1: Worktree is dirty!
+    (wt_dir / "dirty_file.txt").write_text("untracked dirt")
+
+    rec_svc = RecoveryConvergenceService(uow=uow, project_root=repo_dir)
+
+    orig_subproc_run = subprocess.run
+    # Mock git rev-parse to return the candidate SHA so it passes git HEAD check and hits dirty worktree check
+    with patch("subprocess.run") as mock_subproc:
+
+        def fake_git(cmd, *args, **kwargs):
+            from unittest.mock import MagicMock
+
+            if isinstance(cmd, list) and "rev-parse" in cmd:
+                m = MagicMock()
+                m.returncode = 0
+                m.stdout = f"{legacy_cand_sha}\n"
+                return m
+            return orig_subproc_run(cmd, *args, **kwargs)
+
+        mock_subproc.side_effect = fake_git
+        decision = rec_svc.recover_checks_only(legacy_run_id, project_root=repo_dir)
+
+    assert decision.status == RecoveryDecisionStatus.BLOCKED
+    assert "Preserved worktree is not clean" in decision.reason_code
+
+    # CRITICAL G2 ASSERTION: Verify from an independent, fresh Session that PostgreSQL is UNMUTATED!
+    independent_session = pg_session_factory()
+    try:
+        fresh_uow = PostgresPersistenceUnitOfWork(independent_session)
+        persisted_run = fresh_uow.orchestration_runs.get_by_id(legacy_run_id)
+        assert persisted_run is not None
+        assert persisted_run.current_candidate_sha is None, (
+            f"Preflight rejection MUST NOT mutate current_candidate_sha in DB! Expected None, got {persisted_run.current_candidate_sha}"
+        )
+    finally:
+        independent_session.close()
+
+    session.close()

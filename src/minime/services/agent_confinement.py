@@ -186,7 +186,7 @@ def is_authorized_cache_shape(
                 name = p.name
                 prefix = f"minime_cache_{expected_uid}_"
                 if name.startswith(prefix):
-                    leaf = name[len(prefix):]
+                    leaf = name[len(prefix) :]
                     if job_id is None:
                         if leaf:
                             return True
@@ -222,49 +222,83 @@ def validate_secure_cache_path(
             f"Path '{raw_path}' is not an authorized dedicated minime bytecode cache path shape."
         )
 
-    temp_roots = [Path(tempfile.gettempdir()).resolve(), Path("/tmp").resolve()]
+    temp_roots = [
+        Path(tempfile.gettempdir()),
+        Path(tempfile.gettempdir()).resolve(),
+        Path("/tmp"),
+        Path("/tmp").resolve(),
+    ]
     home_root = Path.home().resolve()
 
-    # 2. Inspect all UNRESOLVED original ancestor components without following symlinks
-    current_walk = Path(raw_path.parts[0]) if raw_path.is_absolute() else Path.cwd()
-    for part in raw_path.parts[1:]:
-        current_walk = current_walk / part
-        try:
-            st = os.lstat(current_walk)
-        except FileNotFoundError:
-            break
-        except OSError as e:
-            raise PermissionError(f"Failed to lstat cache path component '{current_walk}': {e}") from e
+    # 2. Inspect all UNRESOLVED original ancestor components using anchored parent descriptors (dir_fd)
+    root_dir = raw_path.parts[0] if raw_path.is_absolute() else str(Path.cwd())
+    current_walk = Path(root_dir)
+    root_open_flags = os.O_RDONLY | (os.O_DIRECTORY if hasattr(os, "O_DIRECTORY") else 0)
+    open_dir_flags = os.O_RDONLY | os.O_NOFOLLOW
+    if hasattr(os, "O_DIRECTORY"):
+        open_dir_flags |= os.O_DIRECTORY
+    current_fd = os.open(root_dir, root_open_flags)
 
-        if stat.S_ISLNK(st.st_mode):
-            if (
-                platform.system().lower() == "darwin"
-                and current_walk in (Path("/var"), Path("/tmp"))
-                and os.readlink(current_walk) in ("private/var", "private/tmp", "/private/var", "/private/tmp")
-            ):
-                continue
-            raise PermissionError(f"Secure cache path component cannot be a symlink: '{current_walk}'")
-
-        try:
-            resolved_walk = current_walk.resolve()
-        except OSError:
-            resolved_walk = current_walk
-
-        mode = stat.S_IMODE(st.st_mode)
-        if (mode & 0o002 != 0) and not (st.st_mode & stat.S_ISVTX):
-            raise PermissionError(
-                f"World-writable ancestor directory '{current_walk}' lacks sticky bit (+t)."
-            )
-
-        if home_root in resolved_walk.parents or resolved_walk == home_root:
-            if st.st_uid != target_uid:
+    try:
+        for part in raw_path.parts[1:]:
+            current_walk = current_walk / part
+            try:
+                st = os.stat(part, dir_fd=current_fd, follow_symlinks=False)
+            except FileNotFoundError:
+                break
+            except OSError as e:
                 raise PermissionError(
-                    f"Secure cache ancestor '{current_walk}' owned by UID {st.st_uid}, expected {target_uid}."
-                )
-            if mode & 0o022 != 0:
+                    f"Failed to stat cache path component '{current_walk}': {e}"
+                ) from e
+
+            if stat.S_ISLNK(st.st_mode):
+                if (
+                    platform.system().lower() == "darwin"
+                    and current_walk in (Path("/var"), Path("/tmp"))
+                    and os.readlink(current_walk)
+                    in ("private/var", "private/tmp", "/private/var", "/private/tmp")
+                ):
+                    resolved_root = current_walk.resolve()
+                    next_fd = os.open(str(resolved_root), open_dir_flags)
+                    os.close(current_fd)
+                    current_fd = next_fd
+                    continue
                 raise PermissionError(
-                    f"Secure cache ancestor '{current_walk}' has insecure permissions (group or world writable)."
+                    f"Secure cache path component cannot be a symlink: '{current_walk}'"
                 )
+
+            try:
+                next_fd = os.open(part, open_dir_flags, dir_fd=current_fd)
+            except OSError as exc:
+                raise PermissionError(
+                    f"Failed to open cache path component '{current_walk}' with O_NOFOLLOW: {exc}"
+                ) from exc
+            st = os.fstat(next_fd)
+            os.close(current_fd)
+            current_fd = next_fd
+
+            try:
+                resolved_walk = current_walk.resolve()
+            except OSError:
+                resolved_walk = current_walk
+
+            mode = stat.S_IMODE(st.st_mode)
+            if (mode & 0o002 != 0) and not (st.st_mode & stat.S_ISVTX):
+                raise PermissionError(
+                    f"World-writable ancestor directory '{current_walk}' lacks sticky bit (+t)."
+                )
+
+            if home_root in resolved_walk.parents or resolved_walk == home_root:
+                if st.st_uid != target_uid:
+                    raise PermissionError(
+                        f"Secure cache ancestor '{current_walk}' owned by UID {st.st_uid}, expected {target_uid}."
+                    )
+                if mode & 0o022 != 0:
+                    raise PermissionError(
+                        f"Secure cache ancestor '{current_walk}' has insecure permissions (group or world writable)."
+                    )
+    finally:
+        os.close(current_fd)
 
     if not raw_path.exists() or not raw_path.is_dir():
         raise PermissionError(f"Secure cache path does not exist or is not a directory: {raw_path}")
@@ -318,15 +352,19 @@ def safe_prepare_cache_dir(
     expected_uid: int,
     job_id: str | None = None,
 ) -> Path:
-    """Safely validate ancestors and create missing directory components without following symlinks.
+    """Safely validate ancestors and create missing directory components using anchored parent descriptors.
 
-    Enforces:
-    - Path must match an authorized cache shape.
-    - No existing component can be a symlink.
-    - Existing components must be owned by expected_uid with secure permissions.
+    Threat model and guarantees:
+    - Path must match an authorized cache shape (<user_cache_root>/minime/pycache/<job_id> or ephemeral).
+    - Traversals use anchored parent directory file descriptors (`dir_fd`) with `O_NOFOLLOW` and `O_DIRECTORY`.
+      Each component is created or opened relative to its verified parent descriptor, eliminating intermediate
+      path component replacement races (TOCTOU) by foreign processes or unprivileged users.
+    - Any world-writable ancestor directory is verified to have the sticky bit (+t) set.
     - If the target directory already exists: must be owned by expected_uid and mode 0700. If not, fail-closed
       without modifying or repairing foreign/unsafe directories.
-    - Missing components are created component-by-component with mode 0700 and verified via fd-based operations with O_NOFOLLOW.
+    - Missing components are created component-by-component with mode 0700 via dir_fd and verified via fstat.
+    - Residual concurrency threat is strictly bounded to same-UID local attacker executing concurrent renames on
+      their own directory hierarchy, which cannot elevate privileges.
     """
     raw_path = Path(target_path)
     target_uid = expected_uid
@@ -336,97 +374,124 @@ def safe_prepare_cache_dir(
             f"Path '{raw_path}' is not an authorized dedicated minime bytecode cache path shape."
         )
 
-    current_walk = Path(raw_path.parts[0]) if raw_path.is_absolute() else Path.cwd()
     home_root = Path.home().resolve()
-
     open_dir_flags = os.O_RDONLY | os.O_NOFOLLOW
     if hasattr(os, "O_DIRECTORY"):
         open_dir_flags |= os.O_DIRECTORY
 
-    for part in raw_path.parts[1:]:
-        current_walk = current_walk / part
-        try:
-            st = os.lstat(current_walk)
-            exists = True
-        except FileNotFoundError:
-            exists = False
-        except OSError as e:
-            raise PermissionError(f"Failed to lstat cache component '{current_walk}': {e}") from e
+    root_dir = raw_path.parts[0] if raw_path.is_absolute() else str(Path.cwd())
+    current_walk = Path(root_dir)
+    root_open_flags = os.O_RDONLY | (os.O_DIRECTORY if hasattr(os, "O_DIRECTORY") else 0)
+    current_fd = os.open(root_dir, root_open_flags)
 
-        if exists:
-            if stat.S_ISLNK(st.st_mode):
-                if (
-                    platform.system().lower() == "darwin"
-                    and current_walk in (Path("/var"), Path("/tmp"))
-                    and os.readlink(current_walk) in ("private/var", "private/tmp", "/private/var", "/private/tmp")
-                ):
-                    continue
-                raise PermissionError(f"Secure cache path component cannot be a symlink: '{current_walk}'")
-            if not stat.S_ISDIR(st.st_mode):
-                raise PermissionError(f"Secure cache path component is not a directory: '{current_walk}'")
-
+    try:
+        for part in raw_path.parts[1:]:
+            current_walk = current_walk / part
             try:
-                fd = os.open(current_walk, open_dir_flags)
-            except OSError as exc:
-                raise PermissionError(f"Failed to open cache component '{current_walk}' with O_NOFOLLOW: {exc}") from exc
-            try:
-                st = os.fstat(fd)
-            finally:
-                os.close(fd)
-
-            try:
-                resolved_walk = current_walk.resolve()
-            except OSError:
-                resolved_walk = current_walk
-
-            mode = stat.S_IMODE(st.st_mode)
-            if (mode & 0o002 != 0) and not (st.st_mode & stat.S_ISVTX):
+                st = os.stat(part, dir_fd=current_fd, follow_symlinks=False)
+                exists = True
+            except FileNotFoundError:
+                exists = False
+            except OSError as e:
                 raise PermissionError(
-                    f"World-writable ancestor directory '{current_walk}' lacks sticky bit (+t)."
-                )
+                    f"Failed to stat cache component '{part}' in '{current_walk}': {e}"
+                ) from e
 
-            if home_root in resolved_walk.parents or resolved_walk == home_root:
+            if exists:
+                if stat.S_ISLNK(st.st_mode):
+                    if (
+                        platform.system().lower() == "darwin"
+                        and current_walk in (Path("/var"), Path("/tmp"))
+                        and os.readlink(current_walk)
+                        in ("private/var", "private/tmp", "/private/var", "/private/tmp")
+                    ):
+                        resolved_root = current_walk.resolve()
+                        next_fd = os.open(str(resolved_root), open_dir_flags)
+                        os.close(current_fd)
+                        current_fd = next_fd
+                        continue
+                    raise PermissionError(
+                        f"Secure cache path component cannot be a symlink: '{current_walk}'"
+                    )
+                if not stat.S_ISDIR(st.st_mode):
+                    raise PermissionError(
+                        f"Secure cache path component is not a directory: '{current_walk}'"
+                    )
+
+                try:
+                    next_fd = os.open(part, open_dir_flags, dir_fd=current_fd)
+                except OSError as exc:
+                    raise PermissionError(
+                        f"Failed to open cache component '{current_walk}' with O_NOFOLLOW: {exc}"
+                    ) from exc
+                st = os.fstat(next_fd)
+                os.close(current_fd)
+                current_fd = next_fd
+
+                try:
+                    resolved_walk = current_walk.resolve()
+                except OSError:
+                    resolved_walk = current_walk
+
+                mode = stat.S_IMODE(st.st_mode)
+                if (mode & 0o002 != 0) and not (st.st_mode & stat.S_ISVTX):
+                    raise PermissionError(
+                        f"World-writable ancestor directory '{current_walk}' lacks sticky bit (+t)."
+                    )
+
+                if home_root in resolved_walk.parents or resolved_walk == home_root:
+                    if st.st_uid != target_uid:
+                        raise PermissionError(
+                            f"Secure cache ancestor '{current_walk}' owned by UID {st.st_uid}, expected {target_uid}."
+                        )
+                    if mode & 0o022 != 0:
+                        raise PermissionError(
+                            f"Secure cache ancestor '{current_walk}' has insecure permissions."
+                        )
+
+                if current_walk == raw_path:
+                    # Existing target directory: must already have mode 0700 and correct owner.
+                    # DO NOT chmod or repair an existing unsafe target. Fail closed!
+                    if st.st_uid != target_uid:
+                        raise PermissionError(
+                            f"Existing cache directory '{current_walk}' owned by UID {st.st_uid}, expected {target_uid}."
+                        )
+                    if mode & 0o077 != 0:
+                        raise PermissionError(
+                            f"Existing cache directory '{current_walk}' mode must be strictly 0700, got {oct(mode)}."
+                        )
+            else:
+                # Component does not exist: create with mode 0700 via dir_fd
+                try:
+                    os.mkdir(part, mode=0o700, dir_fd=current_fd)
+                except OSError as exc:
+                    raise PermissionError(
+                        f"Failed to create secure cache directory '{current_walk}': {exc}"
+                    ) from exc
+
+                try:
+                    next_fd = os.open(part, open_dir_flags, dir_fd=current_fd)
+                except OSError as exc:
+                    raise PermissionError(
+                        f"Failed to open created cache directory '{current_walk}' with O_NOFOLLOW: {exc}"
+                    ) from exc
+                try:
+                    os.fchmod(next_fd, 0o700)
+                    st = os.fstat(next_fd)
+                finally:
+                    os.close(current_fd)
+                    current_fd = next_fd
+
+                if stat.S_ISLNK(st.st_mode) or not stat.S_ISDIR(st.st_mode):
+                    raise PermissionError(
+                        f"Created cache component is not a directory: '{current_walk}'"
+                    )
                 if st.st_uid != target_uid:
                     raise PermissionError(
-                        f"Secure cache ancestor '{current_walk}' owned by UID {st.st_uid}, expected {target_uid}."
+                        f"Created cache component owned by wrong UID: {st.st_uid}"
                     )
-                if mode & 0o022 != 0:
-                    raise PermissionError(
-                        f"Secure cache ancestor '{current_walk}' has insecure permissions."
-                    )
-
-            if current_walk == raw_path:
-                # Existing target directory: must already have mode 0700 and correct owner.
-                # DO NOT chmod or repair an existing unsafe target. Fail closed!
-                if st.st_uid != target_uid:
-                    raise PermissionError(
-                        f"Existing cache directory '{current_walk}' owned by UID {st.st_uid}, expected {target_uid}."
-                    )
-                if mode & 0o077 != 0:
-                    raise PermissionError(
-                        f"Existing cache directory '{current_walk}' mode must be strictly 0700, got {oct(mode)}."
-                    )
-        else:
-            # Component does not exist: create with mode 0700
-            try:
-                os.mkdir(current_walk, mode=0o700)
-            except OSError as exc:
-                raise PermissionError(f"Failed to create secure cache directory '{current_walk}': {exc}") from exc
-
-            try:
-                fd = os.open(current_walk, open_dir_flags)
-            except OSError as exc:
-                raise PermissionError(f"Failed to open created cache directory '{current_walk}' with O_NOFOLLOW: {exc}") from exc
-            try:
-                os.fchmod(fd, 0o700)
-                st = os.fstat(fd)
-            finally:
-                os.close(fd)
-
-            if stat.S_ISLNK(st.st_mode) or not stat.S_ISDIR(st.st_mode):
-                raise PermissionError(f"Created cache component is not a directory: '{current_walk}'")
-            if st.st_uid != target_uid:
-                raise PermissionError(f"Created cache component owned by wrong UID: {st.st_uid}")
+    finally:
+        os.close(current_fd)
 
     return validate_secure_cache_path(raw_path, expected_uid=target_uid, job_id=job_id)
 

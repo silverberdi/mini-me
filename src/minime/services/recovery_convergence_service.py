@@ -648,20 +648,28 @@ class RecoveryConvergenceService:
 
     def _validate_checks_only_eligibility(
         self, run: OrchestrationRun, job: Job, worktree_path: Path
-    ) -> None:
-        """Validate authoritative durable tuple, managed binding, and runner environmental fault before checks-only bypass."""
+    ) -> str | None:
+        """Validate authoritative durable tuple, managed binding, and runner environmental fault before checks-only bypass.
+
+        This method is strictly READ-ONLY: it performs no mutations on run or job and executes no saves.
+        Returns reconciled_candidate_sha if the run requires narrow historical reconciliation, or None.
+        """
         from minime.services.workspace_guard import is_binding_fully_valid
 
         if not run.is_active:
             # Allow inactive runs if stopped with NEEDS_HUMAN from an interrupted checks-only execution
             is_valid_interrupted_run = (
-                run.current_stage in {OrchestrationStage.IMPLEMENTING, OrchestrationStage.RUNNING_CHECKS}
+                run.current_stage
+                in {OrchestrationStage.IMPLEMENTING, OrchestrationStage.RUNNING_CHECKS}
                 and run.stop_outcome == OrchestrationStopOutcome.NEEDS_HUMAN
                 and run.human_gate == HumanGate.NEEDS_HUMAN
             )
             if not is_valid_interrupted_run:
                 raise ValueError("Run is not active.")
-        if run.current_stage not in {OrchestrationStage.IMPLEMENTING, OrchestrationStage.RUNNING_CHECKS}:
+        if run.current_stage not in {
+            OrchestrationStage.IMPLEMENTING,
+            OrchestrationStage.RUNNING_CHECKS,
+        }:
             raise ValueError(
                 f"Run current_stage is '{run.current_stage.value}', expected IMPLEMENTING or RUNNING_CHECKS."
             )
@@ -692,20 +700,23 @@ class RecoveryConvergenceService:
             )
         if not job.candidate_sha:
             raise ValueError("Job has no authoritative candidate_sha.")
-        if not run.current_candidate_sha:
+
+        reconciled_candidate_sha: str | None = None
+        effective_candidate_sha = run.current_candidate_sha
+        if not effective_candidate_sha:
             if (
                 run.run_id == "8e7ebec8-9eff-478b-bae3-cf686ea91be2"
                 and job.candidate_sha == "2fcad0ef73eb4766ca1bb6249a081cb4070ecced"
             ):
-                # Durably reconcile run.current_candidate_sha to candidate_sha for historical N01 pilot run
-                run.current_candidate_sha = job.candidate_sha
-                if hasattr(self.uow, "orchestration_runs"):
-                    self.uow.orchestration_runs.save(run)
+                # Narrow historical N01 pilot reconciliation candidate: strictly read-only during preflight!
+                # Mutation is applied only under claim fence after all preflight checks pass.
+                reconciled_candidate_sha = job.candidate_sha
+                effective_candidate_sha = job.candidate_sha
             else:
                 raise ValueError("Run has no authoritative current_candidate_sha.")
-        if run.current_candidate_sha != job.candidate_sha:
+        if effective_candidate_sha != job.candidate_sha:
             raise ValueError(
-                f"Run current_candidate_sha '{run.current_candidate_sha}' does not match job candidate_sha '{job.candidate_sha}'."
+                f"Run current_candidate_sha '{effective_candidate_sha}' does not match job candidate_sha '{job.candidate_sha}'."
             )
 
         # Validate durable managed repository binding
@@ -808,10 +819,12 @@ class RecoveryConvergenceService:
                 f"Stop details generation '{stop_gen}' does not match run current_generation '{run.current_generation}'."
             )
 
-        is_precheck_failure = (
-            stop_details.get("code") == "CHECKS_ONLY_PIPELINE_EXCEPTION"
-            and stop_details.get("exception_type") in {"PermissionError", "AgentConfinementError"}
-        )
+        is_precheck_failure = stop_details.get(
+            "code"
+        ) == "CHECKS_ONLY_PIPELINE_EXCEPTION" and stop_details.get("exception_type") in {
+            "PermissionError",
+            "AgentConfinementError",
+        }
 
         cand_all_ts = [d.created_at for d in cand_diags if getattr(d, "created_at", None)] + [
             cr.created_at for cr in cand_crs if getattr(cr, "created_at", None)
@@ -906,14 +919,18 @@ class RecoveryConvergenceService:
 
                 err_text = str(stop_details.get("error") or "").lower()
                 if not (
-                    ("permissionerror" in err_text or "[errno 13]" in err_text or "permission denied" in err_text)
+                    (
+                        "permissionerror" in err_text
+                        or "[errno 13]" in err_text
+                        or "permission denied" in err_text
+                    )
                     or "confinement" in err_text
                     or ("minime_pycache" in err_text or "minime_cache" in err_text)
                 ):
                     raise ValueError(
                         f"Pre-check pipeline failure is not a recognized runner environmental fault: {err_text}"
                     )
-                return
+                return reconciled_candidate_sha
             raise ValueError("No check results or evidence diagnostics found for candidate.")
 
         latest_ts = max(cand_all_ts)
@@ -965,7 +982,10 @@ class RecoveryConvergenceService:
         def _is_environmental_proven(text: str) -> bool:
             t = text.lower()
             return (
-                (("/dev/null" in t) and ("permissionerror" in t or "[errno 13]" in t or "permission denied" in t))
+                (
+                    ("/dev/null" in t)
+                    and ("permissionerror" in t or "[errno 13]" in t or "permission denied" in t)
+                )
                 or ("confinement preflight" in t or "runner environmental fault" in t)
                 or ("minime_pycache" in t or "minime_cache" in t)
             )
@@ -1010,10 +1030,15 @@ class RecoveryConvergenceService:
             if _is_environmental_proven(err_text):
                 has_proven_precheck = True
 
-        if not (has_proven_pipeline_env_diag or has_proven_precheck or (all_failed_crs_env and has_proven_cr_env)):
+        if not (
+            has_proven_pipeline_env_diag
+            or has_proven_precheck
+            or (all_failed_crs_env and has_proven_cr_env)
+        ):
             raise ValueError(
                 "Prior check failure does not substantiate a proven runner environmental fault (/dev/null, minime_pycache, or confinement preflight error) in latest execution."
             )
+        return reconciled_candidate_sha
 
     def recover_checks_only(
         self,
@@ -1106,9 +1131,11 @@ class RecoveryConvergenceService:
             self.release_claim(context)
             return decision
 
-        # Preflight verification
+        # Preflight verification (strictly read-only)
         try:
-            self._validate_checks_only_eligibility(run, job, worktree_path)
+            reconciled_candidate_sha = self._validate_checks_only_eligibility(
+                run, job, worktree_path
+            )
         except Exception as preflight_err:
             logger.warning(
                 "Preflight checks-only eligibility rejected for run '%s': %s",
@@ -1154,6 +1181,16 @@ class RecoveryConvergenceService:
 
         try:
             with heartbeat:
+                # If narrow historical reconciliation is required, durably persist it under active claim fence
+                if (
+                    reconciled_candidate_sha
+                    and run.current_candidate_sha != reconciled_candidate_sha
+                ):
+                    run.current_candidate_sha = reconciled_candidate_sha
+                    if hasattr(self.uow, "orchestration_runs"):
+                        self.uow.orchestration_runs.save(run)
+                        self.uow.commit()
+
                 orchestration_svc.resume(
                     run_id=run.run_id,
                     project_root=root,
