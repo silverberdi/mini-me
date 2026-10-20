@@ -58,7 +58,11 @@ Before billable HTTP, validate the durable `AUTHORIZE_DEEPSEEK_CODE_REVIEW` reco
 
 After fenced preflight and durable one-shot consumption, invoke the existing DeepSeek reviewer once. It must receive a read-only, candidate-bound payload and must not write to the repository. Use the existing structured-verdict and usage/settlement handling. Reuse/extract only safe finalization primitives from `ExecutionPipelineService`: post-review integrity validation, fence validation, result persistence, review status transition, and event/metrics recording. Final state is a durable `REVIEW_COMPLETED` (or explicit failure/ambiguous status) for the same SHA/base/generation/manifest, with verified cost or unresolved exposure as the existing accounting policy requires.
 
-Do not invoke the general execution pipeline, APPLY, checks, audit, PR creation, or merge. In the exceptional N01 path, after recording either `READY_TO_MERGE` or `CHANGES_REQUIRED`, preserve the frozen candidate and stop for the separately authorized human decision. For ordinary Runs, preserve the canonical autonomous next stage/remediation behavior; do not add a per-review human approval.
+The review-only operation ends at that durable review result; it never itself continues to audit, PR, APPLY, checks, or merge. A later continuation is a separate, explicitly authorized Control Plane action with a fresh `action_request_id`, optimistic preconditions and the same canonical Run claim/fence authority. It must validate the completed review and all frozen-candidate identity (Run, Job, project/change, candidate/base SHA, generation, manifest id/hash, review id/verdict/provider/account/independence) again, then resume at `COMPLEMENTARY_REVIEW` or the existing equivalent post-review checkpoint. It must never route through `IMPLEMENTING`, re-run checks, or call DeepSeek again for a review already durably completed. A stale or missing review, contradictory identity, absent authorization, concurrent owner, or lost fence blocks before mutation.
+
+For N01's exceptional pilot, the separate continuation is available only for a valid `READY_TO_MERGE` review and an explicit new operator action; a favorable reviewer verdict is not that action. It resumes through the existing normal downstream audit and PR preparation/publishing gates, each under its established authority. It does not authorize merge, which remains human. `CHANGES_REQUIRED` does not take this continuation: preserve findings and the frozen candidate and require a separate, explicitly authorized remediation decision under existing candidate-remediation rules. Never alter the frozen candidate in place. For ordinary Runs, preserve the canonical autonomous next-stage/remediation behavior; do not add a per-review human approval.
+
+**Alternative rejected:** interpreting reviewer `READY_TO_MERGE` as automatic permission to prepare/publish a PR, skip audit, or merge. Also rejected: generic `CONTINUE` without a review-completed checkpoint selector, because it can reset the Run to `IMPLEMENTING` and repeat work.
 
 ### 5. Treat dispatch uncertainty as ambiguity, not retry permission
 
@@ -85,14 +89,18 @@ Control Plane (one review-only action/continuation)
   -> DeepSeekCodeReviewService.review_candidate (DeepSeek Direct, read-only)
   -> reconcile authentic usage/cost; validate post-review candidate integrity under fence
   -> persist verdict/findings + REVIEW_COMPLETED + durable events
-  -> N01: stop at human gate | ordinary Run: existing autonomous next-stage policy
+  -> stop at durable review-completed gate
+  -> separate explicitly authorized Control Plane CONTINUE + fresh claim/fence + exact review/candidate validation
+       -> READY_TO_MERGE: resume COMPLEMENTARY_REVIEW/equivalent -> existing audit -> PR policy gates -> human merge
+       -> CHANGES_REQUIRED: preserve evidence; require separate authorized remediation decision
+       -> never repeat APPLY/checks/CODE_REVIEW for this completed review
 ```
 
 Every stage checks exact Run/Job/project/change, candidate/base SHA, generation, manifest id/hash, provider/account/model/effort, claim owner/fence, action id, reservation id, and expected stage. No action may resolve repository identity from caller-supplied prose.
 
 ## Verification and Traceability
 
-The new spec is the acceptance authority and maps FCR-01–09 to observable requirements and E01–12 to PostgreSQL+Git, intercepted provider, API/status, lifecycle, adversarial and explicitly gated post-deployment scenarios. Tests must use disposable PostgreSQL and real Git/worktrees for state/identity/fencing; intercept the DeepSeek HTTP boundary for deterministic unit/integration cases. A mocked HTTP review is never reported as paid/provider E2E. E12 requires a separate human authorization and is not part of propose or routine CI.
+The new spec is the acceptance authority and maps FCR-01–09 to observable requirements and E01–12 to PostgreSQL+Git, intercepted provider, API/status, lifecycle, adversarial and explicitly gated post-deployment scenarios. Tests must use disposable PostgreSQL and real Git/worktrees for state/identity/fencing; intercept the DeepSeek HTTP boundary for deterministic unit/integration cases. A mocked HTTP review is never reported as paid/provider E2E. E12 requires a separate human authorization and is not part of propose or routine CI. E07/E08/E10/E11 additionally prove the separate post-review continuation: READY_TO_MERGE proceeds only after a new governed action, CHANGES_REQUIRED waits for a distinct remediation authority, generic CONTINUE cannot re-enter implementation, and ordinary Runs retain autonomous continuation.
 
 The final verification must include ordinary autonomous-flow recovery (E11), N01 history preservation, and no unintended `JobAttempt`/APPLY/check rerun. The final N01 review is a separate operational gate after implementation, merge, deployment, fresh authority/capacity/budget checks, and explicit authorization; this proposal does not grant it.
 
@@ -114,6 +122,7 @@ No known implementation is approved for removal at proposal time. APPLY must inv
 - [Historical passing row masks incomplete current batch] → Shared latest-complete-batch validator and adversarial tests for duplicates, missing names, wrong command, timestamp spread, SHA/generation mismatch and newer failure.
 - [One-shot permission is consumed but reservation/review is not linked] → PostgreSQL atomic transaction and uniqueness/CAS tests; do not claim support if current repositories cannot atomically express it.
 - [Review finalizer accidentally advances general pipeline] → Isolated review-only finalization contract and E2E asserting zero APPLY/check/audit/PR side effects.
+- [Post-review continuation repeats paid work or bypasses downstream gates] → Separate action request and claim/fence, exact completed-review revalidation, resume from the post-review checkpoint only, and tests asserting zero repeated CODE_REVIEW/APPLY/checks and no audit/PR/merge bypass.
 - [Canonical provider policy diverges from OpenSpec instructions] → Minimal scoped wording reconciliation; `CANONICAL_DECISIONS.md` remains higher precedence.
 - [Stored candidate authorship or manifest differs from physical worktree] → Verify exact live candidate/manifest/worktree identity at execution; the proposal's read-only DB observations are not a substitute.
 

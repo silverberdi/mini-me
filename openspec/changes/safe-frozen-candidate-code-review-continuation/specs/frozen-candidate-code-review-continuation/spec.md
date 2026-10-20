@@ -28,7 +28,7 @@ The system SHALL provide a single canonical, claim-fenced Control Plane path to 
 
 #### Scenario: Review approval remains a human gate
 - **WHEN** DeepSeek returns READY_TO_MERGE for the exceptional pilot continuation
-- **THEN** the review is durably completed and the candidate is preserved at the designated human gate without audit, PR, merge, or further execution side effects
+- **THEN** the review-only operation durably completes and preserves the candidate at the designated gate without audit, PR, merge, or further execution side effects
 
 #### Scenario: Review requests changes
 - **WHEN** DeepSeek returns CHANGES_REQUIRED for the exceptional pilot continuation
@@ -37,6 +37,10 @@ The system SHALL provide a single canonical, claim-fenced Control Plane path to 
 #### Scenario: Ordinary autonomous Run retains its policy
 - **WHEN** a non-exceptional Run reaches its normal independent-review stage under the owner's standing policy
 - **THEN** it follows the existing autonomous continuation/remediation policy without a new per-call human authorization
+
+#### Scenario: Reviewer is not independent of candidate authorship
+- **WHEN** the selected review authority resolves to a reviewer identity/model that authored the candidate or otherwise fails the existing reviewer-independence policy
+- **THEN** review authorization and dispatch are denied without substituting another provider and without invoking a model
 
 ### Requirement: One-shot review authority and direct-provider accounting
 The system SHALL distinguish durable authorization from execution. Before any billed request on the exceptional path, it SHALL verify a current one-shot `AUTHORIZE_DEEPSEEK_CODE_REVIEW` authority bound to the same Run, Job, project/change, candidate/base SHA, generation, manifest id/hash, direct DeepSeek account, model/effort, verified price snapshot, expiry, and maximum spend. It SHALL link the authorization to one durable reservation and review checkpoint before dispatch, enforce the authorized bound and configured owner policy, and record only authentic provider usage/cost or explicit unresolved exposure. It SHALL NOT reuse OpenRouter authority, route a DeepSeek key through OpenRouter, substitute a reviewer/provider/model, or infer approval from a capacity or balance observation.
@@ -90,23 +94,59 @@ The system SHALL preserve the N01 Run, Job, candidate, manifest, authorship, wor
 - **WHEN** the implementation is deployed but a separate explicit N01 review authorization has not been granted
 - **THEN** no N01 review call is made and the work remains at its durable human/review gate
 
+### Requirement: Governed continuation after completed CODE_REVIEW
+The system SHALL treat continuation after `REVIEW_COMPLETED` as a distinct Control Plane action from review dispatch, requiring a fresh action request identity and explicit authorization for the exceptional held Run. Before any state mutation, it SHALL revalidate the exact Run, Job, project/change, candidate/base SHA, generation, manifest id/hash, durable completed review, reviewer independence, verdict, and current claim/fence. For a valid `READY_TO_MERGE` verdict it SHALL resume from `COMPLEMENTARY_REVIEW` or the established equivalent post-review checkpoint and continue only through existing audit and PR authorities. It SHALL NOT re-enter `IMPLEMENTING`, rerun deterministic checks, repeat CODE_REVIEW, bypass audit/PR policies, or authorize merge. A `CHANGES_REQUIRED` verdict SHALL preserve findings and candidate and require a separate authorized remediation decision; it SHALL NOT proceed through the READY_TO_MERGE continuation.
+
+#### Scenario: Authorized continuation after valid READY_TO_MERGE
+- **WHEN** a new explicitly authorized Control Plane continuation names the exact completed independent review and the matching frozen candidate, all optimistic preconditions match, and the current Run claim/fence is valid
+- **THEN** the Run resumes at `COMPLEMENTARY_REVIEW` or its established equivalent, preserves review/check/candidate evidence, and enters only the existing downstream audit and PR gates
+
+#### Scenario: Continuation lacks a separate authorization
+- **WHEN** an operator or generic CONTINUE request follows `REVIEW_COMPLETED` without the distinct required authorization and fresh request identity
+- **THEN** the request is rejected before changing Run, Job, candidate, review, check, or attempt state
+
+#### Scenario: Completed review is invalid or candidate identity is stale
+- **WHEN** the review is absent, incomplete, non-independent, contradicted, or bound to a different Run, Job, verdict, SHA/base SHA, generation, or manifest
+- **THEN** continuation is blocked before mutation or downstream work
+
+#### Scenario: Claim/fence is lost before continuation
+- **WHEN** another live owner holds the Run claim or the continuation's claim/fence is absent, expired, or superseded
+- **THEN** no stage transition, implementation, checks, repeat review, audit, or PR action is performed
+
+#### Scenario: Generic CONTINUE cannot repeat billable or implementation work
+- **WHEN** generic CONTINUE is issued after a completed CODE_REVIEW or from the review-authorization hold
+- **THEN** it cannot return the Run to `IMPLEMENTING`, rerun checks, or invoke DeepSeek again; the original frozen candidate and all historical evidence remain unchanged
+
+#### Scenario: CHANGES_REQUIRED requires a separate remediation decision
+- **WHEN** the completed review verdict is `CHANGES_REQUIRED`
+- **THEN** findings and frozen candidate are preserved and the READY_TO_MERGE continuation is denied until a separate authorized remediation decision is recorded
+
+#### Scenario: READY_TO_MERGE does not authorize PR or merge
+- **WHEN** a valid reviewer verdict is `READY_TO_MERGE` but downstream audit or PR preparation/publication authority is absent, or human merge has not occurred
+- **THEN** the system does not skip the existing audit/PR gates and does not merge; reviewer acceptance alone is not PR or merge authority
+
+#### Scenario: Ordinary autonomous continuation is unchanged
+- **WHEN** an ordinary Run uses its standing autonomous review policy and has not entered the exceptional held-run protocol
+- **THEN** it continues under existing autonomous policy without requiring a new human approval for every review or continuation
+
 ## Traceability
 
 | Contract item | Requirement / scenario |
 |---|---|
 | FCR-01, FCR-03, FCR-04 | Exact frozen-candidate review readiness; first and second scenarios |
 | FCR-02 | Review-only continuation preserves execution boundaries; first through third scenarios |
-| FCR-05 | One-shot review authority and direct-provider accounting; second requirement scenarios |
+| FCR-05 | One-shot review authority and direct-provider accounting; second requirement scenarios; non-independent reviewer denial |
 | FCR-06 | One-shot review authority and direct-provider accounting; first and third scenarios; honest review state |
 | FCR-07 | Fenced at-most-one dispatch and safe recovery |
 | FCR-08 | Honest review and check state with preserved history |
-| FCR-09 | Review-only boundary and pilot preservation |
+| FCR-09 | Review-only boundary, pilot preservation, and Governed continuation after completed CODE_REVIEW |
 | E01, E03 | Latest full passing batch after historical failure; successful review and historical projection |
-| E02, E09 | Missing/mismatched authorization and provider identity rejected before call |
+| E02, E09 | Missing/mismatched authorization, provider identity, or reviewer independence rejected before call |
 | E04 | Partial, failed, stale, or malformed latest batch blocked |
 | E05 | Candidate/binding/worktree identity contradiction blocked |
 | E06 | Claim loss, concurrency, crash, timeout, and uncertain dispatch recovery |
-| E07, E08 | Pilot stop after either valid verdict |
-| E10 | Generic CONTINUE denied before lifecycle mutation |
-| E11 | Ordinary autonomous review flow preserved |
+| E07 | Durable READY_TO_MERGE, followed only by separate authorization and existing downstream audit/PR gates; never automatic PR/merge |
+| E08 | CHANGES_REQUIRED preserves findings and candidate, awaiting distinct remediation authority |
+| E10 | Generic CONTINUE cannot mutate review holds, repeat checks/review, or re-enter implementation |
+| E11 | Ordinary autonomous review/continuation policy preserved without per-call human approval |
 | E12 | Separate post-deployment authorization required; never run in this Change's proposal or tests |
