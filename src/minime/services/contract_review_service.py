@@ -272,6 +272,7 @@ class DeepSeekContractReviewRunner:
         model: str = "deepseek-chat",
         effort: str = "low",
         review_stage: str = "CONTRACT_REVIEW",
+        max_output_tokens: int = CONTRACT_REVIEW_MAX_OUTPUT_TOKENS,
         client: httpx.AsyncClient | None = None,
     ):
         self.api_key = api_key if api_key is not None else os.getenv("DEEPSEEK_API_KEY")
@@ -280,7 +281,15 @@ class DeepSeekContractReviewRunner:
         self.effort = effort
         if review_stage not in {"CONTRACT_REVIEW", "CODE_REVIEW"}:
             raise ValueError("Unsupported DeepSeek review stage.")
+        if (
+            isinstance(max_output_tokens, bool)
+            or not isinstance(max_output_tokens, int)
+            or max_output_tokens <= 0
+            or max_output_tokens > CONTRACT_REVIEW_MAX_OUTPUT_TOKENS
+        ):
+            raise ValueError("DeepSeek review output-token bound is invalid.")
         self.review_stage = review_stage
+        self.max_output_tokens = max_output_tokens
         self.client = client
 
     async def review(self, contract_json: str, timeout_seconds: int) -> DeepSeekReviewResponse:
@@ -299,7 +308,7 @@ class DeepSeekContractReviewRunner:
                 {"role": "user", "content": contract_json},
             ],
             "temperature": 0,
-            "max_tokens": CONTRACT_REVIEW_MAX_OUTPUT_TOKENS,
+            "max_tokens": self.max_output_tokens,
             "response_format": {"type": "json_object"},
         }
         client = self.client or httpx.AsyncClient(timeout=timeout_seconds)
@@ -442,6 +451,23 @@ class DeepSeekContractReviewRunner:
             '{"verdict":"' + verdicts.split(" or ")[0] + '","summary":"Review summary",'
             '"findings":[]}.'
         )
+
+    def input_token_upper_bound(self, user_content: str) -> int:
+        """Conservative token bound for the exact messages sent to the provider.
+
+        A UTF-8 byte cannot encode more than one tokenizer token, so counting
+        both the fixed system prompt and user content bytes safely bounds the
+        complete request without relying on an unavailable provider tokenizer.
+        """
+        if not isinstance(user_content, str):
+            raise TypeError("DeepSeek review input must be text.")
+        return len(self._system_prompt().encode("utf-8")) + len(user_content.encode("utf-8"))
+
+    @staticmethod
+    def input_token_upper_bound_for(review_stage: str, user_content: str) -> int:
+        """Calculate the same conservative bound without constructing an HTTP client."""
+        runner = DeepSeekContractReviewRunner(api_key="", review_stage=review_stage)
+        return runner.input_token_upper_bound(user_content)
 
 
 class ContractReviewService:

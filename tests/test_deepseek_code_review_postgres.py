@@ -61,7 +61,10 @@ from minime.services.contract_review_service import (
     DeepSeekContractReviewRunner,
 )
 from minime.services.deepseek_auditor_runner import AuditorResult
-from minime.services.deepseek_code_review_service import DeepSeekCodeReviewService
+from minime.services.deepseek_code_review_service import (
+    MAX_REVIEW_OUTPUT_TOKENS,
+    DeepSeekCodeReviewService,
+)
 from minime.services.execution_pipeline import ExecutionPipelineService
 from minime.services.orchestration_service import OrchestrationService
 from minime.services.provider_health_service import ProviderHealthService
@@ -367,6 +370,7 @@ def test_code_review_authorization_reservation_settlement_and_idempotency_in_pos
             payload = json.loads(request.content)
             assert payload["model"] == "deepseek-flash"
             assert payload["reasoning_effort"] == "low"
+            assert payload["max_tokens"] == MAX_REVIEW_OUTPUT_TOKENS == 4096
             assert payload["response_format"] == {"type": "json_object"}
             assert any(
                 message.get("role") == "user"
@@ -440,6 +444,7 @@ def test_code_review_authorization_reservation_settlement_and_idempotency_in_pos
         model="deepseek-flash",
         effort="low",
         review_stage="CODE_REVIEW",
+        max_output_tokens=MAX_REVIEW_OUTPUT_TOKENS,
     )
     monkeypatch.setitem(provider_adapter._ADAPTER_REGISTRY, "deepseek", adapter)
     profile_common = {
@@ -1233,9 +1238,7 @@ def test_code_review_authorization_reservation_settlement_and_idempotency_in_pos
                 == OrchestrationStopOutcome.READY_FOR_HUMAN_MERGE
             )
             assert persisted_continuation_run.human_gate == HumanGate.READY_FOR_HUMAN_MERGE
-            assert persisted_continuation_run.stop_details == {
-                "code": "READY_FOR_HUMAN_MERGE"
-            }
+            assert persisted_continuation_run.stop_details == {"code": "READY_FOR_HUMAN_MERGE"}
             assert downstream_auditor.calls == 1
             assert github.pushed == {branch: candidate_sha}
             assert len(github.created_prs) == 1

@@ -368,10 +368,6 @@ class DeepSeekCodeReviewService:
             sort_keys=True,
             separators=(",", ":"),
         )
-        input_size = len(request_json.encode("utf-8"))
-        if input_size > MAX_REVIEW_INPUT_BYTES:
-            return CodeReviewResult(False, None, sha, reason="CODE_REVIEW_INPUT_EXCEEDS_BOUND")
-
         prior = self.uow.reviews.get_by_job_stage(job.job_id, "CODE_REVIEW")
         resumable_placeholder = False
         if prior:
@@ -451,6 +447,35 @@ class DeepSeekCodeReviewService:
         )
         if authorization_id:
             reservation_key = f"{reservation_key}:{authorization_id}"
+        runner = self.runner or DeepSeekContractReviewRunner(
+            api_key=getattr(adapter, "authenticated_api_key", None),
+            model=profile.model,
+            effort=profile.effort,
+            review_stage="CODE_REVIEW",
+            max_output_tokens=MAX_REVIEW_OUTPUT_TOKENS,
+        )
+        if (
+            getattr(runner, "model", None) != profile.model
+            or getattr(runner, "effort", None) != profile.effort
+            or getattr(runner, "review_stage", "CODE_REVIEW") != "CODE_REVIEW"
+            or getattr(runner, "max_output_tokens", None) != MAX_REVIEW_OUTPUT_TOKENS
+        ):
+            return CodeReviewResult(False, None, sha, reason="CODE_REVIEW_RUNNER_PROFILE_MISMATCH")
+        try:
+            input_size = DeepSeekContractReviewRunner.input_token_upper_bound_for(
+                "CODE_REVIEW", request_json
+            )
+        except (TypeError, ValueError):
+            return CodeReviewResult(
+                False, None, sha, reason="CODE_REVIEW_RUNNER_INPUT_BOUND_UNAVAILABLE"
+            )
+        if (
+            not isinstance(input_size, int)
+            or input_size <= 0
+            or input_size > MAX_REVIEW_INPUT_BYTES
+        ):
+            return CodeReviewResult(False, None, sha, reason="CODE_REVIEW_INPUT_EXCEEDS_BOUND")
+
         reservation, denial = self.budget.reserve_review_budget(
             project_id=project.project_id,
             run_id=run.run_id,
@@ -463,7 +488,7 @@ class DeepSeekCodeReviewService:
             billing_origin="deepseek_direct",
             pricing_snapshot_id=pricing.snapshot_id,
             prompt_token_upper_bound=input_size,
-            max_output_tokens=MAX_REVIEW_OUTPUT_TOKENS,
+            max_output_tokens=runner.max_output_tokens,
             idempotency_key=reservation_key,
             candidate_sha=candidate.candidate_sha,
             candidate_generation=candidate.generation,
@@ -613,41 +638,6 @@ class DeepSeekCodeReviewService:
             self.uow.commit()
             review = self.uow.reviews.get_by_id(review.review_id) or review
 
-        runner = self.runner or DeepSeekContractReviewRunner(
-            api_key=getattr(adapter, "authenticated_api_key", None),
-            model=profile.model,
-            effort=profile.effort,
-            review_stage="CODE_REVIEW",
-        )
-        if (
-            getattr(runner, "model", None) != profile.model
-            or getattr(runner, "effort", None) != profile.effort
-            or getattr(runner, "review_stage", "CODE_REVIEW") != "CODE_REVIEW"
-        ):
-            if reservation:
-                self.budget.release_reservation(reservation.reservation_id, "profile_mismatch")
-            if exceptional_authorization is not None:
-                self.uow.orchestration_external_actions.update_status(
-                    dispatch_action_key,
-                    ExternalActionStatus.FAILED,
-                    error_message="Reviewer profile mismatch before provider request.",
-                )
-                attempts = self.uow.external_action_attempts.list_by_action_key(dispatch_action_key)
-                if attempts:
-                    self.uow.external_action_attempts.update_status(
-                        attempts[0].attempt_id,
-                        "FAILED",
-                        error_message="Reviewer profile mismatch before provider request.",
-                    )
-            self.uow.reviews.transition(
-                review.review_id,
-                ReviewStatus.REVIEW_FAILED.value,
-                error_message="DeepSeek runner identity does not match the authorized code-review profile.",
-            )
-            self.uow.commit()
-            return CodeReviewResult(
-                False, review.review_id, sha, reason="CODE_REVIEW_RUNNER_PROFILE_MISMATCH"
-            )
         try:
             review_started_at = time.monotonic()
             response: DeepSeekReviewResponse = await runner.review(

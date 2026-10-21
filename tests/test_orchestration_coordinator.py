@@ -70,7 +70,10 @@ from minime.services.contract_review_service import (
     DeepSeekReviewResponse,
 )
 from minime.services.deepseek_auditor_runner import MockAuditorRunner
-from minime.services.deepseek_code_review_service import DeepSeekCodeReviewService
+from minime.services.deepseek_code_review_service import (
+    MAX_REVIEW_OUTPUT_TOKENS,
+    DeepSeekCodeReviewService,
+)
 from minime.services.execution_pipeline import ExecutionPipelineService
 from minime.services.implementer_runner import ImplementerResult, MockImplementerRunner
 from minime.services.orchestration_service import OrchestrationService
@@ -114,6 +117,7 @@ class _DeterministicCodeReviewTransport:
     model = "deepseek-chat"
     effort = "low"
     review_stage = "CODE_REVIEW"
+    max_output_tokens = MAX_REVIEW_OUTPUT_TOKENS
 
     def __init__(self, responses: list[dict[str, Any]] | None = None):
         self.responses = list(responses or [])

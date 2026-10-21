@@ -9,6 +9,7 @@ from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
 
+import httpx
 import pytest
 
 from minime.adapters import provider_adapter
@@ -39,12 +40,17 @@ from minime.domain.models import (
     Project,
 )
 from minime.services import control_plane_service
+from minime.services import deepseek_code_review_service as code_review_service_module
 from minime.services.candidate_manifest import CandidateManifestService
 from minime.services.contract_review_service import (
+    DeepSeekContractReviewRunner,
     DeepSeekResponseDiagnostics,
     DeepSeekReviewResponse,
 )
-from minime.services.deepseek_code_review_service import DeepSeekCodeReviewService
+from minime.services.deepseek_code_review_service import (
+    MAX_REVIEW_OUTPUT_TOKENS,
+    DeepSeekCodeReviewService,
+)
 from minime.services.provider_health_service import ProviderHealthService
 
 
@@ -76,6 +82,12 @@ class _ReviewRunner:
     model = "deepseek-flash"
     effort = "low"
     review_stage = "CODE_REVIEW"
+    max_output_tokens = MAX_REVIEW_OUTPUT_TOKENS
+
+    def input_token_upper_bound(self, user_content: str) -> int:
+        return DeepSeekContractReviewRunner.input_token_upper_bound_for(
+            self.review_stage, user_content
+        )
 
     def __init__(self, *, content: str | None = None):
         self.calls = 0
@@ -314,6 +326,116 @@ async def test_code_review_owner_policy_dispatches_bound_candidate_without_per_c
     assert reservation.authorization_id is None
     assert reservation.provider == "deepseek" and reservation.billing_origin == "deepseek_direct"
     assert adapter.capacity_reads == 1
+
+
+@pytest.mark.asyncio
+async def test_code_review_provider_limit_matches_reserved_full_request_bound(
+    in_memory_uow, monkeypatch, tmp_path
+):
+    from minime.services.contract_review_service import DeepSeekContractReviewRunner
+
+    captured: dict[str, object] = {}
+
+    async def respond(request: httpx.Request) -> httpx.Response:
+        body = json.loads(request.content)
+        captured["provider_request"] = body
+        content = json.dumps(
+            {
+                "verdict": "READY_TO_MERGE",
+                "summary": "Bounded intercepted review.",
+                "findings": [],
+            }
+        )
+        return httpx.Response(
+            200,
+            json={
+                "id": "intercepted-code-review",
+                "object": "chat.completion",
+                "model": "deepseek-flash",
+                "choices": [
+                    {
+                        "index": 0,
+                        "message": {"role": "assistant", "content": content},
+                        "finish_reason": "stop",
+                    }
+                ],
+                "usage": {
+                    "prompt_tokens": 30,
+                    "completion_tokens": 15,
+                    "total_tokens": 45,
+                },
+            },
+        )
+
+    client = httpx.AsyncClient(transport=httpx.MockTransport(respond))
+
+    class InterceptedRunner(DeepSeekContractReviewRunner):
+        def __init__(self, **kwargs):
+            captured["configured_max_output_tokens"] = kwargs.get("max_output_tokens")
+            super().__init__(**kwargs, client=client)
+
+    monkeypatch.setattr(
+        code_review_service_module, "DeepSeekContractReviewRunner", InterceptedRunner
+    )
+    project, run, job, candidate, manifest, repo, _, pricing, _, service = await _fixture(
+        tmp_path, monkeypatch, in_memory_uow, runner=_ReviewRunner(), authorize=False
+    )
+    service.runner = None
+
+    result = await service.review_candidate(
+        project=project,
+        run=run,
+        job=job,
+        candidate=candidate,
+        manifest=manifest,
+        candidate_worktree=repo,
+        authorship_evidence={"is_mixed_authorship": False, "surviving_contributions": []},
+    )
+    await client.aclose()
+
+    assert result.accepted, result.reason
+    provider_request = captured["provider_request"]
+    assert isinstance(provider_request, dict)
+    assert captured["configured_max_output_tokens"] == MAX_REVIEW_OUTPUT_TOKENS
+    assert provider_request["max_tokens"] == MAX_REVIEW_OUTPUT_TOKENS == 4096
+    assert captured["configured_max_output_tokens"] == provider_request["max_tokens"]
+    system_message, user_message = provider_request["messages"]
+    input_bound = len(system_message["content"].encode("utf-8")) + len(
+        user_message["content"].encode("utf-8")
+    )
+    review = in_memory_uow.reviews.get_by_id(result.review_id)
+    reservation = in_memory_uow.budget_reservations.get_by_id(review.budget_reservation_id)
+    expected_maximum = (
+        Decimal(input_bound) * pricing.prompt_price_per_token
+        + Decimal(provider_request["max_tokens"]) * pricing.output_price_per_token
+        + pricing.additional_cost_per_request
+    )
+    assert reservation.reserved_amount_usd == expected_maximum
+    assert expected_maximum <= Decimal("0.05")
+
+
+@pytest.mark.asyncio
+async def test_code_review_rejects_65536_output_runner_before_reserving(
+    in_memory_uow, monkeypatch, tmp_path
+):
+    runner = _ReviewRunner()
+    runner.max_output_tokens = 65536
+    project, run, job, candidate, manifest, repo, _, _, _, service = await _fixture(
+        tmp_path, monkeypatch, in_memory_uow, runner=runner, authorize=False
+    )
+    result = await service.review_candidate(
+        project=project,
+        run=run,
+        job=job,
+        candidate=candidate,
+        manifest=manifest,
+        candidate_worktree=repo,
+        authorship_evidence={},
+    )
+    assert not result.accepted
+    assert result.reason == "CODE_REVIEW_RUNNER_PROFILE_MISMATCH"
+    assert in_memory_uow.budget_reservations.list_by_project(project.project_id) == []
+    assert in_memory_uow.reviews.get_by_job_stage(job.job_id, "CODE_REVIEW") is None
 
 
 @pytest.mark.asyncio
