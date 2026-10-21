@@ -349,6 +349,19 @@ The implementation SHALL remain within the exact authorized worktree and be boun
 - **WHEN** worktree reuse is requested
 - **THEN** mini me fails closed without recreating from the current base, overwriting local state, or changing candidate evidence.
 
+#### Scenario: Frozen review adoption uses the exact bound managed repository root
+- **GIVEN** a frozen candidate and `CREATED` worktree are valid under the exact Run/Job and a valid `ProjectManagedRepositoryBinding`
+- **WHEN** API or CLI dispatches CODE_REVIEW or executes the separately authorized post-review continuation
+- **THEN** Control Plane resolves `WorktreeManager.project_root` from that Run project's `binding.managed_repository_root`, never from CWD or a caller-supplied runtime root
+- **AND** it performs the existing Git worktree registration, remote identity, ownership marker, branch, base ancestry, candidate SHA, manifest, and clean-tree proofs from that bound repository
+- **AND** a wrong process CWD cannot make a valid fixture worktree appear unregistered.
+
+#### Scenario: Repository binding contradiction blocks frozen review adoption
+- **GIVEN** the ProjectManagedRepositoryBinding is absent, invalid, inconsistent with the durable Project repository identity, or points to a root that does not own/register the candidate worktree
+- **WHEN** review adoption or post-review continuation is attempted
+- **THEN** Control Plane rejects before DeepSeek dispatch, audit, GitHub mutation, or continuation
+- **AND** it does not fall back to CWD, a configured runtime root, or another repository.
+
 #### Scenario: Adversarial candidate manipulation: tampering with candidate commit SHA, out-of-bounds additions, or forged manifest hash
 - **GIVEN** an external process, rogue tool, or adversarial script modifies files in the candidate worktree, alters git HEAD directly, or supplies a forged candidate manifest hash
 - **WHEN** CandidateManifestService or pre-review verification executes
@@ -385,6 +398,19 @@ Mini me SHALL run the repository's configured deterministic implementation tests
 - **GIVEN** DeepSeek compatibility, sufficient input, account identity, fresh capacity/balance, or applicable owner spending policy is absent, restrictive, or uncertain
 - **WHEN** the pipeline evaluates review eligibility
 - **THEN** it does not invoke DeepSeek, does not treat audit evidence as review, preserves the candidate, and remains in a truthful waiting or blocked state.
+
+#### Scenario: Expired unused CODE_REVIEW authorization can be renewed with a new identity
+- **GIVEN** an exact completed authorization for the current frozen Run/Job/candidate is expired and durable history proves it has no reservation, ledger consumption, review, dispatch intent, external action, or external-action attempt
+- **AND** any execute-action record referencing it is a specific pre-dispatch rejection caused by frozen-candidate worktree adoption
+- **WHEN** an authorized operator submits a fresh CODE_REVIEW authorization with a new action request ID and a valid current expiry
+- **THEN** Control Plane preserves the old authorization and rejection unchanged and records a distinct authorization bound to the exact current candidate and applicable spending policy
+- **AND** the expired unused ceiling is excluded from the outstanding authorization total only after all no-consumption checks pass.
+
+#### Scenario: Consumed, unexpired, or ambiguous CODE_REVIEW authorization cannot be renewed
+- **GIVEN** a prior same-candidate authorization is still unexpired, malformed, identity-contradictory, or has any reservation/ledger entry, review record, dispatch action/intent, external-action attempt, or non-pre-dispatch execute outcome
+- **WHEN** another authorization is requested
+- **THEN** Control Plane rejects renewal without changing prior records or candidate state
+- **AND** ambiguous or incomplete evidence fails closed and remains encumbered under the configured spending limit.
 
 #### Scenario: Contract-review evidence cannot satisfy final review
 - **GIVEN** a valid DeepSeek CONTRACT REVIEW result exists for the OpenSpec artifacts but no valid candidate-bound code REVIEW exists
