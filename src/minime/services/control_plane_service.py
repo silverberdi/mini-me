@@ -54,6 +54,7 @@ from minime.domain.models import (
 )
 from minime.logging import redact_secrets
 from minime.services.container_preview_service import ContainerPreviewService
+from minime.services.deepseek_code_review_service import reconcile_code_review_outcome
 from minime.services.orchestration_service import OrchestrationService
 from minime.services.post_merge_service import PostMergeReconciliationService
 from minime.services.provider_health_service import ProviderHealthService
@@ -406,17 +407,13 @@ class ControlPlaneService:
         manifest = self.uow.candidate_manifests.get_by_id(candidate.manifest_id)
         if manifest is None:
             return False
-        from minime.services.deepseek_code_review_service import (
-            terminal_settled_code_review_recovery_allowed,
-        )
-
-        terminal_failure_proof = terminal_settled_code_review_recovery_allowed(
+        terminal_failure_proof = reconcile_code_review_outcome(
             self.uow,
             run=run,
             job=job,
             candidate=candidate,
             manifest=manifest,
-        )
+        ).permits_new_authorization
         terminal_review_authorization_ids = {
             review.budget_authorization_id
             for review in self.uow.reviews.list_by_job(job.job_id)
@@ -569,17 +566,13 @@ class ControlPlaneService:
         )
         terminal_dispatch_recovery = False
         if active_job and project and frozen_candidate and code_manifest and not run.is_active:
-            from minime.services.deepseek_code_review_service import (
-                terminal_settled_code_review_recovery_allowed,
-            )
-
-            terminal_dispatch_recovery = terminal_settled_code_review_recovery_allowed(
+            terminal_dispatch_recovery = reconcile_code_review_outcome(
                 self.uow,
                 run=run,
                 job=active_job,
                 candidate=frozen_candidate,
                 manifest=code_manifest,
-            )
+            ).permits_new_authorization
         dispatch_review_hold = review_hold_code == "REVIEW_AUTHORIZATION_PENDING" or (
             terminal_dispatch_recovery
             and review_hold_code
@@ -1108,17 +1101,13 @@ class ControlPlaneService:
         )
         terminal_review_recovery = False
         if job and code_candidate and code_manifest and not run.is_active:
-            from minime.services.deepseek_code_review_service import (
-                terminal_settled_code_review_recovery_allowed,
-            )
-
-            terminal_review_recovery = terminal_settled_code_review_recovery_allowed(
+            terminal_review_recovery = reconcile_code_review_outcome(
                 self.uow,
                 run=run,
                 job=job,
                 candidate=code_candidate,
                 manifest=code_manifest,
-            )
+            ).permits_new_authorization
         code_review_slot_open = bool(
             prior_code_review is None
             or (
@@ -2017,12 +2006,9 @@ class ControlPlaneService:
             and job
             and candidate
             and manifest
-            and __import__(
-                "minime.services.deepseek_code_review_service",
-                fromlist=["terminal_settled_code_review_recovery_allowed"],
-            ).terminal_settled_code_review_recovery_allowed(
+            and reconcile_code_review_outcome(
                 self.uow, run=run, job=job, candidate=candidate, manifest=manifest
-            )
+            ).permits_new_authorization
         )
         authorization_id = str(sanitized_params["authorization_id"])
         authorization_record = self.uow.operator_actions.get_by_request_id(authorization_id)
@@ -2313,7 +2299,12 @@ class ControlPlaneService:
                 persisted_run.stop_outcome = OrchestrationStopOutcome.NEEDS_HUMAN
                 persisted_run.human_gate = HumanGate.NEEDS_HUMAN
                 known_terminal_failure = bool(
-                    result.reason == "DEEPSEEK_CODE_REVIEW_TERMINAL_TRUNCATED"
+                    result.reason
+                    in {
+                        "DEEPSEEK_CODE_REVIEW_TERMINAL_TRUNCATED",
+                        "DEEPSEEK_CODE_REVIEW_TERMINAL_UNUSABLE",
+                        "CODE_REVIEW_MALFORMED",
+                    }
                     and not result.waiting
                 )
                 persisted_run.stop_reason = result.reason or "CODE_REVIEW_FAILED_CLOSED"
@@ -2886,12 +2877,9 @@ class ControlPlaneService:
             and candidate
             and manifest
             and not run.is_active
-            and __import__(
-                "minime.services.deepseek_code_review_service",
-                fromlist=["terminal_settled_code_review_recovery_allowed"],
-            ).terminal_settled_code_review_recovery_allowed(
+            and reconcile_code_review_outcome(
                 self.uow, run=run, job=job, candidate=candidate, manifest=manifest
-            )
+            ).permits_new_authorization
         )
         review_slot_open = bool(
             prior_code_review is None

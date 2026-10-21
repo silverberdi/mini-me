@@ -321,7 +321,7 @@ def test_postgres_dispatch_intent_survives_worker_restart_and_blocks_replay():
         "audit_risk",
         "mutate_candidate_during_review",
         "missing_reservation_case",
-        "terminal_recovery_case",
+        "terminal_response_case",
     ),
     [
         (ReviewVerdict.READY_TO_MERGE, "low", False, False, False),
@@ -329,7 +329,10 @@ def test_postgres_dispatch_intent_survives_worker_restart_and_blocks_replay():
         (ReviewVerdict.READY_TO_MERGE, "high", False, False, False),
         (ReviewVerdict.READY_TO_MERGE, "low", True, False, False),
         (ReviewVerdict.READY_TO_MERGE, "low", False, True, False),
-        (ReviewVerdict.READY_TO_MERGE, "low", False, False, True),
+        (ReviewVerdict.READY_TO_MERGE, "low", False, False, "length"),
+        (ReviewVerdict.READY_TO_MERGE, "low", False, False, "empty-json"),
+        (ReviewVerdict.READY_TO_MERGE, "low", False, False, "malformed-json"),
+        (ReviewVerdict.READY_TO_MERGE, "low", False, False, "partial-length"),
     ],
     ids=[
         "ready",
@@ -337,7 +340,10 @@ def test_postgres_dispatch_intent_survives_worker_restart_and_blocks_replay():
         "audit-high",
         "candidate-mutated",
         "missing-reservation",
-        "terminal-recovery",
+        "terminal-recovery-length",
+        "terminal-recovery-empty-json",
+        "terminal-recovery-malformed-json",
+        "terminal-recovery-partial-length",
     ],
 )
 def test_code_review_authorization_reservation_settlement_and_idempotency_in_postgres(
@@ -347,7 +353,7 @@ def test_code_review_authorization_reservation_settlement_and_idempotency_in_pos
     audit_risk,
     mutate_candidate_during_review,
     missing_reservation_case,
-    terminal_recovery_case,
+    terminal_response_case,
 ):
     engine = create_engine(DATABASE_URL, pool_pre_ping=True)
     project_id = f"r01-code-review-{uuid4()}"
@@ -401,8 +407,19 @@ def test_code_review_authorization_reservation_settlement_and_idempotency_in_pos
             review_http_calls.append(payload)
             review_started.set()
             assert release_review.wait(timeout=10)
-            if terminal_recovery_case and not terminal_response_sent:
+            if terminal_response_case and not terminal_response_sent:
                 terminal_response_sent = True
+                response_content = {
+                    "length": "",
+                    "empty-json": "",
+                    "malformed-json": "not-json",
+                    "partial-length": '{"verdict":',
+                }[terminal_response_case]
+                finish_reason = (
+                    "stop"
+                    if terminal_response_case in {"empty-json", "malformed-json"}
+                    else "length"
+                )
                 return httpx.Response(
                     200,
                     json={
@@ -414,16 +431,16 @@ def test_code_review_authorization_reservation_settlement_and_idempotency_in_pos
                                 "index": 0,
                                 "message": {
                                     "role": "assistant",
-                                    "content": "",
+                                    "content": response_content,
                                     "reasoning_content": "private reasoning excluded from evidence",
                                 },
-                                "finish_reason": "length",
+                                "finish_reason": finish_reason,
                             }
                         ],
                         "usage": {
-                            "prompt_tokens": 2000,
-                            "completion_tokens": MAX_REVIEW_OUTPUT_TOKENS,
-                            "total_tokens": 2000 + MAX_REVIEW_OUTPUT_TOKENS,
+                            "prompt_tokens": 8008,
+                            "completion_tokens": 4096,
+                            "total_tokens": 12104,
                         },
                     },
                 )
@@ -1166,11 +1183,15 @@ def test_code_review_authorization_reservation_settlement_and_idempotency_in_pos
             assert not root_mismatch_control_plane._expired_unused_code_review_authorization(
                 expired_auth_record, run, job, candidate
             )
-            if terminal_recovery_case:
+            if terminal_response_case:
                 assert review_action.status == OperatorActionStatus.BLOCKED
-                assert review_action.payload["reason"] == (
-                    "DEEPSEEK_CODE_REVIEW_TERMINAL_TRUNCATED"
-                ), [
+                expected_terminal_reason = {
+                    "length": "DEEPSEEK_CODE_REVIEW_TERMINAL_TRUNCATED",
+                    "empty-json": "DEEPSEEK_CODE_REVIEW_TERMINAL_UNUSABLE",
+                    "malformed-json": "CODE_REVIEW_MALFORMED",
+                    "partial-length": "DEEPSEEK_CODE_REVIEW_TERMINAL_TRUNCATED",
+                }[terminal_response_case]
+                assert review_action.payload["reason"] == expected_terminal_reason, [
                     event.payload.get("response")
                     for event in uow.events.list_events(
                         project_id=project_id, change_id=change_name, limit=10000
@@ -1227,7 +1248,11 @@ def test_code_review_authorization_reservation_settlement_and_idempotency_in_pos
                     if event.event_type == EventType.EVIDENCE_DIAGNOSTIC_RECORDED
                     and event.payload.get("review_id") == failed_review.review_id
                 )
-                assert diagnostic_event.payload["response"]["finish_reason"] == "length"
+                assert diagnostic_event.payload["response"]["finish_reason"] == (
+                    "stop"
+                    if terminal_response_case in {"empty-json", "malformed-json"}
+                    else "length"
+                )
                 assert diagnostic_event.payload["response"]["reasoning_content_present"] is True
                 assert diagnostic_event.payload["response"]["reasoning_content_length"] == len(
                     "private reasoning excluded from evidence"
@@ -1235,7 +1260,8 @@ def test_code_review_authorization_reservation_settlement_and_idempotency_in_pos
                 assert "reasoning_content" not in diagnostic_event.payload["response"]
                 assert "private reasoning" not in json.dumps(diagnostic_event.payload)
                 from minime.services.deepseek_code_review_service import (
-                    terminal_settled_code_review_recovery_allowed,
+                    CodeReviewOutcomeKind,
+                    reconcile_code_review_outcome,
                 )
 
                 contradictory_run = failed_run.model_copy(
@@ -1246,22 +1272,28 @@ def test_code_review_authorization_reservation_settlement_and_idempotency_in_pos
                         }
                     }
                 )
-                assert not terminal_settled_code_review_recovery_allowed(
-                    uow,
-                    run=contradictory_run,
-                    job=failed_job,
-                    candidate=candidate,
-                    manifest=manifest,
+                assert (
+                    reconcile_code_review_outcome(
+                        uow,
+                        run=contradictory_run,
+                        job=failed_job,
+                        candidate=candidate,
+                        manifest=manifest,
+                    ).kind
+                    == CodeReviewOutcomeKind.INTEGRITY_CONFLICT
                 )
                 failed_reservation.status = "UNRESOLVED"
                 uow.budget_reservations.save(failed_reservation)
                 uow.commit()
-                assert not terminal_settled_code_review_recovery_allowed(
-                    uow,
-                    run=failed_run,
-                    job=failed_job,
-                    candidate=candidate,
-                    manifest=manifest,
+                assert (
+                    reconcile_code_review_outcome(
+                        uow,
+                        run=failed_run,
+                        job=failed_job,
+                        candidate=candidate,
+                        manifest=manifest,
+                    ).kind
+                    == CodeReviewOutcomeKind.UNRESOLVED_OR_AMBIGUOUS
                 )
                 failed_reservation.status = "SETTLED"
                 uow.budget_reservations.save(failed_reservation)
@@ -1278,12 +1310,15 @@ def test_code_review_authorization_reservation_settlement_and_idempotency_in_pos
                     {"id": failed_dispatch_attempts[0].attempt_id},
                 )
                 uow.commit()
-                assert not terminal_settled_code_review_recovery_allowed(
-                    uow,
-                    run=failed_run,
-                    job=failed_job,
-                    candidate=candidate,
-                    manifest=manifest,
+                assert (
+                    reconcile_code_review_outcome(
+                        uow,
+                        run=failed_run,
+                        job=failed_job,
+                        candidate=candidate,
+                        manifest=manifest,
+                    ).kind
+                    == CodeReviewOutcomeKind.UNRESOLVED_OR_AMBIGUOUS
                 )
                 failed_dispatch.status = ExternalActionStatus.FAILED
                 uow.session.execute(
@@ -1297,14 +1332,216 @@ def test_code_review_authorization_reservation_settlement_and_idempotency_in_pos
                     {"id": failed_dispatch_attempts[0].attempt_id},
                 )
                 uow.commit()
-                recovery_proven = terminal_settled_code_review_recovery_allowed(
+                # Reconstruct the historical checkpoint whose diagnostic
+                # predates request_duration_ms; missing telemetry is not a
+                # reason to invent a measurement or deny reconciled settlement.
+                failed_run.stop_details = {
+                    **failed_run.stop_details,
+                    "code": "CODE_REVIEW_FAILED_CLOSED",
+                }
+                failed_run.stop_reason = "CODE_REVIEW_FAILED_CLOSED"
+                failed_job.status = JobStatus.REVIEW_RUNNING
+                uow.orchestration_runs.save(failed_run)
+                uow.jobs.save(failed_job)
+                diagnostic_payload = dict(diagnostic_event.payload)
+                response_payload = dict(diagnostic_payload["response"])
+                response_payload.pop("request_duration_ms", None)
+                diagnostic_payload["response"] = response_payload
+                uow.session.execute(
+                    text("UPDATE events SET payload = CAST(:payload AS JSON) WHERE id = :event_id"),
+                    {
+                        "payload": json.dumps(diagnostic_payload),
+                        "event_id": diagnostic_event.event_id,
+                    },
+                )
+                uow.commit()
+
+                from minime.services.deepseek_code_review_service import (
+                    CodeReviewOutcomeKind,
+                    reconcile_code_review_outcome,
+                )
+
+                recovery_decision = reconcile_code_review_outcome(
                     uow,
                     run=failed_run,
                     job=failed_job,
                     candidate=candidate,
                     manifest=manifest,
                 )
-                assert recovery_proven
+                assert recovery_decision.kind == CodeReviewOutcomeKind.DEFINITIVE_UNUSABLE_SETTLED
+                assert recovery_decision.permits_new_authorization
+                persisted_diagnostic = next(
+                    event
+                    for event in uow.events.list_events(
+                        project_id=project_id, change_id=change_name, limit=10000
+                    )
+                    if event.event_type == EventType.EVIDENCE_DIAGNOSTIC_RECORDED
+                    and event.payload.get("review_id") == failed_review.review_id
+                )
+                assert "request_duration_ms" not in persisted_diagnostic.payload["response"]
+                assert persisted_diagnostic.payload["response"]["prompt_tokens"] == 8008
+                assert persisted_diagnostic.payload["response"]["completion_tokens"] == 4096
+                assert persisted_diagnostic.payload["response"]["total_tokens"] == 12104
+                assert failed_reservation.status == "SETTLED"
+                assert old_ledger[0].amount_usd == Decimal("0.007318")
+
+                historical_response = persisted_diagnostic.payload["response"]
+
+                def replace_historical_response(response_changes):
+                    updated_payload = dict(persisted_diagnostic.payload)
+                    updated_payload["response"] = {
+                        **historical_response,
+                        **response_changes,
+                    }
+                    uow.session.execute(
+                        text(
+                            "UPDATE events SET payload = CAST(:payload AS JSON) WHERE id = :event_id"
+                        ),
+                        {
+                            "payload": json.dumps(updated_payload),
+                            "event_id": persisted_diagnostic.event_id,
+                        },
+                    )
+                    uow.commit()
+
+                for changes in (
+                    {"returned_model": "deepseek-other", "model_matches_request": False},
+                    {"total_tokens": 12105},
+                    {"request_duration_ms": "not-an-integer"},
+                    {"reasoning_content_present": "yes"},
+                ):
+                    replace_historical_response(changes)
+                    assert (
+                        reconcile_code_review_outcome(
+                            uow,
+                            run=failed_run,
+                            job=failed_job,
+                            candidate=candidate,
+                            manifest=manifest,
+                        ).kind
+                        == CodeReviewOutcomeKind.INTEGRITY_CONFLICT
+                    )
+                    replace_historical_response({})
+
+                missing_settlement = old_ledger[0]
+                uow.session.execute(
+                    text("DELETE FROM budget_ledger WHERE id = :entry_id"),
+                    {"entry_id": missing_settlement.entry_id},
+                )
+                uow.commit()
+                assert (
+                    reconcile_code_review_outcome(
+                        uow,
+                        run=failed_run,
+                        job=failed_job,
+                        candidate=candidate,
+                        manifest=manifest,
+                    ).kind
+                    == CodeReviewOutcomeKind.UNRESOLVED_OR_AMBIGUOUS
+                )
+                uow.budget_ledger.save(missing_settlement)
+                uow.commit()
+
+                duplicate_settlement = missing_settlement.model_copy(
+                    update={"entry_id": str(uuid4())}
+                )
+                uow.budget_ledger.save(duplicate_settlement)
+                uow.commit()
+                assert (
+                    reconcile_code_review_outcome(
+                        uow,
+                        run=failed_run,
+                        job=failed_job,
+                        candidate=candidate,
+                        manifest=manifest,
+                    ).kind
+                    == CodeReviewOutcomeKind.UNRESOLVED_OR_AMBIGUOUS
+                )
+                uow.session.execute(
+                    text("DELETE FROM budget_ledger WHERE id = :entry_id"),
+                    {"entry_id": duplicate_settlement.entry_id},
+                )
+                # PostgreSQL correctly enforces the ledger->reservation FK,
+                # so model an orphaned operation link using a real decoy
+                # reservation that is not associated with this review's
+                # authorization. The canonical reconciler must still reject
+                # the otherwise-valid direct CODE_REVIEW ledger row.
+                decoy_reservation = failed_reservation.model_copy(
+                    update={
+                        "reservation_id": str(uuid4()),
+                        "authorization_id": str(uuid4()),
+                        "idempotency_key": f"decoy-{uuid4()}",
+                    }
+                )
+                uow.budget_reservations.save(decoy_reservation)
+                uow.commit()
+                orphan_settlement = missing_settlement.model_copy(
+                    update={
+                        "entry_id": str(uuid4()),
+                        "reservation_id": decoy_reservation.reservation_id,
+                    }
+                )
+                uow.budget_ledger.save(orphan_settlement)
+                uow.commit()
+                assert (
+                    reconcile_code_review_outcome(
+                        uow,
+                        run=failed_run,
+                        job=failed_job,
+                        candidate=candidate,
+                        manifest=manifest,
+                    ).kind
+                    == CodeReviewOutcomeKind.UNRESOLVED_OR_AMBIGUOUS
+                )
+                uow.session.execute(
+                    text("DELETE FROM budget_ledger WHERE id = :entry_id"),
+                    {"entry_id": orphan_settlement.entry_id},
+                )
+                uow.session.execute(
+                    text("DELETE FROM budget_reservations WHERE id = :reservation_id"),
+                    {"reservation_id": decoy_reservation.reservation_id},
+                )
+                uow.commit()
+
+                from minime.domain.models import RecoveryClaimContext
+
+                claim_key = f"run:{run_id}"
+                old_claim = uow.claims.acquire_or_reacquire(
+                    claim_key, "stale-code-review-reconciler", lease_seconds=60
+                )
+                assert old_claim is not None
+                stale_context = RecoveryClaimContext(
+                    claim_key=claim_key,
+                    owner_instance_id=old_claim.owner_instance_id,
+                    fence_token=old_claim.fence_token,
+                    lease_expires_at=old_claim.lease_expires_at,
+                )
+                uow.commit()
+                assert uow.claims.release(
+                    old_claim.claim_key, old_claim.owner_instance_id, old_claim.fence_token
+                )
+                uow.commit()
+                newer_claim = uow.claims.acquire_or_reacquire(
+                    claim_key, "newer-code-review-reconciler", lease_seconds=60
+                )
+                assert newer_claim is not None
+                uow.commit()
+                assert (
+                    reconcile_code_review_outcome(
+                        uow,
+                        run=failed_run,
+                        job=failed_job,
+                        candidate=candidate,
+                        manifest=manifest,
+                        claim_context=stale_context,
+                    ).kind
+                    == CodeReviewOutcomeKind.UNRESOLVED_OR_AMBIGUOUS
+                )
+                assert uow.claims.release(
+                    newer_claim.claim_key, newer_claim.owner_instance_id, newer_claim.fence_token
+                )
+                uow.commit()
+
                 renewal_allowed = (
                     root_mismatch_control_plane._code_review_authorization_renewal_allowed(
                         failed_run, failed_job, candidate

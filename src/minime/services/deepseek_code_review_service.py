@@ -10,6 +10,7 @@ from dataclasses import dataclass
 from dataclasses import replace as dataclass_replace
 from datetime import datetime
 from decimal import ROUND_HALF_UP, Decimal
+from enum import StrEnum
 from pathlib import Path, PurePosixPath
 from typing import Any
 
@@ -67,7 +68,27 @@ MAX_REVIEW_DIFF_BYTES = 250_000
 MAX_REVIEW_OUTPUT_TOKENS = 16384
 
 
-def terminal_settled_code_review_recovery_allowed(
+class CodeReviewOutcomeKind(StrEnum):
+    """Canonical read-only classification of persisted CODE_REVIEW evidence."""
+
+    NO_PRIOR_REVIEW = "NO_PRIOR_REVIEW"
+    VALID_INDEPENDENT_VERDICT = "VALID_INDEPENDENT_VERDICT"
+    DEFINITIVE_UNUSABLE_SETTLED = "DEFINITIVE_UNUSABLE_SETTLED"
+    UNRESOLVED_OR_AMBIGUOUS = "UNRESOLVED_OR_AMBIGUOUS"
+    INTEGRITY_CONFLICT = "INTEGRITY_CONFLICT"
+
+
+@dataclass(frozen=True)
+class CodeReviewReconciliation:
+    kind: CodeReviewOutcomeKind
+    reason: str
+
+    @property
+    def permits_new_authorization(self) -> bool:
+        return self.kind == CodeReviewOutcomeKind.DEFINITIVE_UNUSABLE_SETTLED
+
+
+def reconcile_code_review_outcome(
     uow: PersistenceUnitOfWork,
     *,
     run: OrchestrationRun,
@@ -75,18 +96,21 @@ def terminal_settled_code_review_recovery_allowed(
     candidate: OrchestrationCandidate,
     manifest: CandidateManifest,
     claim_context: RecoveryClaimContext | None = None,
-) -> bool:
-    """Prove every prior CODE_REVIEW failed terminally and its spend settled.
+) -> CodeReviewReconciliation:
+    """Classify CODE_REVIEW history from immutable, linked durable evidence.
 
-    This is deliberately narrower than generic review retry: each historical
-    operation must be a finalized DeepSeek `length` response with empty content,
-    verified provider usage, a single matching settlement, and finalized fenced
-    dispatch evidence. Any missing or contradictory row denies the retry.
+    Diagnostic duration and reasoning telemetry are optional. Eligibility is
+    derived only from provider response identity, usage, reservation/ledger
+    linkage, finalized dispatch evidence and the frozen-candidate authority.
+    This function is read-only; callers must still enforce the current claim and
+    fence before any state transition or billable dispatch.
     """
+
+    def decision(kind: CodeReviewOutcomeKind, reason: str) -> CodeReviewReconciliation:
+        return CodeReviewReconciliation(kind, reason)
+
     if (
-        run.is_active
-        or run.stop_outcome != OrchestrationStopOutcome.NEEDS_HUMAN
-        or run.current_candidate_sha != candidate.candidate_sha
+        run.current_candidate_sha != candidate.candidate_sha
         or run.base_sha != candidate.base_sha
         or run.current_generation != candidate.generation
         or run.active_job_id != job.job_id
@@ -101,7 +125,68 @@ def terminal_settled_code_review_recovery_allowed(
         or manifest.manifest_id != candidate.manifest_id
         or manifest.manifest_hash != candidate.manifest_hash
     ):
-        return False
+        return decision(
+            CodeReviewOutcomeKind.INTEGRITY_CONFLICT,
+            "candidate or run identity contradicts the frozen manifest",
+        )
+
+    reviews = [
+        review
+        for review in uow.reviews.list_by_job(job.job_id)
+        if review.review_stage == "CODE_REVIEW"
+    ]
+    if not reviews:
+        return decision(CodeReviewOutcomeKind.NO_PRIOR_REVIEW, "no prior CODE_REVIEW exists")
+
+    for review in reviews:
+        if (
+            review.project_id != run.project_id
+            or review.job_id != job.job_id
+            or review.change_name != job.change_name
+            or review.orchestration_run_id != run.run_id
+            or review.candidate_generation != candidate.generation
+            or review.candidate_sha != candidate.candidate_sha
+            or review.base_sha != candidate.base_sha
+            or review.manifest_id != manifest.manifest_id
+            or review.manifest_hash != manifest.manifest_hash
+        ):
+            return decision(
+                CodeReviewOutcomeKind.INTEGRITY_CONFLICT,
+                "review identity contradicts the frozen candidate",
+            )
+        if (
+            review.status == ReviewStatus.REVIEW_COMPLETED
+            and review.verdict in {ReviewVerdict.READY_TO_MERGE, ReviewVerdict.CHANGES_REQUIRED}
+            and review.provider == "deepseek"
+            and review.reviewer_role == "deepseek"
+            and review.billing_origin == "deepseek_direct"
+            and review.account_fingerprint
+            and review.reviewer_model
+        ):
+            eligible, _ = AuthorshipService().is_reviewer_eligible(job.job_id, "deepseek", uow)
+            if eligible:
+                return decision(
+                    CodeReviewOutcomeKind.VALID_INDEPENDENT_VERDICT,
+                    "an exact independent verdict is already persisted",
+                )
+            return decision(
+                CodeReviewOutcomeKind.INTEGRITY_CONFLICT,
+                "persisted verdict reviewer is not independent",
+            )
+
+    if (
+        run.is_active
+        or run.stop_outcome != OrchestrationStopOutcome.NEEDS_HUMAN
+        or any(
+            item.status != ReviewStatus.REVIEW_FAILED or item.verdict is not None
+            for item in reviews
+        )
+    ):
+        return decision(
+            CodeReviewOutcomeKind.UNRESOLVED_OR_AMBIGUOUS,
+            "review history is not a terminal inactive failure",
+        )
+
     stop_details = run.stop_details or {}
     if stop_details.get("code") not in {
         "CODE_REVIEW_TERMINAL_FAILURE_SETTLED",
@@ -110,7 +195,10 @@ def terminal_settled_code_review_recovery_allowed(
         # establishes that the old generic failure was actually terminal.
         "CODE_REVIEW_FAILED_CLOSED",
     }:
-        return False
+        return decision(
+            CodeReviewOutcomeKind.UNRESOLVED_OR_AMBIGUOUS,
+            "run is not held at a recognized terminal code-review checkpoint",
+        )
     if any(
         observed is not None and observed != expected
         for observed, expected in (
@@ -121,25 +209,30 @@ def terminal_settled_code_review_recovery_allowed(
             (stop_details.get("manifest_hash"), manifest.manifest_hash),
         )
     ):
-        return False
+        return decision(
+            CodeReviewOutcomeKind.INTEGRITY_CONFLICT,
+            "terminal checkpoint identity contradicts the frozen candidate",
+        )
     claim = uow.claims.get_by_key(f"run:{run.run_id}")
     if claim_context is not None:
         if claim_context.claim_key != f"run:{run.run_id}":
-            return False
+            return decision(
+                CodeReviewOutcomeKind.UNRESOLVED_OR_AMBIGUOUS,
+                "current run claim is invalid or belongs to another operation",
+            )
         try:
             validate_claim_context_authoritative(uow, claim_context)
         except Exception:
-            return False
+            return decision(
+                CodeReviewOutcomeKind.UNRESOLVED_OR_AMBIGUOUS,
+                "claim context is no longer authoritative",
+            )
     elif claim is not None and claim.is_active:
-        return False
+        return decision(
+            CodeReviewOutcomeKind.UNRESOLVED_OR_AMBIGUOUS,
+            "a live run claim exists without this operation's claim context",
+        )
 
-    reviews = [
-        review
-        for review in uow.reviews.list_by_job(job.job_id)
-        if review.review_stage == "CODE_REVIEW"
-    ]
-    if not reviews:
-        return False
     events = uow.events.list_events(
         project_id=run.project_id, change_id=run.change_name, limit=10000
     )
@@ -169,7 +262,10 @@ def terminal_settled_code_review_recovery_allowed(
             or not review.reviewer_model
             or review.billing_origin != "deepseek_direct"
         ):
-            return False
+            return decision(
+                CodeReviewOutcomeKind.INTEGRITY_CONFLICT,
+                "review record has incomplete or contradictory provider/candidate identity",
+            )
         authorization_id = review.budget_authorization_id
         authorization_record = uow.operator_actions.get_by_request_id(authorization_id)
         authorization = (
@@ -197,7 +293,10 @@ def terminal_settled_code_review_recovery_allowed(
             or authorization.get("billing_origin") != "deepseek_direct"
             or authorization.get("action_request_id") != authorization_id
         ):
-            return False
+            return decision(
+                CodeReviewOutcomeKind.INTEGRITY_CONFLICT,
+                "review authorization identity or payload does not match",
+            )
         reservation = next(
             (item for item in reservations if item.reservation_id == review.budget_reservation_id),
             None,
@@ -216,14 +315,20 @@ def terminal_settled_code_review_recovery_allowed(
             or reservation.stage != "REVIEW"
             or reservation.billing_origin != "deepseek_direct"
         ):
-            return False
+            return decision(
+                CodeReviewOutcomeKind.UNRESOLVED_OR_AMBIGUOUS,
+                "review does not have exactly one matching settled reservation",
+            )
         settlement_entries = [
             item
             for item in ledger
             if item.reservation_id == reservation.reservation_id and item.entry_type == "SETTLEMENT"
         ]
         if len(settlement_entries) != 1:
-            return False
+            return decision(
+                CodeReviewOutcomeKind.UNRESOLVED_OR_AMBIGUOUS,
+                "settlement ledger does not contain exactly one settlement",
+            )
         settlement = settlement_entries[0]
         diagnostic_events = [
             event
@@ -233,12 +338,34 @@ def terminal_settled_code_review_recovery_allowed(
             and event.payload.get("review_id") == review.review_id
         ]
         if len(diagnostic_events) != 1:
-            return False
+            return decision(
+                CodeReviewOutcomeKind.UNRESOLVED_OR_AMBIGUOUS,
+                "response diagnostic is missing or duplicated",
+            )
         response = diagnostic_events[0].payload.get("response", {})
         prompt_tokens = response.get("prompt_tokens")
         completion_tokens = response.get("completion_tokens")
         total_tokens = response.get("total_tokens")
         request_duration_ms = response.get("request_duration_ms")
+        finish_reason = response.get("finish_reason")
+        content_length = response.get("content_length")
+        content_length_valid = (
+            isinstance(content_length, int)
+            and not isinstance(content_length, bool)
+            and content_length >= 0
+        )
+        definitively_unusable = bool(
+            content_length_valid
+            and (
+                finish_reason == "length"
+                or finish_reason == "stop"
+                and content_length == 0
+                or finish_reason == "stop"
+                and content_length > 0
+                and review.error_message
+                == "DeepSeek code review did not match the strict verdict schema."
+            )
+        )
         token_values_valid = all(
             isinstance(value, int) and not isinstance(value, bool) and value >= 0
             for value in (prompt_tokens, completion_tokens, total_tokens)
@@ -247,17 +374,22 @@ def terminal_settled_code_review_recovery_allowed(
             response.get("http_status") == 200
             and response.get("returned_model") == review.reviewer_model
             and response.get("model_matches_request") is True
-            and response.get("finish_reason") == "length"
+            and definitively_unusable
             and response.get("content_present") is True
             and response.get("content_type") == "str"
-            and response.get("content_length") == 0
             and response.get("usage_valid") is True
             and token_values_valid
             and total_tokens == prompt_tokens + completion_tokens
-            and isinstance(response.get("reasoning_content_present"), bool)
-            and isinstance(request_duration_ms, int)
-            and not isinstance(request_duration_ms, bool)
-            and request_duration_ms >= 0
+            and (
+                response.get("reasoning_content_present") is None
+                or isinstance(response.get("reasoning_content_present"), bool)
+            )
+            and (
+                request_duration_ms is None
+                or isinstance(request_duration_ms, int)
+                and not isinstance(request_duration_ms, bool)
+                and request_duration_ms >= 0
+            )
             and (
                 response.get("reasoning_content_length") is None
                 or isinstance(response.get("reasoning_content_length"), int)
@@ -273,7 +405,10 @@ def terminal_settled_code_review_recovery_allowed(
             and settlement.completion_tokens == completion_tokens
             and settlement.total_tokens == total_tokens
         ):
-            return False
+            return decision(
+                CodeReviewOutcomeKind.INTEGRITY_CONFLICT,
+                "response diagnostics, usage, or settlement attribution contradicts persisted identity",
+            )
         pricing = uow.pricing_snapshots.get_by_id(reservation.pricing_snapshot_id)
         expected_settlement = (
             Decimal(prompt_tokens) * pricing.prompt_price_per_token
@@ -296,7 +431,10 @@ def terminal_settled_code_review_recovery_allowed(
             or settlement.amount_usd != expected_settlement
             or settlement.amount_usd > reservation.reserved_amount_usd
         ):
-            return False
+            return decision(
+                CodeReviewOutcomeKind.UNRESOLVED_OR_AMBIGUOUS,
+                "verified pricing or settlement amount cannot be reconciled",
+            )
 
         dispatch_key = f"deepseek-code-review:{authorization_id}"
         external_action = uow.orchestration_external_actions.get_by_action_key(dispatch_key)
@@ -310,12 +448,18 @@ def terminal_settled_code_review_recovery_allowed(
         finalized_terminal_actions = [
             item
             for item in execute_actions
+            if item.project_id == run.project_id
+            and item.run_id == run.run_id
+            and item.job_id == job.job_id
+            and item.action_type.value == "EXECUTE_AUTHORIZED_DEEPSEEK_CODE_REVIEW"
             if item.status.value == "BLOCKED"
             and item.result_payload_json.get("review_id") == review.review_id
             and item.result_payload_json.get("reason")
             in {
                 "DEEPSEEK_CODE_REVIEW_TERMINAL_TRUNCATED",
+                "DEEPSEEK_CODE_REVIEW_TERMINAL_UNUSABLE",
                 "DEEPSEEK_CODE_REVIEW_RESPONSE_UNVERIFIABLE",
+                "CODE_REVIEW_MALFORMED",
             }
             and item.result_payload_json.get("recovery_decision_id")
         ]
@@ -330,35 +474,130 @@ def terminal_settled_code_review_recovery_allowed(
         if (
             not external_action
             or external_action.run_id != run.run_id
+            or external_action.action_type.value != "DEEPSEEK_CODE_REVIEW_DISPATCH"
             or external_action.candidate_sha != candidate.candidate_sha
             or external_action.generation != candidate.generation
+            or external_action.target_identity
+            != f"deepseek:{review.account_fingerprint}:{review.reviewer_model}:REVIEW"
+            or external_action.request_fingerprint
+            != hashlib.sha256(
+                json.dumps(
+                    [
+                        run.run_id,
+                        job.job_id,
+                        candidate.candidate_sha,
+                        manifest.manifest_hash,
+                        authorization_id,
+                    ],
+                    separators=(",", ":"),
+                ).encode()
+            ).hexdigest()
             or external_action.status != ExternalActionStatus.FAILED
             or len(external_attempts) != 1
             or external_attempts[0].status != "FAILED"
             or external_attempts[0].attempt_number != 1
+            or external_attempts[0].action_key != dispatch_key
             or external_attempts[0].claim_key != f"run:{run.run_id}"
             or external_attempts[0].fence_token <= 0
+            or external_action.last_dispatch_intent_id != external_attempts[0].attempt_id
             or len(finalized_terminal_actions) != 1
             or len(finalized_terminal_actions) + len(side_effect_free_rejections)
             != len(execute_actions)
         ):
-            return False
+            return decision(
+                CodeReviewOutcomeKind.UNRESOLVED_OR_AMBIGUOUS,
+                "external dispatch or attempt is missing, duplicated, or not finalized",
+            )
         execute_action = finalized_terminal_actions[0]
         decision_id = execute_action.result_payload_json.get("recovery_decision_id")
-        decision = uow.recovery_decisions.get_by_id(decision_id) if decision_id else None
+        recovery_decision = uow.recovery_decisions.get_by_id(decision_id) if decision_id else None
         if (
-            not decision
-            or decision.claim_key != f"run:{run.run_id}"
-            or decision.identity_type != "RUN"
-            or decision.identity_id != run.run_id
-            or decision.project_id != run.project_id
-            or decision.change_name != run.change_name
-            or decision.planned_action != "DISPATCH_FROZEN_CODE_REVIEW"
-            or decision.status.value != "BLOCKED"
-            or decision.observation_refs.get("authorization_id") != authorization_id
+            not recovery_decision
+            or recovery_decision.claim_key != f"run:{run.run_id}"
+            or recovery_decision.identity_type != "RUN"
+            or recovery_decision.identity_id != run.run_id
+            or recovery_decision.project_id != run.project_id
+            or recovery_decision.change_name != run.change_name
+            or recovery_decision.source.value != "CONTROL_PLANE"
+            or recovery_decision.classification.value != "RESUME_SAFE_CHECKPOINT"
+            or recovery_decision.planned_action != "DISPATCH_FROZEN_CODE_REVIEW"
+            or recovery_decision.status.value != "BLOCKED"
+            or recovery_decision.fence_token != external_attempts[0].fence_token
+            or recovery_decision.observation_refs.get("authorization_id") != authorization_id
         ):
-            return False
-    return True
+            return decision(
+                CodeReviewOutcomeKind.UNRESOLVED_OR_AMBIGUOUS,
+                "terminal dispatch lacks its canonical fenced recovery decision",
+            )
+
+    # Audit every row for this exact direct CODE_REVIEW operation set. Orphan
+    # rows or rows that cannot be linked by reservation to one of the reviewed
+    # authorizations invalidate the whole recovery proof; timestamps are never
+    # used to associate an entry with an operation.
+    authorization_ids = {review.budget_authorization_id for review in reviews}
+    if len(authorization_ids) != len(reviews):
+        return decision(
+            CodeReviewOutcomeKind.UNRESOLVED_OR_AMBIGUOUS,
+            "multiple reviews reuse one authorization identity",
+        )
+    reservation_by_id = {item.reservation_id: item for item in reservations}
+    linked_reservations: dict[str, list] = {}
+    for reservation in reservations:
+        if reservation.authorization_id in authorization_ids:
+            linked_reservations.setdefault(reservation.authorization_id, []).append(reservation)
+    if any(len(linked_reservations.get(auth_id, [])) != 1 for auth_id in authorization_ids):
+        return decision(
+            CodeReviewOutcomeKind.UNRESOLVED_OR_AMBIGUOUS,
+            "one or more authorizations do not map to exactly one reservation",
+        )
+    related_reservations = [item for rows in linked_reservations.values() for item in rows]
+    related_reservation_ids = {item.reservation_id for item in related_reservations}
+    if any(
+        item.project_id != run.project_id
+        or item.run_id != run.run_id
+        or item.job_id != job.job_id
+        or item.change_id != job.change_name
+        or item.provider != "deepseek"
+        or item.stage != "REVIEW"
+        or item.billing_origin != "deepseek_direct"
+        for item in related_reservations
+    ):
+        return decision(
+            CodeReviewOutcomeKind.INTEGRITY_CONFLICT,
+            "a review authorization is linked to a reservation with contradictory identity",
+        )
+    related_ledger = [
+        item
+        for item in ledger
+        if item.reservation_id in related_reservation_ids
+        or item.project_id == run.project_id
+        and item.job_id == job.job_id
+        and item.stage == "REVIEW"
+        and (item.provider == "deepseek" or item.billing_origin == "deepseek_direct")
+    ]
+    if any(
+        item.billing_origin != "deepseek_direct"
+        or item.reservation_id not in related_reservation_ids
+        or item.reservation_id not in reservation_by_id
+        or reservation_by_id[item.reservation_id].authorization_id not in authorization_ids
+        or item.provider != "deepseek"
+        or item.account_fingerprint != reservation_by_id[item.reservation_id].account_fingerprint
+        or item.canonical_model_identity
+        != reservation_by_id[item.reservation_id].canonical_model_identity
+        or item.change_id != reservation_by_id[item.reservation_id].change_id
+        or item.stage != "REVIEW"
+        or item.entry_type != "SETTLEMENT"
+        for item in related_ledger
+    ):
+        return decision(
+            CodeReviewOutcomeKind.UNRESOLVED_OR_AMBIGUOUS,
+            "a direct CODE_REVIEW ledger row is orphaned or mismatched",
+        )
+
+    return decision(
+        CodeReviewOutcomeKind.DEFINITIVE_UNUSABLE_SETTLED,
+        "all CODE_REVIEW operations are definitive, unusable, finalized, and financially settled",
+    )
 
 
 @dataclass(frozen=True)
@@ -750,14 +989,14 @@ class DeepSeekCodeReviewService:
                         item.budget_authorization_id != authorization_id
                         for item in old_review_actions
                     )
-                    and terminal_settled_code_review_recovery_allowed(
+                    and reconcile_code_review_outcome(
                         self.uow,
                         run=run,
                         job=job,
                         candidate=candidate,
                         manifest=manifest,
                         claim_context=claim_context,
-                    )
+                    ).permits_new_authorization
                 )
             if not resumable_placeholder and not terminal_retry:
                 return CodeReviewResult(
@@ -1140,19 +1379,24 @@ class DeepSeekCodeReviewService:
                 or "DeepSeek code-review response identity or usage is unverifiable.",
             )
             self.uow.commit()
-            terminal_truncation = bool(
+            terminal_unusable = bool(
                 response.exit_code == 0
-                and response.error == "incomplete generation (length)"
                 and response.model == profile.model
                 and diagnostics
                 and diagnostics.http_status == 200
                 and diagnostics.model_matches_request is True
-                and diagnostics.finish_reason == "length"
                 and diagnostics.content_present
                 and diagnostics.content_type == "str"
-                and diagnostics.content_length == 0
+                and isinstance(diagnostics.content_length, int)
+                and not isinstance(diagnostics.content_length, bool)
+                and diagnostics.content_length >= 0
                 and usage_verified
                 and usage_settled
+                and (
+                    diagnostics.finish_reason == "length"
+                    or diagnostics.finish_reason == "stop"
+                    and diagnostics.content_length == 0
+                )
             )
             return CodeReviewResult(
                 False,
@@ -1160,10 +1404,12 @@ class DeepSeekCodeReviewService:
                 sha,
                 reason=(
                     "DEEPSEEK_CODE_REVIEW_TERMINAL_TRUNCATED"
-                    if terminal_truncation
+                    if diagnostics and diagnostics.finish_reason == "length"
+                    else "DEEPSEEK_CODE_REVIEW_TERMINAL_UNUSABLE"
+                    if terminal_unusable
                     else "DEEPSEEK_CODE_REVIEW_RESPONSE_UNVERIFIABLE"
                 ),
-                waiting=not terminal_truncation,
+                waiting=not terminal_unusable,
             )
         try:
             verdict = parse_review_verdict(response.content)
@@ -1187,7 +1433,27 @@ class DeepSeekCodeReviewService:
                 error_message="DeepSeek code review did not match the strict verdict schema.",
             )
             self.uow.commit()
-            return CodeReviewResult(False, review.review_id, sha, reason="CODE_REVIEW_MALFORMED")
+            malformed_terminal = bool(
+                exceptional_authorization is not None
+                and diagnostics
+                and diagnostics.http_status == 200
+                and diagnostics.model_matches_request is True
+                and diagnostics.finish_reason == "stop"
+                and diagnostics.content_present
+                and diagnostics.content_type == "str"
+                and isinstance(diagnostics.content_length, int)
+                and not isinstance(diagnostics.content_length, bool)
+                and diagnostics.content_length > 0
+                and usage_verified
+                and usage_settled
+            )
+            return CodeReviewResult(
+                False,
+                review.review_id,
+                sha,
+                reason="CODE_REVIEW_MALFORMED",
+                waiting=not malformed_terminal,
+            )
 
         if not usage_settled:
             if exceptional_authorization is not None:
