@@ -412,6 +412,42 @@ Mini me SHALL run the repository's configured deterministic implementation tests
 - **THEN** Control Plane rejects renewal without changing prior records or candidate state
 - **AND** ambiguous or incomplete evidence fails closed and remains encumbered under the configured spending limit.
 
+#### Scenario: Known terminal truncated CODE_REVIEW finalizes coherently
+- **GIVEN** the provider returned a definitive HTTP 200 response for the exact requested model with `finish_reason=length`, invalid or empty review content, valid provider-reported usage, and a reservation successfully settled against that usage
+- **WHEN** the review response is finalized
+- **THEN** the Review becomes terminal `REVIEW_FAILED`, never a passing review or capacity wait
+- **AND** the Run remains stopped at a human gate, the Job leaves `REVIEW_RUNNING`, and the candidate, checks, diagnostics, authorization, reservation, and ledger remain unchanged.
+
+#### Scenario: Terminal truncation diagnostics do not expose private reasoning
+- **GIVEN** a response includes `reasoning_content` and ends with `finish_reason=length`
+- **WHEN** transport diagnostics are persisted
+- **THEN** they retain only allowlisted presence/type/character-length metadata, finish reason, response/content metadata, usage, and duration
+- **AND** they never persist or print the reasoning text or claim reasoning-token usage that the provider did not report.
+
+#### Scenario: Terminal settled code-review failure permits only a distinct owner-authorized review operation
+- **GIVEN** the latest exact-candidate CODE_REVIEW is terminal `REVIEW_FAILED` after a definitive invalid/truncated response, its provider usage is verified and its reservation is `SETTLED` with a matching ledger entry, and its dispatch/execute records are conclusively finalized rather than ambiguous
+- **AND** all candidate, base, generation, manifest, current checks, managed worktree and repository-binding identities still match
+- **WHEN** the owner creates a new exact-candidate `AUTHORIZE_DEEPSEEK_CODE_REVIEW` action and a separate new `EXECUTE_AUTHORIZED_DEEPSEEK_CODE_REVIEW` action with fresh JIT capability/pricing/policy checks
+- **THEN** the new operation receives a new action ID, Review ID, reservation idempotency identity, and dispatch identity
+- **AND** its cumulative exposure remains within applicable owner-configured limits while all prior Review, authorization, reservation, usage, and diagnostic records remain immutable.
+
+#### Scenario: New review operation does not repeat APPLY, checks, or historical dispatch
+- **GIVEN** the exact frozen candidate already has current passing check evidence and a terminal settled code-review failure
+- **WHEN** a new explicitly authorized exceptional review operation executes
+- **THEN** it dispatches only read-only CODE_REVIEW against that candidate without re-entering generic CONTINUE, APPLY, or check execution
+- **AND** no historical dispatch key, Review ID, reservation key, or result is reused.
+
+#### Scenario: Ambiguous, unresolved, incomplete, or contradictory code-review outcome cannot be retried
+- **GIVEN** a prior same-candidate review has an active/live claim, `REVIEW_PENDING`, `REVIEW_RUNNING` or `REVIEW_TIMED_OUT` status, an `UNRESOLVED`/missing settlement, missing terminal response diagnostics, ambiguous dispatch/attempt, mismatched identity/check/worktree evidence, or any contradictory history
+- **WHEN** a new CODE_REVIEW authorization or execution is requested
+- **THEN** Control Plane rejects it before provider dispatch and preserves the prior evidence and financial exposure unchanged.
+
+#### Scenario: CODE_REVIEW output ceiling and reservation use one configured bound
+- **GIVEN** a configured CODE_REVIEW output-token bound is positive, within the supported client maximum, and the exact input bound, verified pricing, and applicable optional spend limits are valid
+- **WHEN** DeepSeek CODE_REVIEW reserves cost and constructs its HTTP request
+- **THEN** the HTTP `max_tokens` equals the exact output-token quantity used in the conservative reservation
+- **AND** an invalid bound, exceeded cost/limit, or unavailable price blocks dispatch before provider invocation without changing CONTRACT_REVIEW's separate bound.
+
 #### Scenario: Contract-review evidence cannot satisfy final review
 - **GIVEN** a valid DeepSeek CONTRACT REVIEW result exists for the OpenSpec artifacts but no valid candidate-bound code REVIEW exists
 - **WHEN** the candidate approaches PR readiness
@@ -565,3 +601,45 @@ R01 SHALL be verified after authorized deployment by repeating a low-cost fixtur
 - **WHEN** the deployed API/CLI path executes the agreed functional acceptance scenario
 - **THEN** a real candidate and inspectable PR at the expected SHA are observed
 - **AND** health-only checks or mocked provider/process responses are not reported as deployed functional success.
+
+### Requirement: R01-S08 Canonical terminal CODE_REVIEW reconciliation and authorized recovery
+R01 SHALL use one authoritative, read-only CODE_REVIEW outcome/reconciliation decision shared by operator action discovery, authorization, execution and review-service pre-dispatch, and revalidate that decision under the current fenced Run claim before any externally billable action. Classification SHALL distinguish: a valid independent review; a definitive but unusable provider response with verifiable and completely settled usage; an uncertain result or spend; and contradictory authority or integrity. Only the definitive settled unusable class MAY enable a **new**, distinct, explicitly owner-authorized exceptional CODE_REVIEW; it SHALL never replay the old provider request. Ordinary autonomous review policy is unaffected.
+
+#### Scenario: Complete historical production checkpoint is eligible without fabricating telemetry
+- **GIVEN** a PostgreSQL-disposable reconstruction of the recorded 2026-10-21 checkpoint for Review `38f37f34-627e-4446-ab3e-cb33844cb657`: Run stopped at `CODE_REVIEW_FAILED_CLOSED` and `NEEDS_HUMAN`; Job still `REVIEW_RUNNING`; Review `REVIEW_FAILED` with no verdict; HTTP 200, `finish_reason=length`, empty response content, 8008/4096/12104 tokens, and NO `request_duration_ms` field; one matched SETTLED reservation and ledger entry for USD 0.007318; independently verified final external action, attempt and Control Plane decision; exact candidate/base/generation/manifest/checks and owned clean worktree
+- **WHEN** the reconciliation authority is evaluated through API and CLI against that immutable history
+- **THEN** it identifies a definitive financially settled unusable review and permits a separately requested new authorization, subject to all current identity, capacity, independence, and policy constraints, without dispatching
+- **AND** it SHALL NOT infer, backfill, or mutate missing duration, reasoning token count, or any historical Review, authorization, settlement, action, attempt, or response record
+- **AND** it SHALL NOT treat historical Job `REVIEW_RUNNING` as evidence of current execution when its fenced dispatch and review are conclusively terminal.
+
+#### Scenario: Optional diagnostics never become spending or dispatch authority
+- **GIVEN** any historically missing or present request-duration, transport-stall, reasoning-content presence/character length, or optional provider-reported numeric reasoning-token metrics
+- **WHEN** the recovery classifier evaluates proof of terminality, identity, and settlement
+- **THEN** it treats observability-only metrics as diagnostic, validates their type/range when present, never reads or retains private reasoning text, and never requires them to prove financial settlement or absence of an in-flight dispatch
+- **AND** malformed optional metadata is reported as a diagnostic integrity problem without silently fabricating a safe duration or bypassing authoritative accounting evidence.
+
+#### Scenario: Definitive unusable response is classified by proof, not one finish reason
+- **GIVEN** an exact, durable, definitive provider response with valid returned identity, independently verifiable token usage and a unique settled reservation, and a single finalized non-ambiguous fenced dispatch
+- **WHEN** its output is unusable because generation truncated, JSON mode returned empty content, or the final content violated the strict review schema
+- **THEN** the Review is `REVIEW_FAILED` without a passing verdict and the Run/Job are brought to the human gate through governed fenced/CAS transitions
+- **AND** a future review requires a distinct authorization, action, Review, reservation, and dispatch identity; the original operation and history remain immutable
+- **AND** HTTP 200, a bare `REVIEW_FAILED` status, or the existence of a settlement alone SHALL NOT prove eligibility.
+
+#### Scenario: Unresolved external effect or orphan financial record always blocks
+- **GIVEN** a missing, double, unmatched or misattributed ledger entry or settlement, an `UNRESOLVED` / `SETTLEMENT_BREACH` reservation, pending or ambiguous external action/attempt, pending Review, live or stale claim, provider-identity contradiction, or candidate/check/worktree discrepancy
+- **WHEN** any consumer asks for new review authority or dispatch
+- **THEN** the common decision is UNKNOWN or INTEGRITY_CONFLICT and blocks the operation before provider invocation
+- **AND** every related DeepSeek CODE_REVIEW ledger entry must map unambiguously through its reservation and authorization to a single known operation; legitimate later operations do not invalidate an earlier proven unused grant merely because their ledger timestamps are newer.
+
+#### Scenario: Terminal Job reconciliation is fenced and never retroactively edits history
+- **GIVEN** the exact historic terminal settled Review and an inactive Run whose Job retains `REVIEW_RUNNING`
+- **WHEN** the operator initiates a separately authorized recovery through Control Plane
+- **THEN** a current claim/fence and CAS transition the Job to `NEEDS_HUMAN` and persist a new recovery event/decision while keeping the Run stopped and the earlier Review, usage, ledger, candidate, checks and external history immutable
+- **AND** loss of claim, concurrent action, contradictory status, or failed persistence prevents a new paid dispatch.
+
+#### Scenario: All recovery entrypoints use one outcome and cannot repeat old operations
+- **GIVEN** both a valid settled unusable history and an otherwise-identical ambiguous or financially contradictory history
+- **WHEN** action-discovery, API, CLI, authorization, exceptional dispatch, or the DeepSeek review service evaluates a proposed new operation
+- **THEN** each consumer makes the same allow/deny decision from the shared typed result and the execution path rechecks it under the current claim and transactional authority
+- **AND** concurrency and restart tests prove at most one external request for the newly authorized identity, no replay of prior dispatch, no generic `CONTINUE`/APPLY/check/audit/PR side effects, and rejection of the ambiguous or contradictory history
+- **AND** these tests use PostgreSQL 16 with real Git/worktree and intercepted provider HTTP; the historic missing-field fixture is mandatory and fresh-run mocks alone are insufficient.

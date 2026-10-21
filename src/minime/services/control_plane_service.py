@@ -53,7 +53,9 @@ from minime.domain.models import (
     utc_now,
 )
 from minime.logging import redact_secrets
+from minime.services.budget_service import BudgetService
 from minime.services.container_preview_service import ContainerPreviewService
+from minime.services.deepseek_code_review_service import reconcile_code_review_outcome
 from minime.services.orchestration_service import OrchestrationService
 from minime.services.post_merge_service import PostMergeReconciliationService
 from minime.services.provider_health_service import ProviderHealthService
@@ -147,6 +149,47 @@ class ControlPlaneService:
                     and self._expired_unused_code_review_authorization(action, run, job, candidate)
                 ):
                     continue
+                if job and auth.get("candidate_sha"):
+                    reviews_repo = getattr(self.uow, "reviews", None)
+                    reviews = (
+                        [
+                            item
+                            for item in reviews_repo.list_by_job(job.job_id)
+                            if item.review_stage == "CODE_REVIEW"
+                            and item.budget_authorization_id == action.action_request_id
+                        ]
+                        if reviews_repo
+                        else []
+                    )
+                    if reviews:
+                        if len(reviews) != 1 or not reviews[0].budget_reservation_id:
+                            return None
+                        reservation = self.uow.budget_reservations.get_by_id(
+                            reviews[0].budget_reservation_id
+                        )
+                        if (
+                            not reservation
+                            or reservation.authorization_id != action.action_request_id
+                        ):
+                            return None
+                        if reservation.status == "SETTLED":
+                            settlements = [
+                                item
+                                for item in self.uow.budget_ledger.list_by_project(run.project_id)
+                                if item.reservation_id == reservation.reservation_id
+                                and item.entry_type == "SETTLEMENT"
+                            ]
+                            if len(settlements) != 1:
+                                return None
+                            settled_amount = settlements[0].amount_usd
+                            if not settled_amount.is_finite() or settled_amount < 0:
+                                return None
+                            total += settled_amount
+                            continue
+                        if reservation.status in {"RESERVED", "UNRESOLVED", "SETTLEMENT_BREACH"}:
+                            total += reservation.reserved_amount_usd
+                            continue
+                        return None
             total += amount
         return total
 
@@ -244,8 +287,9 @@ class ControlPlaneService:
         candidate,
         *,
         now: datetime | None = None,
+        allow_later_candidate_review: bool = False,
     ) -> bool:
-        """Prove a prior candidate-bound authorization expired before any review dispatch."""
+        """Prove this exact candidate-bound authorization expired without being consumed."""
         authorization = action.result_payload_json.get("authorization", {})
         expected = {
             "provider": "deepseek",
@@ -288,7 +332,6 @@ class ControlPlaneService:
         auth_id = action.action_request_id
         dispatch_key = f"deepseek-code-review:{auth_id}"
         reservations_repo = getattr(self.uow, "budget_reservations", None)
-        ledger_repo = getattr(self.uow, "budget_ledger", None)
         reviews_repo = getattr(self.uow, "reviews", None)
         external_repo = getattr(self.uow, "orchestration_external_actions", None)
         attempts_repo = getattr(self.uow, "external_action_attempts", None)
@@ -296,7 +339,6 @@ class ControlPlaneService:
         if not all(
             (
                 reservations_repo,
-                ledger_repo,
                 reviews_repo,
                 external_repo,
                 attempts_repo,
@@ -311,22 +353,26 @@ class ControlPlaneService:
         ):
             return False
         if any(
-            entry.job_id == job.job_id
-            and entry.provider == "deepseek"
-            and entry.stage == "REVIEW"
-            and entry.billing_origin == "deepseek_direct"
-            and entry.created_at >= action.created_at
-            for entry in ledger_repo.list_by_project(run.project_id)
-        ):
-            return False
-        if any(
             review.budget_authorization_id == auth_id
             or (
-                review.candidate_sha == candidate.candidate_sha
+                not allow_later_candidate_review
+                and review.candidate_sha == candidate.candidate_sha
                 and review.base_sha == candidate.base_sha
                 and review.orchestration_run_id == run.run_id
             )
             for review in reviews_repo.list_by_job(job.job_id)
+        ):
+            return False
+        usage_audit = BudgetService(self.uow).audit_unreserved_code_review_usage(
+            project_id=run.project_id, job_id=job.job_id
+        )
+        if (
+            not usage_audit.complete
+            or usage_audit.unresolved_entries
+            or any(
+                review.budget_authorization_id == auth_id
+                for review in usage_audit.attributed_reviews.values()
+            )
         ):
             return False
         if external_repo.get_by_action_key(dispatch_key) is not None:
@@ -356,7 +402,7 @@ class ControlPlaneService:
     def _code_review_authorization_renewal_allowed(
         self, run: OrchestrationRun, job, candidate
     ) -> bool:
-        """Allow no prior grant or only exact expired/unused grants for this candidate."""
+        """Allow unused expired grants or fully settled terminal reviews only."""
         actions = self.uow.operator_actions.list_by_run(run.run_id, limit=10000)
         prior = []
         for action in actions:
@@ -369,8 +415,37 @@ class ControlPlaneService:
             bound_sha = auth.get("candidate_sha")
             if not bound_sha or bound_sha == candidate.candidate_sha:
                 prior.append(action)
+        if not prior:
+            return True
+        manifest = self.uow.candidate_manifests.get_by_id(candidate.manifest_id)
+        if manifest is None:
+            return False
+        terminal_failure_proof = reconcile_code_review_outcome(
+            self.uow,
+            run=run,
+            job=job,
+            candidate=candidate,
+            manifest=manifest,
+        ).permits_new_authorization
+        terminal_review_authorization_ids = {
+            review.budget_authorization_id
+            for review in self.uow.reviews.list_by_job(job.job_id)
+            if review.review_stage == "CODE_REVIEW"
+            and review.status == ReviewStatus.REVIEW_FAILED
+            and review.budget_authorization_id
+        }
         return all(
-            self._expired_unused_code_review_authorization(action, run, job, candidate)
+            self._expired_unused_code_review_authorization(
+                action,
+                run,
+                job,
+                candidate,
+                allow_later_candidate_review=terminal_failure_proof,
+            )
+            or (
+                terminal_failure_proof
+                and action.action_request_id in terminal_review_authorization_ids
+            )
             for action in prior
         )
 
@@ -396,6 +471,8 @@ class ControlPlaneService:
             "REVIEW_AUTHORIZATION_PENDING",
             "CODE_REVIEW_COMPLETED_REQUIRES_SEPARATE_AUTHORIZED_CONTINUATION",
             "CODE_REVIEW_COMPLETED_CHANGES_REQUIRED",
+            "CODE_REVIEW_TERMINAL_FAILURE_SETTLED",
+            "CODE_REVIEW_FAILED_CLOSED",
         }
         if (
             run.is_active
@@ -461,6 +538,11 @@ class ControlPlaneService:
             if active_job
             else None
         )
+        code_manifest = (
+            self.uow.candidate_manifests.get_by_id(frozen_candidate.manifest_id)
+            if frozen_candidate and frozen_candidate.manifest_id
+            else None
+        )
         review_authorizations = [
             action
             for action in self.uow.operator_actions.list_by_run(run.run_id, limit=10000)
@@ -495,11 +577,29 @@ class ControlPlaneService:
             if active_job and project and frozen_candidate
             else (False, "Candidate/check evidence unavailable.", [])
         )
+        terminal_dispatch_recovery = False
+        if active_job and project and frozen_candidate and code_manifest and not run.is_active:
+            terminal_dispatch_recovery = reconcile_code_review_outcome(
+                self.uow,
+                run=run,
+                job=active_job,
+                candidate=frozen_candidate,
+                manifest=code_manifest,
+            ).permits_new_authorization
+        dispatch_review_hold = review_hold_code == "REVIEW_AUTHORIZATION_PENDING" or (
+            terminal_dispatch_recovery
+            and review_hold_code
+            in {"CODE_REVIEW_TERMINAL_FAILURE_SETTLED", "CODE_REVIEW_FAILED_CLOSED"}
+        )
         review_dispatch_enabled = bool(
-            review_hold_code == "REVIEW_AUTHORIZATION_PENDING"
+            dispatch_review_hold
             and not run.is_active
             and active_job
-            and active_job.status == JobStatus.CHECKS_PASSED
+            and (
+                active_job.status == JobStatus.CHECKS_PASSED
+                or terminal_dispatch_recovery
+                and active_job.status == JobStatus.NEEDS_HUMAN
+            )
             and frozen_candidate
             and frozen_candidate.is_frozen
             and frozen_candidate.candidate_sha == active_job.candidate_sha
@@ -1012,6 +1112,15 @@ class ControlPlaneService:
             if job and reviews_repo
             else None
         )
+        terminal_review_recovery = False
+        if job and code_candidate and code_manifest and not run.is_active:
+            terminal_review_recovery = reconcile_code_review_outcome(
+                self.uow,
+                run=run,
+                job=job,
+                candidate=code_candidate,
+                manifest=code_manifest,
+            ).permits_new_authorization
         code_review_slot_open = bool(
             prior_code_review is None
             or (
@@ -1020,6 +1129,7 @@ class ControlPlaneService:
                 and prior_code_review.budget_reservation_id is None
                 and prior_code_review.provider is None
             )
+            or terminal_review_recovery
         )
         code_review_authorization_allowed = bool(
             job
@@ -1036,7 +1146,11 @@ class ControlPlaneService:
             and code_manifest.manifest_hash == code_candidate.manifest_hash
             and checks_valid
             and bool(current_check_batch)
-            and job.status in {JobStatus.CHECKS_PASSED, JobStatus.WAITING_CAPACITY}
+            and (
+                job.status in {JobStatus.CHECKS_PASSED, JobStatus.WAITING_CAPACITY}
+                or terminal_review_recovery
+                and job.status in {JobStatus.REVIEW_RUNNING, JobStatus.NEEDS_HUMAN}
+            )
             and run.project_id == job.project_id
             and run.change_name == job.change_name
             and code_review_slot_open
@@ -1455,6 +1569,8 @@ class ControlPlaneService:
             "REVIEW_AUTHORIZATION_PENDING",
             "CODE_REVIEW_COMPLETED_REQUIRES_SEPARATE_AUTHORIZED_CONTINUATION",
             "CODE_REVIEW_COMPLETED_CHANGES_REQUIRED",
+            "CODE_REVIEW_TERMINAL_FAILURE_SETTLED",
+            "CODE_REVIEW_FAILED_CLOSED",
         }:
             return self._record_and_return_rejection(
                 request=request,
@@ -1863,8 +1979,13 @@ class ControlPlaneService:
                 summary="Review dispatch requires exactly one authorization_id.",
                 sanitized_params=sanitized_params,
             )
+        terminal_hold = (run.stop_details or {}).get("code") in {
+            "CODE_REVIEW_TERMINAL_FAILURE_SETTLED",
+            "CODE_REVIEW_FAILED_CLOSED",
+        }
         if (
             (run.stop_details or {}).get("code") != "REVIEW_AUTHORIZATION_PENDING"
+            and not terminal_hold
             or run.current_stage
             not in {
                 OrchestrationStage.FREEZING_CANDIDATE,
@@ -1876,7 +1997,7 @@ class ControlPlaneService:
                 request=request,
                 run=run,
                 error_code=OperatorActionErrorCode.ACTION_NOT_ALLOWED,
-                summary="CODE_REVIEW dispatch requires the inactive review-authorization hold.",
+                summary="CODE_REVIEW dispatch requires an inactive authorized review hold.",
                 sanitized_params=sanitized_params,
             )
 
@@ -1892,6 +2013,15 @@ class ControlPlaneService:
             self.uow.candidate_manifests.get_by_id(candidate.manifest_id)
             if candidate and candidate.manifest_id
             else None
+        )
+        terminal_retry = bool(
+            terminal_hold
+            and job
+            and candidate
+            and manifest
+            and reconcile_code_review_outcome(
+                self.uow, run=run, job=job, candidate=candidate, manifest=manifest
+            ).permits_new_authorization
         )
         authorization_id = str(sanitized_params["authorization_id"])
         authorization_record = self.uow.operator_actions.get_by_request_id(authorization_id)
@@ -1941,7 +2071,13 @@ class ControlPlaneService:
             or manifest.manifest_hash != candidate.manifest_hash
             or not checks_valid
             or not checks
-            or job.status != JobStatus.CHECKS_PASSED
+            or (
+                job.status != JobStatus.CHECKS_PASSED
+                and not (
+                    terminal_retry
+                    and job.status in {JobStatus.NEEDS_HUMAN, JobStatus.REVIEW_RUNNING}
+                )
+            )
             or job.project_id != run.project_id
             or job.change_name != run.change_name
             or run.active_job_id != job.job_id
@@ -1970,7 +2106,7 @@ class ControlPlaneService:
                 run=run,
                 error_code=OperatorActionErrorCode.AUTHORITY_MISMATCH,
                 summary=(
-                    "Review authorization, current configured check batch, or managed binding "
+                    "Review authorization, terminal recovery proof, current configured check batch, or managed binding "
                     f"is invalid: {checks_error or 'identity mismatch'}."
                 ),
                 sanitized_params=sanitized_params,
@@ -2054,7 +2190,7 @@ class ControlPlaneService:
             source=RecoverySource.CONTROL_PLANE,
             prior_checkpoint={
                 "stage": run.current_stage.value,
-                "gate": "REVIEW_AUTHORIZATION_PENDING",
+                "gate": (run.stop_details or {}).get("code"),
                 "candidate_sha": candidate.candidate_sha,
                 "generation": candidate.generation,
                 "manifest_id": manifest.manifest_id,
@@ -2175,15 +2311,55 @@ class ControlPlaneService:
                 persisted_run.is_active = False
                 persisted_run.stop_outcome = OrchestrationStopOutcome.NEEDS_HUMAN
                 persisted_run.human_gate = HumanGate.NEEDS_HUMAN
+                known_terminal_failure = bool(
+                    result.reason
+                    in {
+                        "DEEPSEEK_CODE_REVIEW_TERMINAL_TRUNCATED",
+                        "DEEPSEEK_CODE_REVIEW_TERMINAL_UNUSABLE",
+                        "CODE_REVIEW_MALFORMED",
+                    }
+                    and not result.waiting
+                )
                 persisted_run.stop_reason = result.reason or "CODE_REVIEW_FAILED_CLOSED"
                 persisted_run.stop_details = {
                     "code": "CODE_REVIEW_DISPATCH_AMBIGUOUS"
                     if result.reason and "AMBIGUOUS" in result.reason
-                    else "CODE_REVIEW_FAILED_CLOSED",
+                    else (
+                        "CODE_REVIEW_TERMINAL_FAILURE_SETTLED"
+                        if known_terminal_failure
+                        else "CODE_REVIEW_FAILED_CLOSED"
+                    ),
                     "reason": result.reason,
                     "candidate_sha": candidate.candidate_sha,
+                    "base_sha": candidate.base_sha,
                     "generation": candidate.generation,
+                    "manifest_id": manifest.manifest_id,
+                    "manifest_hash": manifest.manifest_hash,
+                    "review_id": result.review_id,
                 }
+                if result.reason and "AMBIGUOUS" not in result.reason and not result.waiting:
+                    persisted_job = self.uow.jobs.transition(
+                        persisted_job.job_id,
+                        JobStatus.NEEDS_HUMAN.value,
+                        error_message=result.reason,
+                        claim_context=context,
+                    )
+                    self.uow.events.save(
+                        Event(
+                            event_type=EventType.JOB_NEEDS_HUMAN,
+                            project_id=run.project_id,
+                            change_id=run.change_name,
+                            operation_id=job.job_id,
+                            payload={
+                                "run_id": run.run_id,
+                                "job_id": job.job_id,
+                                "review_id": result.review_id,
+                                "candidate_sha": candidate.candidate_sha,
+                                "reason": result.reason,
+                            },
+                            timestamp=utc_now(),
+                        )
+                    )
                 action_record.status = OperatorActionStatus.BLOCKED
                 action_record.summary = "CODE_REVIEW did not complete; durable state is preserved and no blind repeat is allowed."
                 action_record.result_payload_json = {
@@ -2228,11 +2404,12 @@ class ControlPlaneService:
     def _expected_code_review_reservation_key(run, job, candidate, authorization_id: str) -> str:
         from minime.services.deepseek_code_review_service import _reservation_key
 
-        return (
-            _reservation_key(
-                run.run_id, job.job_id, candidate.candidate_sha, candidate.manifest_hash
-            )
-            + f":{authorization_id}"
+        return _reservation_key(
+            run.run_id,
+            job.job_id,
+            candidate.candidate_sha,
+            candidate.manifest_hash,
+            authorization_id=authorization_id,
         )
 
     def _execute_continue_after_code_review(
@@ -2708,6 +2885,15 @@ class ControlPlaneService:
         prior_code_review = (
             self.uow.reviews.get_by_job_stage(job.job_id, "CODE_REVIEW") if job else None
         )
+        terminal_recovery = bool(
+            job
+            and candidate
+            and manifest
+            and not run.is_active
+            and reconcile_code_review_outcome(
+                self.uow, run=run, job=job, candidate=candidate, manifest=manifest
+            ).permits_new_authorization
+        )
         review_slot_open = bool(
             prior_code_review is None
             or (
@@ -2716,6 +2902,7 @@ class ControlPlaneService:
                 and prior_code_review.budget_reservation_id is None
                 and prior_code_review.provider is None
             )
+            or terminal_recovery
         )
         if (
             not job
@@ -2733,7 +2920,13 @@ class ControlPlaneService:
             or manifest.job_id != job.job_id
             or manifest.candidate_sha != candidate.candidate_sha
             or manifest.manifest_hash != candidate.manifest_hash
-            or job.status not in {JobStatus.CHECKS_PASSED, JobStatus.WAITING_CAPACITY}
+            or (
+                job.status not in {JobStatus.CHECKS_PASSED, JobStatus.WAITING_CAPACITY}
+                and not (
+                    terminal_recovery
+                    and job.status in {JobStatus.NEEDS_HUMAN, JobStatus.REVIEW_RUNNING}
+                )
+            )
             or not checks_valid
             or not current_check_batch
             or not review_slot_open
@@ -2752,7 +2945,7 @@ class ControlPlaneService:
                 error_code=OperatorActionErrorCode.ACTION_ALREADY_COMPLETED,
                 summary=(
                     "Code-review authorization cannot be renewed unless every prior same-candidate "
-                    "authorization is expired and durably proven unused."
+                    "authorization is expired and proven unused or belongs to a terminal, settled review."
                 ),
                 sanitized_params=sanitized_params,
             )
@@ -2890,43 +3083,104 @@ class ControlPlaneService:
             "authorized_by": request.actor_identity,
             "action_request_id": request.action_request_id,
         }
-        summary = "One-use DeepSeek Direct code REVIEW authorized for the exact candidate; merge remains a separate human gate."
-        record = OperatorActionRecord(
-            action_request_id=request.action_request_id,
-            project_id=run.project_id,
-            change_name=run.change_name,
-            run_id=run.run_id,
-            job_id=job.job_id,
-            action_type=request.action_type,
-            actor_identity=request.actor_identity,
-            source_interface=request.source_interface,
-            precondition_stage=run.current_stage.value,
-            status=OperatorActionStatus.COMPLETED,
-            summary=summary,
-            evidence_reference=snapshot.snapshot_id,
-            parameters_json=sanitized_params,
-            result_payload_json={"authorization": authorization},
-        )
-        self.uow.operator_actions.save(record)
-        self.uow.events.save(
-            Event(
-                event_type=EventType.OPERATOR_ACTION_EXECUTED,
-                payload={
-                    "action_request_id": request.action_request_id,
-                    "action_type": request.action_type.value,
-                    "run_id": run.run_id,
-                    "job_id": job.job_id,
-                    "provider": "deepseek",
-                    "stage": "REVIEW",
+        terminal_claim = None
+        if terminal_recovery and job.status == JobStatus.REVIEW_RUNNING:
+            terminal_claim = self.recovery_convergence_service.acquire_claim(f"run:{run.run_id}")
+            if terminal_claim is None:
+                return self._record_and_return_rejection(
+                    request=request,
+                    run=run,
+                    error_code=OperatorActionErrorCode.RECOVERY_REQUIRED,
+                    summary="Terminal CODE_REVIEW proof is valid but another recovery owner holds the Run claim.",
+                    sanitized_params=sanitized_params,
+                )
+        try:
+            if terminal_claim:
+                from minime.domain.models import validate_claim_context_authoritative
+
+                validate_claim_context_authoritative(self.uow, terminal_claim, for_update=True)
+                job = self.uow.jobs.transition(
+                    job.job_id,
+                    JobStatus.NEEDS_HUMAN.value,
+                    error_message="A definitive DeepSeek CODE_REVIEW response failed terminally; a new authorized review is a separate operation.",
+                    claim_context=terminal_claim,
+                )
+                run.is_active = False
+                run.stop_outcome = OrchestrationStopOutcome.NEEDS_HUMAN
+                run.human_gate = HumanGate.NEEDS_HUMAN
+                run.stop_reason = "DEEPSEEK_CODE_REVIEW_TERMINAL_FAILURE_SETTLED"
+                run.stop_details = {
+                    "code": "CODE_REVIEW_TERMINAL_FAILURE_SETTLED",
+                    "review_id": prior_code_review.review_id if prior_code_review else None,
                     "candidate_sha": candidate.candidate_sha,
-                    "manifest_hash": candidate.manifest_hash,
-                    "model": profile.model,
-                    "authorization_id": request.action_request_id,
-                },
-                timestamp=now,
+                    "base_sha": candidate.base_sha,
+                    "generation": candidate.generation,
+                    "manifest_id": manifest.manifest_id,
+                    "manifest_hash": manifest.manifest_hash,
+                }
+                self.uow.orchestration_runs.save(run)
+                self.uow.events.save(
+                    Event(
+                        event_type=EventType.JOB_NEEDS_HUMAN,
+                        project_id=run.project_id,
+                        change_id=run.change_name,
+                        operation_id=job.job_id,
+                        payload={
+                            "run_id": run.run_id,
+                            "job_id": job.job_id,
+                            "review_id": prior_code_review.review_id if prior_code_review else None,
+                            "candidate_sha": candidate.candidate_sha,
+                            "reason": "DEEPSEEK_CODE_REVIEW_TERMINAL_FAILURE_SETTLED",
+                        },
+                        timestamp=now,
+                    )
+                )
+                validate_claim_context_authoritative(self.uow, terminal_claim, for_update=True)
+            summary = "One-use DeepSeek Direct code REVIEW authorized for the exact candidate; merge remains a separate human gate."
+            record = OperatorActionRecord(
+                action_request_id=request.action_request_id,
+                project_id=run.project_id,
+                change_name=run.change_name,
+                run_id=run.run_id,
+                job_id=job.job_id,
+                action_type=request.action_type,
+                actor_identity=request.actor_identity,
+                source_interface=request.source_interface,
+                precondition_stage=run.current_stage.value,
+                status=OperatorActionStatus.COMPLETED,
+                summary=summary,
+                evidence_reference=snapshot.snapshot_id,
+                parameters_json=sanitized_params,
+                result_payload_json={"authorization": authorization},
             )
-        )
-        self.uow.commit()
+            self.uow.operator_actions.save(record)
+            self.uow.events.save(
+                Event(
+                    event_type=EventType.OPERATOR_ACTION_EXECUTED,
+                    payload={
+                        "action_request_id": request.action_request_id,
+                        "action_type": request.action_type.value,
+                        "run_id": run.run_id,
+                        "job_id": job.job_id,
+                        "provider": "deepseek",
+                        "stage": "REVIEW",
+                        "candidate_sha": candidate.candidate_sha,
+                        "manifest_hash": manifest.manifest_hash,
+                        "model": profile.model,
+                        "authorization_id": request.action_request_id,
+                    },
+                    timestamp=now,
+                )
+            )
+            if terminal_claim:
+                validate_claim_context_authoritative(self.uow, terminal_claim, for_update=True)
+            self.uow.commit()
+        except Exception:
+            self.uow.rollback()
+            raise
+        finally:
+            if terminal_claim:
+                self.recovery_convergence_service.release_claim(terminal_claim)
         return OperatorActionResult(
             action_request_id=request.action_request_id,
             action_type=request.action_type,

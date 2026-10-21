@@ -234,6 +234,7 @@ class ProviderConfig(BaseModel):
     paid: bool = False
     mode: str | None = None
     budget: dict[str, Any] = Field(default_factory=dict)
+    code_review_max_output_tokens: int = Field(default=16384, gt=0, le=65536)
     drain: dict[str, Any] = Field(default_factory=dict)
     probe: ProbeConfig = Field(default_factory=ProbeConfig)
 

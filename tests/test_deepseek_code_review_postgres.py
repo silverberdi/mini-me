@@ -18,6 +18,7 @@ from uuid import uuid4
 import httpx
 import pytest
 from sqlalchemy import create_engine, text
+from sqlalchemy.engine import make_url
 from sqlalchemy.orm import sessionmaker
 
 from minime.adapters import provider_adapter
@@ -28,6 +29,7 @@ from minime.domain.enums import (
     ChangeStatus,
     EventType,
     ExecutionOutcome,
+    ExternalActionStatus,
     ExternalActionType,
     ExternalOutcome,
     ExternalReasonCode,
@@ -39,10 +41,12 @@ from minime.domain.enums import (
     OrchestrationStage,
     OrchestrationStopOutcome,
     ProgressClassification,
+    ReviewStatus,
     ReviewVerdict,
     WorktreeCreationState,
 )
 from minime.domain.models import (
+    BudgetLedgerEntry,
     BudgetReservation,
     Change,
     CheckResult,
@@ -59,6 +63,7 @@ from minime.domain.models import (
     Project,
     ProjectBinding,
     ProjectManagedRepositoryBinding,
+    Review,
 )
 from minime.services import control_plane_service
 from minime.services.budget_service import BudgetService
@@ -69,7 +74,9 @@ from minime.services.contract_review_service import (
 from minime.services.deepseek_auditor_runner import AuditorResult
 from minime.services.deepseek_code_review_service import (
     MAX_REVIEW_OUTPUT_TOKENS,
+    CodeReviewOutcomeKind,
     DeepSeekCodeReviewService,
+    reconcile_code_review_outcome,
 )
 from minime.services.execution_pipeline import ExecutionPipelineService
 from minime.services.orchestration_service import OrchestrationService
@@ -319,13 +326,29 @@ def test_postgres_dispatch_intent_survives_worker_restart_and_blocks_replay():
         "audit_risk",
         "mutate_candidate_during_review",
         "missing_reservation_case",
+        "terminal_response_case",
     ),
     [
-        (ReviewVerdict.READY_TO_MERGE, "low", False, False),
-        (ReviewVerdict.CHANGES_REQUIRED, "low", False, False),
-        (ReviewVerdict.READY_TO_MERGE, "high", False, False),
-        (ReviewVerdict.READY_TO_MERGE, "low", True, False),
-        (ReviewVerdict.READY_TO_MERGE, "low", False, True),
+        (ReviewVerdict.READY_TO_MERGE, "low", False, False, False),
+        (ReviewVerdict.CHANGES_REQUIRED, "low", False, False, False),
+        (ReviewVerdict.READY_TO_MERGE, "high", False, False, False),
+        (ReviewVerdict.READY_TO_MERGE, "low", True, False, False),
+        (ReviewVerdict.READY_TO_MERGE, "low", False, True, False),
+        (ReviewVerdict.READY_TO_MERGE, "low", False, False, "length"),
+        (ReviewVerdict.READY_TO_MERGE, "low", False, False, "empty-json"),
+        (ReviewVerdict.READY_TO_MERGE, "low", False, False, "malformed-json"),
+        (ReviewVerdict.READY_TO_MERGE, "low", False, False, "partial-length"),
+    ],
+    ids=[
+        "ready",
+        "changes-required",
+        "audit-high",
+        "candidate-mutated",
+        "missing-reservation",
+        "terminal-recovery-length",
+        "terminal-recovery-empty-json",
+        "terminal-recovery-malformed-json",
+        "terminal-recovery-partial-length",
     ],
 )
 def test_code_review_authorization_reservation_settlement_and_idempotency_in_postgres(
@@ -335,6 +358,7 @@ def test_code_review_authorization_reservation_settlement_and_idempotency_in_pos
     audit_risk,
     mutate_candidate_during_review,
     missing_reservation_case,
+    terminal_response_case,
 ):
     engine = create_engine(DATABASE_URL, pool_pre_ping=True)
     project_id = f"r01-code-review-{uuid4()}"
@@ -347,6 +371,7 @@ def test_code_review_authorization_reservation_settlement_and_idempotency_in_pos
     review_started = threading.Event()
     release_review = threading.Event()
     review_http_calls: list[dict[str, object]] = []
+    terminal_response_sent = False
 
     # Exercise the production adapter and HTTP parsing, while every request is
     # answered by an in-process transport. No DeepSeek inference/network call occurs.
@@ -373,10 +398,11 @@ def test_code_review_authorization_reservation_settlement_and_idempotency_in_pos
                 },
             )
         if request.url.path == "/chat/completions":
+            nonlocal terminal_response_sent
             payload = json.loads(request.content)
             assert payload["model"] == "deepseek-flash"
             assert payload["reasoning_effort"] == "low"
-            assert payload["max_tokens"] == MAX_REVIEW_OUTPUT_TOKENS == 4096
+            assert payload["max_tokens"] == MAX_REVIEW_OUTPUT_TOKENS == 16384
             assert payload["response_format"] == {"type": "json_object"}
             assert any(
                 message.get("role") == "user"
@@ -386,6 +412,43 @@ def test_code_review_authorization_reservation_settlement_and_idempotency_in_pos
             review_http_calls.append(payload)
             review_started.set()
             assert release_review.wait(timeout=10)
+            if terminal_response_case and not terminal_response_sent:
+                terminal_response_sent = True
+                response_content = {
+                    "length": "",
+                    "empty-json": "",
+                    "malformed-json": "not-json",
+                    "partial-length": '{"verdict":',
+                }[terminal_response_case]
+                finish_reason = (
+                    "stop"
+                    if terminal_response_case in {"empty-json", "malformed-json"}
+                    else "length"
+                )
+                return httpx.Response(
+                    200,
+                    json={
+                        "id": "intercepted-terminal-truncation",
+                        "object": "chat.completion",
+                        "model": "deepseek-flash",
+                        "choices": [
+                            {
+                                "index": 0,
+                                "message": {
+                                    "role": "assistant",
+                                    "content": response_content,
+                                    "reasoning_content": "private reasoning excluded from evidence",
+                                },
+                                "finish_reason": finish_reason,
+                            }
+                        ],
+                        "usage": {
+                            "prompt_tokens": 8008,
+                            "completion_tokens": 4096,
+                            "total_tokens": 12104,
+                        },
+                    },
+                )
             if mutate_candidate_during_review:
                 # Adversarially mutate the real registered Git worktree while
                 # the intercepted provider response is in flight.
@@ -519,8 +582,15 @@ def test_code_review_authorization_reservation_settlement_and_idempotency_in_pos
 
     try:
         with engine.connect() as connection:
+            parsed_test_url = make_url(DATABASE_URL)
+            assert parsed_test_url.database and parsed_test_url.database.startswith("minime_")
+            assert not (
+                parsed_test_url.host == "192.168.0.194"
+                and parsed_test_url.port == 5432
+                and parsed_test_url.database == "minime"
+            )
             assert connection.execute(text("select current_database()")).scalar() == (
-                "minime_contract_review_test"
+                parsed_test_url.database
             )
             assert connection.execute(text("select version_num from alembic_version")).scalar() == (
                 "r02_contract_review_budget_identity"
@@ -853,6 +923,186 @@ def test_code_review_authorization_reservation_settlement_and_idempotency_in_pos
             assert root_mismatch_control_plane._expired_unused_code_review_authorization(
                 expired_auth_record, run, job, candidate
             )
+            if terminal_response_case == "length":
+                assert (
+                    reconcile_code_review_outcome(
+                        uow,
+                        run=run,
+                        job=job,
+                        candidate=candidate,
+                        manifest=manifest,
+                    ).kind
+                    == CodeReviewOutcomeKind.NO_PRIOR_REVIEW
+                )
+
+                orphan_usage = BudgetLedgerEntry(
+                    entry_id=str(uuid4()),
+                    project_id=project_id,
+                    job_id=job_id,
+                    change_id=change_name,
+                    provider="deepseek",
+                    account_fingerprint=adapter.account_fingerprint,
+                    stage="REVIEW",
+                    billing_origin="deepseek_direct",
+                    role="reviewer",
+                    canonical_model_identity="deepseek-flash",
+                    prompt_tokens=100,
+                    completion_tokens=20,
+                    total_tokens=120,
+                    amount_usd=Decimal("0.000054"),
+                    entry_type="USAGE",
+                )
+                uow.budget_ledger.save(orphan_usage)
+                uow.commit()
+                orphan_audit = BudgetService(uow).audit_unreserved_code_review_usage(
+                    project_id=project_id, job_id=job_id
+                )
+                assert [item.entry_id for item in orphan_audit.unresolved_entries] == [
+                    orphan_usage.entry_id
+                ]
+                assert (
+                    reconcile_code_review_outcome(
+                        uow,
+                        run=run,
+                        job=job,
+                        candidate=candidate,
+                        manifest=manifest,
+                    ).kind
+                    == CodeReviewOutcomeKind.UNRESOLVED_OR_AMBIGUOUS
+                )
+                assert not root_mismatch_control_plane._expired_unused_code_review_authorization(
+                    expired_auth_record, run, job, candidate
+                )
+                # The expired grant is not classified as settled-unused: its
+                # authorized ceiling remains in cumulative authorized exposure.
+                assert root_mismatch_control_plane._deepseek_review_authorized_total(
+                    run
+                ) == Decimal("0.55")
+                exposed_stage, exposed_total = BudgetService(uow)._direct_review_exposure(
+                    project_id=project_id, stage="REVIEW"
+                )
+                assert exposed_stage == exposed_total == orphan_usage.amount_usd
+                auth_descriptor = {
+                    item.action: item
+                    for item in root_mismatch_control_plane.get_available_actions(run_id)
+                }[OperatorActionType.AUTHORIZE_DEEPSEEK_CODE_REVIEW]
+                assert auth_descriptor.enabled is False
+                blocked_authorization_id = f"orphan-ledger-auth-{uuid4()}"
+                blocked_authorization = root_mismatch_control_plane.execute_action(
+                    _control_plane_request(
+                        project_id=project_id,
+                        change_name=change_name,
+                        run=run,
+                        action_type=OperatorActionType.AUTHORIZE_DEEPSEEK_CODE_REVIEW,
+                        action_id=blocked_authorization_id,
+                        params={
+                            "max_spend_usd": "0.05",
+                            "expires_at": (datetime.now(UTC) + timedelta(minutes=10)).isoformat(),
+                            "pricing_snapshot_id": snapshot_id,
+                        },
+                        candidate_sha=candidate_sha,
+                    )
+                )
+                assert blocked_authorization.status != OperatorActionStatus.COMPLETED
+                assert review_http_calls == []
+                with engine.begin() as connection:
+                    connection.execute(
+                        text("delete from budget_ledger where id = :entry_id"),
+                        {"entry_id": orphan_usage.entry_id},
+                    )
+                    connection.execute(
+                        text("delete from operator_action_records where action_request_id = :id"),
+                        {"id": blocked_authorization_id},
+                    )
+
+                # A usage row linked by the persisted Review-derived idempotency
+                # identity to another legitimate operation is not attributed to
+                # the expired grant above, regardless of timestamps.
+                separate_auth_id = f"separate-review-auth-{uuid4()}"
+                separate_auth_payload = {
+                    **prior_auth_payload,
+                    "action_request_id": separate_auth_id,
+                }
+                separate_auth_record = OperatorActionRecord(
+                    action_request_id=separate_auth_id,
+                    project_id=project_id,
+                    change_name=change_name,
+                    run_id=run_id,
+                    job_id=job_id,
+                    action_type=OperatorActionType.AUTHORIZE_DEEPSEEK_CODE_REVIEW,
+                    status=OperatorActionStatus.COMPLETED,
+                    result_payload_json={"authorization": separate_auth_payload},
+                )
+                separate_review = Review(
+                    review_id=str(uuid4()),
+                    job_id=job_id,
+                    project_id=project_id,
+                    change_name=change_name,
+                    reviewer_role="deepseek",
+                    reviewer_model="deepseek-flash",
+                    review_stage="CODE_REVIEW",
+                    provider="deepseek",
+                    account_fingerprint=adapter.account_fingerprint,
+                    budget_authorization_id=separate_auth_id,
+                    billing_origin="deepseek_direct",
+                    orchestration_run_id=run_id,
+                    candidate_generation=1,
+                    candidate_sha=candidate_sha,
+                    base_sha=base_sha,
+                    manifest_id=manifest.manifest_id,
+                    manifest_hash=manifest.manifest_hash,
+                    status=ReviewStatus.REVIEW_FAILED,
+                )
+                uow.operator_actions.save(separate_auth_record)
+                uow.reviews.save(separate_review)
+                uow.commit()
+                separate_usage = BudgetService(uow).record_unreserved_review_usage(
+                    project_id=project_id,
+                    job_id=job_id,
+                    change_id=change_name,
+                    provider="deepseek",
+                    account_fingerprint=adapter.account_fingerprint,
+                    model="deepseek-flash",
+                    stage="REVIEW",
+                    billing_origin="deepseek_direct",
+                    review_id=separate_review.review_id,
+                    prompt_tokens=50,
+                    completion_tokens=10,
+                    actual_cost_usd=Decimal("0.000027"),
+                )
+                uow.commit()
+                separate_audit = BudgetService(uow).audit_unreserved_code_review_usage(
+                    project_id=project_id, job_id=job_id
+                )
+                assert separate_audit.unresolved_entries == ()
+                assert separate_audit.attributed_reviews == {
+                    separate_usage.entry_id: separate_review
+                }
+                assert root_mismatch_control_plane._expired_unused_code_review_authorization(
+                    expired_auth_record,
+                    run,
+                    job,
+                    candidate,
+                    allow_later_candidate_review=True,
+                )
+                exposed_stage, exposed_total = BudgetService(uow)._direct_review_exposure(
+                    project_id=project_id, stage="REVIEW"
+                )
+                assert exposed_stage == exposed_total == separate_usage.amount_usd
+                with engine.begin() as connection:
+                    connection.execute(
+                        text("delete from budget_ledger where id = :separate_id"),
+                        {"separate_id": separate_usage.entry_id},
+                    )
+                    connection.execute(
+                        text("delete from reviews where id = :review_id"),
+                        {"review_id": separate_review.review_id},
+                    )
+                    connection.execute(
+                        text("delete from operator_action_records where action_request_id = :id"),
+                        {"id": separate_auth_id},
+                    )
+
             unexpired_auth_record = expired_auth_record.model_copy(
                 update={
                     "result_payload_json": {
@@ -1007,11 +1257,15 @@ def test_code_review_authorization_reservation_settlement_and_idempotency_in_pos
             assert preserved_expired_auth.result_payload_json == {
                 "authorization": prior_auth_payload
             }
+            original_code_authorization = uow.operator_actions.get_by_request_id(
+                code_auth.action_request_id
+            ).result_payload_json.copy()
 
             github = _DeterministicGitHubAdapter()
             dispatch_key = f"deepseek-code-review:{code_auth.action_request_id}"
 
-            def dispatch_review(action_id):
+            def dispatch_review(action_id, authorization_id=None):
+                effective_authorization_id = authorization_id or code_auth.action_request_id
                 with sessionmaker(
                     bind=engine, autoflush=False, expire_on_commit=False
                 )() as review_session:
@@ -1041,7 +1295,7 @@ def test_code_review_authorization_reservation_settlement_and_idempotency_in_pos
                         run=current_run,
                         action_type=OperatorActionType.EXECUTE_AUTHORIZED_DEEPSEEK_CODE_REVIEW,
                         action_id=action_id,
-                        params={"authorization_id": code_auth.action_request_id},
+                        params={"authorization_id": effective_authorization_id},
                         candidate_sha=candidate_sha,
                     )
                     if (
@@ -1073,7 +1327,7 @@ def test_code_review_authorization_reservation_settlement_and_idempotency_in_pos
                                 run_id,
                                 OperatorActionType.EXECUTE_AUTHORIZED_DEEPSEEK_CODE_REVIEW.value,
                                 "--params",
-                                json.dumps({"authorization_id": code_auth.action_request_id}),
+                                json.dumps({"authorization_id": effective_authorization_id}),
                                 "--actor",
                                 "isolated-test-operator",
                                 "--expected-stage",
@@ -1103,7 +1357,9 @@ def test_code_review_authorization_reservation_settlement_and_idempotency_in_pos
 
             with ThreadPoolExecutor(max_workers=2) as pool:
                 first_review = pool.submit(dispatch_review, f"code-review-dispatch-{uuid4()}")
-                assert review_started.wait(timeout=10)
+                if not review_started.wait(timeout=10):
+                    release_review.set()
+                    assert False, first_review.result(timeout=10).summary
                 competing_review = pool.submit(dispatch_review, str(uuid4()))
                 competing_result = competing_review.result(timeout=10)
                 assert competing_result.status != OperatorActionStatus.COMPLETED
@@ -1112,6 +1368,457 @@ def test_code_review_authorization_reservation_settlement_and_idempotency_in_pos
             assert not root_mismatch_control_plane._expired_unused_code_review_authorization(
                 expired_auth_record, run, job, candidate
             )
+            if terminal_response_case:
+                assert review_action.status == OperatorActionStatus.BLOCKED
+                expected_terminal_reason = {
+                    "length": "DEEPSEEK_CODE_REVIEW_TERMINAL_TRUNCATED",
+                    "empty-json": "DEEPSEEK_CODE_REVIEW_TERMINAL_UNUSABLE",
+                    "malformed-json": "CODE_REVIEW_MALFORMED",
+                    "partial-length": "DEEPSEEK_CODE_REVIEW_TERMINAL_TRUNCATED",
+                }[terminal_response_case]
+                assert review_action.payload["reason"] == expected_terminal_reason, [
+                    event.payload.get("response")
+                    for event in uow.events.list_events(
+                        project_id=project_id, change_id=change_name, limit=10000
+                    )
+                    if event.event_type == EventType.EVIDENCE_DIAGNOSTIC_RECORDED
+                ]
+                assert len(review_http_calls) == 1
+                failed_review = uow.reviews.get_by_id(review_action.payload["review_id"])
+                assert (
+                    failed_review
+                    and failed_review.status.value == "REVIEW_FAILED"
+                    and failed_review.verdict is None
+                )
+                failed_reservation = uow.budget_reservations.get_by_id(
+                    failed_review.budget_reservation_id
+                )
+                assert failed_reservation and failed_reservation.status == "SETTLED"
+                failed_dispatch_key = f"deepseek-code-review:{code_auth.action_request_id}"
+                failed_dispatch = uow.orchestration_external_actions.get_by_action_key(
+                    failed_dispatch_key
+                )
+                failed_dispatch_attempts = uow.external_action_attempts.list_by_action_key(
+                    failed_dispatch_key
+                )
+                assert failed_dispatch and failed_dispatch.status.value == "FAILED"
+                assert len(failed_dispatch_attempts) == 1
+                assert failed_dispatch_attempts[0].status == "FAILED"
+                assert failed_dispatch_attempts[0].attempt_number == 1
+                failed_run = uow.orchestration_runs.get_by_id(run_id)
+                failed_job = uow.jobs.get_by_id(job_id)
+                assert failed_run.stop_details["code"] == ("CODE_REVIEW_TERMINAL_FAILURE_SETTLED")
+                assert failed_run.is_active is False
+                assert failed_job.status == JobStatus.NEEDS_HUMAN
+                terminal_actions = {
+                    item.action: item
+                    for item in control_plane_service.ControlPlaneService(
+                        uow, project_root=tmp_path
+                    ).get_available_actions(run_id)
+                }
+                assert terminal_actions[OperatorActionType.CONTINUE].enabled is False
+                assert _git(repo, "rev-parse", "HEAD") == candidate_sha
+                assert _git(repo, "status", "--porcelain") == ""
+                check_results_before_retry = uow.check_results.list_by_job(job_id)
+                attempts_before_retry = uow.job_attempts.list_by_job(job_id)
+                old_review_snapshot = failed_review.model_copy(deep=True)
+                old_ledger = uow.budget_ledger.list_by_project(project_id)
+                assert len(old_ledger) == 1  # settled CODE_REVIEW; no contract spend occurred
+
+                diagnostic_event = next(
+                    event
+                    for event in uow.events.list_events(
+                        project_id=project_id, change_id=change_name, limit=10000
+                    )
+                    if event.event_type == EventType.EVIDENCE_DIAGNOSTIC_RECORDED
+                    and event.payload.get("review_id") == failed_review.review_id
+                )
+                assert diagnostic_event.payload["response"]["finish_reason"] == (
+                    "stop"
+                    if terminal_response_case in {"empty-json", "malformed-json"}
+                    else "length"
+                )
+                assert diagnostic_event.payload["response"]["reasoning_content_present"] is True
+                assert diagnostic_event.payload["response"]["reasoning_content_length"] == len(
+                    "private reasoning excluded from evidence"
+                )
+                assert "reasoning_content" not in diagnostic_event.payload["response"]
+                assert "private reasoning" not in json.dumps(diagnostic_event.payload)
+                contradictory_run = failed_run.model_copy(
+                    update={
+                        "stop_details": {
+                            **failed_run.stop_details,
+                            "manifest_hash": "contradictory-manifest",
+                        }
+                    }
+                )
+                assert (
+                    reconcile_code_review_outcome(
+                        uow,
+                        run=contradictory_run,
+                        job=failed_job,
+                        candidate=candidate,
+                        manifest=manifest,
+                    ).kind
+                    == CodeReviewOutcomeKind.INTEGRITY_CONFLICT
+                )
+                failed_reservation.status = "UNRESOLVED"
+                uow.budget_reservations.save(failed_reservation)
+                uow.commit()
+                assert (
+                    reconcile_code_review_outcome(
+                        uow,
+                        run=failed_run,
+                        job=failed_job,
+                        candidate=candidate,
+                        manifest=manifest,
+                    ).kind
+                    == CodeReviewOutcomeKind.UNRESOLVED_OR_AMBIGUOUS
+                )
+                failed_reservation.status = "SETTLED"
+                uow.budget_reservations.save(failed_reservation)
+                uow.commit()
+                failed_dispatch.status = ExternalActionStatus.EXECUTING
+                uow.session.execute(
+                    text(
+                        "update orchestration_external_actions set status = 'EXECUTING' where action_key = :key"
+                    ),
+                    {"key": failed_dispatch_key},
+                )
+                uow.session.execute(
+                    text("update external_action_attempts set status = 'EXECUTING' where id = :id"),
+                    {"id": failed_dispatch_attempts[0].attempt_id},
+                )
+                uow.commit()
+                assert (
+                    reconcile_code_review_outcome(
+                        uow,
+                        run=failed_run,
+                        job=failed_job,
+                        candidate=candidate,
+                        manifest=manifest,
+                    ).kind
+                    == CodeReviewOutcomeKind.UNRESOLVED_OR_AMBIGUOUS
+                )
+                failed_dispatch.status = ExternalActionStatus.FAILED
+                uow.session.execute(
+                    text(
+                        "update orchestration_external_actions set status = 'FAILED' where action_key = :key"
+                    ),
+                    {"key": failed_dispatch_key},
+                )
+                uow.session.execute(
+                    text("update external_action_attempts set status = 'FAILED' where id = :id"),
+                    {"id": failed_dispatch_attempts[0].attempt_id},
+                )
+                uow.commit()
+                # Reconstruct the historical checkpoint whose diagnostic
+                # predates request_duration_ms; missing telemetry is not a
+                # reason to invent a measurement or deny reconciled settlement.
+                failed_run.stop_details = {
+                    **failed_run.stop_details,
+                    "code": "CODE_REVIEW_FAILED_CLOSED",
+                }
+                failed_run.stop_reason = "CODE_REVIEW_FAILED_CLOSED"
+                failed_job.status = JobStatus.REVIEW_RUNNING
+                uow.orchestration_runs.save(failed_run)
+                uow.jobs.save(failed_job)
+                diagnostic_payload = dict(diagnostic_event.payload)
+                response_payload = dict(diagnostic_payload["response"])
+                response_payload.pop("request_duration_ms", None)
+                diagnostic_payload["response"] = response_payload
+                uow.session.execute(
+                    text("UPDATE events SET payload = CAST(:payload AS JSON) WHERE id = :event_id"),
+                    {
+                        "payload": json.dumps(diagnostic_payload),
+                        "event_id": diagnostic_event.event_id,
+                    },
+                )
+                uow.commit()
+
+                recovery_decision = reconcile_code_review_outcome(
+                    uow,
+                    run=failed_run,
+                    job=failed_job,
+                    candidate=candidate,
+                    manifest=manifest,
+                )
+                assert recovery_decision.kind == CodeReviewOutcomeKind.DEFINITIVE_UNUSABLE_SETTLED
+                assert recovery_decision.permits_new_authorization
+                persisted_diagnostic = next(
+                    event
+                    for event in uow.events.list_events(
+                        project_id=project_id, change_id=change_name, limit=10000
+                    )
+                    if event.event_type == EventType.EVIDENCE_DIAGNOSTIC_RECORDED
+                    and event.payload.get("review_id") == failed_review.review_id
+                )
+                assert "request_duration_ms" not in persisted_diagnostic.payload["response"]
+                assert persisted_diagnostic.payload["response"]["prompt_tokens"] == 8008
+                assert persisted_diagnostic.payload["response"]["completion_tokens"] == 4096
+                assert persisted_diagnostic.payload["response"]["total_tokens"] == 12104
+                assert failed_reservation.status == "SETTLED"
+                assert old_ledger[0].amount_usd == Decimal("0.007318")
+
+                historical_response = persisted_diagnostic.payload["response"]
+
+                def replace_historical_response(response_changes):
+                    updated_payload = dict(persisted_diagnostic.payload)
+                    updated_payload["response"] = {
+                        **historical_response,
+                        **response_changes,
+                    }
+                    uow.session.execute(
+                        text(
+                            "UPDATE events SET payload = CAST(:payload AS JSON) WHERE id = :event_id"
+                        ),
+                        {
+                            "payload": json.dumps(updated_payload),
+                            "event_id": persisted_diagnostic.event_id,
+                        },
+                    )
+                    uow.commit()
+
+                for changes in (
+                    {"returned_model": "deepseek-other", "model_matches_request": False},
+                    {"total_tokens": 12105},
+                    {"request_duration_ms": "not-an-integer"},
+                    {"reasoning_content_present": "yes"},
+                ):
+                    replace_historical_response(changes)
+                    assert (
+                        reconcile_code_review_outcome(
+                            uow,
+                            run=failed_run,
+                            job=failed_job,
+                            candidate=candidate,
+                            manifest=manifest,
+                        ).kind
+                        == CodeReviewOutcomeKind.INTEGRITY_CONFLICT
+                    )
+                    replace_historical_response({})
+
+                missing_settlement = old_ledger[0]
+                uow.session.execute(
+                    text("DELETE FROM budget_ledger WHERE id = :entry_id"),
+                    {"entry_id": missing_settlement.entry_id},
+                )
+                uow.commit()
+                assert (
+                    reconcile_code_review_outcome(
+                        uow,
+                        run=failed_run,
+                        job=failed_job,
+                        candidate=candidate,
+                        manifest=manifest,
+                    ).kind
+                    == CodeReviewOutcomeKind.UNRESOLVED_OR_AMBIGUOUS
+                )
+                uow.budget_ledger.save(missing_settlement)
+                uow.commit()
+
+                duplicate_settlement = missing_settlement.model_copy(
+                    update={"entry_id": str(uuid4())}
+                )
+                uow.budget_ledger.save(duplicate_settlement)
+                uow.commit()
+                assert (
+                    reconcile_code_review_outcome(
+                        uow,
+                        run=failed_run,
+                        job=failed_job,
+                        candidate=candidate,
+                        manifest=manifest,
+                    ).kind
+                    == CodeReviewOutcomeKind.UNRESOLVED_OR_AMBIGUOUS
+                )
+                uow.session.execute(
+                    text("DELETE FROM budget_ledger WHERE id = :entry_id"),
+                    {"entry_id": duplicate_settlement.entry_id},
+                )
+                # PostgreSQL correctly enforces the ledger->reservation FK,
+                # so model an orphaned operation link using a real decoy
+                # reservation that is not associated with this review's
+                # authorization. The canonical reconciler must still reject
+                # the otherwise-valid direct CODE_REVIEW ledger row.
+                decoy_reservation = failed_reservation.model_copy(
+                    update={
+                        "reservation_id": str(uuid4()),
+                        "authorization_id": str(uuid4()),
+                        "idempotency_key": f"decoy-{uuid4()}",
+                    }
+                )
+                uow.budget_reservations.save(decoy_reservation)
+                uow.commit()
+                orphan_settlement = missing_settlement.model_copy(
+                    update={
+                        "entry_id": str(uuid4()),
+                        "reservation_id": decoy_reservation.reservation_id,
+                    }
+                )
+                uow.budget_ledger.save(orphan_settlement)
+                uow.commit()
+                assert (
+                    reconcile_code_review_outcome(
+                        uow,
+                        run=failed_run,
+                        job=failed_job,
+                        candidate=candidate,
+                        manifest=manifest,
+                    ).kind
+                    == CodeReviewOutcomeKind.UNRESOLVED_OR_AMBIGUOUS
+                )
+                uow.session.execute(
+                    text("DELETE FROM budget_ledger WHERE id = :entry_id"),
+                    {"entry_id": orphan_settlement.entry_id},
+                )
+                uow.session.execute(
+                    text("DELETE FROM budget_reservations WHERE id = :reservation_id"),
+                    {"reservation_id": decoy_reservation.reservation_id},
+                )
+                uow.commit()
+
+                from minime.domain.models import RecoveryClaimContext
+
+                claim_key = f"run:{run_id}"
+                old_claim = uow.claims.acquire_or_reacquire(
+                    claim_key, "stale-code-review-reconciler", lease_seconds=60
+                )
+                assert old_claim is not None
+                stale_context = RecoveryClaimContext(
+                    claim_key=claim_key,
+                    owner_instance_id=old_claim.owner_instance_id,
+                    fence_token=old_claim.fence_token,
+                    lease_expires_at=old_claim.lease_expires_at,
+                )
+                uow.commit()
+                assert uow.claims.release(
+                    old_claim.claim_key, old_claim.owner_instance_id, old_claim.fence_token
+                )
+                uow.commit()
+                newer_claim = uow.claims.acquire_or_reacquire(
+                    claim_key, "newer-code-review-reconciler", lease_seconds=60
+                )
+                assert newer_claim is not None
+                uow.commit()
+                assert (
+                    reconcile_code_review_outcome(
+                        uow,
+                        run=failed_run,
+                        job=failed_job,
+                        candidate=candidate,
+                        manifest=manifest,
+                        claim_context=stale_context,
+                    ).kind
+                    == CodeReviewOutcomeKind.UNRESOLVED_OR_AMBIGUOUS
+                )
+                assert uow.claims.release(
+                    newer_claim.claim_key, newer_claim.owner_instance_id, newer_claim.fence_token
+                )
+                uow.commit()
+
+                renewal_allowed = (
+                    root_mismatch_control_plane._code_review_authorization_renewal_allowed(
+                        failed_run, failed_job, candidate
+                    )
+                )
+                assert renewal_allowed
+
+                over_limit_retry = control_plane_service.ControlPlaneService(
+                    uow, project_root=tmp_path
+                ).execute_action(
+                    _control_plane_request(
+                        project_id=project_id,
+                        change_name=change_name,
+                        run=failed_run,
+                        action_type=OperatorActionType.AUTHORIZE_DEEPSEEK_CODE_REVIEW,
+                        action_id=f"terminal-over-limit-{uuid4()}",
+                        params={
+                            "max_spend_usd": "1.00",
+                            "expires_at": (datetime.now(UTC) + timedelta(minutes=15)).isoformat(),
+                            "pricing_snapshot_id": snapshot_id,
+                        },
+                        candidate_sha=candidate_sha,
+                    )
+                )
+                assert over_limit_retry.status != OperatorActionStatus.COMPLETED
+
+                uow.session.expire_all()
+                retry_run = uow.orchestration_runs.get_by_id(run_id)
+                new_auth_id = f"terminal-recovery-auth-{uuid4()}"
+                new_auth = control_plane_service.ControlPlaneService(
+                    uow, project_root=tmp_path
+                ).execute_action(
+                    _control_plane_request(
+                        project_id=project_id,
+                        change_name=change_name,
+                        run=retry_run,
+                        action_type=OperatorActionType.AUTHORIZE_DEEPSEEK_CODE_REVIEW,
+                        action_id=new_auth_id,
+                        params={
+                            "max_spend_usd": "0.50",
+                            "expires_at": (datetime.now(UTC) + timedelta(minutes=15)).isoformat(),
+                            "pricing_snapshot_id": snapshot_id,
+                        },
+                        candidate_sha=candidate_sha,
+                    )
+                )
+                assert new_auth.status == OperatorActionStatus.COMPLETED, new_auth.summary
+                assert new_auth.action_request_id != code_auth.action_request_id
+                assert (
+                    uow.operator_actions.get_by_request_id(
+                        code_auth.action_request_id
+                    ).result_payload_json
+                    == original_code_authorization
+                )
+                second_review_action = dispatch_review(
+                    f"terminal-recovery-dispatch-{uuid4()}", new_auth.action_request_id
+                )
+                assert second_review_action.status == OperatorActionStatus.COMPLETED, (
+                    second_review_action.summary,
+                    second_review_action.payload.get("reason"),
+                )
+                assert second_review_action.payload["review_id"] != failed_review.review_id
+                assert len(review_http_calls) == 2
+                duplicate_retry = dispatch_review(
+                    f"terminal-recovery-duplicate-{uuid4()}", new_auth.action_request_id
+                )
+                assert duplicate_retry.status != OperatorActionStatus.COMPLETED
+                assert len(review_http_calls) == 2
+                assert uow.reviews.get_by_id(failed_review.review_id) == old_review_snapshot
+                assert _git(repo, "rev-parse", "HEAD") == candidate_sha
+                assert _git(repo, "status", "--porcelain") == ""
+                assert uow.check_results.list_by_job(job_id) == check_results_before_retry
+                assert uow.job_attempts.list_by_job(job_id) == attempts_before_retry
+                assert len(uow.budget_reservations.list_by_project(project_id)) == 2
+                ledger_after_retry = uow.budget_ledger.list_by_project(project_id)
+                assert len(ledger_after_retry) == len(old_ledger) + 1
+                assert {item.entry_id for item in old_ledger} <= {
+                    item.entry_id for item in ledger_after_retry
+                }
+                retry_reservation = next(
+                    item
+                    for item in uow.budget_reservations.list_by_project(project_id)
+                    if item.authorization_id == new_auth.action_request_id
+                )
+                assert retry_reservation.status == "SETTLED"
+                assert retry_reservation.reservation_id != failed_reservation.reservation_id
+                assert retry_reservation.idempotency_key != failed_reservation.idempotency_key
+                assert len(retry_reservation.idempotency_key) <= 128
+                assert (
+                    uow.orchestration_external_actions.get_by_action_key(
+                        f"deepseek-code-review:{new_auth.action_request_id}"
+                    ).status.value
+                    == "COMPLETED"
+                )
+                assert (
+                    uow.orchestration_external_actions.get_by_action_key(
+                        failed_dispatch_key
+                    ).status.value
+                    == "FAILED"
+                )
+                assert _git(managed_repo, "rev-parse", "refs/remotes/origin/main") == base_sha
+                return
             if mutate_candidate_during_review:
                 assert review_action.status == OperatorActionStatus.BLOCKED
                 assert review_action.payload["reason"] == (

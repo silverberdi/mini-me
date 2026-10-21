@@ -141,6 +141,40 @@ class _MutatingReviewRunner(_ReviewRunner):
         return response
 
 
+class _TruncatedReviewRunner(_ReviewRunner):
+    def __init__(self):
+        super().__init__(content="")
+
+    async def review(self, request: str, timeout_seconds: int):
+        self.calls += 1
+        self.request = request
+        return DeepSeekReviewResponse(
+            0,
+            "",
+            self.model,
+            2000,
+            MAX_REVIEW_OUTPUT_TOKENS,
+            error="incomplete generation (length)",
+            response_diagnostics=DeepSeekResponseDiagnostics(
+                http_status=200,
+                returned_model=self.model,
+                model_matches_request=True,
+                choices_count=1,
+                finish_reason="length",
+                content_present=True,
+                content_type="str",
+                content_length=0,
+                reasoning_content_present=True,
+                reasoning_content_length=17378,
+                usage_present=True,
+                prompt_tokens=2000,
+                completion_tokens=MAX_REVIEW_OUTPUT_TOKENS,
+                total_tokens=2000 + MAX_REVIEW_OUTPUT_TOKENS,
+                usage_valid=True,
+            ),
+        )
+
+
 async def _fixture(
     tmp_path: Path, monkeypatch, uow, *, available: bool = True, runner=None, authorize=True
 ):
@@ -397,7 +431,7 @@ async def test_code_review_provider_limit_matches_reserved_full_request_bound(
     provider_request = captured["provider_request"]
     assert isinstance(provider_request, dict)
     assert captured["configured_max_output_tokens"] == MAX_REVIEW_OUTPUT_TOKENS
-    assert provider_request["max_tokens"] == MAX_REVIEW_OUTPUT_TOKENS == 4096
+    assert provider_request["max_tokens"] == MAX_REVIEW_OUTPUT_TOKENS == 16384
     assert captured["configured_max_output_tokens"] == provider_request["max_tokens"]
     system_message, user_message = provider_request["messages"]
     input_bound = len(system_message["content"].encode("utf-8")) + len(
@@ -412,6 +446,57 @@ async def test_code_review_provider_limit_matches_reserved_full_request_bound(
     )
     assert reservation.reserved_amount_usd == expected_maximum
     assert expected_maximum <= Decimal("0.05")
+
+
+@pytest.mark.asyncio
+async def test_terminal_truncation_is_settled_failed_and_diagnostic_is_redacted(
+    in_memory_uow, monkeypatch, tmp_path
+):
+    runner = _TruncatedReviewRunner()
+    project, run, job, candidate, manifest, repo, _, _, _, service = await _fixture(
+        tmp_path, monkeypatch, in_memory_uow, runner=runner, authorize=False
+    )
+    pricing = in_memory_uow.pricing_snapshots.get_by_id("deepseek-code-review-price")
+    pricing.prompt_price_per_token = Decimal("0.00000030")
+    pricing.output_price_per_token = Decimal("0.00000120")
+    in_memory_uow.pricing_snapshots.save(pricing)
+
+    result = await service.review_candidate(
+        project=project,
+        run=run,
+        job=job,
+        candidate=candidate,
+        manifest=manifest,
+        candidate_worktree=repo,
+        authorship_evidence={},
+    )
+
+    assert not result.accepted and not result.waiting
+    assert result.reason == "DEEPSEEK_CODE_REVIEW_TERMINAL_TRUNCATED"
+    assert runner.calls == 1
+    review = in_memory_uow.reviews.get_by_id(result.review_id)
+    assert review and review.status == ReviewStatus.REVIEW_FAILED and review.verdict is None
+    reservation = in_memory_uow.budget_reservations.get_by_id(review.budget_reservation_id)
+    assert reservation and reservation.status == "SETTLED", (
+        reservation.reserved_amount_usd,
+        in_memory_uow.budget_ledger.list_by_project(project.project_id),
+    )
+    ledger = in_memory_uow.budget_ledger.list_by_project(project.project_id)
+    assert len(ledger) == 1 and ledger[0].entry_type == "SETTLEMENT"
+    diagnostic_events = [
+        event
+        for event in in_memory_uow.events.list_events(project_id=project.project_id)
+        if event.event_type == EventType.EVIDENCE_DIAGNOSTIC_RECORDED
+        and event.payload.get("review_id") == review.review_id
+    ]
+    assert len(diagnostic_events) == 1
+    response_diagnostic = diagnostic_events[0].payload["response"]
+    assert response_diagnostic["finish_reason"] == "length"
+    assert response_diagnostic["reasoning_content_present"] is True
+    assert response_diagnostic["reasoning_content_length"] == 17378
+    assert response_diagnostic["request_duration_ms"] >= 0
+    assert "reasoning_content" not in response_diagnostic
+    assert "private reasoning" not in json.dumps(response_diagnostic)
 
 
 @pytest.mark.asyncio

@@ -16,6 +16,7 @@ from minime.domain.models import (
     Event,
     OpenRouterBudgetPolicy,
     OpenRouterPricingSnapshot,
+    Review,
     utc_now,
 )
 
@@ -32,6 +33,19 @@ class BudgetHeadroom:
     unresolved_count: int
     daily_headroom_usd: Decimal
     monthly_headroom_usd: Decimal
+
+
+@dataclass(frozen=True)
+class UnreservedCodeReviewUsageAudit:
+    """Identity-only attribution for direct CODE_REVIEW usage without a reservation.
+
+    Ledger timestamps are deliberately not considered: the usage row ID is the
+    deterministic idempotency identity derived from the Review ID.
+    """
+
+    attributed_reviews: dict[str, Review]
+    unresolved_entries: tuple[BudgetLedgerEntry, ...]
+    complete: bool = True
 
 
 class BudgetService:
@@ -60,6 +74,167 @@ class BudgetService:
             and (now - item.observed_at).total_seconds() <= 30 * 86400
         ]
         return max(eligible, key=lambda item: item.observed_at, default=None)
+
+    def audit_unreserved_code_review_usage(
+        self, *, project_id: str, job_id: str
+    ) -> UnreservedCodeReviewUsageAudit:
+        """Attribute unreserved DeepSeek CODE_REVIEW rows to exact terminal Reviews.
+
+        A missing Review, malformed usage identity, mismatched Review, or
+        contradictory completed authorization remains unresolved. This narrow
+        audit is shared by reconciliation, authorization renewal and spending
+        exposure so those gates cannot disagree about orphaned direct usage.
+        """
+        reviews_repo = getattr(self.uow, "reviews", None)
+        ledger_repo = getattr(self.uow, "budget_ledger", None)
+        if reviews_repo is None or ledger_repo is None:
+            return UnreservedCodeReviewUsageAudit({}, (), complete=False)
+
+        reviews = {
+            review.review_id: review
+            for review in reviews_repo.list_by_job(job_id)
+            if review.project_id == project_id
+            and review.job_id == job_id
+            and review.review_stage == "CODE_REVIEW"
+        }
+        attributed: dict[str, Review] = {}
+        unresolved: list[BudgetLedgerEntry] = []
+        for entry in ledger_repo.list_by_project(project_id):
+            if not (
+                entry.project_id == project_id
+                and entry.job_id == job_id
+                and entry.stage == "REVIEW"
+                and entry.entry_type == "USAGE"
+                and entry.reservation_id is None
+                and (entry.provider == "deepseek" or entry.billing_origin == "deepseek_direct")
+            ):
+                continue
+            # Resolve by the documented deterministic idempotency mapping, not
+            # by approximate timestamps, amount, or payload similarity.
+            matching_reviews = [
+                review
+                for review in reviews.values()
+                if str(uuid5(NAMESPACE_URL, f"minime:review-usage:v1:{review.review_id}"))
+                == entry.entry_id
+            ]
+            if len(matching_reviews) != 1:
+                unresolved.append(entry)
+                continue
+            review = matching_reviews[0]
+            tokens_valid = (
+                isinstance(entry.prompt_tokens, int)
+                and not isinstance(entry.prompt_tokens, bool)
+                and entry.prompt_tokens >= 0
+                and isinstance(entry.completion_tokens, int)
+                and not isinstance(entry.completion_tokens, bool)
+                and entry.completion_tokens >= 0
+                and isinstance(entry.total_tokens, int)
+                and not isinstance(entry.total_tokens, bool)
+                and entry.total_tokens == entry.prompt_tokens + entry.completion_tokens
+            )
+            try:
+                amount_valid = entry.amount_usd.is_finite() and entry.amount_usd >= 0
+            except (AttributeError, TypeError):
+                amount_valid = False
+            if not (
+                entry.provider == "deepseek"
+                and entry.billing_origin == "deepseek_direct"
+                and entry.change_id == review.change_name
+                and entry.role == "reviewer"
+                and entry.account_fingerprint
+                and entry.account_fingerprint == review.account_fingerprint
+                and entry.canonical_model_identity
+                and entry.canonical_model_identity == review.reviewer_model
+                and review.provider == "deepseek"
+                and review.reviewer_role == "deepseek"
+                and review.billing_origin == "deepseek_direct"
+                and review.budget_reservation_id is None
+                and review.status.value in {"REVIEW_COMPLETED", "REVIEW_FAILED"}
+                and review.orchestration_run_id
+                and review.candidate_sha
+                and review.base_sha
+                and tokens_valid
+                and amount_valid
+            ):
+                unresolved.append(entry)
+                continue
+            runs_repo = getattr(self.uow, "orchestration_runs", None)
+            jobs_repo = getattr(self.uow, "jobs", None)
+            candidates_repo = getattr(self.uow, "orchestration_candidates", None)
+            manifests_repo = getattr(self.uow, "candidate_manifests", None)
+            run = (
+                runs_repo.get_by_id(review.orchestration_run_id) if runs_repo is not None else None
+            )
+            job = jobs_repo.get_by_id(job_id) if jobs_repo is not None else None
+            candidate = (
+                candidates_repo.get_by_generation(
+                    review.orchestration_run_id, review.candidate_generation
+                )
+                if candidates_repo is not None and review.candidate_generation is not None
+                else None
+            )
+            manifest = (
+                manifests_repo.get_by_id(review.manifest_id)
+                if manifests_repo is not None and review.manifest_id
+                else None
+            )
+            if not (
+                run
+                and run.project_id == project_id
+                and run.change_name == review.change_name
+                and job
+                and job.project_id == project_id
+                and job.change_name == review.change_name
+                and candidate
+                and candidate.run_id == review.orchestration_run_id
+                and candidate.generation == review.candidate_generation
+                and candidate.candidate_sha == review.candidate_sha
+                and candidate.base_sha == review.base_sha
+                and candidate.manifest_id == review.manifest_id
+                and candidate.manifest_hash == review.manifest_hash
+                and manifest
+                and manifest.job_id == job_id
+                and manifest.candidate_sha == review.candidate_sha
+                and manifest.manifest_id == review.manifest_id
+                and manifest.manifest_hash == review.manifest_hash
+            ):
+                unresolved.append(entry)
+                continue
+            if review.budget_authorization_id:
+                action_repo = getattr(self.uow, "operator_actions", None)
+                action = (
+                    action_repo.get_by_request_id(review.budget_authorization_id)
+                    if action_repo is not None
+                    else None
+                )
+                authorization = (
+                    action.result_payload_json.get("authorization", {}) if action else {}
+                )
+                if not (
+                    action
+                    and action.action_type.value == "AUTHORIZE_DEEPSEEK_CODE_REVIEW"
+                    and action.status.value == "COMPLETED"
+                    and action.project_id == project_id
+                    and action.job_id == job_id
+                    and action.run_id == review.orchestration_run_id
+                    and authorization.get("action_request_id") == action.action_request_id
+                    and authorization.get("run_id") == review.orchestration_run_id
+                    and authorization.get("job_id") == job_id
+                    and authorization.get("candidate_sha") == review.candidate_sha
+                    and authorization.get("base_sha") == review.base_sha
+                    and authorization.get("generation") == review.candidate_generation
+                    and authorization.get("manifest_id") == review.manifest_id
+                    and authorization.get("manifest_hash") == review.manifest_hash
+                    and authorization.get("provider") == "deepseek"
+                    and authorization.get("stage") == "REVIEW"
+                    and authorization.get("billing_origin") == "deepseek_direct"
+                    and authorization.get("account_fingerprint") == entry.account_fingerprint
+                    and authorization.get("model") == entry.canonical_model_identity
+                ):
+                    unresolved.append(entry)
+                    continue
+            attributed[entry.entry_id] = review
+        return UnreservedCodeReviewUsageAudit(attributed, tuple(unresolved))
 
     def sync_policy_from_config(
         self,
@@ -360,28 +535,65 @@ class BudgetService:
         reservations = [
             item
             for item in self.uow.budget_reservations.list_by_project(project_id)
-            if item.provider == "deepseek"
-            and item.billing_origin == "deepseek_direct"
+            if (item.provider == "deepseek" or item.billing_origin == "deepseek_direct")
             and item.stage in {"CONTRACT_REVIEW", "REVIEW"}
         ]
         ledger = [
             item
             for item in self.uow.budget_ledger.list_by_project(project_id)
-            if item.provider == "deepseek"
-            and item.billing_origin == "deepseek_direct"
+            if (item.provider == "deepseek" or item.billing_origin == "deepseek_direct")
             and item.stage in {"CONTRACT_REVIEW", "REVIEW"}
         ]
+        # The same identity audit used by authorization and recovery is applied
+        # here. It never associates usage to a grant by time: attributed and
+        # orphaned usage both remain financial exposure, while the orphan is
+        # left unassigned to any authorization.
+        unreserved_code_review_jobs = {
+            item.job_id for item in ledger if item.stage == "REVIEW" and item.reservation_id is None
+        }
+        usage_audits = {
+            job_id: self.audit_unreserved_code_review_usage(project_id=project_id, job_id=job_id)
+            for job_id in unreserved_code_review_jobs
+        }
+        unresolved_usage_ids = {
+            entry.entry_id for audit in usage_audits.values() for entry in audit.unresolved_entries
+        }
+        attributed_usage_ids = {
+            entry_id for audit in usage_audits.values() for entry_id in audit.attributed_reviews
+        }
         ledger_by_reservation: dict[str, Decimal] = {}
-        unreserved = Decimal("0")
+        unreserved_by_stage = {"CONTRACT_REVIEW": Decimal("0"), "REVIEW": Decimal("0")}
         for entry in ledger:
             if entry.reservation_id:
                 ledger_by_reservation[entry.reservation_id] = (
                     ledger_by_reservation.get(entry.reservation_id, Decimal("0")) + entry.amount_usd
                 )
             else:
-                unreserved += entry.amount_usd
+                try:
+                    amount = entry.amount_usd
+                    if not amount.is_finite() or amount < 0:
+                        amount = Decimal("Infinity")
+                except (AttributeError, TypeError):
+                    amount = Decimal("Infinity")
+                if entry.stage == "REVIEW":
+                    if entry.entry_id in unresolved_usage_ids:
+                        # Preserve the verified ledger amount as unassigned
+                        # spend; never infer which authorization paid it.
+                        unreserved_by_stage["REVIEW"] += amount
+                    elif entry.entry_id in attributed_usage_ids:
+                        # A distinct operation is recognized by the exact
+                        # Review-derived idempotency key, never by timestamp.
+                        unreserved_by_stage["REVIEW"] += amount
+                    else:
+                        # Non-USAGE legacy entries are still counted, but are
+                        # not eligible for attribution by this audit.
+                        unreserved_by_stage["REVIEW"] += amount
+                else:
+                    unreserved_by_stage[entry.stage] += amount
         stage_total = Decimal("0")
-        combined_total = unreserved
+        combined_total = sum(unreserved_by_stage.values(), Decimal("0"))
+        if stage in unreserved_by_stage:
+            stage_total = unreserved_by_stage[stage]
         for item in reservations:
             actual = ledger_by_reservation.get(item.reservation_id)
             if item.status in {"RESERVED", "UNRESOLVED"}:
