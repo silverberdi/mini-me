@@ -978,25 +978,76 @@ def test_gr09_restart_recovery_service_delegates_to_recovery_convergence(
     session.close()
 
 
-def test_gr10_direct_entry_point_census():
-    """BLOCKER G-R10 proof: Production census verifies zero un-fenced OrchestrationService.resume() calls in production code."""
+def test_gr10_direct_entry_point_census_allows_only_fenced_post_review_resume():
+    """Direct resume is forbidden except for the separately authorized fenced review continuation."""
+    import ast
+
     src_dir = Path(__file__).parent.parent / "src"
-
     violations = []
+    fenced_post_review_resumes = 0
     for py_file in src_dir.glob("**/*.py"):
-        text_content = py_file.read_text(encoding="utf-8")
-        lines = text_content.splitlines()
-        for idx, line in enumerate(lines, 1):
-            if (
-                "orchestration_svc.resume(" in line
-                or "orchestration_service.resume(" in line
-                or "service.resume(" in line
-            ):
-                if "def resume(" in line or "recovery_convergence_service.py" in str(py_file):
-                    continue
-                violations.append(f"{py_file.name}:{idx}: {line.strip()}")
+        tree = ast.parse(py_file.read_text(encoding="utf-8"), filename=str(py_file))
+        lines = py_file.read_text(encoding="utf-8").splitlines()
 
-    assert violations == [], f"Found Category 4 resume() direct invocation violations: {violations}"
+        class ResumeCallVisitor(ast.NodeVisitor):
+            def __init__(self):
+                self.function_stack = []
+
+            def visit_FunctionDef(self, node):
+                self.function_stack.append(node)
+                self.generic_visit(node)
+                self.function_stack.pop()
+
+            visit_AsyncFunctionDef = visit_FunctionDef
+
+            def visit_Call(self, node):
+                nonlocal fenced_post_review_resumes
+                func = node.func
+                is_resume = isinstance(func, ast.Attribute) and func.attr == "resume"
+                if is_resume:
+                    owner = self.function_stack[-1] if self.function_stack else None
+                    kwargs = {keyword.arg: keyword.value for keyword in node.keywords}
+                    if py_file.name == "recovery_convergence_service.py":
+                        self.generic_visit(node)
+                        return
+                    is_fenced_post_review_resume = (
+                        py_file.name == "control_plane_service.py"
+                        and owner is not None
+                        and owner.name == "_execute_continue_after_code_review"
+                        and isinstance(kwargs.get("claim_context"), ast.Name)
+                        and kwargs["claim_context"].id == "context"
+                        and isinstance(kwargs.get("manage_heartbeat"), ast.Constant)
+                        and kwargs["manage_heartbeat"].value is False
+                    )
+                    if is_fenced_post_review_resume:
+                        owner_source = ast.get_source_segment("\n".join(lines), owner) or ""
+                        has_fence_lifecycle = all(
+                            token in owner_source
+                            for token in (
+                                "acquire_claim",
+                                "OperationalHeartbeat",
+                                "validate_claim_context_authoritative",
+                            )
+                        )
+                        if has_fence_lifecycle:
+                            fenced_post_review_resumes += 1
+                        else:
+                            violations.append(
+                                f"{py_file.name}:{node.lineno}: post-review resume lacks claim lifecycle"
+                            )
+                    else:
+                        violations.append(
+                            f"{py_file.name}:{node.lineno}: unapproved direct resume invocation"
+                        )
+                self.generic_visit(node)
+
+        ResumeCallVisitor().visit(tree)
+
+    assert fenced_post_review_resumes == 1, (
+        "Expected exactly one direct resume in the explicitly authorized, single-heartbeat "
+        f"post-review continuation; found {fenced_post_review_resumes}."
+    )
+    assert violations == [], f"Found unfenced/unapproved resume() calls: {violations}"
 
 
 def test_gr11_stale_owner_cannot_push_or_create_pr(

@@ -35,6 +35,7 @@ from minime.domain.enums import (
     RecoveryDecisionStatus,
     RecoverySource,
     ReviewStatus,
+    ReviewVerdict,
     ValidationVerdict,
 )
 from minime.domain.interfaces import PersistenceUnitOfWork
@@ -46,6 +47,8 @@ from minime.domain.models import (
     OperatorActionResult,
     OrchestrationRun,
     PreviewSession,
+    RecoveryDecision,
+    generate_uuid,
     utc_now,
 )
 from minime.logging import redact_secrets
@@ -73,8 +76,10 @@ class ControlPlaneService:
         recovery_service: RestartRecoveryService | None = None,
         provider_health_service: ProviderHealthService | None = None,
         post_merge_service: PostMergeReconciliationService | None = None,
+        deepseek_code_review_service: Any | None = None,
     ):
         self.uow = uow
+        self.deepseek_code_review_service = deepseek_code_review_service
         self.project_root = Path(project_root).resolve()
         self.orchestration_service = orchestration_service or OrchestrationService(
             uow, project_root=self.project_root
@@ -166,12 +171,21 @@ class ControlPlaneService:
         continue_enabled = False
         continue_reason: str | None = None
         stale_checkpoint = self._has_stale_active_checkpoint(run) if run.is_active else False
+        review_hold_code = (run.stop_details or {}).get("code")
+        exceptional_review_hold = review_hold_code in {
+            "REVIEW_AUTHORIZATION_PENDING",
+            "CODE_REVIEW_COMPLETED_REQUIRES_SEPARATE_AUTHORIZED_CONTINUATION",
+            "CODE_REVIEW_COMPLETED_CHANGES_REQUIRED",
+        }
         if (
             run.is_active
             and run.stop_outcome != OrchestrationStopOutcome.WAITING_CAPACITY
             and not stale_checkpoint
         ):
             continue_reason = "Run is already active"
+        elif exceptional_review_hold:
+            continue_reason = "Use the separately authorized frozen-candidate review action."
+            continue_enabled = False
         elif stale_checkpoint:
             continue_enabled = True
         elif run.current_stage == OrchestrationStage.PR_PREPARED:
@@ -218,6 +232,203 @@ class ControlPlaneService:
                 disabled_reason=continue_reason,
                 requires_confirmation=False,
                 risk_level=ActionRiskLevel.LOW,
+            )
+        )
+
+        active_job = self.uow.jobs.get_by_id(run.active_job_id) if run.active_job_id else None
+        frozen_candidate = (
+            self.uow.orchestration_candidates.get_by_generation(run.run_id, run.current_generation)
+            if active_job
+            else None
+        )
+        review_authorizations = [
+            action
+            for action in self.uow.operator_actions.list_by_run(run.run_id)
+            if action.action_type == OperatorActionType.AUTHORIZE_DEEPSEEK_CODE_REVIEW
+            and action.status == OperatorActionStatus.COMPLETED
+            and action.job_id == (active_job.job_id if active_job else None)
+            and action.result_payload_json.get("authorization", {}).get("candidate_sha")
+            == (frozen_candidate.candidate_sha if frozen_candidate else None)
+        ]
+        review_authorization = review_authorizations[-1] if review_authorizations else None
+        dispatch_key = (
+            f"deepseek-code-review:{review_authorization.action_request_id}"
+            if review_authorization
+            else None
+        )
+        existing_review_dispatch = (
+            self.uow.orchestration_external_actions.get_by_action_key(dispatch_key)
+            if dispatch_key
+            else None
+        )
+        latest_check_valid, _, latest_check_batch = (
+            self.orchestration_service._validate_current_checks_batch(
+                active_job,
+                run,
+                project,
+                require_configured_checks=True,
+            )
+            if active_job and project and frozen_candidate
+            else (False, "Candidate/check evidence unavailable.", [])
+        )
+        review_dispatch_enabled = bool(
+            review_hold_code == "REVIEW_AUTHORIZATION_PENDING"
+            and not run.is_active
+            and active_job
+            and active_job.status == JobStatus.CHECKS_PASSED
+            and frozen_candidate
+            and frozen_candidate.is_frozen
+            and frozen_candidate.candidate_sha == active_job.candidate_sha
+            and frozen_candidate.candidate_sha == run.current_candidate_sha
+            and frozen_candidate.base_sha == run.base_sha == active_job.base_sha
+            and frozen_candidate.generation == run.current_generation
+            and review_authorization
+            and latest_check_valid
+            and bool(latest_check_batch)
+            and existing_review_dispatch is None
+        )
+        descriptors.append(
+            ActionDescriptor(
+                action=OperatorActionType.EXECUTE_AUTHORIZED_DEEPSEEK_CODE_REVIEW,
+                display_name="Execute Authorized Frozen-Candidate Code Review",
+                description=(
+                    "Dispatch the one-use read-only DeepSeek review for the exact frozen candidate."
+                ),
+                enabled=review_dispatch_enabled,
+                disabled_reason=(
+                    None
+                    if review_dispatch_enabled
+                    else "A current review hold, exact frozen candidate, complete passing checks, unused authorization and binding are required."
+                ),
+                requires_confirmation=True,
+                confirmation_prompt=(
+                    "Dispatch the one-use DeepSeek CODE_REVIEW for this exact frozen candidate?"
+                ),
+                risk_level=ActionRiskLevel.HIGH,
+                parameters_schema={
+                    "type": "object",
+                    "required": ["authorization_id"],
+                    "properties": {"authorization_id": {"type": "string"}},
+                    "additionalProperties": False,
+                },
+            )
+        )
+
+        completed_review = (
+            self.uow.reviews.get_by_job_stage(active_job.job_id, "CODE_REVIEW")
+            if active_job
+            else None
+        )
+        completed_review_authorization = (
+            self.uow.operator_actions.get_by_request_id(completed_review.budget_authorization_id)
+            if completed_review and completed_review.budget_authorization_id
+            else None
+        )
+        completed_review_reservation = (
+            self.uow.budget_reservations.get_by_id(completed_review.budget_reservation_id)
+            if completed_review and completed_review.budget_reservation_id
+            else None
+        )
+        completed_review_dispatch = (
+            self.uow.orchestration_external_actions.get_by_action_key(
+                f"deepseek-code-review:{completed_review.budget_authorization_id}"
+            )
+            if completed_review and completed_review.budget_authorization_id
+            else None
+        )
+        completed_review_attempts = (
+            self.uow.external_action_attempts.list_by_action_key(
+                f"deepseek-code-review:{completed_review.budget_authorization_id}"
+            )
+            if completed_review and completed_review.budget_authorization_id
+            else []
+        )
+        reviewer_independent = False
+        if completed_review and active_job:
+            from minime.services.authorship_service import AuthorshipService
+
+            reviewer_independent, _ = AuthorshipService().is_reviewer_eligible(
+                active_job.job_id, completed_review.reviewer_role, self.uow
+            )
+        post_review_continue_enabled = bool(
+            review_hold_code == "CODE_REVIEW_COMPLETED_REQUIRES_SEPARATE_AUTHORIZED_CONTINUATION"
+            and not run.is_active
+            and active_job
+            and frozen_candidate
+            and frozen_candidate.is_frozen
+            and completed_review
+            and completed_review.status == ReviewStatus.REVIEW_COMPLETED
+            and completed_review.verdict == ReviewVerdict.READY_TO_MERGE
+            and completed_review.provider == "deepseek"
+            and completed_review.budget_authorization_id
+            and completed_review.orchestration_run_id == run.run_id
+            and completed_review.job_id == active_job.job_id
+            and completed_review.project_id == run.project_id
+            and completed_review.change_name == run.change_name
+            and completed_review.candidate_sha == frozen_candidate.candidate_sha
+            and completed_review.base_sha == frozen_candidate.base_sha
+            and completed_review.candidate_generation == run.current_generation
+            and completed_review.manifest_id == frozen_candidate.manifest_id
+            and completed_review.manifest_hash == frozen_candidate.manifest_hash
+            and completed_review_authorization
+            and completed_review_authorization.action_type
+            == OperatorActionType.AUTHORIZE_DEEPSEEK_CODE_REVIEW
+            and completed_review_authorization.status == OperatorActionStatus.COMPLETED
+            and completed_review_authorization.run_id == run.run_id
+            and completed_review_authorization.job_id == active_job.job_id
+            and completed_review_reservation
+            and completed_review_reservation.authorization_id
+            == completed_review.budget_authorization_id
+            and completed_review_reservation.status == "SETTLED"
+            and completed_review_reservation.run_id == run.run_id
+            and completed_review_reservation.job_id == active_job.job_id
+            and completed_review_reservation.project_id == run.project_id
+            and completed_review_reservation.provider == "deepseek"
+            and completed_review_reservation.account_fingerprint
+            == completed_review.account_fingerprint
+            and completed_review_reservation.canonical_model_identity
+            == completed_review.reviewer_model
+            and completed_review_reservation.stage == "REVIEW"
+            and completed_review_reservation.billing_origin == "deepseek_direct"
+            and completed_review_reservation.idempotency_key
+            == self._expected_code_review_reservation_key(
+                run, active_job, frozen_candidate, completed_review.budget_authorization_id
+            )
+            and completed_review_dispatch
+            and completed_review_dispatch.status == ExternalActionStatus.COMPLETED
+            and completed_review_dispatch.remote_identifier == completed_review.review_id
+            and len(completed_review_attempts) == 1
+            and completed_review_attempts[0].status == "COMPLETED"
+            and reviewer_independent
+        )
+        descriptors.append(
+            ActionDescriptor(
+                action=OperatorActionType.CONTINUE_AFTER_CODE_REVIEW,
+                display_name="Continue After Independent Code Review",
+                description=(
+                    "Continue a completed READY_TO_MERGE review through existing audit and PR gates; never merge."
+                ),
+                enabled=post_review_continue_enabled,
+                disabled_reason=(
+                    None
+                    if post_review_continue_enabled
+                    else "An exact completed independent review and separate post-review continuation gate are required."
+                ),
+                requires_confirmation=True,
+                confirmation_prompt=(
+                    "Continue this exact reviewed candidate through existing downstream gates?"
+                ),
+                risk_level=ActionRiskLevel.HIGH,
+                parameters_schema={
+                    "type": "object",
+                    "required": ["review_id", "candidate_sha", "manifest_hash"],
+                    "properties": {
+                        "review_id": {"type": "string"},
+                        "candidate_sha": {"type": "string"},
+                        "manifest_hash": {"type": "string"},
+                    },
+                    "additionalProperties": False,
+                },
             )
         )
 
@@ -555,16 +766,15 @@ class ControlPlaneService:
             if code_candidate and code_candidate.manifest_id and manifests_repo
             else None
         )
-        check_evidence = (
-            [
-                check
-                for check in check_results_repo.list_by_job(job.job_id)
-                if check.candidate_sha == code_candidate.candidate_sha
-                and check.candidate_generation == code_candidate.generation
-                and check.exit_code == 0
-            ]
+        checks_valid, _, current_check_batch = (
+            self.orchestration_service._validate_current_checks_batch(
+                job,
+                run,
+                project,
+                require_configured_checks=True,
+            )
             if job and code_candidate and check_results_repo
-            else []
+            else (False, "Candidate or check authority is unavailable.", [])
         )
         prior_code_review = (
             reviews_repo.get_by_job_stage(job.job_id, "CODE_REVIEW")
@@ -593,7 +803,8 @@ class ControlPlaneService:
             and code_manifest.job_id == job.job_id
             and code_manifest.candidate_sha == code_candidate.candidate_sha
             and code_manifest.manifest_hash == code_candidate.manifest_hash
-            and check_evidence
+            and checks_valid
+            and bool(current_check_batch)
             and job.status in {JobStatus.CHECKS_PASSED, JobStatus.WAITING_CAPACITY}
             and run.project_id == job.project_id
             and run.change_name == job.change_name
@@ -736,7 +947,9 @@ class ControlPlaneService:
             return False
 
         candidates_repo = getattr(self.uow, "orchestration_candidates", None)
-        latest_candidate = candidates_repo.get_latest_for_run(run.run_id) if candidates_repo else None
+        latest_candidate = (
+            candidates_repo.get_latest_for_run(run.run_id) if candidates_repo else None
+        )
         if latest_candidate:
             return False
 
@@ -862,6 +1075,10 @@ class ControlPlaneService:
                 return self._execute_authorize_deepseek_review(request, run, sanitized_params)
             elif request.action_type == OperatorActionType.AUTHORIZE_DEEPSEEK_CODE_REVIEW:
                 return self._execute_authorize_deepseek_code_review(request, run, sanitized_params)
+            elif request.action_type == OperatorActionType.EXECUTE_AUTHORIZED_DEEPSEEK_CODE_REVIEW:
+                return self._execute_code_review_only(request, run, sanitized_params)
+            elif request.action_type == OperatorActionType.CONTINUE_AFTER_CODE_REVIEW:
+                return self._execute_continue_after_code_review(request, run, sanitized_params)
             else:
                 return self._record_and_return_rejection(
                     request=request,
@@ -882,24 +1099,35 @@ class ControlPlaneService:
             self.uow.rollback()
             persisted_run = self.uow.orchestration_runs.get_by_id(run.run_id) or run
             err_msg = redact_secrets(str(exc))
-            record = OperatorActionRecord(
-                action_request_id=request.action_request_id,
-                project_id=request.project_id,
-                change_name=request.change_name,
-                run_id=request.run_id,
-                action_type=request.action_type,
-                actor_identity=request.actor_identity,
-                source_interface=request.source_interface,
-                precondition_stage=persisted_run.current_stage.value,
-                precondition_gate=(
-                    persisted_run.human_gate.value if persisted_run.human_gate else None
-                ),
-                status=OperatorActionStatus.FAILED,
-                error_code=OperatorActionErrorCode.ACTION_EXECUTION_FAILED,
-                summary=f"Internal execution failure: {err_msg}",
-                parameters_json=sanitized_params,
-                result_payload_json={"error": err_msg},
-            )
+            record = self.uow.operator_actions.get_by_request_id(request.action_request_id)
+            if record is None:
+                record = OperatorActionRecord(
+                    action_request_id=request.action_request_id,
+                    project_id=request.project_id,
+                    change_name=request.change_name,
+                    run_id=request.run_id,
+                    action_type=request.action_type,
+                    actor_identity=request.actor_identity,
+                    source_interface=request.source_interface,
+                    precondition_stage=persisted_run.current_stage.value,
+                    precondition_gate=(
+                        persisted_run.human_gate.value if persisted_run.human_gate else None
+                    ),
+                    status=OperatorActionStatus.FAILED,
+                    error_code=OperatorActionErrorCode.ACTION_EXECUTION_FAILED,
+                    summary=f"Internal execution failure: {err_msg}",
+                    parameters_json=sanitized_params,
+                    result_payload_json={"error": err_msg},
+                )
+            else:
+                # A fenced dispatch-intent commit can durably persist the
+                # ACCEPTED action before provider I/O. Reuse that same row on
+                # a later failure instead of violating action_request_id's
+                # uniqueness with a second failure record.
+                record.status = OperatorActionStatus.FAILED
+                record.error_code = OperatorActionErrorCode.ACTION_EXECUTION_FAILED
+                record.summary = f"Internal execution failure: {err_msg}"
+                record.result_payload_json = {"error": err_msg}
             self.uow.operator_actions.save(record)
             self.uow.commit()
 
@@ -991,6 +1219,18 @@ class ControlPlaneService:
         run: OrchestrationRun,
         sanitized_params: dict[str, Any],
     ) -> OperatorActionResult:
+        if (run.stop_details or {}).get("code") in {
+            "REVIEW_AUTHORIZATION_PENDING",
+            "CODE_REVIEW_COMPLETED_REQUIRES_SEPARATE_AUTHORIZED_CONTINUATION",
+            "CODE_REVIEW_COMPLETED_CHANGES_REQUIRED",
+        }:
+            return self._record_and_return_rejection(
+                request=request,
+                run=run,
+                error_code=OperatorActionErrorCode.ACTION_NOT_ALLOWED,
+                summary="Generic CONTINUE cannot cross an exceptional frozen-code-review gate.",
+                sanitized_params=sanitized_params,
+            )
         waiting_capacity_checkpoint = run.stop_outcome == OrchestrationStopOutcome.WAITING_CAPACITY
         stale_checkpoint = self._has_stale_active_checkpoint(run)
         if (
@@ -1376,6 +1616,813 @@ class ControlPlaneService:
             },
         )
 
+    def _execute_code_review_only(
+        self,
+        request: OperatorActionRequest,
+        run: OrchestrationRun,
+        sanitized_params: dict[str, Any],
+    ) -> OperatorActionResult:
+        """Dispatch one explicitly authorized CODE_REVIEW under the Run fence only."""
+        if set(sanitized_params) != {"authorization_id"}:
+            return self._record_and_return_rejection(
+                request=request,
+                run=run,
+                error_code=OperatorActionErrorCode.INVALID_ACTION_PARAMETERS,
+                summary="Review dispatch requires exactly one authorization_id.",
+                sanitized_params=sanitized_params,
+            )
+        if (
+            (run.stop_details or {}).get("code") != "REVIEW_AUTHORIZATION_PENDING"
+            or run.current_stage
+            not in {
+                OrchestrationStage.FREEZING_CANDIDATE,
+                OrchestrationStage.COMPLEMENTARY_REVIEW,
+            }
+            or run.is_active
+        ):
+            return self._record_and_return_rejection(
+                request=request,
+                run=run,
+                error_code=OperatorActionErrorCode.ACTION_NOT_ALLOWED,
+                summary="CODE_REVIEW dispatch requires the inactive review-authorization hold.",
+                sanitized_params=sanitized_params,
+            )
+
+        job = self.uow.jobs.get_by_id(run.active_job_id) if run.active_job_id else None
+        project = self.uow.projects.get_by_id(run.project_id)
+        candidates_repo = getattr(self.uow, "orchestration_candidates", None)
+        candidate = (
+            candidates_repo.get_by_generation(run.run_id, run.current_generation)
+            if candidates_repo
+            else None
+        )
+        manifest = (
+            self.uow.candidate_manifests.get_by_id(candidate.manifest_id)
+            if candidate and candidate.manifest_id
+            else None
+        )
+        authorization_id = str(sanitized_params["authorization_id"])
+        authorization_record = self.uow.operator_actions.get_by_request_id(authorization_id)
+        authorization = (
+            authorization_record.result_payload_json.get("authorization", {})
+            if authorization_record
+            else {}
+        )
+        checks_valid, checks_error, checks = (
+            self.orchestration_service._validate_current_checks_batch(
+                job,
+                run,
+                project,
+                require_configured_checks=True,
+            )
+            if job and project
+            else (False, "Project or Job is unavailable.", [])
+        )
+        binding_repo = getattr(self.uow, "project_managed_repository_bindings", None)
+        binding = binding_repo.get_by_project_id(run.project_id) if binding_repo else None
+        from minime.services.workspace_guard import is_binding_fully_valid
+
+        if (
+            not job
+            or not project
+            or not candidate
+            or not manifest
+            or not candidate.is_frozen
+            or candidate.run_id != run.run_id
+            or candidate.generation != run.current_generation
+            or candidate.candidate_sha != job.candidate_sha
+            or candidate.candidate_sha != run.current_candidate_sha
+            or candidate.base_sha != job.base_sha
+            or candidate.base_sha != run.base_sha
+        ):
+            return self._record_and_return_rejection(
+                request=request,
+                run=run,
+                error_code=OperatorActionErrorCode.AUTHORITY_MISMATCH,
+                summary="Frozen candidate identity is incomplete or contradictory.",
+                sanitized_params=sanitized_params,
+            )
+        if (
+            manifest.job_id != job.job_id
+            or manifest.candidate_sha != candidate.candidate_sha
+            or manifest.manifest_hash != candidate.manifest_hash
+            or not checks_valid
+            or not checks
+            or job.status != JobStatus.CHECKS_PASSED
+            or job.project_id != run.project_id
+            or job.change_name != run.change_name
+            or run.active_job_id != job.job_id
+            or not is_binding_fully_valid(binding)
+            or authorization_record is None
+            or authorization_record.action_type != OperatorActionType.AUTHORIZE_DEEPSEEK_CODE_REVIEW
+            or authorization_record.status != OperatorActionStatus.COMPLETED
+            or authorization_record.project_id != run.project_id
+            or authorization_record.change_name != run.change_name
+            or authorization_record.run_id != run.run_id
+            or authorization_record.job_id != job.job_id
+            or authorization.get("run_id") != run.run_id
+            or authorization.get("job_id") != job.job_id
+            or authorization.get("candidate_sha") != candidate.candidate_sha
+            or authorization.get("base_sha") != candidate.base_sha
+            or authorization.get("generation") != candidate.generation
+            or authorization.get("manifest_id") != manifest.manifest_id
+            or authorization.get("manifest_hash") != manifest.manifest_hash
+            or authorization.get("action_request_id") != authorization_id
+            or not authorization.get("account_fingerprint")
+            or not authorization.get("pricing_snapshot_id")
+            or not authorization.get("max_spend_usd")
+        ):
+            return self._record_and_return_rejection(
+                request=request,
+                run=run,
+                error_code=OperatorActionErrorCode.AUTHORITY_MISMATCH,
+                summary=(
+                    "Review authorization, current configured check batch, or managed binding "
+                    f"is invalid: {checks_error or 'identity mismatch'}."
+                ),
+                sanitized_params=sanitized_params,
+            )
+        if any(
+            reservation.authorization_id == authorization_id
+            for reservation in self.uow.budget_reservations.list_by_project(run.project_id)
+        ):
+            return self._record_and_return_rejection(
+                request=request,
+                run=run,
+                error_code=OperatorActionErrorCode.ACTION_ALREADY_COMPLETED,
+                summary="The one-shot review authorization has already been consumed.",
+                sanitized_params=sanitized_params,
+            )
+
+        from minime.services.recovery_convergence_service import OperationalHeartbeat
+        from minime.services.worktree_manager import WorktreeManager
+
+        worktree_manager = WorktreeManager(project_root=self.project_root, uow=self.uow)
+        worktree_path = worktree_manager.worktree_path(job.job_id, project_id=job.project_id)
+        ownership_repo = getattr(self.uow, "orchestration_worktree_ownerships", None)
+        ownership = ownership_repo.get_by_job_id(job.job_id) if ownership_repo else None
+        if not ownership:
+            return self._record_and_return_rejection(
+                request=request,
+                run=run,
+                error_code=OperatorActionErrorCode.AUTHORITY_MISMATCH,
+                summary="Durable frozen-candidate worktree ownership is unavailable.",
+                sanitized_params=sanitized_params,
+            )
+        try:
+            import asyncio
+
+            asyncio.run(
+                worktree_manager._verify_frozen_candidate_worktree_adoption(
+                    path=worktree_path,
+                    job_id=job.job_id,
+                    project_id=project.project_id,
+                    run_id=run.run_id,
+                    change_name=run.change_name,
+                    ownership=ownership,
+                )
+            )
+        except Exception as exc:
+            return self._record_and_return_rejection(
+                request=request,
+                run=run,
+                error_code=OperatorActionErrorCode.AUTHORITY_MISMATCH,
+                summary=f"Frozen candidate worktree adoption proof failed: {type(exc).__name__}.",
+                sanitized_params=sanitized_params,
+            )
+
+        context = self.recovery_convergence_service.acquire_claim(f"run:{run.run_id}")
+        if not context:
+            return self._record_and_return_rejection(
+                request=request,
+                run=run,
+                error_code=OperatorActionErrorCode.RECOVERY_REQUIRED,
+                summary="Run claim is held by another live recovery owner.",
+                sanitized_params=sanitized_params,
+            )
+        cycle_id = generate_uuid()
+        decision = RecoveryDecision(
+            cycle_id=cycle_id,
+            claim_key=context.claim_key,
+            identity_type="RUN",
+            identity_id=run.run_id,
+            project_id=run.project_id,
+            change_name=run.change_name,
+            source=RecoverySource.CONTROL_PLANE,
+            prior_checkpoint={
+                "stage": run.current_stage.value,
+                "gate": "REVIEW_AUTHORIZATION_PENDING",
+                "candidate_sha": candidate.candidate_sha,
+                "generation": candidate.generation,
+                "manifest_id": manifest.manifest_id,
+                "manifest_hash": manifest.manifest_hash,
+            },
+            observation_refs={
+                "authorization_id": authorization_id,
+                "check_result_ids": [item.result_id for item in checks],
+            },
+            classification=RecoveryClassification.RESUME_SAFE_CHECKPOINT,
+            planned_action="DISPATCH_FROZEN_CODE_REVIEW",
+            fence_token=context.fence_token,
+            status=RecoveryDecisionStatus.EXECUTING,
+        )
+        self.uow.recovery_decisions.create_decision(decision)
+        action_record = OperatorActionRecord(
+            action_request_id=request.action_request_id,
+            project_id=run.project_id,
+            change_name=run.change_name,
+            run_id=run.run_id,
+            job_id=job.job_id,
+            action_type=request.action_type,
+            actor_identity=request.actor_identity,
+            source_interface=request.source_interface,
+            precondition_stage=run.current_stage.value,
+            precondition_gate=run.human_gate.value if run.human_gate else None,
+            status=OperatorActionStatus.ACCEPTED,
+            summary="Fenced one-shot CODE_REVIEW dispatch accepted; provider call remains pending.",
+            parameters_json=sanitized_params,
+            result_payload_json={"recovery_decision_id": decision.decision_id},
+        )
+        self.uow.operator_actions.save(action_record)
+
+        service = self.deepseek_code_review_service
+        if service is None:
+            from minime.services.deepseek_code_review_service import DeepSeekCodeReviewService
+
+            service = DeepSeekCodeReviewService(
+                self.uow,
+                health_service=self.provider_health_service,
+            )
+        heartbeat = OperationalHeartbeat(
+            recovery_service=self.recovery_convergence_service,
+            claim_context=context,
+            interval_seconds=max(1, self.recovery_convergence_service.heartbeat_seconds),
+            lease_seconds=self.recovery_convergence_service.lease_seconds,
+        )
+        try:
+            with heartbeat:
+                result = __import__("asyncio").run(
+                    service.review_candidate(
+                        project=project,
+                        run=run,
+                        job=job,
+                        candidate=candidate,
+                        manifest=manifest,
+                        candidate_worktree=worktree_path,
+                        authorship_evidence={},
+                        authorization_id=authorization_id,
+                        claim_context=context,
+                        dispatch_action_key=f"deepseek-code-review:{authorization_id}",
+                    )
+                )
+            if heartbeat.heartbeat_failed:
+                raise RuntimeError("CODE_REVIEW_HEARTBEAT_RENEWAL_FAILED")
+            if not heartbeat.stopped_cleanly or heartbeat.is_alive or heartbeat.is_renewing:
+                raise RuntimeError("CODE_REVIEW_HEARTBEAT_DID_NOT_STOP_CLEANLY")
+            if not self.recovery_convergence_service.validate_claim(context):
+                raise RuntimeError("CODE_REVIEW_RUN_FENCE_LOST")
+
+            from minime.domain.models import validate_claim_context_authoritative
+
+            validate_claim_context_authoritative(self.uow, context, for_update=True)
+            persisted_run = self.uow.orchestration_runs.get_by_id(run.run_id)
+            persisted_job = self.uow.jobs.get_by_id(job.job_id)
+            review = self.uow.reviews.get_by_id(result.review_id) if result.review_id else None
+            if result.accepted and review and review.status == ReviewStatus.REVIEW_COMPLETED:
+                persisted_run.current_stage = OrchestrationStage.COMPLEMENTARY_REVIEW
+                persisted_run.resumable_stage = OrchestrationStage.COMPLEMENTARY_REVIEW
+                persisted_run.is_active = False
+                persisted_run.stop_outcome = OrchestrationStopOutcome.NEEDS_HUMAN
+                persisted_run.human_gate = HumanGate.NEEDS_HUMAN
+                if review.verdict == ReviewVerdict.READY_TO_MERGE:
+                    gate_code = "CODE_REVIEW_COMPLETED_REQUIRES_SEPARATE_AUTHORIZED_CONTINUATION"
+                    reason = "Independent review completed; a separate governed continuation is required."
+                else:
+                    gate_code = "CODE_REVIEW_COMPLETED_CHANGES_REQUIRED"
+                    reason = "Independent review requires changes; frozen candidate and findings are preserved."
+                persisted_run.stop_reason = reason
+                persisted_run.stop_details = {
+                    "code": gate_code,
+                    "review_id": review.review_id,
+                    "review_verdict": review.verdict.value if review.verdict else None,
+                    "candidate_sha": candidate.candidate_sha,
+                    "base_sha": candidate.base_sha,
+                    "generation": candidate.generation,
+                    "manifest_id": manifest.manifest_id,
+                    "manifest_hash": manifest.manifest_hash,
+                }
+                persisted_job.status = JobStatus.CHECKS_PASSED
+                action_record.status = OperatorActionStatus.COMPLETED
+                action_record.summary = (
+                    "Fenced DeepSeek CODE_REVIEW completed and was durably finalized."
+                )
+                action_record.evidence_reference = review.review_id
+                action_record.result_payload_json = {
+                    "review_id": review.review_id,
+                    "candidate_sha": candidate.candidate_sha,
+                    "verdict": review.verdict.value if review.verdict else None,
+                    "dispatch_action_key": f"deepseek-code-review:{authorization_id}",
+                    "recovery_decision_id": decision.decision_id,
+                }
+                decision.status = RecoveryDecisionStatus.COMPLETED
+                decision.result_payload = action_record.result_payload_json
+            else:
+                persisted_run = persisted_run or run
+                persisted_job = persisted_job or job
+                persisted_run.is_active = False
+                persisted_run.stop_outcome = OrchestrationStopOutcome.NEEDS_HUMAN
+                persisted_run.human_gate = HumanGate.NEEDS_HUMAN
+                persisted_run.stop_reason = result.reason or "CODE_REVIEW_FAILED_CLOSED"
+                persisted_run.stop_details = {
+                    "code": "CODE_REVIEW_DISPATCH_AMBIGUOUS"
+                    if result.reason and "AMBIGUOUS" in result.reason
+                    else "CODE_REVIEW_FAILED_CLOSED",
+                    "reason": result.reason,
+                    "candidate_sha": candidate.candidate_sha,
+                    "generation": candidate.generation,
+                }
+                action_record.status = OperatorActionStatus.BLOCKED
+                action_record.summary = "CODE_REVIEW did not complete; durable state is preserved and no blind repeat is allowed."
+                action_record.result_payload_json = {
+                    "reason": result.reason,
+                    "review_id": result.review_id,
+                    "recovery_decision_id": decision.decision_id,
+                }
+                decision.status = RecoveryDecisionStatus.BLOCKED
+                decision.reason_code = "CODE_REVIEW_FAILED_OR_AMBIGUOUS"
+                decision.result_payload = action_record.result_payload_json
+            self.uow.orchestration_runs.save(persisted_run)
+            self.uow.jobs.save(persisted_job)
+            self.uow.operator_actions.save(action_record)
+            self.uow.recovery_decisions.update_decision(decision, claim_context=context)
+            self.uow.commit()
+        except Exception:
+            self.uow.rollback()
+            raise
+        finally:
+            if not heartbeat.is_alive and not heartbeat.is_renewing:
+                self.recovery_convergence_service.release_claim(context)
+
+        resulting_run = self.uow.orchestration_runs.get_by_id(run.run_id) or run
+        return OperatorActionResult(
+            action_request_id=request.action_request_id,
+            action_type=request.action_type,
+            status=action_record.status,
+            error_code=(
+                OperatorActionErrorCode.ACTION_EXECUTION_FAILED
+                if action_record.status != OperatorActionStatus.COMPLETED
+                else None
+            ),
+            summary=action_record.summary,
+            resulting_stage=resulting_run.current_stage,
+            resulting_outcome=resulting_run.stop_outcome,
+            resulting_gate=resulting_run.human_gate,
+            evidence_reference=action_record.evidence_reference,
+            payload=action_record.result_payload_json,
+        )
+
+    @staticmethod
+    def _expected_code_review_reservation_key(run, job, candidate, authorization_id: str) -> str:
+        from minime.services.deepseek_code_review_service import _reservation_key
+
+        return (
+            _reservation_key(
+                run.run_id, job.job_id, candidate.candidate_sha, candidate.manifest_hash
+            )
+            + f":{authorization_id}"
+        )
+
+    def _execute_continue_after_code_review(
+        self,
+        request: OperatorActionRequest,
+        run: OrchestrationRun,
+        sanitized_params: dict[str, Any],
+    ) -> OperatorActionResult:
+        """Continue only a completed, exact READY_TO_MERGE review through existing gates."""
+        required = {"review_id", "candidate_sha", "manifest_hash"}
+        if set(sanitized_params) != required:
+            return self._record_and_return_rejection(
+                request=request,
+                run=run,
+                error_code=OperatorActionErrorCode.INVALID_ACTION_PARAMETERS,
+                summary="Post-review continuation requires exact review, candidate, and manifest identities.",
+                sanitized_params=sanitized_params,
+            )
+        if (
+            run.is_active
+            or run.stop_outcome != OrchestrationStopOutcome.NEEDS_HUMAN
+            or (run.stop_details or {}).get("code")
+            != "CODE_REVIEW_COMPLETED_REQUIRES_SEPARATE_AUTHORIZED_CONTINUATION"
+            or run.current_stage != OrchestrationStage.COMPLEMENTARY_REVIEW
+            or run.resumable_stage != OrchestrationStage.COMPLEMENTARY_REVIEW
+        ):
+            return self._record_and_return_rejection(
+                request=request,
+                run=run,
+                error_code=OperatorActionErrorCode.ACTION_NOT_ALLOWED,
+                summary="Continuation is available only from the completed review checkpoint.",
+                sanitized_params=sanitized_params,
+            )
+
+        job = self.uow.jobs.get_by_id(run.active_job_id) if run.active_job_id else None
+        project = self.uow.projects.get_by_id(run.project_id)
+        candidates = getattr(self.uow, "orchestration_candidates", None)
+        candidate = (
+            candidates.get_by_generation(run.run_id, run.current_generation) if candidates else None
+        )
+        manifests = getattr(self.uow, "candidate_manifests", None)
+        manifest = (
+            manifests.get_by_id(candidate.manifest_id)
+            if candidate and candidate.manifest_id and manifests
+            else None
+        )
+        review = self.uow.reviews.get_by_id(str(sanitized_params["review_id"]))
+        authorization = (
+            self.uow.operator_actions.get_by_request_id(review.budget_authorization_id)
+            if review and review.budget_authorization_id
+            else None
+        )
+        reservation = (
+            self.uow.budget_reservations.get_by_id(review.budget_reservation_id)
+            if review and review.budget_reservation_id
+            else None
+        )
+        review_action_key = (
+            f"deepseek-code-review:{review.budget_authorization_id}"
+            if review and review.budget_authorization_id
+            else None
+        )
+        review_dispatch = (
+            self.uow.orchestration_external_actions.get_by_action_key(review_action_key)
+            if review_action_key
+            else None
+        )
+        review_attempts = (
+            self.uow.external_action_attempts.list_by_action_key(review_action_key)
+            if review_action_key
+            else []
+        )
+        review_execution_action = next(
+            (
+                action
+                for action in self.uow.operator_actions.list_by_run(run.run_id)
+                if action.action_type == OperatorActionType.EXECUTE_AUTHORIZED_DEEPSEEK_CODE_REVIEW
+                and action.status == OperatorActionStatus.COMPLETED
+                and action.job_id == (job.job_id if job else None)
+                and action.evidence_reference == (review.review_id if review else None)
+                and action.result_payload_json.get("review_id")
+                == (review.review_id if review else None)
+                and action.result_payload_json.get("dispatch_action_key") == review_action_key
+            ),
+            None,
+        )
+        review_decision_id = (
+            review_execution_action.result_payload_json.get("recovery_decision_id")
+            if review_execution_action
+            else None
+        )
+        review_recovery_decision = (
+            self.uow.recovery_decisions.get_by_id(review_decision_id)
+            if review_decision_id
+            else None
+        )
+        authorization_payload = (
+            authorization.result_payload_json.get("authorization", {}) if authorization else {}
+        )
+        if (
+            not job
+            or not project
+            or not candidate
+            or not manifest
+            or not candidate.is_frozen
+            or job.job_id != run.active_job_id
+            or job.project_id != run.project_id
+            or job.change_name != run.change_name
+            or job.status != JobStatus.CHECKS_PASSED
+            or candidate.run_id != run.run_id
+            or candidate.generation != run.current_generation
+            or candidate.candidate_sha != str(sanitized_params["candidate_sha"])
+            or candidate.candidate_sha != job.candidate_sha
+            or candidate.candidate_sha != run.current_candidate_sha
+            or candidate.base_sha != run.base_sha
+            or candidate.base_sha != job.base_sha
+            or candidate.manifest_hash != str(sanitized_params["manifest_hash"])
+            or manifest.job_id != job.job_id
+            or manifest.candidate_sha != candidate.candidate_sha
+            or manifest.manifest_hash != candidate.manifest_hash
+            or not review
+            or review.review_id != str(sanitized_params["review_id"])
+            or review.status != ReviewStatus.REVIEW_COMPLETED
+            or review.verdict != ReviewVerdict.READY_TO_MERGE
+            or review.review_stage != "CODE_REVIEW"
+            or review.reviewer_role != "deepseek"
+            or review.provider != "deepseek"
+            or review.billing_origin != "deepseek_direct"
+            or review.project_id != run.project_id
+            or review.change_name != run.change_name
+            or review.job_id != job.job_id
+            or review.orchestration_run_id != run.run_id
+            or review.candidate_sha != candidate.candidate_sha
+            or review.base_sha != candidate.base_sha
+            or review.candidate_generation != candidate.generation
+            or review.manifest_id != manifest.manifest_id
+            or review.manifest_hash != manifest.manifest_hash
+            or not reservation
+            or not authorization
+            or authorization.action_type != OperatorActionType.AUTHORIZE_DEEPSEEK_CODE_REVIEW
+            or authorization.status != OperatorActionStatus.COMPLETED
+            or authorization.project_id != run.project_id
+            or authorization.change_name != run.change_name
+            or authorization.run_id != run.run_id
+            or authorization.job_id != job.job_id
+            or authorization.result_payload_json.get("authorization", {}).get("provider")
+            != "deepseek"
+            or authorization.result_payload_json.get("authorization", {}).get("stage") != "REVIEW"
+            or authorization.result_payload_json.get("authorization", {}).get("billing_origin")
+            != "deepseek_direct"
+            or authorization_payload.get("account_fingerprint") != review.account_fingerprint
+            or authorization_payload.get("model") != review.reviewer_model
+            or authorization_payload.get("pricing_snapshot_id") != reservation.pricing_snapshot_id
+            or Decimal(str(authorization_payload.get("max_spend_usd", "0")))
+            < reservation.reserved_amount_usd
+            or authorization.result_payload_json.get("authorization", {}).get("candidate_sha")
+            != candidate.candidate_sha
+            or authorization.result_payload_json.get("authorization", {}).get("base_sha")
+            != candidate.base_sha
+            or authorization.result_payload_json.get("authorization", {}).get("generation")
+            != candidate.generation
+            or authorization.result_payload_json.get("authorization", {}).get("manifest_id")
+            != manifest.manifest_id
+            or authorization.result_payload_json.get("authorization", {}).get("manifest_hash")
+            != manifest.manifest_hash
+            or reservation.authorization_id != authorization.action_request_id
+            or reservation.project_id != run.project_id
+            or reservation.run_id != run.run_id
+            or reservation.job_id != job.job_id
+            or reservation.provider != "deepseek"
+            or reservation.account_fingerprint != review.account_fingerprint
+            or reservation.canonical_model_identity != review.reviewer_model
+            or reservation.stage != "REVIEW"
+            or reservation.billing_origin != "deepseek_direct"
+            or reservation.status != "SETTLED"
+            or reservation.idempotency_key
+            != self._expected_code_review_reservation_key(
+                run, job, candidate, review.budget_authorization_id
+            )
+            or not review_dispatch
+            or review_dispatch.status != ExternalActionStatus.COMPLETED
+            or review_dispatch.remote_identifier != review.review_id
+            or len(review_attempts) != 1
+            or review_attempts[0].status != "COMPLETED"
+            or review_attempts[0].attempt_number != 1
+            or review_attempts[0].claim_key != f"run:{run.run_id}"
+            or review_attempts[0].fence_token <= 0
+            or not review_execution_action
+            or not review_recovery_decision
+            or review_recovery_decision.status != RecoveryDecisionStatus.COMPLETED
+            or review_recovery_decision.identity_type != "RUN"
+            or review_recovery_decision.identity_id != run.run_id
+            or review_recovery_decision.project_id != run.project_id
+            or review_recovery_decision.change_name != run.change_name
+            or review_recovery_decision.claim_key != review_attempts[0].claim_key
+            or review_recovery_decision.fence_token != review_attempts[0].fence_token
+            or review_recovery_decision.planned_action != "DISPATCH_FROZEN_CODE_REVIEW"
+            or review_recovery_decision.observation_refs.get("authorization_id")
+            != review.budget_authorization_id
+            or review_recovery_decision.prior_checkpoint.get("candidate_sha")
+            != candidate.candidate_sha
+            or review_recovery_decision.prior_checkpoint.get("manifest_hash")
+            != manifest.manifest_hash
+            or review_execution_action.action_request_id == request.action_request_id
+        ):
+            return self._record_and_return_rejection(
+                request=request,
+                run=run,
+                error_code=OperatorActionErrorCode.AUTHORITY_MISMATCH,
+                summary="Review, authorization, reservation, candidate, or manifest identity is not exact.",
+                sanitized_params=sanitized_params,
+            )
+
+        from minime.services.authorship_service import AuthorshipService
+        from minime.services.recovery_convergence_service import OperationalHeartbeat
+        from minime.services.worktree_manager import WorktreeManager
+
+        independent, _reason = AuthorshipService().is_reviewer_eligible(
+            job.job_id, "deepseek", self.uow
+        )
+        if not independent:
+            return self._record_and_return_rejection(
+                request=request,
+                run=run,
+                error_code=OperatorActionErrorCode.AUTHORITY_MISMATCH,
+                summary="Persisted reviewer is not independent of candidate authorship.",
+                sanitized_params=sanitized_params,
+            )
+        manager = WorktreeManager(project_root=self.project_root, uow=self.uow)
+        worktree_path = manager.worktree_path(job.job_id, project_id=job.project_id)
+        ownership_repo = getattr(self.uow, "orchestration_worktree_ownerships", None)
+        ownership = ownership_repo.get_by_job_id(job.job_id) if ownership_repo else None
+        try:
+            import asyncio
+
+            if ownership is None:
+                raise ValueError("ownership missing")
+            asyncio.run(
+                manager._verify_frozen_candidate_worktree_adoption(
+                    path=worktree_path,
+                    job_id=job.job_id,
+                    project_id=project.project_id,
+                    run_id=run.run_id,
+                    change_name=run.change_name,
+                    ownership=ownership,
+                )
+            )
+        except Exception as exc:
+            return self._record_and_return_rejection(
+                request=request,
+                run=run,
+                error_code=OperatorActionErrorCode.AUTHORITY_MISMATCH,
+                summary=f"Frozen candidate integrity revalidation failed: {type(exc).__name__}.",
+                sanitized_params=sanitized_params,
+            )
+
+        context = self.recovery_convergence_service.acquire_claim(f"run:{run.run_id}")
+        if not context:
+            return self._record_and_return_rejection(
+                request=request,
+                run=run,
+                error_code=OperatorActionErrorCode.RECOVERY_REQUIRED,
+                summary="Run claim is held by another live recovery owner.",
+                sanitized_params=sanitized_params,
+            )
+        cycle_id = generate_uuid()
+        decision = RecoveryDecision(
+            cycle_id=cycle_id,
+            claim_key=context.claim_key,
+            identity_type="RUN",
+            identity_id=run.run_id,
+            project_id=run.project_id,
+            change_name=run.change_name,
+            source=RecoverySource.CONTROL_PLANE,
+            prior_checkpoint={
+                "stage": OrchestrationStage.COMPLEMENTARY_REVIEW.value,
+                "review_id": review.review_id,
+                "candidate_sha": candidate.candidate_sha,
+                "generation": candidate.generation,
+                "manifest_id": manifest.manifest_id,
+                "manifest_hash": manifest.manifest_hash,
+            },
+            observation_refs={"action_request_id": request.action_request_id},
+            classification=RecoveryClassification.RESUME_SAFE_CHECKPOINT,
+            planned_action="CONTINUE_AFTER_CODE_REVIEW",
+            fence_token=context.fence_token,
+            status=RecoveryDecisionStatus.EXECUTING,
+        )
+        action_record = OperatorActionRecord(
+            action_request_id=request.action_request_id,
+            project_id=run.project_id,
+            change_name=run.change_name,
+            run_id=run.run_id,
+            job_id=job.job_id,
+            action_type=request.action_type,
+            actor_identity=request.actor_identity,
+            source_interface=request.source_interface,
+            precondition_stage=run.current_stage.value,
+            precondition_gate=run.human_gate.value if run.human_gate else None,
+            status=OperatorActionStatus.ACCEPTED,
+            summary="Exact completed review accepted for separately authorized continuation.",
+            parameters_json=sanitized_params,
+            result_payload_json={"recovery_decision_id": decision.decision_id},
+        )
+        self.uow.recovery_decisions.create_decision(decision)
+        self.uow.operator_actions.save(action_record)
+        heartbeat = OperationalHeartbeat(
+            recovery_service=self.recovery_convergence_service,
+            claim_context=context,
+            interval_seconds=max(1, self.recovery_convergence_service.heartbeat_seconds),
+            lease_seconds=self.recovery_convergence_service.lease_seconds,
+        )
+        try:
+            with heartbeat:
+                from minime.domain.models import validate_claim_context_authoritative
+
+                validate_claim_context_authoritative(self.uow, context, for_update=True)
+                persisted_run = self.uow.orchestration_runs.get_by_id(run.run_id)
+                persisted_job = self.uow.jobs.get_by_id(job.job_id)
+                if (
+                    not persisted_run
+                    or not persisted_job
+                    or persisted_run.stop_details != run.stop_details
+                    or persisted_run.stop_outcome != OrchestrationStopOutcome.NEEDS_HUMAN
+                    or persisted_run.human_gate != HumanGate.NEEDS_HUMAN
+                    or persisted_run.current_candidate_sha != candidate.candidate_sha
+                    or persisted_run.current_stage != OrchestrationStage.COMPLEMENTARY_REVIEW
+                    or persisted_run.resumable_stage != OrchestrationStage.COMPLEMENTARY_REVIEW
+                    or persisted_job.status != JobStatus.CHECKS_PASSED
+                ):
+                    raise ValueError("post-review checkpoint changed while acquiring claim")
+                persisted_run.is_active = True
+                persisted_run.stop_outcome = None
+                persisted_run.human_gate = None
+                persisted_run.stop_reason = None
+                persisted_run.stop_details = {}
+                persisted_run.current_stage = OrchestrationStage.COMPLEMENTARY_REVIEW
+                persisted_run.resumable_stage = OrchestrationStage.COMPLEMENTARY_REVIEW
+                self.uow.orchestration_runs.save(persisted_run)
+                self.uow.commit()
+                resumed = self.orchestration_service.resume(
+                    run_id=run.run_id,
+                    project_root=self.project_root,
+                    force=True,
+                    claim_context=context,
+                    manage_heartbeat=False,
+                )
+            if (
+                heartbeat.heartbeat_failed
+                or not heartbeat.stopped_cleanly
+                or heartbeat.is_alive
+                or heartbeat.is_renewing
+            ):
+                raise RuntimeError("post-review continuation lost its claim heartbeat")
+            validate_claim_context_authoritative(self.uow, context, for_update=True)
+            final_run = self.uow.orchestration_runs.get_by_id(run.run_id) or resumed
+            final_job = self.uow.jobs.get_by_id(job.job_id)
+            action_record.status = OperatorActionStatus.COMPLETED
+            action_record.summary = (
+                "Post-review continuation processed through existing gates; "
+                f"persisted stage={final_run.current_stage.value}, "
+                f"outcome={final_run.stop_outcome.value if final_run.stop_outcome else 'NONE'}, "
+                f"job={final_job.status.value if final_job else 'MISSING'}."
+            )
+            action_record.evidence_reference = review.review_id
+            action_record.result_payload_json = {
+                "review_id": review.review_id,
+                "candidate_sha": candidate.candidate_sha,
+                "manifest_hash": manifest.manifest_hash,
+                "resulting_stage": final_run.current_stage.value,
+                "resulting_outcome": final_run.stop_outcome.value
+                if final_run.stop_outcome
+                else None,
+                "job_status": final_job.status.value if final_job else None,
+                "recovery_decision_id": decision.decision_id,
+            }
+            decision.status = RecoveryDecisionStatus.COMPLETED
+            decision.result_payload = action_record.result_payload_json
+            self.uow.operator_actions.save(action_record)
+            self.uow.recovery_decisions.update_decision(decision, claim_context=context)
+            self.uow.commit()
+        except Exception as exc:
+            self.uow.rollback()
+            action_record.status = OperatorActionStatus.BLOCKED
+            action_record.summary = "Post-review continuation failed closed; inspect durable Run/Job state before another action."
+            safe_error_detail = redact_secrets(str(exc))[:240]
+            action_record.result_payload_json = {
+                "error_type": type(exc).__name__,
+                "error_detail": safe_error_detail,
+                "recovery_decision_id": decision.decision_id,
+            }
+            decision.status = RecoveryDecisionStatus.BLOCKED
+            decision.reason_code = f"POST_REVIEW_CONTINUATION_FAILED:{type(exc).__name__}"
+            try:
+                self.uow.operator_actions.save(action_record)
+                self.uow.recovery_decisions.update_decision(decision, claim_context=context)
+                self.uow.commit()
+            except Exception:
+                self.uow.rollback()
+            return OperatorActionResult(
+                action_request_id=request.action_request_id,
+                action_type=request.action_type,
+                status=OperatorActionStatus.BLOCKED,
+                error_code=OperatorActionErrorCode.ACTION_EXECUTION_FAILED,
+                summary=action_record.summary,
+                resulting_stage=(
+                    self.uow.orchestration_runs.get_by_id(run.run_id) or run
+                ).current_stage,
+                resulting_outcome=(
+                    self.uow.orchestration_runs.get_by_id(run.run_id) or run
+                ).stop_outcome,
+                resulting_gate=(
+                    self.uow.orchestration_runs.get_by_id(run.run_id) or run
+                ).human_gate,
+                evidence_reference=review.review_id,
+                payload=action_record.result_payload_json,
+            )
+        finally:
+            if not heartbeat.is_alive and not heartbeat.is_renewing:
+                self.recovery_convergence_service.release_claim(context)
+
+        return OperatorActionResult(
+            action_request_id=request.action_request_id,
+            action_type=request.action_type,
+            status=action_record.status,
+            summary=action_record.summary,
+            resulting_stage=final_run.current_stage,
+            resulting_outcome=final_run.stop_outcome,
+            resulting_gate=final_run.human_gate,
+            evidence_reference=review.review_id,
+            payload=action_record.result_payload_json,
+        )
+
     def _execute_authorize_deepseek_code_review(
         self,
         request: OperatorActionRequest,
@@ -1396,17 +2443,16 @@ class ControlPlaneService:
             if candidate and candidate.manifest_id and manifests_repo
             else None
         )
-        passing_checks = (
-            [
-                item
-                for item in self.uow.check_results.list_by_job(job.job_id)
-                if candidate
-                and item.candidate_sha == candidate.candidate_sha
-                and item.candidate_generation == candidate.generation
-                and item.exit_code == 0
-            ]
-            if job
-            else []
+        project = self.uow.projects.get_by_id(run.project_id) if job else None
+        checks_valid, _, current_check_batch = (
+            self.orchestration_service._validate_current_checks_batch(
+                job,
+                run,
+                project,
+                require_configured_checks=True,
+            )
+            if job and candidate
+            else (False, "Candidate or check authority is unavailable.", [])
         )
         prior_code_review = (
             self.uow.reviews.get_by_job_stage(job.job_id, "CODE_REVIEW") if job else None
@@ -1437,7 +2483,8 @@ class ControlPlaneService:
             or manifest.candidate_sha != candidate.candidate_sha
             or manifest.manifest_hash != candidate.manifest_hash
             or job.status not in {JobStatus.CHECKS_PASSED, JobStatus.WAITING_CAPACITY}
-            or not passing_checks
+            or not checks_valid
+            or not current_check_batch
             or not review_slot_open
         ):
             return self._record_and_return_rejection(
@@ -1493,7 +2540,6 @@ class ControlPlaneService:
                 summary="Code-review authorization must expire within one hour.",
                 sanitized_params=sanitized_params,
             )
-        project = self.uow.projects.get_by_id(run.project_id)
         if not project:
             return self._record_and_return_rejection(
                 request=request,
@@ -1582,6 +2628,7 @@ class ControlPlaneService:
             "provider": "deepseek",
             "account_fingerprint": account_fingerprint,
             "model": profile.model,
+            "effort": profile.effort,
             "stage": "REVIEW",
             "billing_origin": "deepseek_direct",
             "pricing_snapshot_id": snapshot.snapshot_id,

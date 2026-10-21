@@ -26,6 +26,7 @@ from minime.domain.enums import (
 from minime.domain.interfaces import PersistenceUnitOfWork
 from minime.domain.models import (
     Change,
+    CheckResult,
     EfficiencyTelemetryView,
     Job,
     OrchestrationRun,
@@ -223,9 +224,12 @@ class CheckResultItemDTO(BaseModel):
     check_name: str
     command: str
     status: str  # PASS, FAIL, SKIPPED
+    result_id: str | None = None
     exit_code: int | None = None
     duration_ms: int | None = None
     candidate_sha: str | None = None
+    candidate_generation: int | None = None
+    is_current_batch: bool = False
     diagnostic_snippet: str | None = None
 
 
@@ -1306,11 +1310,68 @@ class OperationsDashboardService:
             checks_summary = "Checks failed"
         passed_count = 0
         failed_count = 0
+        historical_failed_count = 0
+        current_batch_ids: set[str] = set()
+        current_batch_valid = False
+        current_batch_reason: str | None = None
+        current_batch: list[CheckResult] = []
+        project = self.uow.projects.get_by_id(job.project_id) if job else None
         if job:
             cr_list = self.uow.check_results.list_by_job(job.job_id)
-            passed_count = sum(1 for c in cr_list if c.exit_code == 0)
-            failed_count = sum(1 for c in cr_list if c.exit_code != 0)
-        checks_details = {"passed_count": passed_count, "failed_count": failed_count}
+            from minime.services.current_check_batch import validate_current_checks_batch
+
+            current_batch_valid, current_batch_reason, current_batch = (
+                validate_current_checks_batch(
+                    check_results=cr_list,
+                    job=job,
+                    run=run,
+                    project=project,
+                )
+            )
+            current_batch_ids = {item.result_id for item in current_batch}
+            passed_count = sum(1 for item in current_batch if item.exit_code == 0)
+            failed_count = sum(1 for item in current_batch if item.exit_code != 0)
+            historical_failed_count = sum(
+                1
+                for item in cr_list
+                if item.result_id not in current_batch_ids and item.exit_code != 0
+            )
+            if stage not in {
+                OrchestrationStage.RUNNING_CHECKS,
+                OrchestrationStage.IMPLEMENTING,
+                OrchestrationStage.PREPARING_EXECUTION,
+                OrchestrationStage.ADMITTED,
+            }:
+                if job.status == JobStatus.CHECKS_FAILED and not is_done:
+                    checks_status = "failed"
+                    checks_summary = "Job records deterministic checks failure"
+                elif current_batch_valid and current_batch:
+                    checks_status = "passed"
+                    checks_summary = "Latest complete deterministic check batch passed"
+                elif current_batch and failed_count:
+                    checks_status = "failed"
+                    checks_summary = "Latest complete deterministic check batch failed"
+                elif not any(
+                    isinstance(item, dict) and item.get("name")
+                    for item in (project.checks if project else [])
+                ):
+                    checks_status = "not_configured"
+                    checks_summary = "No deterministic checks are configured"
+                else:
+                    checks_status = "blocked"
+                    checks_summary = current_batch_reason or "Current check batch is unavailable"
+        checks_details = {
+            "current_batch_status": checks_status.upper(),
+            "current_candidate_sha": candidate_authority.candidate_sha
+            if candidate_authority
+            else (run.current_candidate_sha if run else None),
+            "current_generation": run.current_generation if run else None,
+            "current_check_result_ids": sorted(current_batch_ids),
+            "passed_count": passed_count,
+            "failed_count": failed_count,
+            "historical_failed_count": historical_failed_count,
+            "reason": current_batch_reason,
+        }
         phases.append(
             PipelinePhaseDTO(
                 name="checks",
@@ -1558,6 +1619,23 @@ class OperationsDashboardService:
         check_results = self.uow.check_results.list_by_job(run.active_job_id)
         diagnostics = self.uow.evidence_diagnostics.list_by_job(run.active_job_id)
         diag_map = {d.check_name: d for d in diagnostics if d.check_name}
+        job = self.uow.jobs.get_by_id(run.active_job_id)
+        project = self.uow.projects.get_by_id(run.project_id)
+        from minime.services.current_check_batch import validate_current_checks_batch
+
+        current_batch_valid, _, current_batch = (
+            validate_current_checks_batch(
+                check_results=check_results,
+                job=job,
+                run=run,
+                project=project,
+            )
+            if job
+            else (False, "Active Job is unavailable.", [])
+        )
+        current_batch_ids = (
+            {item.result_id for item in current_batch} if current_batch_valid else set()
+        )
 
         dtos: list[CheckResultItemDTO] = []
         current_sha = candidate.candidate_sha if candidate else run.current_candidate_sha
@@ -1581,6 +1659,9 @@ class OperationsDashboardService:
                     exit_code=cr.exit_code,
                     duration_ms=cr.duration_ms,
                     candidate_sha=current_sha,
+                    result_id=cr.result_id,
+                    candidate_generation=cr.candidate_generation,
+                    is_current_batch=cr.result_id in current_batch_ids,
                     diagnostic_snippet=diag_snippet,
                 )
             )

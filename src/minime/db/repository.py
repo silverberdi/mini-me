@@ -1358,6 +1358,7 @@ class PostgresJobRepository(JobRepositoryInterface):
         JobStatus.CHECKS_PASSED: {
             JobStatus.RUNNING,
             JobStatus.REVIEW_RUNNING,
+            JobStatus.AUDIT_RUNNING,
             JobStatus.CHECKS_RUNNING,
             JobStatus.CHECKS_PASSED,
             JobStatus.READY_TO_MERGE,

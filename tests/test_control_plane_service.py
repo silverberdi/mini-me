@@ -689,6 +689,87 @@ def test_get_available_actions_disables_continue_for_genuine_human_gates(
     assert action_map[OperatorActionType.CONTINUE].enabled is True
 
 
+@pytest.mark.parametrize(
+    "gate_code",
+    [
+        "REVIEW_AUTHORIZATION_PENDING",
+        "CODE_REVIEW_COMPLETED_REQUIRES_SEPARATE_AUTHORIZED_CONTINUATION",
+        "CODE_REVIEW_COMPLETED_CHANGES_REQUIRED",
+    ],
+)
+def test_exceptional_code_review_holds_disable_generic_continue(
+    in_memory_uow, seeded_project_and_run, gate_code
+):
+    _, _, run = seeded_project_and_run
+    run.current_stage = OrchestrationStage.COMPLEMENTARY_REVIEW
+    run.resumable_stage = OrchestrationStage.COMPLEMENTARY_REVIEW
+    run.stop_outcome = OrchestrationStopOutcome.NEEDS_HUMAN
+    run.human_gate = HumanGate.NEEDS_HUMAN
+    run.stop_details = {"code": gate_code}
+    in_memory_uow.orchestration_runs.save(run)
+    in_memory_uow.commit()
+
+    actions = {
+        item.action: item
+        for item in ControlPlaneService(in_memory_uow).get_available_actions(run.run_id)
+    }
+    assert actions[OperatorActionType.CONTINUE].enabled is False
+    assert actions[OperatorActionType.CONTINUE_AFTER_CODE_REVIEW].enabled is False
+
+
+@pytest.mark.parametrize(
+    "gate_code",
+    [
+        "REVIEW_AUTHORIZATION_PENDING",
+        "CODE_REVIEW_COMPLETED_REQUIRES_SEPARATE_AUTHORIZED_CONTINUATION",
+        "CODE_REVIEW_COMPLETED_CHANGES_REQUIRED",
+    ],
+)
+def test_generic_continue_cannot_mutate_exceptional_review_checkpoint(
+    in_memory_uow, seeded_project_and_run, gate_code
+):
+    _, _, run = seeded_project_and_run
+    job = Job(
+        project_id=run.project_id,
+        change_name=run.change_name,
+        implementer_role="codex",
+        current_executor="codex",
+        status=JobStatus.CHECKS_PASSED,
+        base_sha=run.base_sha,
+        candidate_sha=run.candidate_sha,
+    )
+    run.active_job_id = job.job_id
+    run.current_stage = OrchestrationStage.COMPLEMENTARY_REVIEW
+    run.resumable_stage = OrchestrationStage.COMPLEMENTARY_REVIEW
+    run.stop_outcome = OrchestrationStopOutcome.NEEDS_HUMAN
+    run.human_gate = HumanGate.NEEDS_HUMAN
+    run.stop_details = {"code": gate_code}
+    in_memory_uow.jobs.save(job)
+    in_memory_uow.orchestration_runs.save(run)
+    in_memory_uow.commit()
+    before_run = in_memory_uow.orchestration_runs.get_by_id(run.run_id).model_copy(deep=True)
+    before_job = in_memory_uow.jobs.get_by_id(job.job_id).model_copy(deep=True)
+
+    result = ControlPlaneService(in_memory_uow).execute_action(
+        OperatorActionRequest(
+            action_request_id=f"generic-review-continue-{gate_code}",
+            project_id=run.project_id,
+            change_name=run.change_name,
+            run_id=run.run_id,
+            action_type=OperatorActionType.CONTINUE,
+            parameters={},
+            actor_identity="test-operator",
+            expected_stage=run.current_stage,
+            expected_generation=run.current_generation,
+            expected_candidate_sha=run.current_candidate_sha,
+        )
+    )
+    assert result.status == OperatorActionStatus.REJECTED
+    assert in_memory_uow.orchestration_runs.get_by_id(run.run_id) == before_run
+    assert in_memory_uow.jobs.get_by_id(job.job_id) == before_job
+    assert in_memory_uow.job_attempts.list_by_job(job.job_id) == []
+
+
 def test_operator_action_result_computed_success(in_memory_uow, seeded_project_and_run):
     project, change, run = seeded_project_and_run
     service = ControlPlaneService(in_memory_uow)

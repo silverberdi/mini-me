@@ -19,6 +19,8 @@ from minime.adapters.provider_adapter import (
 from minime.config import AppConfig, ProjectConfig, ProviderConfig
 from minime.domain.enums import (
     CapacitySignalSource,
+    EventType,
+    ExternalActionStatus,
     JobStatus,
     OperatorActionStatus,
     OperatorActionType,
@@ -114,6 +116,19 @@ class _ReviewRunner:
         )
 
 
+class _MutatingReviewRunner(_ReviewRunner):
+    def __init__(self, worktree: Path):
+        super().__init__()
+        self.worktree = worktree
+
+    async def review(self, request: str, timeout_seconds: int):
+        response = await super().review(request, timeout_seconds)
+        (self.worktree / "slug.py").write_text(
+            "def normalize_slug(value):\n    return 'mutated'\n", encoding="utf-8"
+        )
+        return response
+
+
 async def _fixture(
     tmp_path: Path, monkeypatch, uow, *, available: bool = True, runner=None, authorize=True
 ):
@@ -126,6 +141,7 @@ async def _fixture(
         repository="owner/repo",
         openspec_path="openspec",
         external_providers_allowed=["codex", "antigravity", "deepseek"],
+        checks=[{"name": "pytest", "command": "pytest -q"}],
     )
     app_config = AppConfig(
         providers={
@@ -369,6 +385,86 @@ async def test_contract_review_authorization_is_not_used_as_code_review_budget_a
     assert reservation.authorization_id is None
 
 
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("provider", "openrouter"),
+        ("account_fingerprint", "another-account"),
+        ("model", "another-model"),
+        ("effort", "high"),
+        ("stage", "CONTRACT_REVIEW"),
+        ("billing_origin", "openrouter"),
+        ("run_id", "another-run"),
+        ("job_id", "another-job"),
+        ("candidate_sha", "another-candidate"),
+        ("base_sha", "another-base"),
+        ("generation", 99),
+        ("manifest_id", "another-manifest"),
+        ("manifest_hash", "another-manifest-hash"),
+        ("action_request_id", "another-action"),
+        ("pricing_snapshot_id", "missing-pricing-snapshot"),
+        ("expires_at", (datetime.now(UTC) - timedelta(seconds=1)).isoformat()),
+        ("max_spend_usd", "0"),
+        ("authorized_by", ""),
+        ("record.action_type", OperatorActionType.AUTHORIZE_DEEPSEEK_REVIEW),
+        ("record.status", OperatorActionStatus.BLOCKED),
+        ("record.project_id", "another-project"),
+        ("record.change_name", "another-change"),
+        ("record.run_id", "another-run"),
+        ("record.job_id", "another-job"),
+    ],
+)
+@pytest.mark.asyncio
+async def test_exceptional_authorization_mismatch_is_rejected_before_reservation_or_dispatch(
+    in_memory_uow, monkeypatch, tmp_path, field, value
+):
+    from minime.services.recovery_convergence_service import RecoveryConvergenceService
+
+    runner = _ReviewRunner()
+    project, run, job, candidate, manifest, repo, _, _, auth, service = await _fixture(
+        tmp_path, monkeypatch, in_memory_uow, runner=runner
+    )
+    assert auth.status == OperatorActionStatus.COMPLETED
+    action = in_memory_uow.operator_actions.get_by_request_id(auth.action_request_id)
+    if field.startswith("record."):
+        setattr(action, field.removeprefix("record."), value)
+    else:
+        payload = dict(action.result_payload_json)
+        authority = dict(payload["authorization"])
+        authority[field] = value
+        payload["authorization"] = authority
+        action.result_payload_json = payload
+    in_memory_uow.operator_actions.save(action)
+    in_memory_uow.commit()
+    claim = RecoveryConvergenceService(in_memory_uow).acquire_claim(f"run:{run.run_id}")
+    assert claim is not None
+
+    result = await service.review_candidate(
+        project=project,
+        run=run,
+        job=job,
+        candidate=candidate,
+        manifest=manifest,
+        candidate_worktree=repo,
+        authorship_evidence={},
+        authorization_id=auth.action_request_id,
+        claim_context=claim,
+        dispatch_action_key=f"deepseek-code-review:{auth.action_request_id}",
+    )
+
+    assert not result.accepted
+    assert result.reason == "CODE_REVIEW_EXCEPTIONAL_AUTHORITY_MISSING_OR_MISMATCHED"
+    assert runner.calls == 0
+    assert in_memory_uow.budget_reservations.list_by_project(project.project_id) == []
+    assert in_memory_uow.reviews.get_by_job_stage(job.job_id, "CODE_REVIEW") is None
+    assert (
+        in_memory_uow.orchestration_external_actions.get_by_action_key(
+            f"deepseek-code-review:{auth.action_request_id}"
+        )
+        is None
+    )
+
+
 @pytest.mark.asyncio
 async def test_unavailable_capacity_and_dirty_candidate_wait_without_dispatch(
     in_memory_uow, monkeypatch, tmp_path
@@ -448,6 +544,74 @@ async def test_candidate_bound_review_checkpoint_is_not_dispatched_twice(
         in_memory_uow, run, job, candidate, AuthorshipService()
     )
     assert valid and verdict == ReviewVerdict.READY_TO_MERGE and reason is None
+
+
+@pytest.mark.asyncio
+async def test_exceptional_code_review_rejects_candidate_mutated_during_http_and_preserves_evidence(
+    in_memory_uow, monkeypatch, tmp_path
+):
+    from minime.services.recovery_convergence_service import RecoveryConvergenceService
+
+    project, run, job, candidate, manifest, repo, _, _, auth, service = await _fixture(
+        tmp_path, monkeypatch, in_memory_uow
+    )
+    runner = _MutatingReviewRunner(repo)
+    service.runner = runner
+    claim = RecoveryConvergenceService(in_memory_uow).acquire_claim(f"run:{run.run_id}")
+    assert auth.status == OperatorActionStatus.COMPLETED and claim is not None
+    action_key = f"deepseek-code-review:{auth.action_request_id}"
+
+    result = await service.review_candidate(
+        project=project,
+        run=run,
+        job=job,
+        candidate=candidate,
+        manifest=manifest,
+        candidate_worktree=repo,
+        authorship_evidence={},
+        authorization_id=auth.action_request_id,
+        claim_context=claim,
+        dispatch_action_key=action_key,
+    )
+
+    assert not result.accepted
+    assert result.reason == "CODE_REVIEW_POST_REVIEW_INTEGRITY_FAILED"
+    assert runner.calls == 1
+    review = in_memory_uow.reviews.get_by_id(result.review_id)
+    assert review and review.status == ReviewStatus.REVIEW_FAILED
+    assert review.verdict is None
+    assert in_memory_uow.reviews.get_by_job_stage(job.job_id, "CODE_REVIEW") is not None
+    diagnostics = [
+        event
+        for event in in_memory_uow.events.list_events(project_id=project.project_id)
+        if event.event_type == EventType.EVIDENCE_DIAGNOSTIC_RECORDED
+        and event.payload.get("review_id") == review.review_id
+    ]
+    assert len(diagnostics) == 1
+    reservation = in_memory_uow.budget_reservations.get_by_id(review.budget_reservation_id)
+    assert reservation and reservation.status == "SETTLED"
+    assert len(in_memory_uow.budget_ledger.list_by_project(project.project_id)) == 1
+    dispatch = in_memory_uow.orchestration_external_actions.get_by_action_key(action_key)
+    assert dispatch and dispatch.status == ExternalActionStatus.FAILED
+    attempts = in_memory_uow.external_action_attempts.list_by_action_key(action_key)
+    assert len(attempts) == 1 and attempts[0].status == "FAILED"
+    events = in_memory_uow.events.list_events(project_id=project.project_id)
+    assert any(event.event_type == EventType.UNAUTHORIZED_REVIEWER_MUTATION for event in events)
+    assert not any(event.event_type == EventType.CODE_REVIEW_COMPLETED for event in events)
+
+    replay = await service.review_candidate(
+        project=project,
+        run=run,
+        job=job,
+        candidate=candidate,
+        manifest=manifest,
+        candidate_worktree=repo,
+        authorship_evidence={},
+        authorization_id=auth.action_request_id,
+        claim_context=claim,
+        dispatch_action_key=action_key,
+    )
+    assert not replay.accepted and runner.calls == 1
 
 
 @pytest.mark.asyncio
@@ -537,6 +701,58 @@ async def test_ambiguous_dispatch_is_not_replayed_or_reserved_twice(
 
 
 @pytest.mark.asyncio
+async def test_lost_post_dispatch_fence_cannot_apply_provider_result(
+    in_memory_uow, monkeypatch, tmp_path
+):
+    from minime.services.recovery_convergence_service import RecoveryConvergenceService
+
+    claim_context = None
+
+    class LostFenceRunner(_ReviewRunner):
+        async def review(self, request: str, timeout_seconds: int):
+            response = await super().review(request, timeout_seconds)
+            claim = in_memory_uow.claims.get_by_key(claim_context.claim_key)
+            claim.fence_token += 1
+            in_memory_uow.claims._claims[claim_context.claim_key] = claim
+            return response
+
+    runner = LostFenceRunner()
+    project, run, job, candidate, manifest, repo, _, _, auth, service = await _fixture(
+        tmp_path, monkeypatch, in_memory_uow, runner=runner
+    )
+    assert auth.status == OperatorActionStatus.COMPLETED
+    claim_context = RecoveryConvergenceService(in_memory_uow).acquire_claim(f"run:{run.run_id}")
+    assert claim_context is not None
+
+    result = await service.review_candidate(
+        project=project,
+        run=run,
+        job=job,
+        candidate=candidate,
+        manifest=manifest,
+        candidate_worktree=repo,
+        authorship_evidence={},
+        authorization_id=auth.action_request_id,
+        claim_context=claim_context,
+        dispatch_action_key=f"deepseek-code-review:{auth.action_request_id}",
+    )
+
+    assert not result.accepted and result.waiting
+    assert result.reason == "CODE_REVIEW_CLAIM_LOST_AFTER_DISPATCH"
+    assert runner.calls == 1
+    review = in_memory_uow.reviews.get_by_job_stage(job.job_id, "CODE_REVIEW")
+    assert review and review.status == ReviewStatus.REVIEW_RUNNING and review.verdict is None
+    reservation = in_memory_uow.budget_reservations.get_by_id(review.budget_reservation_id)
+    assert reservation and reservation.status == "RESERVED"
+    dispatch_key = f"deepseek-code-review:{auth.action_request_id}"
+    dispatch = in_memory_uow.orchestration_external_actions.get_by_action_key(dispatch_key)
+    attempts = in_memory_uow.external_action_attempts.list_by_action_key(dispatch_key)
+    assert dispatch and dispatch.status.value == "EXECUTING" and dispatch.last_dispatch_intent_id
+    assert len(attempts) == 1 and attempts[0].status == "EXECUTING"
+    assert in_memory_uow.metrics.list_facts(project_id=project.project_id) == []
+
+
+@pytest.mark.asyncio
 async def test_code_review_excludes_unchanged_static_documentation_and_reduces_tokens(
     in_memory_uow, monkeypatch, tmp_path
 ):
@@ -549,7 +765,9 @@ async def test_code_review_excludes_unchanged_static_documentation_and_reduces_t
     docs_dir = repo / "docs"
     docs_dir.mkdir(parents=True, exist_ok=True)
     for i in range(10):
-        (docs_dir / f"manual_{i}.md").write_text("# Extensive Manual\n" + ("Lorem ipsum dolor sit amet. " * 300), encoding="utf-8")
+        (docs_dir / f"manual_{i}.md").write_text(
+            "# Extensive Manual\n" + ("Lorem ipsum dolor sit amet. " * 300), encoding="utf-8"
+        )
     subprocess.run(["git", "-C", str(repo), "add", "docs"], check=True)
     subprocess.run(["git", "-C", str(repo), "commit", "-qm", "add docs"], check=True)
     base_sha = subprocess.run(
@@ -631,7 +849,9 @@ async def test_code_review_unconditionally_includes_security_policy_modification
     # Base commit with an agent skill policy
     agent_dir = repo / ".agent" / "skills" / "security"
     agent_dir.mkdir(parents=True, exist_ok=True)
-    (agent_dir / "SKILL.md").write_text("# Safe Security Policy\nenforce_safe = True\n", encoding="utf-8")
+    (agent_dir / "SKILL.md").write_text(
+        "# Safe Security Policy\nenforce_safe = True\n", encoding="utf-8"
+    )
     subprocess.run(["git", "-C", str(repo), "add", ".agent"], check=True)
     subprocess.run(["git", "-C", str(repo), "commit", "-qm", "base security policy"], check=True)
     base_sha = subprocess.run(
@@ -639,7 +859,9 @@ async def test_code_review_unconditionally_includes_security_policy_modification
     ).stdout.strip()
 
     # Adversarial change: modifies agent security policy
-    (agent_dir / "SKILL.md").write_text("# Bypassed Security Policy\nenforce_safe = False\n", encoding="utf-8")
+    (agent_dir / "SKILL.md").write_text(
+        "# Bypassed Security Policy\nenforce_safe = False\n", encoding="utf-8"
+    )
     subprocess.run(["git", "-C", str(repo), "add", ".agent"], check=True)
     subprocess.run(["git", "-C", str(repo), "commit", "-qm", "evil security tweak"], check=True)
     candidate_sha = subprocess.run(
@@ -691,9 +913,7 @@ async def test_code_review_unconditionally_includes_security_policy_modification
 
 
 @pytest.mark.asyncio
-async def test_code_review_redacts_secrets_in_git_diff(
-    in_memory_uow, monkeypatch, tmp_path
-):
+async def test_code_review_redacts_secrets_in_git_diff(in_memory_uow, monkeypatch, tmp_path):
     runner = _ReviewRunner()
     project, run, job, candidate, manifest, repo, _, _, auth, service = await _fixture(
         tmp_path, monkeypatch, in_memory_uow, runner=runner
@@ -821,5 +1041,3 @@ async def test_code_review_fails_closed_when_git_diff_exceeds_bound(
     # Must fail closed without silent truncation
     assert result.accepted is False
     assert result.reason == "CODE_REVIEW_PREFLIGHT_BLOCKED:ValueError"
-
-

@@ -30,7 +30,7 @@ from minime.domain.models import (
     ProjectBinding,
     Review,
 )
-from minime.services.dashboard_service import OperationsDashboardService
+from minime.services.dashboard_service import CandidateAuthorityDTO, OperationsDashboardService
 from minime.services.systemd_scheduler_observer import SchedulerServiceObservation
 
 
@@ -273,6 +273,7 @@ def test_dashboard_change_detail_pipeline_phases(
         openspec_path="openspec",
         implementer="codex",
         reviewer="antigravity",
+        checks=[{"name": "pytest", "command": "pytest"}],
     )
     in_memory_uow.projects.save(project)
 
@@ -318,6 +319,8 @@ def test_dashboard_change_detail_pipeline_phases(
         exit_code=0,
         duration_ms=120,
         output_snippet="=== 415 passed ===",
+        candidate_sha="cand123456",
+        candidate_generation=1,
     )
     in_memory_uow.check_results.save(cr)
 
@@ -474,6 +477,7 @@ def test_dashboard_failed_checks_blocks_downstream_phases(
         repository="owner/test-proj",
         base_branch="main",
         openspec_path="openspec",
+        checks=[{"name": "pytest", "command": "pytest -q"}],
     )
     in_memory_uow.projects.save(project)
 
@@ -517,6 +521,81 @@ def test_dashboard_failed_checks_blocks_downstream_phases(
     assert phase_map["review"] == "blocked"
     assert phase_map["audit"] == "blocked"
     assert phase_map["pr_merge"] == "blocked"
+
+
+def test_dashboard_projects_current_check_batch_separately_from_history(in_memory_uow):
+    project = Project(
+        project_id="check-batch-project",
+        display_name="Check Batch",
+        repository="owner/check-batch",
+        checks=[{"name": "pytest", "command": "pytest -q"}],
+    )
+    change = Change(project_id=project.project_id, name="check-batch-change")
+    job = Job(
+        job_id="check-batch-job",
+        project_id=project.project_id,
+        change_name=change.name,
+        implementer_role="codex",
+        status=JobStatus.CHECKS_PASSED,
+        candidate_sha="frozen-candidate",
+    )
+    run = OrchestrationRun(
+        run_id="check-batch-run",
+        project_id=project.project_id,
+        change_name=change.name,
+        base_sha="base-sha",
+        active_job_id=job.job_id,
+        current_stage=OrchestrationStage.COMPLEMENTARY_REVIEW,
+        current_generation=2,
+        current_candidate_sha=job.candidate_sha,
+    )
+    earlier_failure = CheckResult(
+        job_id=job.job_id,
+        check_name="pytest",
+        command="pytest -q",
+        exit_code=1,
+        duration_ms=20,
+        output_snippet="historical failure",
+        candidate_sha=job.candidate_sha,
+        candidate_generation=2,
+        created_at=datetime(2026, 10, 20, 12, 0, tzinfo=UTC),
+    )
+    latest_pass = CheckResult(
+        job_id=job.job_id,
+        check_name="pytest",
+        command="pytest -q",
+        exit_code=0,
+        duration_ms=25,
+        output_snippet="passed",
+        candidate_sha=job.candidate_sha,
+        candidate_generation=2,
+        created_at=datetime(2026, 10, 20, 12, 1, tzinfo=UTC),
+    )
+    in_memory_uow.projects.save(project)
+    in_memory_uow.changes.save(change)
+    in_memory_uow.jobs.save(job)
+    in_memory_uow.orchestration_runs.save(run)
+    in_memory_uow.check_results.save(earlier_failure)
+    in_memory_uow.check_results.save(latest_pass)
+
+    service = OperationsDashboardService(in_memory_uow)
+    candidate = CandidateAuthorityDTO(
+        generation=2,
+        candidate_sha=job.candidate_sha,
+        candidate_sha_short=job.candidate_sha,
+        base_sha="base-sha",
+        base_sha_short="base-sha",
+        is_frozen=True,
+    )
+    phases = service._project_pipeline_phases(change, run, candidate)
+    checks = service._project_checks(run, candidate)
+    check_phase = next(item for item in phases if item.name == "checks")
+
+    assert check_phase.status == "passed"
+    assert check_phase.details["current_batch_status"] == "PASSED"
+    assert check_phase.details["current_check_result_ids"] == [latest_pass.result_id]
+    assert check_phase.details["historical_failed_count"] == 1
+    assert [(item.exit_code, item.is_current_batch) for item in checks] == [(1, False), (0, True)]
 
 
 def test_dashboard_pipeline_requires_persisted_evidence(

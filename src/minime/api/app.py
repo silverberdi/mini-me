@@ -80,6 +80,7 @@ from minime.services.capacity_lifecycle_service import CapacityLifecycleService
 from minime.services.container_preview_service import ContainerPreviewService
 from minime.services.context_discovery_service import ContextDiscoveryService
 from minime.services.control_plane_service import ControlPlaneService
+from minime.services.current_check_batch import validate_current_checks_batch
 from minime.services.dashboard_service import (
     DashboardChangeDetailResponse,
     DashboardOverviewResponse,
@@ -1060,6 +1061,69 @@ def get_job_diagnostics(job_id: str, uow: UowDep) -> list[dict[str, Any]]:
 
 def _job_summary(uow: PersistenceUnitOfWork, job: Job) -> dict[str, Any]:
     checks = uow.check_results.list_by_job(job.job_id)
+    matching_runs = uow.orchestration_runs.list_runs(
+        project_id=job.project_id, change_name=job.change_name
+    )
+    run = next((item for item in matching_runs if item.active_job_id == job.job_id), None)
+    project = uow.projects.get_by_id(job.project_id)
+    configured_checks = [
+        check
+        for check in (project.checks if project else [])
+        if isinstance(check, dict) and check.get("name")
+    ]
+    current_check_batch: dict[str, Any]
+    if not run or not project:
+        current_check_batch = {
+            "status": "UNKNOWN",
+            "candidate_sha": job.candidate_sha,
+            "generation": run.current_generation if run else None,
+            "check_result_ids": [],
+            "reason": "Run or project authority is unavailable.",
+        }
+    elif not configured_checks:
+        current_check_batch = {
+            "status": "NOT_CONFIGURED",
+            "candidate_sha": job.candidate_sha,
+            "generation": run.current_generation,
+            "check_result_ids": [],
+            "reason": "No deterministic checks are configured for this project.",
+        }
+    else:
+        valid, reason, batch = validate_current_checks_batch(
+            check_results=checks,
+            job=job,
+            run=run,
+            project=project,
+            require_configured_checks=True,
+        )
+        current_check_batch = {
+            "status": "PASSED" if valid else "BLOCKED",
+            "candidate_sha": job.candidate_sha,
+            "generation": run.current_generation,
+            "check_result_ids": [item.result_id for item in batch],
+            "reason": reason,
+        }
+    code_review = uow.reviews.get_by_job_stage(job.job_id, "CODE_REVIEW")
+    code_review_authorization = (
+        uow.operator_actions.get_by_request_id(code_review.budget_authorization_id)
+        if code_review and code_review.budget_authorization_id
+        else None
+    )
+    code_review_action_key = (
+        f"deepseek-code-review:{code_review.budget_authorization_id}"
+        if code_review and code_review.budget_authorization_id
+        else None
+    )
+    code_review_dispatch = (
+        uow.orchestration_external_actions.get_by_action_key(code_review_action_key)
+        if code_review_action_key
+        else None
+    )
+    code_review_attempts = (
+        uow.external_action_attempts.list_by_action_key(code_review_action_key)
+        if code_review_action_key
+        else []
+    )
     review = uow.reviews.get_by_job_id(job.job_id)
     audit = uow.audits.get_by_job_id(job.job_id)
     attempts = uow.job_attempts.list_by_job(job.job_id)
@@ -1095,13 +1159,39 @@ def _job_summary(uow: PersistenceUnitOfWork, job: Job) -> dict[str, Any]:
         "diagnostics_count": len(diagnostics),
         "checks": [
             {
+                "result_id": c.result_id,
                 "check_name": c.check_name,
                 "command": c.command,
                 "exit_code": c.exit_code,
                 "duration_ms": c.duration_ms,
+                "candidate_sha": c.candidate_sha,
+                "candidate_generation": c.candidate_generation,
             }
             for c in checks
         ],
+        "current_check_batch": current_check_batch,
+        "code_review_checkpoint": {
+            "review_id": code_review.review_id if code_review else None,
+            "status": code_review.status.value if code_review else "NOT_STARTED",
+            "verdict": code_review.verdict.value if code_review and code_review.verdict else None,
+            "candidate_sha": code_review.candidate_sha if code_review else None,
+            "base_sha": code_review.base_sha if code_review else None,
+            "generation": code_review.candidate_generation if code_review else None,
+            "manifest_id": code_review.manifest_id if code_review else None,
+            "manifest_hash": code_review.manifest_hash if code_review else None,
+            "authorization_id": code_review.budget_authorization_id if code_review else None,
+            "authorization_status": code_review_authorization.status.value
+            if code_review_authorization
+            else "NOT_LINKED",
+            "dispatch_status": code_review_dispatch.status.value
+            if code_review_dispatch
+            else "NOT_DISPATCHED",
+            "dispatch_intent_present": bool(
+                code_review_dispatch and code_review_dispatch.last_dispatch_intent_id
+            ),
+            "dispatch_attempt_count": len(code_review_attempts),
+            "gate_code": (run.stop_details or {}).get("code") if run else None,
+        },
         "review": {
             "review_id": review.review_id,
             "reviewer": review.reviewer_role,

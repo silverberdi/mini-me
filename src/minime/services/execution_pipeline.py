@@ -55,6 +55,8 @@ from minime.domain.models import (
     JobAttempt,
     JobLog,
     MetricFact,
+    OrchestrationCandidate,
+    OrchestrationRun,
     Project,
     RecoveryClaimContext,
     Review,
@@ -3272,6 +3274,7 @@ class ExecutionPipelineService:
                         worktree_path=worktree.path,
                         check_run_results=check_run_results,
                         review_id=review.review_id,
+                        claim_context=claim_context,
                     )
                 else:
                     job = self._transition(job, JobStatus.READY_TO_MERGE)
@@ -3389,6 +3392,86 @@ class ExecutionPipelineService:
                 self.uow.commit()
         return self._require_job(job.job_id)
 
+    async def execute_post_review_audit(
+        self,
+        *,
+        run: OrchestrationRun,
+        job: Job,
+        claim_context: RecoveryClaimContext,
+    ) -> Job:
+        """Run the existing downstream audit once for a separately resumed review checkpoint."""
+        from minime.domain.models import validate_claim_context_authoritative
+        from minime.services.current_check_batch import validate_current_checks_batch
+        from minime.services.review_evidence import validate_review_authority
+
+        validate_claim_context_authoritative(self.uow, claim_context, for_update=True)
+        project = self.uow.projects.get_by_id(run.project_id)
+        candidate = self.uow.orchestration_candidates.get_latest_for_run(run.run_id)
+        if (
+            not project
+            or not project.independent_audit_required
+            or not candidate
+            or run.active_job_id != job.job_id
+            or job.project_id != run.project_id
+            or job.change_name != run.change_name
+            or candidate.run_id != run.run_id
+            or candidate.generation != run.current_generation
+            or candidate.candidate_sha != run.current_candidate_sha
+            or candidate.candidate_sha != job.candidate_sha
+            or candidate.base_sha != run.base_sha
+            or candidate.base_sha != job.base_sha
+            or not candidate.is_frozen
+            or self.uow.audits.get_by_job_id(job.job_id) is not None
+        ):
+            raise RuntimeError(
+                "Post-review audit checkpoint identity is invalid or already consumed."
+            )
+
+        review = self.uow.reviews.get_by_job_id(job.job_id)
+        valid_review, verdict, reason = validate_review_authority(
+            self.uow, run, job, candidate, self.authorship_service
+        )
+        if not valid_review or verdict != ReviewVerdict.READY_TO_MERGE or not review:
+            raise RuntimeError(
+                reason or "Post-review audit requires current READY_TO_MERGE review."
+            )
+
+        valid_batch, batch_error, current_batch = validate_current_checks_batch(
+            check_results=self.uow.check_results.list_by_job(job.job_id),
+            job=job,
+            run=run,
+            project=project,
+            require_configured_checks=True,
+        )
+        if not valid_batch:
+            raise RuntimeError(batch_error or "Post-review audit requires current passing checks.")
+
+        ownership_repo = getattr(self.uow, "orchestration_worktree_ownerships", None)
+        ownership = ownership_repo.get_by_job_id(job.job_id) if ownership_repo else None
+        if not ownership:
+            raise RuntimeError("Post-review audit requires canonical worktree ownership.")
+        worktree_path = self.worktree_manager.worktree_path(job.job_id, project_id=job.project_id)
+        await self.worktree_manager._verify_frozen_candidate_worktree_adoption(
+            path=worktree_path,
+            job_id=job.job_id,
+            project_id=project.project_id,
+            run_id=run.run_id,
+            change_name=run.change_name,
+            ownership=ownership,
+        )
+        result = await self._run_audit_stage(
+            job=job,
+            project=project,
+            worktree_path=worktree_path,
+            check_run_results=current_batch,
+            review_id=review.review_id,
+            claim_context=claim_context,
+            run=run,
+            candidate=candidate,
+        )
+        validate_claim_context_authoritative(self.uow, claim_context, for_update=True)
+        return result
+
     async def _run_audit_stage(
         self,
         job: Job,
@@ -3396,9 +3479,41 @@ class ExecutionPipelineService:
         worktree_path: Path,
         check_run_results: list,
         review_id: str,
+        claim_context: RecoveryClaimContext | None = None,
+        run: OrchestrationRun | None = None,
+        candidate: OrchestrationCandidate | None = None,
     ) -> Job:
         """Execute DeepSeek Direct audit. OpenRouter is never used for audit."""
+        from minime.domain.models import validate_claim_context_authoritative
+
+        validate_claim_context_authoritative(self.uow, claim_context, for_update=True)
         review = self.uow.reviews.get_by_id(review_id)
+        if run is None:
+            run = next(
+                (
+                    item
+                    for item in self.uow.orchestration_runs.list_runs(
+                        project_id=job.project_id, change_name=job.change_name
+                    )
+                    if item.active_job_id == job.job_id
+                ),
+                None,
+            )
+        if candidate is None and run is not None:
+            candidate = self.uow.orchestration_candidates.get_latest_for_run(run.run_id)
+        if (
+            not run
+            or not candidate
+            or candidate.run_id != run.run_id
+            or candidate.generation != run.current_generation
+            or candidate.candidate_sha != job.candidate_sha
+            or candidate.base_sha != run.base_sha
+            or candidate.manifest_id is None
+            or not candidate.manifest_hash
+        ):
+            raise RuntimeError("Independent audit requires the exact frozen Run/Job candidate.")
+        if not review or review.candidate_sha != candidate.candidate_sha:
+            raise RuntimeError("Independent audit requires the exact persisted CODE_REVIEW.")
         review_findings = self.uow.review_findings.list_by_review(review_id) if review else []
         persisted_checks = [
             r
@@ -3418,13 +3533,23 @@ class ExecutionPipelineService:
             self._save_event(EventType.CANDIDATE_SHA_MISMATCH, job, {"error": pre_err})
             raise RuntimeError(pre_err or "Pre-audit integrity failure.")
 
-        job = self._transition(job, JobStatus.AUDIT_RUNNING)
+        job = self._transition(
+            job,
+            JobStatus.AUDIT_RUNNING,
+            claim_context=claim_context,
+            auto_commit=False,
+        )
         audit = AuditRecord(
             job_id=job.job_id,
             project_id=job.project_id,
             change_name=job.change_name,
+            orchestration_run_id=run.run_id,
+            candidate_generation=candidate.generation,
             candidate_sha=job.candidate_sha or "",
             base_sha=job.base_sha or "",
+            manifest_id=candidate.manifest_id,
+            manifest_hash=candidate.manifest_hash,
+            is_full_candidate=True,
             review_id=review.review_id if review else None,
             review_verdict=review.verdict if review else None,
             status=AuditStatus.AUDIT_RUNNING,
@@ -3465,6 +3590,7 @@ class ExecutionPipelineService:
                 prompt,
                 timeout_seconds=self.reviewer_timeout_seconds,
             )
+            validate_claim_context_authoritative(self.uow, claim_context, for_update=True)
             for line in result.output:
                 self._log(job.job_id, "audit", line)
             self.uow.metrics.save(
@@ -3483,6 +3609,7 @@ class ExecutionPipelineService:
             )
 
             if result.timed_out:
+                validate_claim_context_authoritative(self.uow, claim_context, for_update=True)
                 self.uow.audits.transition(
                     audit.audit_id,
                     AuditStatus.AUDIT_TIMED_OUT.value,
@@ -3499,6 +3626,7 @@ class ExecutionPipelineService:
 
             if result.exit_code != 0:
                 err = result.error_message or f"DeepSeek audit failed with code {result.exit_code}."
+                validate_claim_context_authoritative(self.uow, claim_context, for_update=True)
                 self.uow.audits.transition(
                     audit.audit_id,
                     AuditStatus.AUDIT_FAILED.value,
@@ -3514,6 +3642,7 @@ class ExecutionPipelineService:
 
             post_ok, post_err = verify_post_audit(worktree_path, job.candidate_sha or "")
             if not post_ok:
+                validate_claim_context_authoritative(self.uow, claim_context, for_update=True)
                 self.uow.audits.transition(
                     audit.audit_id,
                     AuditStatus.AUDIT_FAILED.value,
@@ -3531,6 +3660,7 @@ class ExecutionPipelineService:
                 audit_result = parse_audit_result(result.output)
             except Exception as exc:
                 err = f"Malformed audit output: {exc}"
+                validate_claim_context_authoritative(self.uow, claim_context, for_update=True)
                 self.uow.audits.transition(
                     audit.audit_id,
                     AuditStatus.AUDIT_FAILED.value,
@@ -3557,6 +3687,7 @@ class ExecutionPipelineService:
                 or has_blocking_finding
             )
             audit_status = AuditStatus.AUDIT_BLOCKED if blocking else AuditStatus.AUDIT_COMPLETED
+            validate_claim_context_authoritative(self.uow, claim_context, for_update=True)
             self.uow.audits.transition(
                 audit.audit_id,
                 audit_status.value,
@@ -3603,7 +3734,9 @@ class ExecutionPipelineService:
             )
             self.uow.commit()
             return self._transition(
-                job, JobStatus.AUDIT_BLOCKED if blocking else JobStatus.READY_TO_MERGE
+                job,
+                JobStatus.AUDIT_BLOCKED if blocking else JobStatus.READY_TO_MERGE,
+                claim_context=claim_context,
             )
         except Exception as exc:
             latest_audit = self.uow.audits.get_by_id(audit.audit_id)
@@ -3613,6 +3746,7 @@ class ExecutionPipelineService:
                 AuditStatus.AUDIT_FAILED,
                 AuditStatus.AUDIT_TIMED_OUT,
             }:
+                validate_claim_context_authoritative(self.uow, claim_context, for_update=True)
                 err = str(exc)
                 self.uow.audits.transition(
                     audit.audit_id,
