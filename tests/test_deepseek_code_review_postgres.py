@@ -41,10 +41,12 @@ from minime.domain.enums import (
     OrchestrationStage,
     OrchestrationStopOutcome,
     ProgressClassification,
+    ReviewStatus,
     ReviewVerdict,
     WorktreeCreationState,
 )
 from minime.domain.models import (
+    BudgetLedgerEntry,
     BudgetReservation,
     Change,
     CheckResult,
@@ -61,6 +63,7 @@ from minime.domain.models import (
     Project,
     ProjectBinding,
     ProjectManagedRepositoryBinding,
+    Review,
 )
 from minime.services import control_plane_service
 from minime.services.budget_service import BudgetService
@@ -71,7 +74,9 @@ from minime.services.contract_review_service import (
 from minime.services.deepseek_auditor_runner import AuditorResult
 from minime.services.deepseek_code_review_service import (
     MAX_REVIEW_OUTPUT_TOKENS,
+    CodeReviewOutcomeKind,
     DeepSeekCodeReviewService,
+    reconcile_code_review_outcome,
 )
 from minime.services.execution_pipeline import ExecutionPipelineService
 from minime.services.orchestration_service import OrchestrationService
@@ -918,6 +923,186 @@ def test_code_review_authorization_reservation_settlement_and_idempotency_in_pos
             assert root_mismatch_control_plane._expired_unused_code_review_authorization(
                 expired_auth_record, run, job, candidate
             )
+            if terminal_response_case == "length":
+                assert (
+                    reconcile_code_review_outcome(
+                        uow,
+                        run=run,
+                        job=job,
+                        candidate=candidate,
+                        manifest=manifest,
+                    ).kind
+                    == CodeReviewOutcomeKind.NO_PRIOR_REVIEW
+                )
+
+                orphan_usage = BudgetLedgerEntry(
+                    entry_id=str(uuid4()),
+                    project_id=project_id,
+                    job_id=job_id,
+                    change_id=change_name,
+                    provider="deepseek",
+                    account_fingerprint=adapter.account_fingerprint,
+                    stage="REVIEW",
+                    billing_origin="deepseek_direct",
+                    role="reviewer",
+                    canonical_model_identity="deepseek-flash",
+                    prompt_tokens=100,
+                    completion_tokens=20,
+                    total_tokens=120,
+                    amount_usd=Decimal("0.000054"),
+                    entry_type="USAGE",
+                )
+                uow.budget_ledger.save(orphan_usage)
+                uow.commit()
+                orphan_audit = BudgetService(uow).audit_unreserved_code_review_usage(
+                    project_id=project_id, job_id=job_id
+                )
+                assert [item.entry_id for item in orphan_audit.unresolved_entries] == [
+                    orphan_usage.entry_id
+                ]
+                assert (
+                    reconcile_code_review_outcome(
+                        uow,
+                        run=run,
+                        job=job,
+                        candidate=candidate,
+                        manifest=manifest,
+                    ).kind
+                    == CodeReviewOutcomeKind.UNRESOLVED_OR_AMBIGUOUS
+                )
+                assert not root_mismatch_control_plane._expired_unused_code_review_authorization(
+                    expired_auth_record, run, job, candidate
+                )
+                # The expired grant is not classified as settled-unused: its
+                # authorized ceiling remains in cumulative authorized exposure.
+                assert root_mismatch_control_plane._deepseek_review_authorized_total(
+                    run
+                ) == Decimal("0.55")
+                exposed_stage, exposed_total = BudgetService(uow)._direct_review_exposure(
+                    project_id=project_id, stage="REVIEW"
+                )
+                assert exposed_stage == exposed_total == orphan_usage.amount_usd
+                auth_descriptor = {
+                    item.action: item
+                    for item in root_mismatch_control_plane.get_available_actions(run_id)
+                }[OperatorActionType.AUTHORIZE_DEEPSEEK_CODE_REVIEW]
+                assert auth_descriptor.enabled is False
+                blocked_authorization_id = f"orphan-ledger-auth-{uuid4()}"
+                blocked_authorization = root_mismatch_control_plane.execute_action(
+                    _control_plane_request(
+                        project_id=project_id,
+                        change_name=change_name,
+                        run=run,
+                        action_type=OperatorActionType.AUTHORIZE_DEEPSEEK_CODE_REVIEW,
+                        action_id=blocked_authorization_id,
+                        params={
+                            "max_spend_usd": "0.05",
+                            "expires_at": (datetime.now(UTC) + timedelta(minutes=10)).isoformat(),
+                            "pricing_snapshot_id": snapshot_id,
+                        },
+                        candidate_sha=candidate_sha,
+                    )
+                )
+                assert blocked_authorization.status != OperatorActionStatus.COMPLETED
+                assert review_http_calls == []
+                with engine.begin() as connection:
+                    connection.execute(
+                        text("delete from budget_ledger where id = :entry_id"),
+                        {"entry_id": orphan_usage.entry_id},
+                    )
+                    connection.execute(
+                        text("delete from operator_action_records where action_request_id = :id"),
+                        {"id": blocked_authorization_id},
+                    )
+
+                # A usage row linked by the persisted Review-derived idempotency
+                # identity to another legitimate operation is not attributed to
+                # the expired grant above, regardless of timestamps.
+                separate_auth_id = f"separate-review-auth-{uuid4()}"
+                separate_auth_payload = {
+                    **prior_auth_payload,
+                    "action_request_id": separate_auth_id,
+                }
+                separate_auth_record = OperatorActionRecord(
+                    action_request_id=separate_auth_id,
+                    project_id=project_id,
+                    change_name=change_name,
+                    run_id=run_id,
+                    job_id=job_id,
+                    action_type=OperatorActionType.AUTHORIZE_DEEPSEEK_CODE_REVIEW,
+                    status=OperatorActionStatus.COMPLETED,
+                    result_payload_json={"authorization": separate_auth_payload},
+                )
+                separate_review = Review(
+                    review_id=str(uuid4()),
+                    job_id=job_id,
+                    project_id=project_id,
+                    change_name=change_name,
+                    reviewer_role="deepseek",
+                    reviewer_model="deepseek-flash",
+                    review_stage="CODE_REVIEW",
+                    provider="deepseek",
+                    account_fingerprint=adapter.account_fingerprint,
+                    budget_authorization_id=separate_auth_id,
+                    billing_origin="deepseek_direct",
+                    orchestration_run_id=run_id,
+                    candidate_generation=1,
+                    candidate_sha=candidate_sha,
+                    base_sha=base_sha,
+                    manifest_id=manifest.manifest_id,
+                    manifest_hash=manifest.manifest_hash,
+                    status=ReviewStatus.REVIEW_FAILED,
+                )
+                uow.operator_actions.save(separate_auth_record)
+                uow.reviews.save(separate_review)
+                uow.commit()
+                separate_usage = BudgetService(uow).record_unreserved_review_usage(
+                    project_id=project_id,
+                    job_id=job_id,
+                    change_id=change_name,
+                    provider="deepseek",
+                    account_fingerprint=adapter.account_fingerprint,
+                    model="deepseek-flash",
+                    stage="REVIEW",
+                    billing_origin="deepseek_direct",
+                    review_id=separate_review.review_id,
+                    prompt_tokens=50,
+                    completion_tokens=10,
+                    actual_cost_usd=Decimal("0.000027"),
+                )
+                uow.commit()
+                separate_audit = BudgetService(uow).audit_unreserved_code_review_usage(
+                    project_id=project_id, job_id=job_id
+                )
+                assert separate_audit.unresolved_entries == ()
+                assert separate_audit.attributed_reviews == {
+                    separate_usage.entry_id: separate_review
+                }
+                assert root_mismatch_control_plane._expired_unused_code_review_authorization(
+                    expired_auth_record,
+                    run,
+                    job,
+                    candidate,
+                    allow_later_candidate_review=True,
+                )
+                exposed_stage, exposed_total = BudgetService(uow)._direct_review_exposure(
+                    project_id=project_id, stage="REVIEW"
+                )
+                assert exposed_stage == exposed_total == separate_usage.amount_usd
+                with engine.begin() as connection:
+                    connection.execute(
+                        text("delete from budget_ledger where id = :separate_id"),
+                        {"separate_id": separate_usage.entry_id},
+                    )
+                    connection.execute(
+                        text("delete from reviews where id = :review_id"),
+                        {"review_id": separate_review.review_id},
+                    )
+                    connection.execute(
+                        text("delete from operator_action_records where action_request_id = :id"),
+                        {"id": separate_auth_id},
+                    )
+
             unexpired_auth_record = expired_auth_record.model_copy(
                 update={
                     "result_payload_json": {
@@ -1259,11 +1444,6 @@ def test_code_review_authorization_reservation_settlement_and_idempotency_in_pos
                 )
                 assert "reasoning_content" not in diagnostic_event.payload["response"]
                 assert "private reasoning" not in json.dumps(diagnostic_event.payload)
-                from minime.services.deepseek_code_review_service import (
-                    CodeReviewOutcomeKind,
-                    reconcile_code_review_outcome,
-                )
-
                 contradictory_run = failed_run.model_copy(
                     update={
                         "stop_details": {
@@ -1355,11 +1535,6 @@ def test_code_review_authorization_reservation_settlement_and_idempotency_in_pos
                     },
                 )
                 uow.commit()
-
-                from minime.services.deepseek_code_review_service import (
-                    CodeReviewOutcomeKind,
-                    reconcile_code_review_outcome,
-                )
 
                 recovery_decision = reconcile_code_review_outcome(
                     uow,

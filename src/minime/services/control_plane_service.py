@@ -53,6 +53,7 @@ from minime.domain.models import (
     utc_now,
 )
 from minime.logging import redact_secrets
+from minime.services.budget_service import BudgetService
 from minime.services.container_preview_service import ContainerPreviewService
 from minime.services.deepseek_code_review_service import reconcile_code_review_outcome
 from minime.services.orchestration_service import OrchestrationService
@@ -360,6 +361,18 @@ class ControlPlaneService:
                 and review.orchestration_run_id == run.run_id
             )
             for review in reviews_repo.list_by_job(job.job_id)
+        ):
+            return False
+        usage_audit = BudgetService(self.uow).audit_unreserved_code_review_usage(
+            project_id=run.project_id, job_id=job.job_id
+        )
+        if (
+            not usage_audit.complete
+            or usage_audit.unresolved_entries
+            or any(
+                review.budget_authorization_id == auth_id
+                for review in usage_audit.attributed_reviews.values()
+            )
         ):
             return False
         if external_repo.get_by_action_key(dispatch_key) is not None:

@@ -135,6 +135,14 @@ def reconcile_code_review_outcome(
         for review in uow.reviews.list_by_job(job.job_id)
         if review.review_stage == "CODE_REVIEW"
     ]
+    usage_audit = BudgetService(uow).audit_unreserved_code_review_usage(
+        project_id=run.project_id, job_id=job.job_id
+    )
+    if not usage_audit.complete or usage_audit.unresolved_entries:
+        return decision(
+            CodeReviewOutcomeKind.UNRESOLVED_OR_AMBIGUOUS,
+            "direct CODE_REVIEW usage cannot be attributed to one terminal Review",
+        )
     if not reviews:
         return decision(CodeReviewOutcomeKind.NO_PRIOR_REVIEW, "no prior CODE_REVIEW exists")
 
