@@ -9,6 +9,7 @@ import subprocess
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
+from contextlib import contextmanager
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
@@ -27,10 +28,12 @@ from minime.domain.enums import (
     ChangeStatus,
     EventType,
     ExecutionOutcome,
+    ExternalActionType,
     ExternalOutcome,
     ExternalReasonCode,
     HumanGate,
     JobStatus,
+    OperatorActionErrorCode,
     OperatorActionStatus,
     OperatorActionType,
     OrchestrationStage,
@@ -40,14 +43,17 @@ from minime.domain.enums import (
     WorktreeCreationState,
 )
 from minime.domain.models import (
+    BudgetReservation,
     Change,
     CheckResult,
     ExternalActionResult,
     Job,
     JobAttempt,
     OpenRouterPricingSnapshot,
+    OperatorActionRecord,
     OperatorActionRequest,
     OrchestrationCandidate,
+    OrchestrationExternalAction,
     OrchestrationRun,
     OrchestrationWorktreeOwnership,
     Project,
@@ -752,6 +758,26 @@ def test_code_review_authorization_reservation_settlement_and_idempotency_in_pos
             manager._write_ownership_marker(repo, ownership)
             uow.commit()
 
+            # The service process root is deliberately unrelated to the
+            # managed repository. The validated durable binding remains the
+            # only authority for review worktree adoption.
+            root_mismatch_control_plane = control_plane_service.ControlPlaneService(
+                uow, project_root=tmp_path
+            )
+            assert root_mismatch_control_plane.project_root == tmp_path.resolve()
+            assert root_mismatch_control_plane.project_root != managed_repo.resolve()
+            bound_manager = root_mismatch_control_plane._worktree_manager_for_bound_project(
+                project_id, project
+            )
+            assert bound_manager.project_root == managed_repo.resolve()
+            contradictory_project = project.model_copy(
+                update={"repository": "silverberdi/contradictory-repository"}
+            )
+            with pytest.raises(RuntimeError, match="binding is missing or contradictory"):
+                root_mismatch_control_plane._worktree_manager_for_bound_project(
+                    project_id, contradictory_project
+                )
+
             app_config.providers["deepseek"].budget["maximum_combined_review_usd"] = "1.49"
             over_limit = control_plane_service.ControlPlaneService(
                 uow, project_root=tmp_path
@@ -774,6 +800,141 @@ def test_code_review_authorization_reservation_settlement_and_idempotency_in_pos
             assert "combined" in over_limit.summary.lower()
 
             app_config.providers["deepseek"].budget["maximum_combined_review_usd"] = "1.50"
+            expired_auth_id = f"expired-unused-code-auth-{uuid4()}"
+            expired_at = datetime.now(UTC) - timedelta(minutes=5)
+            prior_auth_payload = {
+                "provider": "deepseek",
+                "account_fingerprint": adapter.account_fingerprint,
+                "model": "deepseek-flash",
+                "effort": "low",
+                "stage": "REVIEW",
+                "billing_origin": "deepseek_direct",
+                "pricing_snapshot_id": snapshot_id,
+                "run_id": run_id,
+                "job_id": job_id,
+                "candidate_sha": candidate_sha,
+                "base_sha": base_sha,
+                "generation": 1,
+                "manifest_id": manifest.manifest_id,
+                "manifest_hash": manifest.manifest_hash,
+                "max_spend_usd": "0.05",
+                "expires_at": expired_at.isoformat(),
+                "authorized_by": "operator-test",
+                "action_request_id": expired_auth_id,
+            }
+            expired_auth_record = OperatorActionRecord(
+                action_request_id=expired_auth_id,
+                project_id=project_id,
+                change_name=change_name,
+                run_id=run_id,
+                job_id=job_id,
+                action_type=OperatorActionType.AUTHORIZE_DEEPSEEK_CODE_REVIEW,
+                status=OperatorActionStatus.COMPLETED,
+                created_at=expired_at - timedelta(minutes=1),
+                summary="Prior exact-candidate authorization expired unused.",
+                result_payload_json={"authorization": prior_auth_payload},
+            )
+            root_rejection = OperatorActionRecord(
+                action_request_id=f"expired-auth-root-rejection-{uuid4()}",
+                project_id=project_id,
+                change_name=change_name,
+                run_id=run_id,
+                job_id=job_id,
+                action_type=OperatorActionType.EXECUTE_AUTHORIZED_DEEPSEEK_CODE_REVIEW,
+                status=OperatorActionStatus.REJECTED,
+                error_code=OperatorActionErrorCode.AUTHORITY_MISMATCH,
+                summary="Frozen candidate worktree adoption proof failed: RuntimeError.",
+                parameters_json={"authorization_id": expired_auth_id},
+                created_at=expired_at + timedelta(seconds=1),
+            )
+            uow.operator_actions.save(expired_auth_record)
+            uow.operator_actions.save(root_rejection)
+            uow.commit()
+            assert root_mismatch_control_plane._expired_unused_code_review_authorization(
+                expired_auth_record, run, job, candidate
+            )
+            unexpired_auth_record = expired_auth_record.model_copy(
+                update={
+                    "result_payload_json": {
+                        "authorization": {
+                            **prior_auth_payload,
+                            "expires_at": (datetime.now(UTC) + timedelta(minutes=5)).isoformat(),
+                        }
+                    }
+                }
+            )
+            assert not root_mismatch_control_plane._expired_unused_code_review_authorization(
+                unexpired_auth_record, run, job, candidate
+            )
+
+            consumed_reservation = BudgetReservation(
+                project_id=project_id,
+                job_id=job_id,
+                run_id=run_id,
+                change_id=change_name,
+                role="reviewer",
+                canonical_model_identity="deepseek-flash",
+                reserved_amount_usd=Decimal("0.05"),
+                status="RESERVED",
+                pricing_snapshot_id=snapshot_id,
+                provider="deepseek",
+                account_fingerprint=adapter.account_fingerprint,
+                stage="REVIEW",
+                billing_origin="deepseek_direct",
+                authorization_id=expired_auth_id,
+                idempotency_key=f"expired-auth-consumed-{uuid4()}",
+            )
+            uow.budget_reservations.save(consumed_reservation)
+            uow.commit()
+            assert not root_mismatch_control_plane._expired_unused_code_review_authorization(
+                expired_auth_record, run, job, candidate
+            )
+            with engine.begin() as connection:
+                connection.execute(
+                    text("delete from budget_reservations where id = :reservation_id"),
+                    {"reservation_id": consumed_reservation.reservation_id},
+                )
+
+            ambiguous_dispatch = OrchestrationExternalAction(
+                run_id=run_id,
+                action_key=f"deepseek-code-review:{expired_auth_id}",
+                action_type=ExternalActionType.DEEPSEEK_CODE_REVIEW_DISPATCH,
+                target_identity=f"{project_id}:{candidate_sha}",
+                request_fingerprint=f"ambiguous-review-dispatch-{uuid4()}",
+                candidate_sha=candidate_sha,
+                generation=1,
+            )
+            uow.orchestration_external_actions.reserve(ambiguous_dispatch)
+            uow.commit()
+            assert not root_mismatch_control_plane._expired_unused_code_review_authorization(
+                expired_auth_record, run, job, candidate
+            )
+            with engine.begin() as connection:
+                connection.execute(
+                    text("delete from orchestration_external_actions where action_key = :key"),
+                    {"key": f"deepseek-code-review:{expired_auth_id}"},
+                )
+
+            ambiguous_execute_record = OperatorActionRecord(
+                action_request_id=str(uuid4()),
+                project_id=project_id,
+                change_name=change_name,
+                run_id=run_id,
+                job_id=job_id,
+                action_type=OperatorActionType.EXECUTE_AUTHORIZED_DEEPSEEK_CODE_REVIEW,
+                status=OperatorActionStatus.BLOCKED,
+                parameters_json={"authorization_id": expired_auth_id},
+            )
+            uow.operator_actions.save(ambiguous_execute_record)
+            uow.commit()
+            assert not root_mismatch_control_plane._expired_unused_code_review_authorization(
+                expired_auth_record, run, job, candidate
+            )
+            with engine.begin() as connection:
+                connection.execute(
+                    text("delete from operator_action_records where id = :action_id"),
+                    {"action_id": ambiguous_execute_record.id},
+                )
             first_authorization_check = threading.Event()
             release_first_authorization = threading.Event()
             second_authorization_check = threading.Event()
@@ -840,6 +1001,12 @@ def test_code_review_authorization_reservation_settlement_and_idempotency_in_pos
             assert code_auth.status == OperatorActionStatus.COMPLETED, code_auth.summary
             assert duplicate_code_auth.status != OperatorActionStatus.COMPLETED
             assert code_auth.payload["candidate_sha"] == candidate_sha
+            preserved_expired_auth = uow.operator_actions.get_by_request_id(expired_auth_id)
+            assert preserved_expired_auth is not None
+            assert preserved_expired_auth.created_at == expired_auth_record.created_at
+            assert preserved_expired_auth.result_payload_json == {
+                "authorization": prior_auth_payload
+            }
 
             github = _DeterministicGitHubAdapter()
             dispatch_key = f"deepseek-code-review:{code_auth.action_request_id}"
@@ -865,21 +1032,74 @@ def test_code_review_authorization_reservation_settlement_and_idempotency_in_pos
                     )
                     review_control_plane = control_plane_service.ControlPlaneService(
                         review_uow,
-                        project_root=managed_repo,
                         orchestration_service=review_orchestration,
                         deepseek_code_review_service=review_service,
                     )
-                    return review_control_plane.execute_action(
-                        _control_plane_request(
-                            project_id=project_id,
-                            change_name=change_name,
-                            run=current_run,
-                            action_type=OperatorActionType.EXECUTE_AUTHORIZED_DEEPSEEK_CODE_REVIEW,
-                            action_id=action_id,
-                            params={"authorization_id": code_auth.action_request_id},
-                            candidate_sha=candidate_sha,
-                        )
+                    action_request = _control_plane_request(
+                        project_id=project_id,
+                        change_name=change_name,
+                        run=current_run,
+                        action_type=OperatorActionType.EXECUTE_AUTHORIZED_DEEPSEEK_CODE_REVIEW,
+                        action_id=action_id,
+                        params={"authorization_id": code_auth.action_request_id},
+                        candidate_sha=candidate_sha,
                     )
+                    if (
+                        review_verdict == ReviewVerdict.READY_TO_MERGE
+                        and audit_risk == "low"
+                        and not mutate_candidate_during_review
+                        and not missing_reservation_case
+                    ):
+                        # Exercise the real `minime action execute` entrypoint
+                        # with its default process root, using only this isolated
+                        # PostgreSQL engine and intercepted provider HTTP.
+                        from typer.testing import CliRunner
+
+                        from minime.cli import main as cli_main
+
+                        @contextmanager
+                        def isolated_cli_session():
+                            with sessionmaker(
+                                bind=engine, autoflush=False, expire_on_commit=False
+                            )() as cli_session:
+                                yield cli_session
+
+                        monkeypatch.setattr(cli_main.db_manager, "session", isolated_cli_session)
+                        cli_result = CliRunner().invoke(
+                            cli_main.app,
+                            [
+                                "action",
+                                "execute",
+                                run_id,
+                                OperatorActionType.EXECUTE_AUTHORIZED_DEEPSEEK_CODE_REVIEW.value,
+                                "--params",
+                                json.dumps({"authorization_id": code_auth.action_request_id}),
+                                "--actor",
+                                "isolated-test-operator",
+                                "--expected-stage",
+                                OrchestrationStage.COMPLEMENTARY_REVIEW.value,
+                                "--expected-gen",
+                                "1",
+                                "--expected-sha",
+                                candidate_sha,
+                                "--json",
+                            ],
+                        )
+                        if cli_result.exit_code != 0:
+                            review_started.set()
+                        assert cli_result.exit_code == 0, cli_result.output
+                        return control_plane_service.OperatorActionResult.model_validate(
+                            json.loads(cli_result.stdout)
+                        )
+                    if review_verdict == ReviewVerdict.CHANGES_REQUIRED:
+                        # Exercise the API action endpoint against the same
+                        # exact database/Git fixture; no external HTTP or model.
+                        from minime.api import app as api_app
+
+                        return api_app.execute_action_generic_endpoint(
+                            run_id, action_request, review_uow
+                        )
+                    return review_control_plane.execute_action(action_request)
 
             with ThreadPoolExecutor(max_workers=2) as pool:
                 first_review = pool.submit(dispatch_review, f"code-review-dispatch-{uuid4()}")
@@ -889,6 +1109,9 @@ def test_code_review_authorization_reservation_settlement_and_idempotency_in_pos
                 assert competing_result.status != OperatorActionStatus.COMPLETED
                 release_review.set()
                 review_action = first_review.result(timeout=15)
+            assert not root_mismatch_control_plane._expired_unused_code_review_authorization(
+                expired_auth_record, run, job, candidate
+            )
             if mutate_candidate_during_review:
                 assert review_action.status == OperatorActionStatus.BLOCKED
                 assert review_action.payload["reason"] == (
@@ -926,6 +1149,8 @@ def test_code_review_authorization_reservation_settlement_and_idempotency_in_pos
                 return
             assert review_action.status == OperatorActionStatus.COMPLETED, review_action.summary
             review_id = review_action.payload["review_id"]
+            assert _git(repo, "rev-parse", "HEAD") == candidate_sha
+            assert _git(repo, "status", "--porcelain") == ""
             downstream_auditor = _NoInferenceAuditor(risk=audit_risk)
             downstream_pipeline = ExecutionPipelineService(
                 uow,
@@ -934,7 +1159,6 @@ def test_code_review_authorization_reservation_settlement_and_idempotency_in_pos
             )
             control_plane = control_plane_service.ControlPlaneService(
                 uow,
-                project_root=managed_repo,
                 orchestration_service=OrchestrationService(
                     uow,
                     project_root=managed_repo,

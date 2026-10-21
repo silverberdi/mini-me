@@ -7,6 +7,7 @@ idempotency, cancellation safety, and durable audit persistence across presentat
 from __future__ import annotations
 
 import logging
+import subprocess
 from datetime import datetime
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
@@ -108,7 +109,7 @@ class ControlPlaneService:
             OperatorActionType.AUTHORIZE_DEEPSEEK_REVIEW: "CONTRACT_REVIEW",
             OperatorActionType.AUTHORIZE_DEEPSEEK_CODE_REVIEW: "REVIEW",
         }
-        for action in self.uow.operator_actions.list_by_run(run.run_id):
+        for action in self.uow.operator_actions.list_by_run(run.run_id, limit=10000):
             expected_stage = review_actions.get(action.action_type)
             if not expected_stage or action.status != OperatorActionStatus.COMPLETED:
                 continue
@@ -131,6 +132,21 @@ class ControlPlaneService:
                 return None
             if not amount.is_finite() or amount <= 0:
                 return None
+            if expected_stage == "REVIEW" and action.job_id:
+                job = self.uow.jobs.get_by_id(action.job_id)
+                candidates_repo = getattr(self.uow, "orchestration_candidates", None)
+                candidate = (
+                    candidates_repo.get_by_generation(run.run_id, run.current_generation)
+                    if candidates_repo
+                    else None
+                )
+                if (
+                    job
+                    and candidate
+                    and auth.get("candidate_sha") == candidate.candidate_sha
+                    and self._expired_unused_code_review_authorization(action, run, job, candidate)
+                ):
+                    continue
             total += amount
         return total
 
@@ -153,6 +169,210 @@ class ControlPlaneService:
             return True
         prior_total = self._deepseek_review_authorized_total(run)
         return prior_total is not None and limit > 0 and prior_total + requested <= limit
+
+    def _worktree_manager_for_bound_project(self, project_id: str, project=None):
+        """Build a worktree manager from the exact durable managed-repository binding."""
+        from minime.services.repository_identity import normalize_repository_identity
+        from minime.services.workspace_guard import (
+            ManagedWorkspaceGuard,
+            is_binding_fully_valid,
+        )
+        from minime.services.worktree_manager import WorktreeManager
+
+        bindings = getattr(self.uow, "project_managed_repository_bindings", None)
+        binding = bindings.get_by_project_id(project_id) if bindings else None
+        project = project or self.uow.projects.get_by_id(project_id)
+        if (
+            not is_binding_fully_valid(binding)
+            or binding.project_id != project_id
+            or not project
+            or normalize_repository_identity(project.repository)
+            != normalize_repository_identity(binding.canonical_repository_identity)
+        ):
+            raise RuntimeError("validated managed repository binding is missing or contradictory")
+
+        configured_root = Path(binding.managed_repository_root)
+        try:
+            resolved_root = configured_root.resolve(strict=True)
+        except (OSError, RuntimeError) as exc:
+            raise RuntimeError("bound managed repository root is unavailable") from exc
+        if (
+            not configured_root.is_absolute()
+            or configured_root.is_symlink()
+            or configured_root != resolved_root
+            or not resolved_root.is_dir()
+        ):
+            raise RuntimeError("bound managed repository root is non-canonical or unsafe")
+
+        guard = ManagedWorkspaceGuard(self.uow)
+        git_identity_valid, _reason = guard.verify_git_repository_identity(
+            str(resolved_root), binding.canonical_repository_identity, binding.remote_name
+        )
+        try:
+            git_root = subprocess.run(
+                ["git", "rev-parse", "--show-toplevel"],
+                cwd=resolved_root,
+                capture_output=True,
+                text=True,
+                check=True,
+                timeout=5,
+            ).stdout.strip()
+        except (OSError, subprocess.SubprocessError) as exc:
+            raise RuntimeError("bound managed repository Git root is unobservable") from exc
+        if not git_identity_valid or Path(git_root).resolve() != resolved_root:
+            raise RuntimeError("bound managed repository Git identity or root is contradictory")
+
+        return WorktreeManager(
+            project_root=resolved_root,
+            uow=self.uow,
+            workspace_guard=guard,
+        )
+
+    @staticmethod
+    def _authorization_expiry(authorization: dict[str, Any]) -> datetime | None:
+        try:
+            value = datetime.fromisoformat(str(authorization.get("expires_at")))
+        except (TypeError, ValueError):
+            return None
+        return value if value.tzinfo is not None and value.utcoffset() is not None else None
+
+    def _expired_unused_code_review_authorization(
+        self,
+        action: OperatorActionRecord,
+        run: OrchestrationRun,
+        job,
+        candidate,
+        *,
+        now: datetime | None = None,
+    ) -> bool:
+        """Prove a prior candidate-bound authorization expired before any review dispatch."""
+        authorization = action.result_payload_json.get("authorization", {})
+        expected = {
+            "provider": "deepseek",
+            "stage": "REVIEW",
+            "billing_origin": "deepseek_direct",
+            "run_id": run.run_id,
+            "job_id": job.job_id,
+            "candidate_sha": candidate.candidate_sha,
+            "base_sha": candidate.base_sha,
+            "generation": candidate.generation,
+            "manifest_id": candidate.manifest_id,
+            "manifest_hash": candidate.manifest_hash,
+            "action_request_id": action.action_request_id,
+        }
+        if (
+            action.action_type != OperatorActionType.AUTHORIZE_DEEPSEEK_CODE_REVIEW
+            or action.status != OperatorActionStatus.COMPLETED
+            or action.project_id != run.project_id
+            or action.change_name != run.change_name
+            or action.run_id != run.run_id
+            or action.job_id != job.job_id
+            or not all(authorization.get(key) == value for key, value in expected.items())
+            or not authorization.get("account_fingerprint")
+            or not authorization.get("model")
+            or not authorization.get("pricing_snapshot_id")
+            or not authorization.get("authorized_by")
+        ):
+            return False
+        expiry = self._authorization_expiry(authorization)
+        current = now or utc_now()
+        if expiry is None or expiry > current:
+            return False
+        try:
+            maximum = Decimal(str(authorization.get("max_spend_usd")))
+        except (InvalidOperation, TypeError, ValueError):
+            return False
+        if not maximum.is_finite() or maximum <= 0:
+            return False
+
+        auth_id = action.action_request_id
+        dispatch_key = f"deepseek-code-review:{auth_id}"
+        reservations_repo = getattr(self.uow, "budget_reservations", None)
+        ledger_repo = getattr(self.uow, "budget_ledger", None)
+        reviews_repo = getattr(self.uow, "reviews", None)
+        external_repo = getattr(self.uow, "orchestration_external_actions", None)
+        attempts_repo = getattr(self.uow, "external_action_attempts", None)
+        actions_repo = getattr(self.uow, "operator_actions", None)
+        if not all(
+            (
+                reservations_repo,
+                ledger_repo,
+                reviews_repo,
+                external_repo,
+                attempts_repo,
+                actions_repo,
+            )
+        ):
+            return False
+
+        if any(
+            reservation.authorization_id == auth_id
+            for reservation in reservations_repo.list_by_project(run.project_id)
+        ):
+            return False
+        if any(
+            entry.job_id == job.job_id
+            and entry.provider == "deepseek"
+            and entry.stage == "REVIEW"
+            and entry.billing_origin == "deepseek_direct"
+            and entry.created_at >= action.created_at
+            for entry in ledger_repo.list_by_project(run.project_id)
+        ):
+            return False
+        if any(
+            review.budget_authorization_id == auth_id
+            or (
+                review.candidate_sha == candidate.candidate_sha
+                and review.base_sha == candidate.base_sha
+                and review.orchestration_run_id == run.run_id
+            )
+            for review in reviews_repo.list_by_job(job.job_id)
+        ):
+            return False
+        if external_repo.get_by_action_key(dispatch_key) is not None:
+            return False
+        if attempts_repo.list_by_action_key(dispatch_key):
+            return False
+
+        for execute_action in actions_repo.list_by_run(run.run_id, limit=10000):
+            if (
+                execute_action.action_type
+                != OperatorActionType.EXECUTE_AUTHORIZED_DEEPSEEK_CODE_REVIEW
+                or execute_action.parameters_json.get("authorization_id") != auth_id
+            ):
+                continue
+            if not (
+                execute_action.status == OperatorActionStatus.REJECTED
+                and execute_action.error_code == OperatorActionErrorCode.AUTHORITY_MISMATCH
+                and execute_action.summary.startswith(
+                    "Frozen candidate worktree adoption proof failed:"
+                )
+                and not execute_action.result_payload_json.get("recovery_decision_id")
+                and not execute_action.result_payload_json.get("dispatch_action_key")
+            ):
+                return False
+        return True
+
+    def _code_review_authorization_renewal_allowed(
+        self, run: OrchestrationRun, job, candidate
+    ) -> bool:
+        """Allow no prior grant or only exact expired/unused grants for this candidate."""
+        actions = self.uow.operator_actions.list_by_run(run.run_id, limit=10000)
+        prior = []
+        for action in actions:
+            if (
+                action.action_type != OperatorActionType.AUTHORIZE_DEEPSEEK_CODE_REVIEW
+                or action.job_id != job.job_id
+            ):
+                continue
+            auth = action.result_payload_json.get("authorization", {})
+            bound_sha = auth.get("candidate_sha")
+            if not bound_sha or bound_sha == candidate.candidate_sha:
+                prior.append(action)
+        return all(
+            self._expired_unused_code_review_authorization(action, run, job, candidate)
+            for action in prior
+        )
 
     def get_available_actions(self, run_id: str) -> list[ActionDescriptor]:
         """Discover all supported operator actions for a run and their current eligibility."""
@@ -243,14 +463,18 @@ class ControlPlaneService:
         )
         review_authorizations = [
             action
-            for action in self.uow.operator_actions.list_by_run(run.run_id)
+            for action in self.uow.operator_actions.list_by_run(run.run_id, limit=10000)
             if action.action_type == OperatorActionType.AUTHORIZE_DEEPSEEK_CODE_REVIEW
             and action.status == OperatorActionStatus.COMPLETED
             and action.job_id == (active_job.job_id if active_job else None)
             and action.result_payload_json.get("authorization", {}).get("candidate_sha")
             == (frozen_candidate.candidate_sha if frozen_candidate else None)
         ]
-        review_authorization = review_authorizations[-1] if review_authorizations else None
+        review_authorization = (
+            max(review_authorizations, key=lambda action: action.created_at)
+            if review_authorizations
+            else None
+        )
         dispatch_key = (
             f"deepseek-code-review:{review_authorization.action_request_id}"
             if review_authorization
@@ -283,6 +507,13 @@ class ControlPlaneService:
             and frozen_candidate.base_sha == run.base_sha == active_job.base_sha
             and frozen_candidate.generation == run.current_generation
             and review_authorization
+            and (
+                authorization_expiry := self._authorization_expiry(
+                    review_authorization.result_payload_json.get("authorization", {})
+                )
+            )
+            is not None
+            and authorization_expiry > utc_now()
             and latest_check_valid
             and bool(latest_check_batch)
             and existing_review_dispatch is None
@@ -809,6 +1040,7 @@ class ControlPlaneService:
             and run.project_id == job.project_id
             and run.change_name == job.change_name
             and code_review_slot_open
+            and self._code_review_authorization_renewal_allowed(run, job, code_candidate)
         )
         descriptors.append(
             ActionDescriptor(
@@ -1678,9 +1910,10 @@ class ControlPlaneService:
             if job and project
             else (False, "Project or Job is unavailable.", [])
         )
+        from minime.services.workspace_guard import is_binding_fully_valid
+
         binding_repo = getattr(self.uow, "project_managed_repository_bindings", None)
         binding = binding_repo.get_by_project_id(run.project_id) if binding_repo else None
-        from minime.services.workspace_guard import is_binding_fully_valid
 
         if (
             not job
@@ -1755,10 +1988,20 @@ class ControlPlaneService:
             )
 
         from minime.services.recovery_convergence_service import OperationalHeartbeat
-        from minime.services.worktree_manager import WorktreeManager
 
-        worktree_manager = WorktreeManager(project_root=self.project_root, uow=self.uow)
-        worktree_path = worktree_manager.worktree_path(job.job_id, project_id=job.project_id)
+        try:
+            worktree_manager = self._worktree_manager_for_bound_project(
+                run.project_id, project=project
+            )
+            worktree_path = worktree_manager.worktree_path(job.job_id, project_id=job.project_id)
+        except Exception as exc:
+            return self._record_and_return_rejection(
+                request=request,
+                run=run,
+                error_code=OperatorActionErrorCode.AUTHORITY_MISMATCH,
+                summary=f"Bound managed repository proof failed: {type(exc).__name__}.",
+                sanitized_params=sanitized_params,
+            )
         ownership_repo = getattr(self.uow, "orchestration_worktree_ownerships", None)
         ownership = ownership_repo.get_by_job_id(job.job_id) if ownership_repo else None
         if not ownership:
@@ -2205,7 +2448,6 @@ class ControlPlaneService:
 
         from minime.services.authorship_service import AuthorshipService
         from minime.services.recovery_convergence_service import OperationalHeartbeat
-        from minime.services.worktree_manager import WorktreeManager
 
         independent, _reason = AuthorshipService().is_reviewer_eligible(
             job.job_id, "deepseek", self.uow
@@ -2218,8 +2460,17 @@ class ControlPlaneService:
                 summary="Persisted reviewer is not independent of candidate authorship.",
                 sanitized_params=sanitized_params,
             )
-        manager = WorktreeManager(project_root=self.project_root, uow=self.uow)
-        worktree_path = manager.worktree_path(job.job_id, project_id=job.project_id)
+        try:
+            manager = self._worktree_manager_for_bound_project(run.project_id, project=project)
+            worktree_path = manager.worktree_path(job.job_id, project_id=job.project_id)
+        except Exception as exc:
+            return self._record_and_return_rejection(
+                request=request,
+                run=run,
+                error_code=OperatorActionErrorCode.AUTHORITY_MISMATCH,
+                summary=f"Bound managed repository proof failed: {type(exc).__name__}.",
+                sanitized_params=sanitized_params,
+            )
         ownership_repo = getattr(self.uow, "orchestration_worktree_ownerships", None)
         ownership = ownership_repo.get_by_job_id(job.job_id) if ownership_repo else None
         try:
@@ -2332,7 +2583,7 @@ class ControlPlaneService:
                 self.uow.commit()
                 resumed = self.orchestration_service.resume(
                     run_id=run.run_id,
-                    project_root=self.project_root,
+                    project_root=manager.project_root,
                     force=True,
                     claim_context=context,
                     manage_heartbeat=False,
@@ -2494,20 +2745,15 @@ class ControlPlaneService:
                 summary="Code-review authorization requires the exact frozen candidate and passing checks.",
                 sanitized_params=sanitized_params,
             )
-        prior_same_candidate = any(
-            action.action_type == OperatorActionType.AUTHORIZE_DEEPSEEK_CODE_REVIEW
-            and action.status == OperatorActionStatus.COMPLETED
-            and action.job_id == job.job_id
-            and action.result_payload_json.get("authorization", {}).get("candidate_sha")
-            == candidate.candidate_sha
-            for action in self.uow.operator_actions.list_by_run(run.run_id)
-        )
-        if prior_same_candidate:
+        if not self._code_review_authorization_renewal_allowed(run, job, candidate):
             return self._record_and_return_rejection(
                 request=request,
                 run=run,
                 error_code=OperatorActionErrorCode.ACTION_ALREADY_COMPLETED,
-                summary="Code-review spend is already authorized for this candidate.",
+                summary=(
+                    "Code-review authorization cannot be renewed unless every prior same-candidate "
+                    "authorization is expired and durably proven unused."
+                ),
                 sanitized_params=sanitized_params,
             )
         if set(sanitized_params) != {"max_spend_usd", "expires_at", "pricing_snapshot_id"}:
