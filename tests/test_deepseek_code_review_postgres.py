@@ -1219,8 +1219,23 @@ def test_code_review_authorization_reservation_settlement_and_idempotency_in_pos
                 uow.audits.get_by_job_id(job_id),
                 review_authority_before_continue,
             )
-            assert continuation.resulting_gate == HumanGate.READY_FOR_HUMAN_MERGE
+            persisted_continuation_run = uow.orchestration_runs.get_by_id(run_id)
+            assert continuation.resulting_gate == HumanGate.READY_FOR_HUMAN_MERGE, (
+                f"stage={continuation.resulting_stage!r}, "
+                f"outcome={continuation.resulting_outcome!r}, "
+                f"gate={continuation.resulting_gate!r}, "
+                f"stop_details={persisted_continuation_run.stop_details!r}"
+            )
             assert continuation.resulting_outcome == OrchestrationStopOutcome.READY_FOR_HUMAN_MERGE
+            assert persisted_continuation_run.current_stage == OrchestrationStage.PR_PREPARED
+            assert (
+                persisted_continuation_run.stop_outcome
+                == OrchestrationStopOutcome.READY_FOR_HUMAN_MERGE
+            )
+            assert persisted_continuation_run.human_gate == HumanGate.READY_FOR_HUMAN_MERGE
+            assert persisted_continuation_run.stop_details == {
+                "code": "READY_FOR_HUMAN_MERGE"
+            }
             assert downstream_auditor.calls == 1
             assert github.pushed == {branch: candidate_sha}
             assert len(github.created_prs) == 1
