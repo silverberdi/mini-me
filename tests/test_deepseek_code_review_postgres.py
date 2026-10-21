@@ -536,8 +536,8 @@ def test_code_review_authorization_reservation_settlement_and_idempotency_in_pos
                 ).scalars()
             )
             assert {
-                "budget_reservations_authorization_id_key",
-                "budget_reservations_idempotency_key_key",
+                "uq_budget_reservations_authorization_id",
+                "uq_budget_reservations_idempotency_key",
                 "uq_external_action_dispatch_intent",
                 "ix_operator_action_records_action_request_id",
             } <= unique_indexes
