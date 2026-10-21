@@ -117,6 +117,7 @@ class DeepSeekResponseDiagnostics:
     usage_valid: bool = False
     transport_retry_count: int = 0
     transport_stall_ms: int = 0
+    request_duration_ms: int | None = None
 
 
 _SAFE_PROVIDER_ID = re.compile(r"^[A-Za-z0-9._:-]{1,128}$")

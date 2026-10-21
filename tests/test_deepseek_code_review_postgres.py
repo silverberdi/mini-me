@@ -18,6 +18,7 @@ from uuid import uuid4
 import httpx
 import pytest
 from sqlalchemy import create_engine, text
+from sqlalchemy.engine import make_url
 from sqlalchemy.orm import sessionmaker
 
 from minime.adapters import provider_adapter
@@ -28,6 +29,7 @@ from minime.domain.enums import (
     ChangeStatus,
     EventType,
     ExecutionOutcome,
+    ExternalActionStatus,
     ExternalActionType,
     ExternalOutcome,
     ExternalReasonCode,
@@ -319,13 +321,23 @@ def test_postgres_dispatch_intent_survives_worker_restart_and_blocks_replay():
         "audit_risk",
         "mutate_candidate_during_review",
         "missing_reservation_case",
+        "terminal_recovery_case",
     ),
     [
-        (ReviewVerdict.READY_TO_MERGE, "low", False, False),
-        (ReviewVerdict.CHANGES_REQUIRED, "low", False, False),
-        (ReviewVerdict.READY_TO_MERGE, "high", False, False),
-        (ReviewVerdict.READY_TO_MERGE, "low", True, False),
-        (ReviewVerdict.READY_TO_MERGE, "low", False, True),
+        (ReviewVerdict.READY_TO_MERGE, "low", False, False, False),
+        (ReviewVerdict.CHANGES_REQUIRED, "low", False, False, False),
+        (ReviewVerdict.READY_TO_MERGE, "high", False, False, False),
+        (ReviewVerdict.READY_TO_MERGE, "low", True, False, False),
+        (ReviewVerdict.READY_TO_MERGE, "low", False, True, False),
+        (ReviewVerdict.READY_TO_MERGE, "low", False, False, True),
+    ],
+    ids=[
+        "ready",
+        "changes-required",
+        "audit-high",
+        "candidate-mutated",
+        "missing-reservation",
+        "terminal-recovery",
     ],
 )
 def test_code_review_authorization_reservation_settlement_and_idempotency_in_postgres(
@@ -335,6 +347,7 @@ def test_code_review_authorization_reservation_settlement_and_idempotency_in_pos
     audit_risk,
     mutate_candidate_during_review,
     missing_reservation_case,
+    terminal_recovery_case,
 ):
     engine = create_engine(DATABASE_URL, pool_pre_ping=True)
     project_id = f"r01-code-review-{uuid4()}"
@@ -347,6 +360,7 @@ def test_code_review_authorization_reservation_settlement_and_idempotency_in_pos
     review_started = threading.Event()
     release_review = threading.Event()
     review_http_calls: list[dict[str, object]] = []
+    terminal_response_sent = False
 
     # Exercise the production adapter and HTTP parsing, while every request is
     # answered by an in-process transport. No DeepSeek inference/network call occurs.
@@ -373,10 +387,11 @@ def test_code_review_authorization_reservation_settlement_and_idempotency_in_pos
                 },
             )
         if request.url.path == "/chat/completions":
+            nonlocal terminal_response_sent
             payload = json.loads(request.content)
             assert payload["model"] == "deepseek-flash"
             assert payload["reasoning_effort"] == "low"
-            assert payload["max_tokens"] == MAX_REVIEW_OUTPUT_TOKENS == 4096
+            assert payload["max_tokens"] == MAX_REVIEW_OUTPUT_TOKENS == 16384
             assert payload["response_format"] == {"type": "json_object"}
             assert any(
                 message.get("role") == "user"
@@ -386,6 +401,32 @@ def test_code_review_authorization_reservation_settlement_and_idempotency_in_pos
             review_http_calls.append(payload)
             review_started.set()
             assert release_review.wait(timeout=10)
+            if terminal_recovery_case and not terminal_response_sent:
+                terminal_response_sent = True
+                return httpx.Response(
+                    200,
+                    json={
+                        "id": "intercepted-terminal-truncation",
+                        "object": "chat.completion",
+                        "model": "deepseek-flash",
+                        "choices": [
+                            {
+                                "index": 0,
+                                "message": {
+                                    "role": "assistant",
+                                    "content": "",
+                                    "reasoning_content": "private reasoning excluded from evidence",
+                                },
+                                "finish_reason": "length",
+                            }
+                        ],
+                        "usage": {
+                            "prompt_tokens": 2000,
+                            "completion_tokens": MAX_REVIEW_OUTPUT_TOKENS,
+                            "total_tokens": 2000 + MAX_REVIEW_OUTPUT_TOKENS,
+                        },
+                    },
+                )
             if mutate_candidate_during_review:
                 # Adversarially mutate the real registered Git worktree while
                 # the intercepted provider response is in flight.
@@ -519,8 +560,15 @@ def test_code_review_authorization_reservation_settlement_and_idempotency_in_pos
 
     try:
         with engine.connect() as connection:
+            parsed_test_url = make_url(DATABASE_URL)
+            assert parsed_test_url.database and parsed_test_url.database.startswith("minime_")
+            assert not (
+                parsed_test_url.host == "192.168.0.194"
+                and parsed_test_url.port == 5432
+                and parsed_test_url.database == "minime"
+            )
             assert connection.execute(text("select current_database()")).scalar() == (
-                "minime_contract_review_test"
+                parsed_test_url.database
             )
             assert connection.execute(text("select version_num from alembic_version")).scalar() == (
                 "r02_contract_review_budget_identity"
@@ -1007,11 +1055,15 @@ def test_code_review_authorization_reservation_settlement_and_idempotency_in_pos
             assert preserved_expired_auth.result_payload_json == {
                 "authorization": prior_auth_payload
             }
+            original_code_authorization = uow.operator_actions.get_by_request_id(
+                code_auth.action_request_id
+            ).result_payload_json.copy()
 
             github = _DeterministicGitHubAdapter()
             dispatch_key = f"deepseek-code-review:{code_auth.action_request_id}"
 
-            def dispatch_review(action_id):
+            def dispatch_review(action_id, authorization_id=None):
+                effective_authorization_id = authorization_id or code_auth.action_request_id
                 with sessionmaker(
                     bind=engine, autoflush=False, expire_on_commit=False
                 )() as review_session:
@@ -1041,7 +1093,7 @@ def test_code_review_authorization_reservation_settlement_and_idempotency_in_pos
                         run=current_run,
                         action_type=OperatorActionType.EXECUTE_AUTHORIZED_DEEPSEEK_CODE_REVIEW,
                         action_id=action_id,
-                        params={"authorization_id": code_auth.action_request_id},
+                        params={"authorization_id": effective_authorization_id},
                         candidate_sha=candidate_sha,
                     )
                     if (
@@ -1073,7 +1125,7 @@ def test_code_review_authorization_reservation_settlement_and_idempotency_in_pos
                                 run_id,
                                 OperatorActionType.EXECUTE_AUTHORIZED_DEEPSEEK_CODE_REVIEW.value,
                                 "--params",
-                                json.dumps({"authorization_id": code_auth.action_request_id}),
+                                json.dumps({"authorization_id": effective_authorization_id}),
                                 "--actor",
                                 "isolated-test-operator",
                                 "--expected-stage",
@@ -1103,7 +1155,9 @@ def test_code_review_authorization_reservation_settlement_and_idempotency_in_pos
 
             with ThreadPoolExecutor(max_workers=2) as pool:
                 first_review = pool.submit(dispatch_review, f"code-review-dispatch-{uuid4()}")
-                assert review_started.wait(timeout=10)
+                if not review_started.wait(timeout=10):
+                    release_review.set()
+                    assert False, first_review.result(timeout=10).summary
                 competing_review = pool.submit(dispatch_review, str(uuid4()))
                 competing_result = competing_review.result(timeout=10)
                 assert competing_result.status != OperatorActionStatus.COMPLETED
@@ -1112,6 +1166,247 @@ def test_code_review_authorization_reservation_settlement_and_idempotency_in_pos
             assert not root_mismatch_control_plane._expired_unused_code_review_authorization(
                 expired_auth_record, run, job, candidate
             )
+            if terminal_recovery_case:
+                assert review_action.status == OperatorActionStatus.BLOCKED
+                assert review_action.payload["reason"] == (
+                    "DEEPSEEK_CODE_REVIEW_TERMINAL_TRUNCATED"
+                ), [
+                    event.payload.get("response")
+                    for event in uow.events.list_events(
+                        project_id=project_id, change_id=change_name, limit=10000
+                    )
+                    if event.event_type == EventType.EVIDENCE_DIAGNOSTIC_RECORDED
+                ]
+                assert len(review_http_calls) == 1
+                failed_review = uow.reviews.get_by_id(review_action.payload["review_id"])
+                assert (
+                    failed_review
+                    and failed_review.status.value == "REVIEW_FAILED"
+                    and failed_review.verdict is None
+                )
+                failed_reservation = uow.budget_reservations.get_by_id(
+                    failed_review.budget_reservation_id
+                )
+                assert failed_reservation and failed_reservation.status == "SETTLED"
+                failed_dispatch_key = f"deepseek-code-review:{code_auth.action_request_id}"
+                failed_dispatch = uow.orchestration_external_actions.get_by_action_key(
+                    failed_dispatch_key
+                )
+                failed_dispatch_attempts = uow.external_action_attempts.list_by_action_key(
+                    failed_dispatch_key
+                )
+                assert failed_dispatch and failed_dispatch.status.value == "FAILED"
+                assert len(failed_dispatch_attempts) == 1
+                assert failed_dispatch_attempts[0].status == "FAILED"
+                assert failed_dispatch_attempts[0].attempt_number == 1
+                failed_run = uow.orchestration_runs.get_by_id(run_id)
+                failed_job = uow.jobs.get_by_id(job_id)
+                assert failed_run.stop_details["code"] == ("CODE_REVIEW_TERMINAL_FAILURE_SETTLED")
+                assert failed_run.is_active is False
+                assert failed_job.status == JobStatus.NEEDS_HUMAN
+                terminal_actions = {
+                    item.action: item
+                    for item in control_plane_service.ControlPlaneService(
+                        uow, project_root=tmp_path
+                    ).get_available_actions(run_id)
+                }
+                assert terminal_actions[OperatorActionType.CONTINUE].enabled is False
+                assert _git(repo, "rev-parse", "HEAD") == candidate_sha
+                assert _git(repo, "status", "--porcelain") == ""
+                check_results_before_retry = uow.check_results.list_by_job(job_id)
+                attempts_before_retry = uow.job_attempts.list_by_job(job_id)
+                old_review_snapshot = failed_review.model_copy(deep=True)
+                old_ledger = uow.budget_ledger.list_by_project(project_id)
+                assert len(old_ledger) == 1  # settled CODE_REVIEW; no contract spend occurred
+
+                diagnostic_event = next(
+                    event
+                    for event in uow.events.list_events(
+                        project_id=project_id, change_id=change_name, limit=10000
+                    )
+                    if event.event_type == EventType.EVIDENCE_DIAGNOSTIC_RECORDED
+                    and event.payload.get("review_id") == failed_review.review_id
+                )
+                assert diagnostic_event.payload["response"]["finish_reason"] == "length"
+                assert diagnostic_event.payload["response"]["reasoning_content_present"] is True
+                assert diagnostic_event.payload["response"]["reasoning_content_length"] == len(
+                    "private reasoning excluded from evidence"
+                )
+                assert "reasoning_content" not in diagnostic_event.payload["response"]
+                assert "private reasoning" not in json.dumps(diagnostic_event.payload)
+                from minime.services.deepseek_code_review_service import (
+                    terminal_settled_code_review_recovery_allowed,
+                )
+
+                contradictory_run = failed_run.model_copy(
+                    update={
+                        "stop_details": {
+                            **failed_run.stop_details,
+                            "manifest_hash": "contradictory-manifest",
+                        }
+                    }
+                )
+                assert not terminal_settled_code_review_recovery_allowed(
+                    uow,
+                    run=contradictory_run,
+                    job=failed_job,
+                    candidate=candidate,
+                    manifest=manifest,
+                )
+                failed_reservation.status = "UNRESOLVED"
+                uow.budget_reservations.save(failed_reservation)
+                uow.commit()
+                assert not terminal_settled_code_review_recovery_allowed(
+                    uow,
+                    run=failed_run,
+                    job=failed_job,
+                    candidate=candidate,
+                    manifest=manifest,
+                )
+                failed_reservation.status = "SETTLED"
+                uow.budget_reservations.save(failed_reservation)
+                uow.commit()
+                failed_dispatch.status = ExternalActionStatus.EXECUTING
+                uow.session.execute(
+                    text(
+                        "update orchestration_external_actions set status = 'EXECUTING' where action_key = :key"
+                    ),
+                    {"key": failed_dispatch_key},
+                )
+                uow.session.execute(
+                    text("update external_action_attempts set status = 'EXECUTING' where id = :id"),
+                    {"id": failed_dispatch_attempts[0].attempt_id},
+                )
+                uow.commit()
+                assert not terminal_settled_code_review_recovery_allowed(
+                    uow,
+                    run=failed_run,
+                    job=failed_job,
+                    candidate=candidate,
+                    manifest=manifest,
+                )
+                failed_dispatch.status = ExternalActionStatus.FAILED
+                uow.session.execute(
+                    text(
+                        "update orchestration_external_actions set status = 'FAILED' where action_key = :key"
+                    ),
+                    {"key": failed_dispatch_key},
+                )
+                uow.session.execute(
+                    text("update external_action_attempts set status = 'FAILED' where id = :id"),
+                    {"id": failed_dispatch_attempts[0].attempt_id},
+                )
+                uow.commit()
+                recovery_proven = terminal_settled_code_review_recovery_allowed(
+                    uow,
+                    run=failed_run,
+                    job=failed_job,
+                    candidate=candidate,
+                    manifest=manifest,
+                )
+                assert recovery_proven
+                renewal_allowed = (
+                    root_mismatch_control_plane._code_review_authorization_renewal_allowed(
+                        failed_run, failed_job, candidate
+                    )
+                )
+                assert renewal_allowed
+
+                over_limit_retry = control_plane_service.ControlPlaneService(
+                    uow, project_root=tmp_path
+                ).execute_action(
+                    _control_plane_request(
+                        project_id=project_id,
+                        change_name=change_name,
+                        run=failed_run,
+                        action_type=OperatorActionType.AUTHORIZE_DEEPSEEK_CODE_REVIEW,
+                        action_id=f"terminal-over-limit-{uuid4()}",
+                        params={
+                            "max_spend_usd": "1.00",
+                            "expires_at": (datetime.now(UTC) + timedelta(minutes=15)).isoformat(),
+                            "pricing_snapshot_id": snapshot_id,
+                        },
+                        candidate_sha=candidate_sha,
+                    )
+                )
+                assert over_limit_retry.status != OperatorActionStatus.COMPLETED
+
+                uow.session.expire_all()
+                retry_run = uow.orchestration_runs.get_by_id(run_id)
+                new_auth_id = f"terminal-recovery-auth-{uuid4()}"
+                new_auth = control_plane_service.ControlPlaneService(
+                    uow, project_root=tmp_path
+                ).execute_action(
+                    _control_plane_request(
+                        project_id=project_id,
+                        change_name=change_name,
+                        run=retry_run,
+                        action_type=OperatorActionType.AUTHORIZE_DEEPSEEK_CODE_REVIEW,
+                        action_id=new_auth_id,
+                        params={
+                            "max_spend_usd": "0.50",
+                            "expires_at": (datetime.now(UTC) + timedelta(minutes=15)).isoformat(),
+                            "pricing_snapshot_id": snapshot_id,
+                        },
+                        candidate_sha=candidate_sha,
+                    )
+                )
+                assert new_auth.status == OperatorActionStatus.COMPLETED, new_auth.summary
+                assert new_auth.action_request_id != code_auth.action_request_id
+                assert (
+                    uow.operator_actions.get_by_request_id(
+                        code_auth.action_request_id
+                    ).result_payload_json
+                    == original_code_authorization
+                )
+                second_review_action = dispatch_review(
+                    f"terminal-recovery-dispatch-{uuid4()}", new_auth.action_request_id
+                )
+                assert second_review_action.status == OperatorActionStatus.COMPLETED, (
+                    second_review_action.summary,
+                    second_review_action.payload.get("reason"),
+                )
+                assert second_review_action.payload["review_id"] != failed_review.review_id
+                assert len(review_http_calls) == 2
+                duplicate_retry = dispatch_review(
+                    f"terminal-recovery-duplicate-{uuid4()}", new_auth.action_request_id
+                )
+                assert duplicate_retry.status != OperatorActionStatus.COMPLETED
+                assert len(review_http_calls) == 2
+                assert uow.reviews.get_by_id(failed_review.review_id) == old_review_snapshot
+                assert _git(repo, "rev-parse", "HEAD") == candidate_sha
+                assert _git(repo, "status", "--porcelain") == ""
+                assert uow.check_results.list_by_job(job_id) == check_results_before_retry
+                assert uow.job_attempts.list_by_job(job_id) == attempts_before_retry
+                assert len(uow.budget_reservations.list_by_project(project_id)) == 2
+                ledger_after_retry = uow.budget_ledger.list_by_project(project_id)
+                assert len(ledger_after_retry) == len(old_ledger) + 1
+                assert {item.entry_id for item in old_ledger} <= {
+                    item.entry_id for item in ledger_after_retry
+                }
+                retry_reservation = next(
+                    item
+                    for item in uow.budget_reservations.list_by_project(project_id)
+                    if item.authorization_id == new_auth.action_request_id
+                )
+                assert retry_reservation.status == "SETTLED"
+                assert retry_reservation.reservation_id != failed_reservation.reservation_id
+                assert retry_reservation.idempotency_key != failed_reservation.idempotency_key
+                assert len(retry_reservation.idempotency_key) <= 128
+                assert (
+                    uow.orchestration_external_actions.get_by_action_key(
+                        f"deepseek-code-review:{new_auth.action_request_id}"
+                    ).status.value
+                    == "COMPLETED"
+                )
+                assert (
+                    uow.orchestration_external_actions.get_by_action_key(
+                        failed_dispatch_key
+                    ).status.value
+                    == "FAILED"
+                )
+                assert _git(managed_repo, "rev-parse", "refs/remotes/origin/main") == base_sha
+                return
             if mutate_candidate_during_review:
                 assert review_action.status == OperatorActionStatus.BLOCKED
                 assert review_action.payload["reason"] == (

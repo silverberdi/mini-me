@@ -412,6 +412,42 @@ Mini me SHALL run the repository's configured deterministic implementation tests
 - **THEN** Control Plane rejects renewal without changing prior records or candidate state
 - **AND** ambiguous or incomplete evidence fails closed and remains encumbered under the configured spending limit.
 
+#### Scenario: Known terminal truncated CODE_REVIEW finalizes coherently
+- **GIVEN** the provider returned a definitive HTTP 200 response for the exact requested model with `finish_reason=length`, invalid or empty review content, valid provider-reported usage, and a reservation successfully settled against that usage
+- **WHEN** the review response is finalized
+- **THEN** the Review becomes terminal `REVIEW_FAILED`, never a passing review or capacity wait
+- **AND** the Run remains stopped at a human gate, the Job leaves `REVIEW_RUNNING`, and the candidate, checks, diagnostics, authorization, reservation, and ledger remain unchanged.
+
+#### Scenario: Terminal truncation diagnostics do not expose private reasoning
+- **GIVEN** a response includes `reasoning_content` and ends with `finish_reason=length`
+- **WHEN** transport diagnostics are persisted
+- **THEN** they retain only allowlisted presence/type/character-length metadata, finish reason, response/content metadata, usage, and duration
+- **AND** they never persist or print the reasoning text or claim reasoning-token usage that the provider did not report.
+
+#### Scenario: Terminal settled code-review failure permits only a distinct owner-authorized review operation
+- **GIVEN** the latest exact-candidate CODE_REVIEW is terminal `REVIEW_FAILED` after a definitive invalid/truncated response, its provider usage is verified and its reservation is `SETTLED` with a matching ledger entry, and its dispatch/execute records are conclusively finalized rather than ambiguous
+- **AND** all candidate, base, generation, manifest, current checks, managed worktree and repository-binding identities still match
+- **WHEN** the owner creates a new exact-candidate `AUTHORIZE_DEEPSEEK_CODE_REVIEW` action and a separate new `EXECUTE_AUTHORIZED_DEEPSEEK_CODE_REVIEW` action with fresh JIT capability/pricing/policy checks
+- **THEN** the new operation receives a new action ID, Review ID, reservation idempotency identity, and dispatch identity
+- **AND** its cumulative exposure remains within applicable owner-configured limits while all prior Review, authorization, reservation, usage, and diagnostic records remain immutable.
+
+#### Scenario: New review operation does not repeat APPLY, checks, or historical dispatch
+- **GIVEN** the exact frozen candidate already has current passing check evidence and a terminal settled code-review failure
+- **WHEN** a new explicitly authorized exceptional review operation executes
+- **THEN** it dispatches only read-only CODE_REVIEW against that candidate without re-entering generic CONTINUE, APPLY, or check execution
+- **AND** no historical dispatch key, Review ID, reservation key, or result is reused.
+
+#### Scenario: Ambiguous, unresolved, incomplete, or contradictory code-review outcome cannot be retried
+- **GIVEN** a prior same-candidate review has an active/live claim, `REVIEW_PENDING`, `REVIEW_RUNNING` or `REVIEW_TIMED_OUT` status, an `UNRESOLVED`/missing settlement, missing terminal response diagnostics, ambiguous dispatch/attempt, mismatched identity/check/worktree evidence, or any contradictory history
+- **WHEN** a new CODE_REVIEW authorization or execution is requested
+- **THEN** Control Plane rejects it before provider dispatch and preserves the prior evidence and financial exposure unchanged.
+
+#### Scenario: CODE_REVIEW output ceiling and reservation use one configured bound
+- **GIVEN** a configured CODE_REVIEW output-token bound is positive, within the supported client maximum, and the exact input bound, verified pricing, and applicable optional spend limits are valid
+- **WHEN** DeepSeek CODE_REVIEW reserves cost and constructs its HTTP request
+- **THEN** the HTTP `max_tokens` equals the exact output-token quantity used in the conservative reservation
+- **AND** an invalid bound, exceeded cost/limit, or unavailable price blocks dispatch before provider invocation without changing CONTRACT_REVIEW's separate bound.
+
 #### Scenario: Contract-review evidence cannot satisfy final review
 - **GIVEN** a valid DeepSeek CONTRACT REVIEW result exists for the OpenSpec artifacts but no valid candidate-bound code REVIEW exists
 - **WHEN** the candidate approaches PR readiness
