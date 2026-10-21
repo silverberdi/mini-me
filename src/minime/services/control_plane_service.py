@@ -2127,6 +2127,7 @@ class ControlPlaneService:
             or review.candidate_generation != candidate.generation
             or review.manifest_id != manifest.manifest_id
             or review.manifest_hash != manifest.manifest_hash
+            or not reservation
             or not authorization
             or authorization.action_type != OperatorActionType.AUTHORIZE_DEEPSEEK_CODE_REVIEW
             or authorization.status != OperatorActionStatus.COMPLETED
@@ -2154,7 +2155,6 @@ class ControlPlaneService:
             != manifest.manifest_id
             or authorization.result_payload_json.get("authorization", {}).get("manifest_hash")
             != manifest.manifest_hash
-            or not reservation
             or reservation.authorization_id != authorization.action_request_id
             or reservation.project_id != run.project_id
             or reservation.run_id != run.run_id

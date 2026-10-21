@@ -46,6 +46,7 @@ from minime.domain.models import (
 from minime.logging import redact_secrets
 from minime.services.authorship_service import AuthorshipService
 from minime.services.budget_service import BudgetService
+from minime.services.candidate_integrity import validate_post_review_integrity
 from minime.services.candidate_manifest import CandidateManifestService
 from minime.services.contract_review_service import (
     DeepSeekContractReviewRunner,
@@ -854,6 +855,58 @@ class DeepSeekCodeReviewService:
             return CodeReviewResult(
                 False, review.review_id, sha, reason="CODE_REVIEW_BUDGET_RECONCILIATION_FAILED"
             )
+        if exceptional_authorization is not None:
+            # The exceptional path owns finalization here (unlike the ordinary
+            # pipeline, which validates after this service returns). Recheck the
+            # exact worktree after reviewer I/O and before accepting its verdict.
+            # Keep the response diagnostic and verified usage settlement durable,
+            # but never mark a review of a mutated candidate complete.
+            intact, integrity_error = validate_post_review_integrity(
+                Path(candidate_worktree), candidate.candidate_sha
+            )
+            if not intact:
+                message = integrity_error or "Post-review candidate integrity failed."
+                self.uow.reviews.transition(
+                    review.review_id,
+                    ReviewStatus.REVIEW_FAILED.value,
+                    error_message=message,
+                )
+                self.uow.orchestration_external_actions.update_status(
+                    dispatch_action_key,
+                    ExternalActionStatus.FAILED,
+                    error_message="Candidate integrity changed during read-only review.",
+                )
+                attempts = self.uow.external_action_attempts.list_by_action_key(dispatch_action_key)
+                if attempts:
+                    self.uow.external_action_attempts.update_status(
+                        attempts[0].attempt_id,
+                        "FAILED",
+                        error_message="Candidate integrity changed during read-only review.",
+                    )
+                self.uow.events.save(
+                    Event(
+                        event_type=EventType.UNAUTHORIZED_REVIEWER_MUTATION,
+                        project_id=project.project_id,
+                        change_id=job.change_name,
+                        operation_id=job.job_id,
+                        payload={
+                            "run_id": run.run_id,
+                            "job_id": job.job_id,
+                            "review_id": review.review_id,
+                            "candidate_sha": candidate.candidate_sha,
+                            "generation": candidate.generation,
+                            "error": message,
+                        },
+                        timestamp=utc_now(),
+                    )
+                )
+                self.uow.commit()
+                return CodeReviewResult(
+                    False,
+                    review.review_id,
+                    sha,
+                    reason="CODE_REVIEW_POST_REVIEW_INTEGRITY_FAILED",
+                )
         # Persist the response with settlement before returning to the pipeline.
         # The pipeline still performs its post-review immutability check before
         # finalizing REVIEW_COMPLETED. A crash in between can recover this exact

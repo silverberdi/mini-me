@@ -305,15 +305,27 @@ def test_postgres_dispatch_intent_survives_worker_restart_and_blocks_replay():
 
 
 @pytest.mark.parametrize(
-    ("review_verdict", "audit_risk"),
+    (
+        "review_verdict",
+        "audit_risk",
+        "mutate_candidate_during_review",
+        "missing_reservation_case",
+    ),
     [
-        (ReviewVerdict.READY_TO_MERGE, "low"),
-        (ReviewVerdict.CHANGES_REQUIRED, "low"),
-        (ReviewVerdict.READY_TO_MERGE, "high"),
+        (ReviewVerdict.READY_TO_MERGE, "low", False, False),
+        (ReviewVerdict.CHANGES_REQUIRED, "low", False, False),
+        (ReviewVerdict.READY_TO_MERGE, "high", False, False),
+        (ReviewVerdict.READY_TO_MERGE, "low", True, False),
+        (ReviewVerdict.READY_TO_MERGE, "low", False, True),
     ],
 )
 def test_code_review_authorization_reservation_settlement_and_idempotency_in_postgres(
-    tmp_path, monkeypatch, review_verdict, audit_risk
+    tmp_path,
+    monkeypatch,
+    review_verdict,
+    audit_risk,
+    mutate_candidate_during_review,
+    missing_reservation_case,
 ):
     engine = create_engine(DATABASE_URL, pool_pre_ping=True)
     project_id = f"r01-code-review-{uuid4()}"
@@ -364,6 +376,12 @@ def test_code_review_authorization_reservation_settlement_and_idempotency_in_pos
             review_http_calls.append(payload)
             review_started.set()
             assert release_review.wait(timeout=10)
+            if mutate_candidate_during_review:
+                # Adversarially mutate the real registered Git worktree while
+                # the intercepted provider response is in flight.
+                (repo / "slug.py").write_text(
+                    "def normalize_slug(value):\n    return 'mutated'\n", encoding="utf-8"
+                )
             content = json.dumps(
                 {
                     "verdict": review_verdict.value,
@@ -866,6 +884,41 @@ def test_code_review_authorization_reservation_settlement_and_idempotency_in_pos
                 assert competing_result.status != OperatorActionStatus.COMPLETED
                 release_review.set()
                 review_action = first_review.result(timeout=15)
+            if mutate_candidate_during_review:
+                assert review_action.status == OperatorActionStatus.BLOCKED
+                assert review_action.payload["reason"] == (
+                    "CODE_REVIEW_POST_REVIEW_INTEGRITY_FAILED"
+                )
+                blocked_review = uow.reviews.get_by_id(review_action.payload["review_id"])
+                assert blocked_review and blocked_review.status.value == "REVIEW_FAILED"
+                assert blocked_review.verdict is None
+                assert len(review_http_calls) == 1
+                assert len(uow.budget_ledger.list_by_project(project_id)) == 1
+                assert len(uow.budget_reservations.list_by_project(project_id)) == 1
+                failed_dispatch = uow.orchestration_external_actions.get_by_action_key(dispatch_key)
+                assert failed_dispatch and failed_dispatch.status.value == "FAILED"
+                failed_attempts = uow.external_action_attempts.list_by_action_key(dispatch_key)
+                assert len(failed_attempts) == 1 and failed_attempts[0].status == "FAILED"
+                assert not any(
+                    event.event_type == EventType.CODE_REVIEW_COMPLETED
+                    and event.payload.get("review_id") == blocked_review.review_id
+                    for event in uow.events.list_events(
+                        project_id=project_id, change_id=change_name, limit=10000
+                    )
+                )
+                assert any(
+                    event.event_type == EventType.EVIDENCE_DIAGNOSTIC_RECORDED
+                    and event.payload.get("review_id") == blocked_review.review_id
+                    for event in uow.events.list_events(
+                        project_id=project_id, change_id=change_name, limit=10000
+                    )
+                )
+                assert github.pushed == {} and github.created_prs == []
+                assert candidate_sha == uow.jobs.get_by_id(job_id).candidate_sha
+                assert (
+                    uow.orchestration_runs.get_by_id(run_id).current_candidate_sha == candidate_sha
+                )
+                return
             assert review_action.status == OperatorActionStatus.COMPLETED, review_action.summary
             review_id = review_action.payload["review_id"]
             downstream_auditor = _NoInferenceAuditor(risk=audit_risk)
@@ -1012,6 +1065,58 @@ def test_code_review_authorization_reservation_settlement_and_idempotency_in_pos
                 assert len(review_http_calls) == 1
                 assert github.pushed == {}
                 assert github.created_prs == []
+
+            if missing_reservation_case:
+                # A completed review with a dangling reservation identity is not
+                # continuation authority. This exercises the real PostgreSQL read
+                # returning None and must reject before audit, push, or PR effects.
+                review_record = uow.reviews.get_by_id(review_id)
+                assert (
+                    review_record
+                    and review_record.budget_reservation_id == reservation.reservation_id
+                )
+                saved_run = uow.orchestration_runs.get_by_id(run_id)
+                saved_job = uow.jobs.get_by_id(job_id)
+                external_actions_before = uow.orchestration_external_actions.list_by_run(run_id)
+                attempts_before = uow.external_action_attempts.list_by_action_key(dispatch_key)
+                review_record.budget_reservation_id = str(uuid4())
+                uow.reviews.save(review_record)
+                uow.commit()
+                missing_reservation = control_plane.execute_action(
+                    _control_plane_request(
+                        project_id=project_id,
+                        change_name=change_name,
+                        run=held_run,
+                        action_type=OperatorActionType.CONTINUE_AFTER_CODE_REVIEW,
+                        action_id=f"missing-reservation-{uuid4()}",
+                        params={
+                            "review_id": review_id,
+                            "candidate_sha": candidate_sha,
+                            "manifest_hash": manifest.manifest_hash,
+                        },
+                        candidate_sha=candidate_sha,
+                    )
+                )
+                assert missing_reservation.status == OperatorActionStatus.REJECTED
+                assert uow.orchestration_runs.get_by_id(run_id) == saved_run
+                assert uow.jobs.get_by_id(job_id) == saved_job
+                assert (
+                    uow.orchestration_external_actions.list_by_run(run_id)
+                    == external_actions_before
+                )
+                assert (
+                    uow.external_action_attempts.list_by_action_key(dispatch_key) == attempts_before
+                )
+                assert len(review_http_calls) == 1
+                assert downstream_auditor.calls == 0
+                assert github.pushed == {} and github.created_prs == []
+
+                # Restore only the disposable test fixture so test cleanup sees
+                # the original link; no production records are involved.
+                review_record.budget_reservation_id = reservation.reservation_id
+                uow.reviews.save(review_record)
+                uow.commit()
+                return
 
             # A competing live claim blocks before downstream audit or PR work.
             from minime.services.recovery_convergence_service import RecoveryConvergenceService

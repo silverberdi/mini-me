@@ -19,6 +19,8 @@ from minime.adapters.provider_adapter import (
 from minime.config import AppConfig, ProjectConfig, ProviderConfig
 from minime.domain.enums import (
     CapacitySignalSource,
+    EventType,
+    ExternalActionStatus,
     JobStatus,
     OperatorActionStatus,
     OperatorActionType,
@@ -112,6 +114,19 @@ class _ReviewRunner:
                 usage_valid=True,
             ),
         )
+
+
+class _MutatingReviewRunner(_ReviewRunner):
+    def __init__(self, worktree: Path):
+        super().__init__()
+        self.worktree = worktree
+
+    async def review(self, request: str, timeout_seconds: int):
+        response = await super().review(request, timeout_seconds)
+        (self.worktree / "slug.py").write_text(
+            "def normalize_slug(value):\n    return 'mutated'\n", encoding="utf-8"
+        )
+        return response
 
 
 async def _fixture(
@@ -529,6 +544,74 @@ async def test_candidate_bound_review_checkpoint_is_not_dispatched_twice(
         in_memory_uow, run, job, candidate, AuthorshipService()
     )
     assert valid and verdict == ReviewVerdict.READY_TO_MERGE and reason is None
+
+
+@pytest.mark.asyncio
+async def test_exceptional_code_review_rejects_candidate_mutated_during_http_and_preserves_evidence(
+    in_memory_uow, monkeypatch, tmp_path
+):
+    from minime.services.recovery_convergence_service import RecoveryConvergenceService
+
+    project, run, job, candidate, manifest, repo, _, _, auth, service = await _fixture(
+        tmp_path, monkeypatch, in_memory_uow
+    )
+    runner = _MutatingReviewRunner(repo)
+    service.runner = runner
+    claim = RecoveryConvergenceService(in_memory_uow).acquire_claim(f"run:{run.run_id}")
+    assert auth.status == OperatorActionStatus.COMPLETED and claim is not None
+    action_key = f"deepseek-code-review:{auth.action_request_id}"
+
+    result = await service.review_candidate(
+        project=project,
+        run=run,
+        job=job,
+        candidate=candidate,
+        manifest=manifest,
+        candidate_worktree=repo,
+        authorship_evidence={},
+        authorization_id=auth.action_request_id,
+        claim_context=claim,
+        dispatch_action_key=action_key,
+    )
+
+    assert not result.accepted
+    assert result.reason == "CODE_REVIEW_POST_REVIEW_INTEGRITY_FAILED"
+    assert runner.calls == 1
+    review = in_memory_uow.reviews.get_by_id(result.review_id)
+    assert review and review.status == ReviewStatus.REVIEW_FAILED
+    assert review.verdict is None
+    assert in_memory_uow.reviews.get_by_job_stage(job.job_id, "CODE_REVIEW") is not None
+    diagnostics = [
+        event
+        for event in in_memory_uow.events.list_events(project_id=project.project_id)
+        if event.event_type == EventType.EVIDENCE_DIAGNOSTIC_RECORDED
+        and event.payload.get("review_id") == review.review_id
+    ]
+    assert len(diagnostics) == 1
+    reservation = in_memory_uow.budget_reservations.get_by_id(review.budget_reservation_id)
+    assert reservation and reservation.status == "SETTLED"
+    assert len(in_memory_uow.budget_ledger.list_by_project(project.project_id)) == 1
+    dispatch = in_memory_uow.orchestration_external_actions.get_by_action_key(action_key)
+    assert dispatch and dispatch.status == ExternalActionStatus.FAILED
+    attempts = in_memory_uow.external_action_attempts.list_by_action_key(action_key)
+    assert len(attempts) == 1 and attempts[0].status == "FAILED"
+    events = in_memory_uow.events.list_events(project_id=project.project_id)
+    assert any(event.event_type == EventType.UNAUTHORIZED_REVIEWER_MUTATION for event in events)
+    assert not any(event.event_type == EventType.CODE_REVIEW_COMPLETED for event in events)
+
+    replay = await service.review_candidate(
+        project=project,
+        run=run,
+        job=job,
+        candidate=candidate,
+        manifest=manifest,
+        candidate_worktree=repo,
+        authorship_evidence={},
+        authorization_id=auth.action_request_id,
+        claim_context=claim,
+        dispatch_action_key=action_key,
+    )
+    assert not replay.accepted and runner.calls == 1
 
 
 @pytest.mark.asyncio
