@@ -108,10 +108,21 @@ def list_project_provider_catalog() -> None:
 
 
 @project_catalog_app.command("agents")
-def list_project_agent_catalog() -> None:
-    """Discover configured CLI/model/native-OpenSpec capabilities read-only."""
+def list_project_agent_catalog(
+    project_id: str | None = typer.Option(None, "--project-id"),
+) -> None:
+    """Discover local capabilities, optionally checking a bound project workspace."""
     try:
-        catalog = asyncio.run(ProjectCatalogService().agent_catalog())
+        project_root = None
+        if project_id:
+            with db_manager.session() as session:
+                service = ProjectService(PostgresPersistenceUnitOfWork(session))
+                if service.get_project(project_id) is None:
+                    raise ValueError(f"Project '{project_id}' not found")
+                project_root = service.verified_managed_workspace_root(project_id)
+                if project_root is None:
+                    raise ValueError("Project managed workspace identity is unavailable or invalid")
+        catalog = asyncio.run(ProjectCatalogService().agent_catalog(project_root))
     except Exception as exc:
         typer.echo(f"agent catalog unavailable: {exc}", err=True)
         raise typer.Exit(code=1) from exc
