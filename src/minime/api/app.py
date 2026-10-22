@@ -27,12 +27,9 @@ from minime.db.repository import PostgresPersistenceUnitOfWork
 from minime.db.session import db_manager
 from minime.domain.enums import (
     AuthEventType,
-    EventType,
     OperatorActionType,
     OperatorAuthDecision,
-    PreviewStatus,
     ProjectStatus,
-    ValidationVerdict,
 )
 from minime.domain.interfaces import PersistenceUnitOfWork
 from minime.domain.models import (
@@ -42,21 +39,18 @@ from minime.domain.models import (
     Change,
     ContextDiscoveryReport,
     EfficiencyTelemetryView,
-    Event,
     Job,
     JobLog,
     OperatorActionRecord,
     OperatorActionRequest,
     OperatorActionResult,
     OperatorIdentityDTO,
-    PreviewSession,
     Project,
     ProjectOnboardingInput,
     ProjectOnboardingResult,
     ProviderEfficiencyMetrics,
     ProviderHealth,
     SchedulerStatus,
-    utc_now,
 )
 from minime.logging import redact_secrets
 from minime.services.auth_service import (
@@ -67,7 +61,6 @@ from minime.services.auth_service import (
 )
 from minime.services.budget_service import BudgetService
 from minime.services.capacity_lifecycle_service import CapacityLifecycleService
-from minime.services.container_preview_service import ContainerPreviewService
 from minime.services.context_discovery_service import ContextDiscoveryService
 from minime.services.current_check_batch import validate_current_checks_batch
 from minime.services.legacy_unavailable import unavailable_payload
@@ -1323,219 +1316,21 @@ def list_project_efficiency_metrics(
 # -----------------------------------------------------------------------------
 
 
-class PreviewBuildRequest(BaseModel):
-    project_id: str
-    change_name: str
-    run_id: str | None = None
-    job_id: str | None = None
-    candidate_generation: int = 1
-    head_sha: str
-    base_sha: str
-    worktree_path: str = "."
-    dockerfile: str = "Dockerfile"
-    tag: str | None = None
-
-
-class PreviewStartRequest(BaseModel):
-    preview_id: str
-    internal_port: int = 8787
-    env_vars: dict[str, str] = Field(default_factory=dict)
-    probe_health: bool = True
-    health_path: str = "/api/v1/health"
-
-
-class ValidationSubmitRequest(BaseModel):
-    project_id: str
-    change_name: str
-    head_sha: str
-    base_sha: str
-    image_digest: str
-    verdict: str = "PASS"
-    scenario_results: list[dict[str, Any]] = Field(default_factory=list)
-    run_id: str | None = None
-    preview_id: str | None = None
-    candidate_generation: int = 1
-    notes: str | None = None
-    operator: str = "operator"
-
-
 @app.post("/api/v1/previews/build", tags=["previews"])
-async def build_preview_image(
-    req: PreviewBuildRequest,
-    uow: object | None = None,
-) -> dict[str, Any]:
+async def build_preview_image() -> dict[str, Any]:
     """F1 does not build or persist preview artifacts; that UI flow belongs to F5."""
     raise HTTPException(
         status_code=status.HTTP_410_GONE,
         detail=unavailable_payload("container_preview", "F5"),
     )
 
-    # Retained below as the historical F5 implementation reference.  It is
-    # unreachable through this F1 boundary and must not be reactivated here.
-    project = uow.projects.get_by_id(req.project_id)
-    if not project:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail=f"Project '{req.project_id}' not found.",
-        )
-
-    preview_svc = ContainerPreviewService(uow)
-    tag = (
-        req.tag
-        or f"minime-preview:{req.project_id}-{req.change_name}-gen{req.candidate_generation}"
-    )
-    try:
-        image_digest = await preview_svc.build_image(
-            worktree_path=req.worktree_path,
-            tag=tag,
-            dockerfile=req.dockerfile,
-        )
-    except Exception as e:
-        logger.error(f"Preview build failed: {e}")
-        session = PreviewSession(
-            project_id=req.project_id,
-            change_name=req.change_name,
-            run_id=req.run_id,
-            job_id=req.job_id,
-            candidate_generation=req.candidate_generation,
-            head_sha=req.head_sha,
-            base_sha=req.base_sha,
-            image_digest="",
-            status=PreviewStatus.FAILED,
-            failure_reason=str(e),
-            failure_code="BUILD_FAILED",
-        )
-        uow.preview_sessions.save(session)
-        uow.events.save(
-            Event(
-                project_id=req.project_id,
-                change_id=req.change_name,
-                event_type=EventType.PREVIEW_FAILED,
-                payload={"error": str(e), "head_sha": req.head_sha},
-            )
-        )
-        uow.commit()
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Preview build failed: {e}",
-        )
-
-    session = PreviewSession(
-        project_id=req.project_id,
-        change_name=req.change_name,
-        run_id=req.run_id,
-        job_id=req.job_id,
-        candidate_generation=req.candidate_generation,
-        head_sha=req.head_sha,
-        base_sha=req.base_sha,
-        image_digest=image_digest,
-        status=PreviewStatus.BUILDING,
-    )
-    uow.preview_sessions.save(session)
-    uow.events.save(
-        Event(
-            project_id=req.project_id,
-            change_id=req.change_name,
-            event_type=EventType.PREVIEW_BUILDING,
-            payload={"preview_id": session.preview_id, "image_digest": image_digest, "tag": tag},
-        )
-    )
-    uow.commit()
-    return {
-        "preview_id": session.preview_id,
-        "image_digest": image_digest,
-        "tag": tag,
-        "status": session.status.value,
-    }
-
-
 @app.post("/api/v1/previews/start", tags=["previews"])
-async def start_preview_container(
-    req: PreviewStartRequest,
-    uow: object | None = None,
-) -> dict[str, Any]:
+async def start_preview_container() -> dict[str, Any]:
     """F1 never launches containers from a compatibility endpoint."""
     raise HTTPException(
         status_code=status.HTTP_410_GONE,
         detail=unavailable_payload("container_preview", "F5"),
     )
-
-    session = uow.preview_sessions.get_by_id(req.preview_id)
-    if not session:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail=f"Preview session '{req.preview_id}' not found.",
-        )
-
-    preview_svc = ContainerPreviewService(uow)
-    image_target = session.image_digest
-    try:
-        session.status = PreviewStatus.STARTING
-        uow.preview_sessions.save(session)
-        uow.commit()
-
-        container_id, preview_url, host_port = await preview_svc.start_preview_container(
-            preview_session=session,
-            image_tag_or_digest=image_target,
-            internal_port=req.internal_port,
-            env_vars=req.env_vars,
-        )
-        session.container_id = container_id
-        session.preview_url = preview_url
-        session.allocated_port = host_port
-        session.status = PreviewStatus.PROBING
-        uow.preview_sessions.save(session)
-        uow.commit()
-
-        if req.probe_health:
-            is_healthy = await preview_svc.probe_health(
-                preview_url=preview_url,
-                health_path=req.health_path,
-            )
-            if not is_healthy:
-                session.status = PreviewStatus.FAILED
-                session.failure_reason = "Health probe timed out."
-                session.failure_code = "HEALTH_PROBE_FAILED"
-                uow.preview_sessions.save(session)
-                uow.commit()
-                raise HTTPException(
-                    status_code=status.HTTP_502_BAD_GATEWAY,
-                    detail="Preview container launched but health probe failed.",
-                )
-
-        session.status = PreviewStatus.READY
-        session.ready_at = utc_now()
-        uow.preview_sessions.save(session)
-        uow.events.save(
-            Event(
-                project_id=session.project_id,
-                change_id=session.change_name,
-                event_type=EventType.PREVIEW_READY,
-                payload={
-                    "preview_id": session.preview_id,
-                    "preview_url": preview_url,
-                    "port": host_port,
-                },
-            )
-        )
-        uow.commit()
-        return {
-            "preview_id": session.preview_id,
-            "status": session.status.value,
-            "preview_url": preview_url,
-            "allocated_port": host_port,
-            "container_id": container_id,
-        }
-    except HTTPException:
-        raise
-    except Exception as e:
-        session.status = PreviewStatus.FAILED
-        session.failure_reason = str(e)
-        session.failure_code = "START_FAILED"
-        uow.preview_sessions.save(session)
-        uow.commit()
-        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=str(e))
-
 
 @app.get("/api/v1/previews/{preview_id}", tags=["previews"])
 def get_preview_session(
@@ -1599,7 +1394,6 @@ def get_latest_preview_for_change(
 @app.post("/api/v1/previews/{preview_id}/teardown", tags=["previews"])
 async def teardown_preview_session(
     preview_id: str,
-    uow: object | None = None,
 ) -> dict[str, Any]:
     """F1 does not operate preview containers."""
     raise HTTPException(
@@ -1607,31 +1401,13 @@ async def teardown_preview_session(
         detail=unavailable_payload("container_preview", "F5"),
     )
 
-    session = uow.preview_sessions.get_by_id(preview_id)
-    if not session:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail="Preview session not found.",
-        )
-    preview_svc = ContainerPreviewService(uow)
-    await preview_svc.teardown_preview(session)
-    return {"preview_id": preview_id, "status": PreviewStatus.TERMINATED.value}
-
-
 @app.post("/api/v1/previews/reconcile", tags=["previews"])
-async def reconcile_orphan_previews(
-    uow: object | None = None,
-) -> dict[str, Any]:
+async def reconcile_orphan_previews() -> dict[str, Any]:
     """F1 must not inspect or mutate Docker state."""
     raise HTTPException(
         status_code=status.HTTP_410_GONE,
         detail=unavailable_payload("container_preview", "F5"),
     )
-
-    preview_svc = ContainerPreviewService(uow)
-    cleaned = await preview_svc.reconcile_orphan_previews()
-    return {"cleaned_containers": cleaned, "count": len(cleaned)}
-
 
 @app.get("/api/v1/validations/scenarios/{project_id}/{change_name}", tags=["validations"])
 def get_validation_scenarios_endpoint(
@@ -1663,45 +1439,12 @@ def get_validation_scenarios_endpoint(
 
 @app.post("/api/v1/validations/submit", tags=["validations"])
 def submit_validation(
-    req: ValidationSubmitRequest,
-    request: Request,
-    uow: object | None = None,
 ) -> dict[str, Any]:
     """F1 keeps no candidate-validation writer before the F5 UI exists."""
     raise HTTPException(
         status_code=status.HTTP_410_GONE,
         detail=unavailable_payload("candidate_validation", "F5"),
     )
-
-    verdict = ValidationVerdict.PASS if req.verdict.upper() == "PASS" else ValidationVerdict.FAIL
-    authenticated_operator = getattr(request.state, "operator", None)
-    # The request body is client-controlled and is never an identity authority.
-    # Auth-disabled local environments get an explicit non-identity marker.
-    actor_identity = getattr(authenticated_operator, "email", None) or "unauthenticated"
-    val_svc = ValidationAuthorityService(uow)
-    validation = val_svc.record_validation(
-        project_id=req.project_id,
-        change_name=req.change_name,
-        head_sha=req.head_sha,
-        base_sha=req.base_sha,
-        image_digest=req.image_digest,
-        verdict=verdict,
-        scenario_results=req.scenario_results,
-        run_id=req.run_id,
-        preview_id=req.preview_id,
-        generation=req.candidate_generation,
-        notes=req.notes,
-        operator=actor_identity,
-    )
-    return {
-        "validation_id": validation.validation_id,
-        "verdict": validation.verdict.value,
-        "head_sha": validation.head_sha,
-        "base_sha": validation.base_sha,
-        "image_digest": validation.image_digest,
-        "created_at": validation.created_at.isoformat(),
-    }
-
 
 @app.get("/api/v1/validations/authority/{project_id}/{change_name}", tags=["validations"])
 def get_candidate_validation_authority_endpoint(

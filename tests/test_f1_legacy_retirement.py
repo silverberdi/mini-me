@@ -40,6 +40,9 @@ def test_retired_openspec_preview_and_validation_writers_fail_closed(monkeypatch
                     "base_sha": "base",
                 },
             ),
+            client.post("/api/v1/previews/start"),
+            client.post("/api/v1/previews/example/teardown"),
+            client.post("/api/v1/previews/reconcile"),
             client.post(
                 "/api/v1/validations/submit",
                 json={
