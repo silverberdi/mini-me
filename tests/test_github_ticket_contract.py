@@ -27,6 +27,81 @@ def test_github_adapter_implements_narrow_ticket_and_git_contracts():
     assert isinstance(adapter, GitPullRequestAdapter)
 
 
+def test_project_github_adapter_creates_branch_from_observed_commit_and_reconciles():
+    base_sha = "a" * 40
+    created = []
+
+    def handler(request):
+        if request.method == "GET" and request.url.path.endswith("/git/ref/heads/topic/context"):
+            if not created:
+                return httpx.Response(404, json={"message": "Not Found"})
+            return httpx.Response(
+                200,
+                json={
+                    "ref": "refs/heads/topic/context",
+                    "object": {"sha": created[-1]},
+                },
+            )
+        if request.method == "POST" and request.url.path.endswith("/git/refs"):
+            payload = json.loads(request.content)
+            assert payload == {"ref": "refs/heads/topic/context", "sha": base_sha}
+            created.append(payload["sha"])
+            return httpx.Response(201, json={"ref": payload["ref"]})
+        return httpx.Response(404)
+
+    adapter = GitHubAdapter(auth=_StaticAuth(handler))
+    result = adapter.create_remote_branch("example/demo", "topic/context", base_sha)
+
+    assert result.outcome == ExternalOutcome.SUCCESS
+    assert result.data == base_sha
+    assert len(created) == 1
+    reused = adapter.create_remote_branch("example/demo", "topic/context", base_sha)
+    assert reused.outcome == ExternalOutcome.SUCCESS
+    assert len(created) == 1
+
+
+def test_project_github_adapter_blocks_branch_reuse_with_a_different_base():
+    observed_sha = "b" * 40
+    posts = []
+
+    def handler(request):
+        if request.method == "GET" and request.url.path.endswith("/git/ref/heads/main"):
+            return httpx.Response(
+                200,
+                json={"ref": "refs/heads/main", "object": {"sha": observed_sha}},
+            )
+        if request.method == "POST":
+            posts.append(request)
+        return httpx.Response(404)
+
+    result = GitHubAdapter(auth=_StaticAuth(handler)).create_remote_branch(
+        "example/demo", "main", "a" * 40
+    )
+
+    assert result.outcome == ExternalOutcome.FAILURE
+    assert result.data == observed_sha
+    assert posts == []
+
+
+def test_project_github_adapter_reports_provider_default_branch_only_for_exact_repo():
+    requested = []
+
+    def handler(request):
+        requested.append(request.url.path)
+        return httpx.Response(
+            200,
+            json={"full_name": "example/demo", "default_branch": "develop"},
+        )
+
+    result = GitHubAdapter(auth=_StaticAuth(handler)).get_repository_default_branch(
+        "https://github.com/example/demo.git"
+    )
+
+    assert result.outcome == ExternalOutcome.SUCCESS
+    assert result.data == "develop"
+    assert requested == ["/repos/example/demo"]
+
+
 def test_issue_comment_reconciles_by_operation_key_without_duplicate_post():
     comments = []
     posts = []

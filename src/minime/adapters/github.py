@@ -12,7 +12,7 @@ from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Callable
-from urllib.parse import urlparse
+from urllib.parse import quote, urlparse
 
 import httpx
 import jwt
@@ -173,6 +173,26 @@ def _github_permission_satisfies(actual: str | None, required: str) -> bool:
     return actual == required
 
 
+def _is_valid_git_branch(branch: str) -> bool:
+    if not isinstance(branch, str) or not branch or branch.startswith("-"):
+        return False
+    try:
+        result = subprocess.run(
+            ["git", "check-ref-format", "--branch", branch],
+            capture_output=True,
+            text=True,
+            timeout=5,
+            check=False,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return False
+    return result.returncode == 0
+
+
+def _is_git_sha(value: Any) -> bool:
+    return isinstance(value, str) and bool(re.fullmatch(r"(?:[0-9a-f]{40}|[0-9a-f]{64})", value))
+
+
 class GitHubAdapter(GitHubAdapterInterface):
     """GitHub REST and Git adapter under the configured App installation."""
 
@@ -319,6 +339,216 @@ class GitHubAdapter(GitHubAdapterInterface):
                 data=False,
                 provider_detail=str(exc),
                 error_message=str(exc),
+            )
+
+    def get_repository_default_branch(self, repository: str) -> ExternalActionResult[str]:
+        """Read the exact repository identity and its provider-declared default branch."""
+        try:
+            repo = self._repo(repository)
+            response = self._request("GET", f"/repos/{repo}")
+            if response.status_code in (401, 403):
+                return ExternalActionResult(
+                    outcome=ExternalOutcome.FAILURE,
+                    source_adapter="github_rest",
+                    reason_code=ExternalReasonCode.AUTH_REQUIRED,
+                    retry_safety=RetrySafety.SAFE,
+                    error_message="GitHub App is unauthorized to inspect repository settings.",
+                )
+            if response.status_code == 404:
+                return ExternalActionResult(
+                    outcome=ExternalOutcome.FAILURE,
+                    source_adapter="github_rest",
+                    reason_code=ExternalReasonCode.NOT_FOUND,
+                    retry_safety=RetrySafety.SAFE,
+                    error_message="Configured GitHub repository was not found or is inaccessible.",
+                )
+            if response.status_code >= 400:
+                return ExternalActionResult(
+                    outcome=ExternalOutcome.UNKNOWN,
+                    source_adapter="github_rest",
+                    reason_code=ExternalReasonCode.UNOBSERVABLE,
+                    retry_safety=RetrySafety.SAFE,
+                    provider_detail=f"HTTP {response.status_code}",
+                    error_message="GitHub repository settings are unobservable.",
+                )
+            data = response.json()
+            actual = self._repo(str(data.get("full_name", "")))
+            branch = data.get("default_branch")
+            valid_branch = isinstance(branch, str) and _is_valid_git_branch(branch)
+            if actual != repo or not valid_branch:
+                return ExternalActionResult(
+                    outcome=ExternalOutcome.FAILURE,
+                    source_adapter="github_rest",
+                    reason_code=ExternalReasonCode.CONFLICT,
+                    retry_safety=RetrySafety.SAFE,
+                    error_message="GitHub repository identity or default branch is invalid.",
+                )
+            return ExternalActionResult(
+                outcome=ExternalOutcome.SUCCESS,
+                source_adapter="github_rest",
+                reason_code=ExternalReasonCode.EXECUTION_SUCCESS,
+                retry_safety=RetrySafety.SAFE,
+                data=branch,
+            )
+        except (GitHubAuthorizationError, GitHubRemoteError, ValueError, TypeError):
+            return ExternalActionResult(
+                outcome=ExternalOutcome.UNKNOWN,
+                source_adapter="github_rest",
+                reason_code=ExternalReasonCode.UNOBSERVABLE,
+                retry_safety=RetrySafety.SAFE,
+                error_message="GitHub repository default branch could not be verified.",
+            )
+
+    def _observe_remote_branch_sha(
+        self, repository: str, branch: str
+    ) -> ExternalActionResult[str]:
+        repo = self._repo(repository)
+        if not _is_valid_git_branch(branch):
+            return ExternalActionResult(
+                outcome=ExternalOutcome.FAILURE,
+                source_adapter="github_rest",
+                reason_code=ExternalReasonCode.CONFLICT,
+                retry_safety=RetrySafety.SAFE,
+                error_message="Requested GitHub branch name is invalid.",
+            )
+        path = f"/repos/{repo}/git/ref/heads/{quote(branch, safe='/')}"
+        try:
+            response = self._request("GET", path)
+            if response.status_code == 404:
+                return ExternalActionResult(
+                    outcome=ExternalOutcome.FAILURE,
+                    source_adapter="github_rest",
+                    reason_code=ExternalReasonCode.NOT_FOUND,
+                    retry_safety=RetrySafety.SAFE,
+                    error_message="GitHub branch does not exist.",
+                )
+            if response.status_code in (401, 403):
+                return ExternalActionResult(
+                    outcome=ExternalOutcome.FAILURE,
+                    source_adapter="github_rest",
+                    reason_code=ExternalReasonCode.AUTH_REQUIRED,
+                    retry_safety=RetrySafety.SAFE,
+                    error_message="GitHub App is unauthorized to inspect the requested branch.",
+                )
+            if response.status_code >= 400:
+                return ExternalActionResult(
+                    outcome=ExternalOutcome.UNKNOWN,
+                    source_adapter="github_rest",
+                    reason_code=ExternalReasonCode.UNOBSERVABLE,
+                    retry_safety=RetrySafety.SAFE,
+                    provider_detail=f"HTTP {response.status_code}",
+                    error_message="GitHub branch state is unobservable.",
+                )
+            payload = response.json()
+            sha = ((payload.get("object") or {}).get("sha"))
+            expected_ref = f"refs/heads/{branch}"
+            if payload.get("ref") != expected_ref or not _is_git_sha(sha):
+                return ExternalActionResult(
+                    outcome=ExternalOutcome.UNKNOWN,
+                    source_adapter="github_rest",
+                    reason_code=ExternalReasonCode.EVIDENCE_INSUFFICIENT,
+                    retry_safety=RetrySafety.SAFE,
+                    error_message="GitHub returned incomplete branch identity evidence.",
+                )
+            return ExternalActionResult(
+                outcome=ExternalOutcome.SUCCESS,
+                source_adapter="github_rest",
+                reason_code=ExternalReasonCode.EXECUTION_SUCCESS,
+                retry_safety=RetrySafety.SAFE,
+                data=sha,
+            )
+        except (GitHubAuthorizationError, GitHubRemoteError, ValueError, TypeError):
+            return ExternalActionResult(
+                outcome=ExternalOutcome.UNKNOWN,
+                source_adapter="github_rest",
+                reason_code=ExternalReasonCode.UNOBSERVABLE,
+                retry_safety=RetrySafety.SAFE,
+                error_message="GitHub branch state is unobservable.",
+            )
+
+    def create_remote_branch(
+        self, repository: str, branch: str, base_sha: str
+    ) -> ExternalActionResult[str]:
+        """Create a branch from a proven commit and reconcile uncertain POST outcomes."""
+        repo = self._repo(repository)
+        if not _is_valid_git_branch(branch) or not _is_git_sha(base_sha):
+            return ExternalActionResult(
+                outcome=ExternalOutcome.FAILURE,
+                source_adapter="github_rest",
+                reason_code=ExternalReasonCode.CONFLICT,
+                retry_safety=RetrySafety.SAFE,
+                error_message="Branch creation requires a valid branch name and observed commit SHA.",
+            )
+        before = self._observe_remote_branch_sha(repo, branch)
+        if before.outcome == ExternalOutcome.SUCCESS:
+            if before.data == base_sha:
+                return ExternalActionResult(
+                    outcome=ExternalOutcome.SUCCESS,
+                    source_adapter="github_rest",
+                    reason_code=ExternalReasonCode.REUSED_EXISTING,
+                    retry_safety=RetrySafety.SAFE,
+                    data=base_sha,
+                )
+            return ExternalActionResult(
+                outcome=ExternalOutcome.FAILURE,
+                source_adapter="github_rest",
+                reason_code=ExternalReasonCode.CONFLICT,
+                retry_safety=RetrySafety.SAFE,
+                data=before.data,
+                error_message="Requested branch already exists at a different commit.",
+            )
+        if before.reason_code != ExternalReasonCode.NOT_FOUND:
+            return before
+        try:
+            response = self._request(
+                "POST",
+                f"/repos/{repo}/git/refs",
+                json={"ref": f"refs/heads/{branch}", "sha": base_sha},
+            )
+            if response.status_code in (401, 403):
+                return ExternalActionResult(
+                    outcome=ExternalOutcome.FAILURE,
+                    source_adapter="github_rest",
+                    reason_code=ExternalReasonCode.AUTH_REQUIRED,
+                    retry_safety=RetrySafety.UNSAFE,
+                    error_message="GitHub App is unauthorized to create the requested branch.",
+                )
+            observed = self._observe_remote_branch_sha(repo, branch)
+            if observed.outcome == ExternalOutcome.SUCCESS and observed.data == base_sha:
+                return ExternalActionResult(
+                    outcome=ExternalOutcome.SUCCESS,
+                    source_adapter="github_rest",
+                    reason_code=(
+                        ExternalReasonCode.EXECUTION_SUCCESS
+                        if response.status_code in (200, 201)
+                        else ExternalReasonCode.REUSED_EXISTING
+                    ),
+                    retry_safety=RetrySafety.UNSAFE,
+                    data=base_sha,
+                )
+            if observed.outcome == ExternalOutcome.SUCCESS:
+                return ExternalActionResult(
+                    outcome=ExternalOutcome.FAILURE,
+                    source_adapter="github_rest",
+                    reason_code=ExternalReasonCode.CONFLICT,
+                    retry_safety=RetrySafety.UNSAFE,
+                    data=observed.data,
+                    error_message="Created branch head does not match the requested base commit.",
+                )
+            return ExternalActionResult(
+                outcome=ExternalOutcome.AMBIGUOUS,
+                source_adapter="github_rest",
+                reason_code=ExternalReasonCode.POSTCONDITION_NOT_PROVEN,
+                retry_safety=RetrySafety.UNKNOWN,
+                error_message="Branch creation outcome is unobservable; retry requires reconciliation.",
+            )
+        except (GitHubAuthorizationError, GitHubRemoteError, ValueError):
+            return ExternalActionResult(
+                outcome=ExternalOutcome.AMBIGUOUS,
+                source_adapter="github_rest",
+                reason_code=ExternalReasonCode.UNOBSERVABLE,
+                retry_safety=RetrySafety.UNKNOWN,
+                error_message="Branch creation outcome is unobservable; retry requires reconciliation.",
             )
 
     def verify_connection_permissions(

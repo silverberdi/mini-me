@@ -919,6 +919,12 @@ class GitPullRequestAdapter(Protocol):
 
     def verify_repository(self, repository: str) -> ExternalActionResult[bool]: ...
 
+    def get_repository_default_branch(self, repository: str) -> ExternalActionResult[str]: ...
+
+    def create_remote_branch(
+        self, repository: str, branch: str, base_sha: str
+    ) -> ExternalActionResult[str]: ...
+
     def get_remote_branch_head(
         self, repository: str, branch: str, remote: str = "origin"
     ) -> ExternalActionResult[str]: ...
@@ -947,6 +953,22 @@ class GitPullRequestAdapter(Protocol):
 
 
 class GitHubAdapterInterface(ABC):
+    def get_repository_default_branch(self, repository: str) -> ExternalActionResult[str]:
+        return ExternalActionResult[str](
+            outcome=ExternalOutcome.UNKNOWN,
+            source_adapter="interface",
+            reason_code=ExternalReasonCode.UNSUPPORTED,
+        )
+
+    def create_remote_branch(
+        self, repository: str, branch: str, base_sha: str
+    ) -> ExternalActionResult[str]:
+        return ExternalActionResult[str](
+            outcome=ExternalOutcome.UNKNOWN,
+            source_adapter="interface",
+            reason_code=ExternalReasonCode.UNSUPPORTED,
+        )
+
     def validate_issue_binding(
         self,
         expected_repository: str,
