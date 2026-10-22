@@ -1,33 +1,11 @@
-# State Machine
+# Estado operativo mínimo — dirección v1.2
 
-## Change states
-`DISCOVERED → READY → IN_PROGRESS → NEEDS_HUMAN → APPROVED → MERGE_PENDING → CLOSING → DONE`
+**Fuente:** [CONTRATO_RECTOR.md](CONTRATO_RECTOR.md). La máquina de estados heredada describe código histórico; NO es especificación obligatoria del nuevo flujo.
 
-Exceptional/terminal paths: `BLOCKED`, `REJECTED`, `CANCELLED`.
+El flujo visible requerido es: **ticket seleccionado → Propose → revisión propuesta → Apply → Verify → revisión código condicional → PR pendiente merge humano → sync/archive en rama documental → PR documental → ticket cerrado**.
 
-`CHANGES_REQUESTED` is a human decision that returns the change to `IN_PROGRESS`; it need not be a long-lived portfolio state.
+Correcciones regresan al responsable del trabajo y vuelven a la revisión pertinente, con límite de intentos. Preguntas humanas conservan el contexto y esperan respuesta sin consumir cuota. Un fallo conserva Git/worktree y reintenta solo si la operación externa no ocurrió ya.
 
-## Job stages
-Typical path:
+**No introducir una máquina adicional** de subestados de capacidad, recovery, scoring o saga sin una necesidad explícita y demostrada en la fase actual. DB guarda solo etapa/checkpoint mínimo y referencias a artefactos autoritativos externos.
 
-`QUEUED → PREPARING → IMPLEMENTING → CHECKING_IMPLEMENTATION → REVIEWING → [CORRECTING loop] → CHECKING_FINAL → [OPTIONAL_AUTHORIZED_AUDIT] → [DEPLOYING_PREVIEW → VERIFYING_PREVIEW → AWAITING_HUMAN_VALIDATION when required] → AWAITING_HUMAN → FINALIZING → PUSHING/PR_READY → AWAITING_MERGE → DEPLOYING_PRODUCTION → VERIFYING_PRODUCTION → POST_MERGE_CLOSING → COMPLETED`
-
-Temporary/error states include `RETRY_SCHEDULED`, `WAITING_CAPACITY`, `WAITING_DEPENDENCY`, `BLOCKED`, `FAILED`, `CANCELLED`.
-
-## Scheduler modes
-- `RUN`: may admit new READY changes.
-- `DRAIN`: both primary subscription providers exhausted; do not admit new READY work; paid fallback may finish eligible in-flight work.
-- `WAIT`: no eligible drain work; await primary capacity recovery.
-
-Scheduler mode is not a change state.
-
-## Transition invariants
-- State changes occur through centralized domain transition functions.
-- Current state update + event append occur atomically where practical.
-- No `READY → DONE`, `IMPLEMENTING → APPROVED`, or similar bypasses.
-- `FAILED` attempt does not automatically fail the change.
-- `WAITING` means mini me knows the recovery condition and does not currently require human judgment.
-- E2E_PASS and DEPLOYED_VERIFIED are **evidence gates**, not inferred merely from stage transition, mock runner response or successful HTTP /health.
-- Native OpenSpec workflow events and candidate/tool evidence precede advancing apply/verify/sync/archive stages; a custom Python emulation is not authoritative.
-- Tool/provider fallback requires both primary providers unable to cover the stage **and** explicit operator authorization. Unknown reset/remaining quota may not be reported as certain.
-- `BLOCKED` means safe progress requires human intervention or resolution.
+La eliminación de estados/tablas históricos deberá planificarse en F1 y completarse en F6, con datos y rollback preservados.

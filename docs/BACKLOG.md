@@ -1,59 +1,28 @@
-# mini me — backlog de recuperación orientado a valor (propuesto)
+# Backlog vigente — Reconstrucción gacela de mini me
 
-> **Estado:** plan propuesto; NO equivale a código implementado ni prueba productiva. Aprobación de este PR actualiza la **planificación**, no autoriza por sí sola consumo de agentes, migraciones, merge de otros PR, despliegue ni activación del scheduler.
->
-> **Autoridad:** `docs/BUSINESS_INTENT.md` → `docs/CANONICAL_DECISIONS.md` → `docs/PRODUCT.md` → `docs/CHANGE_DELIVERY_CONTRACT.md` → OpenSpec vigente por Change. Ante contradicción, detener `propose`/`apply`, documentar discrepancia y resolverla en el Change; jamás inventar reglas alternativas.
+**Autoridad:** docs/CONTRATO_RECTOR.md (v1.2). **ÚNICO PLAN ACTIVO: 6 fases = 6 Changes OpenSpec.**
+Este documento y los Issues son planificación. Ni su creación ni la aprobación documental ejecutan agentes, migraciones, scheduler, despliegue o merge de código.
 
-## Objetivo y definición del valor
+| Orden | Issue GitHub | Change planificado (NO creado) | Resultado verificable | Ejecutor de la fase |
+| --- | --- | --- | --- | --- |
+| 1 | [#169](https://github.com/silverberdi/mini-me/issues/169) | gacela-01-depuracion-inicial | Eliminar emulación OpenSpec, lógica y DB obsoletas sin romper núcleo útil | Agentes externos |
+| 2 | [#170](https://github.com/silverberdi/mini-me/issues/170) | gacela-02-proyectos | Configurar proyectos, roles/modelos/contexto y GitHub inicial | Agentes externos |
+| 3 | [#171](https://github.com/silverberdi/mini-me/issues/171) | gacela-03-openspec-y-revision | E2E real ticket → propose/review → apply → verify/review → PR/merge humano → sync/archive → PR documental → cierre | Agentes externos |
+| 4 | [#172](https://github.com/silverberdi/mini-me/issues/172) | gacela-04-skills-base | Skills mínimas reutilizables seleccionables y vinculadas | Agentes externos |
+| 5 | [#173](https://github.com/silverberdi/mini-me/issues/173) | gacela-05-ui-self-hosted | UI móvil/tablet/web diseñada y desarrollada por mini me sobre sí mismo | **mini me** |
+| 6 | [#174](https://github.com/silverberdi/mini-me/issues/174) | gacela-06-depuracion-final | Eliminar código/DB obsoleto residual; pruebas y cierre ejecutados por mini me | **mini me** |
 
-mini me coordina **agentes de IA que usan OpenSpec**; no es una IA programadora, un generador propio de artefactos SDD ni un reemplazo de los workflows OpenSpec. El valor es que el dueño registre trabajo y mini me seleccione agentes y capacidades, prepare contexto autorizado, gobierne etapas/cuotas/seguridad, preserve progreso y produzca software revisado hasta PR y cierre tras merge humano. GitHub conserva la cartera; OpenSpec es autoridad sobre comportamiento y planificación; PostgreSQL sobre ejecución y evidencia; Git sobre código e identidades de candidatos.
+## Reglas de admisión y desarrollo
+1. No abrir más Changes para dividir estas fases. Cada Change puede tener MUCHAS specs y tareas de implementación, pruebas, migraciones y limpieza.
+2. Solo después de cerrar la fase anterior puede ejecutarse la siguiente. No arrancar automáticamente por aprobar esta planificación.
+3. Un ticket activo por proyecto; fuente de tickets remota y más antigua elegible, sin cola DB ni algoritmo de prioridad.
+4. Revisión independiente de propuesta obligatoria; código según política. Autorización humana para merge de implementación; cierre documental nativo y PR acotado.
+5. Fase 3 debe probar recorrido funcional real; F5 y F6 deben ser efectivamente ejecutadas POR mini me, no mediante transferencia manual de prompts.
+6. POO, SOLID, DRY, KISS, YAGNI; reducción de servicios/estados/DB, no renombrado de complejidad.
 
-Cada Change agrupa **todas** las specs backend/frontend/persistencia/CLI/harness/seguridad necesarias para entregar una capacidad operativa completa. Está prohibido dividir una capacidad en fases técnicas que no entreguen utilidad. Todas las comprobaciones pasan por E2E real de la etapa y del resultado desplegado, según `docs/CHANGE_DELIVERY_CONTRACT.md`.
+## Qué ocurre con el backlog anterior
+Los dossiers [docs/backlog/MM-Rxx.md](backlog/), PR históricos, tickets N01–N05 (incluyendo #133–#138), #162 y demás issues anteriores quedan como antecedentes y fuente de evidencia **no ejecutable** bajo el nuevo roadmap hasta conciliación por fase. No borrar, cerrar en masa ni reasignar Issues anteriores automáticamente. No usar el antiguo MM-R01–R10 como plan en paralelo.
 
-## Orden de entrega aprobado para elaboración (dependencias por capacidad)
+La fuente de tickets real para el futuro ciclo de mini me seguirá siendo GitHub; estos seis Issues son los requerimientos de esta reconstrucción. La prioridad es **fecha remota** (para proyectos activos) y **orden contractual de fases** (durante la reconstrucción), no puntajes.
 
-| ID | Change OpenSpec (slug) | Entrega observable | Depende de | Ficha |
-|---|---|---|---|---|
-| MM-R01 | `real-openspec-agent-execution` | Un OpenSpec READY es implementado mediante el workflow de un agente real, revisado por otro y entregado en PR | Baseline segura | [Ficha](backlog/MM-R01.md) |
-| MM-R02 | `intelligent-github-to-openspec-intake` | Issue real → propuesta OpenSpec coherente creada por IA, con trazabilidad y DoR | R01 | [Ficha](backlog/MM-R02.md) |
-| MM-R03 | `autonomous-backlog-to-reviewed-pr` | Work item admitido → propuesta, ejecución y PR revisado sin handoffs manuales | R01–R02 | [Ficha](backlog/MM-R03.md) |
-| MM-R04 | `native-openspec-delivery-and-closure` | Merge humano → workflows nativos `sync/archive`, despliegue autorizado y DONE íntegro | R03 | [Ficha](backlog/MM-R04.md) |
-| MM-R05 | `quota-safe-execution-and-recovery` | Espera/reanudación automática segura ante cuota, autenticación, reinicio o fallo | R03–R04; garantías mínimas desde R01 | [Ficha](backlog/MM-R05.md) |
-| MM-R06 | `project-aware-agent-capabilities` | Agentes usan skills/hooks/commands/guards/harnesses adecuados en un cambio real | R05; capacidades esenciales desde R01 | [Ficha](backlog/MM-R06.md) |
-| MM-R07 | `operational-control-and-human-attention` | UI explica estado/causas/siguiente paso y resuelve gates humanos reales | R03–R06 | [Ficha](backlog/MM-R07.md) |
-| MM-R08 | `multi-repository-sdd-execution` | Un segundo repo completa E2E respetando su propia metodología y bindings | R01–R07 | [Ficha](backlog/MM-R08.md) |
-| MM-R09 | `governed-agent-capability-evolution` | Skills/hooks/harnesses faltantes evolucionan vía OpenSpec y revisión humana | R06–R08 | [Ficha](backlog/MM-R09.md) |
-| MM-R10 | `autonomous-self-development` | mini me selecciona y desarrolla una mejora de mini me con PR/merge/closure verificable | R01–R09 | [Ficha](backlog/MM-R10.md) |
-
-**Política de dependencias:** no hay prerrequisito de “terminar todos los mecanismos técnicos” antes de obtener el valor del primer Change. Cada Change debe implementar la porción vertical mínima completa, incluyendo seguridad, preflight, E2E, observabilidad y rollback aplicables. Cambios futuros amplían sin dejar rotas las garantías existentes. Reordenar únicamente por decisión explícita que preserve dichas garantías.
-
-## Reconciliación conservadora del backlog anterior
-
-- `docs/ROADMAP.md` anterior declaraba 001–021/018.* “DELIVERED”. Son **hitos históricos de implementación**, no evidencias suficientes del objetivo final. Se conserva su historial Git/PR/OpenSpec; su funcionalidad debe ser revalidada como parte de los E2E verticales.
-- Issues activos [#133](https://github.com/silverberdi/mini-me/issues/133) y [#138](https://github.com/silverberdi/mini-me/issues/138): ambas entradas refieren a N01; no crear otro N01. Mantener identidades/historial; decidir canon y retiro del duplicado mediante reconciliación idempotente antes de cambiar Issues/DB.
-- N01 no se puede recrear ni borrar: conservar Run/Job, workspace CREATED, intentos, modificados, eventos, ownership y acciones externas. [PR #152](https://github.com/silverberdi/mini-me/pull/152) permanece Draft y debe evaluarse como posible insumo R01/R05, no declararse cierre.
-- Issues [#134](https://github.com/silverberdi/mini-me/issues/134), [#135](https://github.com/silverberdi/mini-me/issues/135), [#136](https://github.com/silverberdi/mini-me/issues/136), [#137](https://github.com/silverberdi/mini-me/issues/137): conservar alcance útil como escenarios de R07 (N02/N04/N05) y gobernanza de reconciliación de R02/R03 (N03). No ejecutar los cinco como un roadmap paralelo.
-- [PR #140](https://github.com/silverberdi/mini-me/pull/140): hooks de calidad todavía no fusionados. Auditar integración/invariantes con R01/R06/R09 antes de reutilizarlos, sin duplicar su trabajo.
-- Issues históricos ya cerrados sobre routing local, Qwen, telemetry, grafos, UX y harnesses: **no reabrir automáticamente**; reutilizar únicamente lo demostrado necesario por el Change vigente. Prohibido introducir benchmarking/analítica/estética como prerequisito de una primera entrega real.
-- OpenSpec `changes/archive/`, documentación pasada y eventos de producción son **historial inmutable**, no “basura” para limpiar. Nunca migrar o declarar DONE artificialmente para cuadrar métricas.
-- La herramienta GitHub conectada no expone aquí una API de GitHub Projects v2; la reconciliación de campos/cards del Project requiere un ejecutor autorizado capaz de verificarla. **No suponer que cambiar estos archivos sincroniza el Project ni PostgreSQL.**
-
-## Regla de planificación OpenSpec
-
-Estas fichas son **contratos de backlog**, no `proposal.md` ni `specs/` artificiales. Solamente un Change activo se convierte mediante el workflow `propose` del **agente** en `openspec/changes/<slug>/`. En la propuesta se materializan todas las specs funcionales y escenarios de la ficha, con verificación de consistencia. `apply` y `verify` ocurren mediante los workflows instalados en el agente correspondiente, bajo los guards del proyecto. No emitir prompts libres fuera de ese circuito.
-
-Los nombres e invocaciones son **específicos por agente**: Codex usa el skill **efectivamente instalado** (por ejemplo, `$openspec-propose` y `$openspec-apply-change` en este repositorio); otros agentes pueden usar `/opsx-propose` o `/opsx:propose`. Resolver el nombre real desde archivos/versiones del runner en preflight; no hardcodear un nombre que la instalación no registra. Son invocaciones en el **agente**, no binarios de shell `opsx`. El CLI `openspec` puede proporcionar `new`, `status`, `instructions`, `validate` y `archive` conforme a versión instalada. mini me jamás simulará una llamada al workflow invocando un script Python que replique su semántica.
-
-## Ingeniería y capacidades precargadas
-
-- `docs/ENGINEERING_DISCIPLINE.md` establece diseño/seguridad/mantenibilidad/UX, inventario de servicios/callers, controles de drift, migración y eliminación de código muerto **en el mismo Change**, seguido de pruebas/E2E después del retiro.
-- `docs/agent-capabilities/V1_MANIFEST.md` y sus contratos `HOOK_CONTRACTS.md`, `HARNESS_CONTRACT.md`, `RETIREMENT_MAP.md` aportan decisiones, interfaces y candidatos ya definidos; no se solicita a Codex/AGY que los infieran desde cero.
-- `.agent/skills/` y `.agents/skills/` contienen v1 de `minime-engineering-discipline`, `minime-safe-retirement` y `minime-real-e2e-proof`. `.agent/workflows/minime-{propose,apply,verify}-vertical.md` son adaptadores de orientación hacia los **workflows OpenSpec oficiales**, nunca sustitutos.
-- PR #140 sigue pendiente de revisión para hooks ejecutables. **Los nuevos archivos de skills son instrucciones, no pruebas de ejecución ni hooks técnicos activos.**
-
-## Primera admisión
-
-1. Scheduler productivo permanece **disabled/inactive** hasta E2E autorizado, capacidad verificable y release gate cumplido.
-2. Obtener baseline `main`, estado real de PR #140/#152 y del N01, binding exacto, política de cuota, configuración de OpenSpec y compatibilidad CLI/harness.
-3. Abrir con Codex (cuando esté disponible) el workflow instalado `$openspec-propose real-openspec-agent-execution` usando la ficha `docs/backlog/MM-R01.md` y **`docs/agent-capabilities/R01_IMPLEMENTATION_STARTER.md`**. No inventar prompt largo: este archivo ya suministra inspección, interfaces, E2E y retiro. El workflow propone; **no ejecuta apply en la misma solicitud**. Exigir a OpenSpec la propuesta multi-spec y pruebas E2E; no implementar por prompt libre.
-4. No se autoriza `apply` hasta revisión de propuesta, riesgos y ruta real de prueba. Mantener merge humano y presupuesto explícito para pruebas de inferencia.
+Véase [RECONCILIACION_LEGADO.md](RECONCILIACION_LEGADO.md).

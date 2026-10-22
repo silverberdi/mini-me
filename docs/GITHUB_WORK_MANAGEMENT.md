@@ -1,41 +1,18 @@
-# GitHub Work Management
+# Gestión de tickets y PR — GitHub inicial
 
-## Topology
-One global GitHub Project under the owner's personal account. Issues remain in the repository that owns the work.
+**Autoridad:** [CONTRATO_RECTOR.md](CONTRATO_RECTOR.md). GitHub Issues es la fuente remota de tickets inicial; Azure Boards podrá añadirse mediante adaptador mínimo cuando sea necesario. Integración de tickets separada de integración Git/PR.
 
-## Source-of-truth rule
-GitHub Project fields are for planning/visualization. Runtime repository selection derives only from validated durable project binding.
+## Fuente y selección
+No replicar tickets como cola propia en PostgreSQL. Consultar Issues abiertos elegibles, ordenar por created_at ascendente y resolver empates con ID estable. Procesar un cambio activo por proyecto; no saltar bloqueos silenciosamente ni usar score o prioridad sintética.
 
-Required logical binding:
-`project_id ↔ repository identity ↔ GitHub issue ↔ OpenSpec change`.
+## Contrato básico de tickets
+Listar, leer, crear, comentar hallazgos/avance/opciones y cerrar solo tras sync/archive y PR documental fusionado. El ticket nuevo debe incluir objetivo, comportamiento, alcance y criterios verificables; el agente usa skill seleccionada donde corresponda, la API determinista ejecuta escritura.
 
-## Suggested Project fields
-- Status: Backlog / Ready / In Progress / Human Review / Blocked / Done / Closed
-- Priority: P0/P1/P2/P3
-- Stage
-- OpenSpec Change
-- Project (display only)
-- Type: Feature/Bug/Improvement/Tech Debt
-- Complexity: S/M/L
-- Executor
-- Reviewer
-- Outcome
-- Started
-- Completed
+## PR implementación
+Rama única del candidato → push y PR → evidencia de verify/review → humano autoriza merge para SHA exacto → mini me ejecuta por integración Git respetando protecciones. Los agentes no se autoautorizan.
 
-Do not duplicate every `tasks.md` checkbox into GitHub Issues. MM-Rxx backlog dossiers are planning sources; each approved OpenSpec Change should correspond to **one** canonical GitHub Issue and a durable change binding only after de-duplication. The N01 #133/#138 duplicate must be retired carefully without loss of history. Never equate writing docs on a branch with updating GitHub Projects v2/production DB.
+## PR documental
+Después del merge anterior: rama nueva desde main, pensamiento con OpenSpec sync/archive nativos → commit/push/PR documental → merge automatizable SOLO con política y protecciones Git permitiéndolo → cerrar Issue → siguiente.
 
-## Status mapping
-- DISCOVERED → Backlog
-- READY → Ready
-- IN_PROGRESS → In Progress
-- NEEDS_HUMAN / MERGE_PENDING → Human Review
-- BLOCKED → Blocked
-- DONE → Done
-- REJECTED/CANCELLED → Closed
-
-## PR lifecycle
-A candidate should be committed/pushed and represented by a **draft PR before UI human validation**, so validation is tied to an exact head/base identity. After successful human approval the PR may become ready for human merge.
-
-## Post-merge
-mini me detects and corroborates human merge, deploys only according to project authorization and verifies **functional** behavior in the destination. OpenSpec sync/archive are performed by **native agent/OpenSpec workflow**, not custom Python merges or shutil-based simulators. If closure creates new tracked Git changes **after** human merge, the design must use a protected-branch-compliant and human-authorized Git route (for example an additional closure PR) or an explicitly approved pre-merge inclusion strategy; no silent direct push to protected main. Then mini me reconciles Issue/Project, finalizes metrics and only cleans safe owned worktrees. DONE requires no unverified closure phase or side effect.
+## Backlog de esta reconstrucción
+Únicamente Issues [#169](https://github.com/silverberdi/mini-me/issues/169)–[#174](https://github.com/silverberdi/mini-me/issues/174), uno por fase/Change OpenSpec. No cerrar ni migrar automáticamente #133–#138, #162 u otros tickets anteriores por aprobar la planificación. Ver [BACKLOG.md](BACKLOG.md).

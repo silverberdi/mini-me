@@ -1,35 +1,24 @@
-# Product Definition
+# Definición del producto — mini me
 
-## Core user
-One technical owner/operator supervising several software repositories.
+**Fuente rectora:** [CONTRATO_RECTOR.md](CONTRATO_RECTOR.md) v1.2.
 
-## Primary outcomes
-1. Centralize pending work and visible progress in one personal GitHub Project.
-2. Convert a READY OpenSpec change into code using the **real agent-side OpenSpec workflows** without manual handoffs; also let authorized GitHub Issues generate agent-led OpenSpec proposals.
-3. Use Codex ↔ Antigravity as stage-assigned proposer/implementer/reviewer, with candidate-author/reviewer independence.
-4. Verify changes through native OpenSpec agent workflows, deterministic checks, independent primary-agent review and real end-to-end tests; DeepSeek is not a mandatory routine auditor.
-5. Survive daemon restart, provider exhaustion and transient failures without losing useful work.
-6. Use DeepSeek/OpenRouter only as compatible explicitly authorized and budgeted fallbacks after both subscription primaries are unable to complete a required stage; never admit fresh work merely because paid fallback is available.
-7. For UI changes requiring human validation, deliver a testable containerized preview plus exact instructions for what to test and expected results.
-8. Automate draft PR, **native OpenSpec sync/archive**, authorized deployment and closure around human approval/merge gates; mini me does not implement OpenSpec or write code itself.
-9. Measure value delivered and verified postdeployment (not test counts), real E2E, quality, provider effectiveness, autonomy, interrupted-work recovery and authorized fallback cost.
-10. Progressively support self-development: mini me may select and orchestrate changes to its own repo but never auto-merge or bypass policy.
+mini me es un coordinador pequeño de desarrollos de software que convierte tickets remotos en resultados mediante agentes y workflows nativos de OpenSpec. **No programa ni emula OpenSpec.**
 
-## MVP non-goals
-- Autonomous merge.
-- Autonomous product/architecture decisions when specs are ambiguous.
-- Reimplementing OpenSpec proposals, apply, verify, sync or archive as deterministic Python or prompts divorced from agent workflows.
-- Claiming product delivery based only on unit/integration tests, fake agent runners or HTTP health checks.
-- Dynamic learned provider routing.
-- Multiple simultaneous implementation changes in one repository.
-- Distributed remote workers.
-- Commercial multi-installation support or multitenancy.
-- PWA remote supervision (post-MVP).
-- Qwen local holding any correctness/security/human authority.
-- OpenRouter starting new work merely because budget is available.
+## Usuario
+Un operador técnico supervisa proyectos desde una instalación personal, en escritorio/tablet/móvil, sin pasar mensajes manualmente entre agentes.
 
-## First adoption sequence
-1. Deliver a real agent-side OpenSpec implementation, independent review and PR (MM-R01) while preserving existing state/N01.
-2. Prove GitHub-to-OpenSpec intake, queue and real postmerge closure (MM-R02–R04), with quota-safe recovery (MM-R05).
-3. Add necessary skills/hooks/harnesses and operational UI (MM-R06–R07), then prove on a second authorized repository (MM-R08).
-4. Enable governed capability evolution and self-development only after real E2E evidence (MM-R09–R10).
+## Resultado obligatorio
+Proyecto activo → ticket abierto elegible más antiguo del proveedor remoto (GitHub inicialmente) → rama → Propose → revisión independiente de propuesta → Apply → Verify + correcciones → revisión independiente de código según política → PR → autorización humana de merge → rama fresca desde main → Sync/Archive nativos → PR documental con merge autorizado → cerrar issue → siguiente.
+
+Preguntas de OpenSpec: opciones originales se muestran; sin opciones el agente de pensamiento consulta ticket/specs/contexto para resolver solo lo permitido, o solicita respuesta humana informada. Estado mínimo se conserva para continuar sin duplicar acciones.
+
+## Configuración
+Cuatro roles independientes: pensamiento, ejecución, revisión y respaldo; proveedor/modelo/CLI compatibles configurables por proyecto; esfuerzo medio por defecto para razonamiento/ejecución/revisión y menor compatible para sync/archive. Skills preexistentes y AGENTS.md apuntan al contexto canónico. Origen de tickets extensible sin implementar ADO aún.
+
+## No objetivos
+Implementar OpenSpec en Python, generar plantillas de specs, emular sync/archive, motor propio de riesgo, scheduler con scoring, backlog DB duplicado, proveedores hardcodeados, plataforma universal de plugins, microservicios, despliegue productivo o ejecución sin autorización de merge humano.
+
+## Reconstrucción
+Exactamente 6 Changes F1–F6 (issues #169–#174). F5 y F6 desarrolladas POR mini me. F3 debe demostrar un recorrido real completo. POO, SOLID, DRY, KISS, YAGNI; reducir código y DB, no ampliar complejidad.
+
+**No declarar valor por cantidad de tests o líneas; sí por E2E real y autonomía demostrada.**
