@@ -200,6 +200,56 @@ class ProjectService:
         if patch.agent_profiles is not None:
             self._validate_agent_profiles(patch.agent_profiles)
 
+        binding = self.uow.project_managed_repository_bindings.get_by_project_id(project_id)
+        changed_base_branch = (
+            patch.base_branch is not None and patch.base_branch.strip() != project.base_branch
+        )
+        if changed_base_branch and binding is not None:
+            from minime.adapters.github import GitHubAdapter
+            from minime.domain.enums import ExternalOutcome
+            from minime.services.workspace_guard import (
+                ManagedWorkspaceGuard,
+                is_binding_fully_valid,
+            )
+
+            if not is_binding_fully_valid(binding) or normalize_repository_identity(
+                binding.canonical_repository_identity
+            ) != normalize_repository_identity(project.repository):
+                raise ValueError("Cannot change base branch while repository binding is invalid")
+            guard = ManagedWorkspaceGuard(self.uow)
+            marker_ok, _, _, _ = guard.verify_managed_repository_ownership_marker(
+                binding.managed_repository_root,
+                project_id,
+                binding.canonical_repository_identity,
+                binding.ownership_marker_filename,
+            )
+            if not marker_ok:
+                raise ValueError("Cannot change base branch without a valid managed-repository marker")
+            git_connection = (
+                patch.provider_connections.get("git_pr")
+                if patch.provider_connections is not None
+                else project.provider_connections.get("git_pr")
+            )
+            if not isinstance(git_connection, dict):
+                raise ValueError("Cannot change base branch without a configured Git/PR connection")
+            adapter = GitHubAdapter.for_project_connection(
+                project_id, git_connection, self.credential_store
+            )
+            identity_ok, identity_reason = guard.verify_git_repository_identity(
+                binding.managed_repository_root,
+                binding.canonical_repository_identity,
+                remote_name="origin",
+            )
+            if not identity_ok:
+                raise ValueError(f"Cannot change base branch: repository identity failed: {identity_reason}")
+            branch_result = adapter.get_remote_branch_head(
+                binding.managed_repository_root, patch.base_branch.strip(), remote="origin"
+            )
+            if branch_result.outcome != ExternalOutcome.SUCCESS or not branch_result.data:
+                raise ValueError(
+                    "Cannot change base branch because the configured remote branch is absent or unobservable"
+                )
+
         credential_ref: str | None = None
         try:
             if patch.github_app_credentials:
@@ -214,6 +264,10 @@ class ProjectService:
                 project.display_name = patch.display_name.strip()
             if patch.base_branch is not None:
                 project.base_branch = patch.base_branch.strip()
+                if changed_base_branch and binding is not None:
+                    binding.default_base_branch = project.base_branch
+                    binding.updated_at = utc_now()
+                    self.uow.project_managed_repository_bindings.save(binding)
             if patch.provider_connections is not None:
                 connections: dict[str, dict[str, Any]] = {}
                 for key, value in patch.provider_connections.items():
@@ -261,8 +315,6 @@ class ProjectService:
     def _validate_agent_profiles(profiles) -> None:
         """Resolve chosen profiles against configured, installed file-capable CLIs."""
         from minime.config import (
-            SUPPORTED_PROVIDER_EFFORTS,
-            SUPPORTED_PROVIDER_MODELS,
             load_config,
             resolve_cli_invocation,
         )
@@ -284,12 +336,6 @@ class ProjectService:
             executable = (provider.command or "").strip().split(maxsplit=1)
             if not executable or shutil.which(executable[0]) is None:
                 raise ValueError(f"Agent '{agent_id}' executable is not installed")
-            provider_models = SUPPORTED_PROVIDER_MODELS.get(provider_id, {})
-            if profile.model_id.strip().lower() not in provider_models:
-                raise ValueError(f"Model '{profile.model_id}' is not in the verified {agent_id} catalog")
-            supported_efforts = SUPPORTED_PROVIDER_EFFORTS.get(provider_id, set())
-            if profile.effort.strip().lower() not in supported_efforts:
-                raise ValueError(f"Effort '{profile.effort}' is not supported by {agent_id}")
             try:
                 resolve_cli_invocation(
                     provider_id,
@@ -301,8 +347,12 @@ class ProjectService:
             except ValueError as exc:
                 raise ValueError(f"Agent profile '{role}' cannot be invoked: {exc}") from exc
             normalized_ids[role] = provider_id
-        if normalized_ids.get("execution") == normalized_ids.get("independent_review"):
-            raise ValueError("Independent review must use an agent distinct from the execution author")
+        reviewer_id = normalized_ids.get("independent_review")
+        for author_role in ("thinking", "execution"):
+            if reviewer_id and reviewer_id == normalized_ids.get(author_role):
+                raise ValueError(
+                    f"Independent review must use an agent distinct from the {author_role} author"
+                )
 
     def register_project(
         self,

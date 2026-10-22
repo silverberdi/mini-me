@@ -194,3 +194,17 @@ class ProjectCatalogService:
                 raise ValueError(
                     f"Selected agent '{provider_id}' has no verified official OpenSpec setup"
                 )
+        reviewer = profiles.get("independent_review")
+        if reviewer is not None:
+            reviewer_id = reviewer.agent_id.strip().lower()
+            reviewer_id = "antigravity" if reviewer_id == "agy" else reviewer_id
+            for author_role in ("thinking", "execution"):
+                author = profiles.get(author_role)
+                if author is None:
+                    continue
+                author_id = author.agent_id.strip().lower()
+                author_id = "antigravity" if author_id == "agy" else author_id
+                if reviewer_id == author_id:
+                    raise ValueError(
+                        f"Independent reviewer cannot be the configured {author_role} author"
+                    )

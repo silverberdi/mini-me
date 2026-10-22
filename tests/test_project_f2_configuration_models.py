@@ -93,10 +93,13 @@ async def test_profile_validation_requires_live_model_and_role_evidence(monkeypa
             "agents": [
                 {
                     "id": "codex",
-                    "roles": ["implementer"],
-                    "invocations": {"implementer": {"transport": "stdin"}},
+                    "roles": ["implementer", "reviewer"],
+                    "invocations": {
+                        "implementer": {"transport": "stdin"},
+                        "reviewer": {"transport": "stdin"},
+                    },
                     "file_edit_roles": ["implementer"],
-                    "read_only_roles": [],
+                    "read_only_roles": ["reviewer"],
                     "capability_status": "OBSERVED_READ_ONLY",
                     "models": {"gpt-5.6-luna": ["medium"]},
                     "native_openspec_setup": True,
@@ -116,6 +119,12 @@ async def test_profile_validation_requires_live_model_and_role_evidence(monkeypa
 
     monkeypatch.setattr(service, "agent_catalog", observed_catalog)
     profiles = _configuration().agent_profiles
+    profiles["independent_review"].agent_id = "codex"
+    profiles["independent_review"].model_id = "gpt-5.6-luna"
+    with pytest.raises(ValueError, match="cannot be the configured thinking author"):
+        await service.validate_project_profiles(profiles)
+    profiles["independent_review"].agent_id = "antigravity"
+    profiles["independent_review"].model_id = "claude-sonnet-5-5-medium"
     await service.validate_project_profiles(profiles)
     profiles["thinking"].model_id = "not-observed"
     with pytest.raises(ValueError, match="live codex catalog"):
@@ -133,6 +142,17 @@ def test_project_configuration_requires_four_explicit_profiles():
     }
     with pytest.raises(ValidationError, match="Missing agent profiles"):
         _configuration(agent_profiles=profiles)
+
+
+def test_project_service_rejects_review_by_thinking_author(in_memory_uow):
+    configuration = _configuration()
+    configuration.agent_profiles["independent_review"].agent_id = "codex"
+    configuration.agent_profiles["independent_review"].model_id = "gpt-5.6-luna"
+
+    with pytest.raises(ValueError, match="distinct from the thinking author"):
+        ProjectService(in_memory_uow).create_configured_project(configuration)
+
+    assert in_memory_uow.projects.get_by_id("demo") is None
 
 
 def test_project_credentials_are_kept_out_of_project_configuration(in_memory_uow, tmp_path):
@@ -284,6 +304,89 @@ def test_project_update_preserves_identity_and_can_change_settings(in_memory_uow
     assert updated.repository == original.repository
     assert updated.project_id == original.project_id
     assert updated.base_branch == "develop"
+
+
+def test_project_update_fails_closed_on_branch_change_with_invalid_binding(in_memory_uow):
+    from minime.domain.models import ProjectManagedRepositoryBinding
+
+    service = ProjectService(in_memory_uow)
+    project = service.create_configured_project(_configuration())
+    in_memory_uow.project_managed_repository_bindings.save(
+        ProjectManagedRepositoryBinding(
+            project_id=project.project_id,
+            canonical_repository_identity=project.repository,
+            managed_repository_root="/tmp/minime-invalid-binding",
+            worktree_parent_dir="/tmp/minime-invalid-binding/.minime/worktrees",
+            is_valid=False,
+        )
+    )
+
+    with pytest.raises(ValueError, match="binding is invalid"):
+        service.update_configuration(
+            project.project_id, ProjectConfigurationPatch(base_branch="release")
+        )
+
+    assert in_memory_uow.projects.get_by_id(project.project_id).base_branch == "main"
+
+
+def test_project_update_advances_verified_base_branch_and_binding(
+    in_memory_uow, tmp_path, monkeypatch
+):
+    from minime.adapters.github import GitHubAdapter
+    from minime.domain.enums import ExternalOutcome, ExternalReasonCode, RetrySafety
+    from minime.domain.models import ExternalActionResult, ProjectManagedRepositoryBinding
+    from minime.services import workspace_guard
+
+    service = ProjectService(in_memory_uow)
+    project = service.create_configured_project(_configuration())
+    root = tmp_path / "repository"
+    root.mkdir()
+    binding = ProjectManagedRepositoryBinding(
+        project_id=project.project_id,
+        canonical_repository_identity=project.repository,
+        managed_repository_root=str(root),
+        worktree_parent_dir=str(root / ".minime/worktrees"),
+    )
+    in_memory_uow.project_managed_repository_bindings.save(binding)
+    monkeypatch.setattr(workspace_guard, "is_binding_fully_valid", lambda _binding: True)
+    monkeypatch.setattr(
+        workspace_guard.ManagedWorkspaceGuard,
+        "verify_managed_repository_ownership_marker",
+        lambda *_args, **_kwargs: (True, "", None, None),
+    )
+    monkeypatch.setattr(
+        workspace_guard.ManagedWorkspaceGuard,
+        "verify_git_repository_identity",
+        lambda *_args, **_kwargs: (True, None),
+    )
+
+    class BranchAdapter:
+        def get_remote_branch_head(self, repository, branch, remote):
+            assert repository == str(root)
+            assert branch == "release"
+            assert remote == "origin"
+            return ExternalActionResult(
+                outcome=ExternalOutcome.SUCCESS,
+                source_adapter="test",
+                reason_code=ExternalReasonCode.EXECUTION_SUCCESS,
+                retry_safety=RetrySafety.SAFE,
+                data="abc123",
+            )
+
+    monkeypatch.setattr(
+        GitHubAdapter,
+        "for_project_connection",
+        classmethod(lambda *_args, **_kwargs: BranchAdapter()),
+    )
+    updated = service.update_configuration(
+        project.project_id, ProjectConfigurationPatch(base_branch="release")
+    )
+
+    saved_binding = in_memory_uow.project_managed_repository_bindings.get_by_project_id(
+        project.project_id
+    )
+    assert updated.base_branch == "release"
+    assert saved_binding.default_base_branch == "release"
 
 
 def test_project_cli_update_uses_shared_configuration_service(in_memory_uow, tmp_path, monkeypatch):
