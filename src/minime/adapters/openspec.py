@@ -62,28 +62,33 @@ class OpenSpecAdapter(OpenSpecAdapterInterface):
         root = requested_root.resolve()
         if not root.is_dir():
             raise ValueError("OpenSpec setup target must be an existing project directory")
-        self._assert_integration_paths_are_not_symlinks(root)
-        self._initialize_official_integrations(root, selected, capabilities)
-        self._assert_integration_paths_are_not_symlinks(root)
-        installed = self.inspect_integrations(root, selected)
-        if not installed["complete"]:
-            raise RuntimeError(
-                "Official OpenSpec initialization did not produce the complete compatible "
-                "integration set for the selected agents"
-            )
+        self._assert_integration_paths_are_not_symlinks(root, selected)
         with tempfile.TemporaryDirectory(prefix="minime-openspec-official-reference-") as temporary:
             reference_root = Path(temporary) / "project"
             reference_root.mkdir(mode=0o700)
             self._initialize_official_integrations(reference_root, selected, capabilities)
             reference = self.inspect_integrations(reference_root, selected)
-        if not reference["complete"] or any(
-            installed["integrations"].get(agent) != reference["integrations"].get(agent)
-            for agent in selected
-        ):
-            raise RuntimeError(
-                "Target workspace does not contain the full official OpenSpec integration "
-                "set available for the verified CLI version"
-            )
+            if not reference["complete"]:
+                raise RuntimeError(
+                    "Official OpenSpec setup did not produce a complete compatible reference set"
+                )
+            self._assert_no_incompatible_official_files(root, reference_root, reference, selected)
+            self._initialize_official_integrations(root, selected, capabilities)
+            self._assert_integration_paths_are_not_symlinks(root, selected)
+            installed = self.inspect_integrations(root, selected)
+            if not installed["complete"] or any(
+                installed["integrations"].get(agent) != reference["integrations"].get(agent)
+                for agent in selected
+            ):
+                raise RuntimeError(
+                    "Target workspace does not contain the full official OpenSpec integration "
+                    "set available for the verified CLI version"
+                )
+            for relative in self._official_integration_paths(reference, selected):
+                if (root / relative).read_bytes() != (reference_root / relative).read_bytes():
+                    raise RuntimeError(
+                        "Target workspace integration content differs from official setup"
+                    )
         return {
             "version": capabilities["version"],
             "agents": selected,
@@ -91,6 +96,40 @@ class OpenSpecAdapter(OpenSpecAdapterInterface):
             "stdout": "Official initializer output omitted",
             "stderr": "",
         }
+
+    @staticmethod
+    def _official_integration_paths(
+        reference: dict[str, Any], selected: list[str]
+    ) -> tuple[Path, ...]:
+        paths: list[Path] = []
+        for agent in selected:
+            names = reference.get("integrations", {}).get(agent, [])
+            if agent == "codex":
+                paths.extend(
+                    Path(".agents/skills") / f"openspec-{name}" / "SKILL.md" for name in names
+                )
+            else:
+                paths.extend(
+                    Path(".agent/workflows") / f"opsx-{name}.md" for name in names
+                )
+        return tuple(paths)
+
+    @classmethod
+    def _assert_no_incompatible_official_files(
+        cls, root: Path, reference_root: Path, reference: dict[str, Any], selected: list[str]
+    ) -> None:
+        """Never let official setup silently replace a modified native integration."""
+        for relative in cls._official_integration_paths(reference, selected):
+            target = root / relative
+            if target.is_symlink():
+                raise ValueError("OpenSpec integration target contains a symlink")
+            if not target.exists():
+                continue
+            if not target.is_file() or target.read_bytes() != (reference_root / relative).read_bytes():
+                raise RuntimeError(
+                    "Existing OpenSpec agent integration conflicts with the installed official version; "
+                    "it was preserved and requires explicit resolution"
+                )
 
     def _initialize_official_integrations(
         self, root: Path, selected: list[str], capabilities: dict[str, Any]
@@ -106,7 +145,7 @@ class OpenSpecAdapter(OpenSpecAdapterInterface):
             raise RuntimeError("Official OpenSpec initialization failed; workspace remains unprepared")
 
     @staticmethod
-    def _assert_integration_paths_are_not_symlinks(root: Path) -> None:
+    def _assert_integration_paths_are_not_symlinks(root: Path, agents: list[str]) -> None:
         for relative in (
             ".agents",
             ".agents/skills",
@@ -116,6 +155,19 @@ class OpenSpecAdapter(OpenSpecAdapterInterface):
             "openspec/config.yaml",
         ):
             if (root / relative).is_symlink():
+                raise ValueError("OpenSpec integration target contains a symlink")
+        selected = set(agents)
+        if "codex" in selected:
+            skills = root / ".agents/skills"
+            if skills.is_dir():
+                for skill in skills.glob("openspec-*"):
+                    if skill.is_symlink() or (skill / "SKILL.md").is_symlink():
+                        raise ValueError("OpenSpec integration target contains a symlink")
+        if "antigravity" in selected:
+            workflows = root / ".agent/workflows"
+            if workflows.is_dir() and any(
+                workflow.is_symlink() for workflow in workflows.glob("opsx-*.md")
+            ):
                 raise ValueError("OpenSpec integration target contains a symlink")
 
     def discover_official_integrations(self, agents: list[str]) -> dict[str, Any]:
@@ -165,7 +217,7 @@ class OpenSpecAdapter(OpenSpecAdapterInterface):
         }
         complete = not requested_root.is_symlink()
         try:
-            OpenSpecAdapter._assert_integration_paths_are_not_symlinks(root)
+            OpenSpecAdapter._assert_integration_paths_are_not_symlinks(root, selected)
         except ValueError:
             complete = False
         for agent in selected:

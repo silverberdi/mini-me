@@ -40,6 +40,36 @@ def test_official_init_installs_complete_codex_and_antigravity_integrations(tmp_
     )["complete"] is True
 
 
+def test_official_init_preserves_existing_project_instructions(tmp_path):
+    project = tmp_path / "existing-project"
+    (project / "openspec").mkdir(parents=True)
+    instructions = "# Project instructions\nKeep this content.\n"
+    config = "schema: spec-driven\ncontext: existing-context.md\n"
+    (project / "AGENTS.md").write_text(instructions, encoding="utf-8")
+    (project / "openspec/config.yaml").write_text(config, encoding="utf-8")
+    (project / "existing-context.md").write_text("Approved context.\n", encoding="utf-8")
+
+    OpenSpecAdapter().install_official_integrations(project, ["codex", "antigravity"])
+
+    assert (project / "AGENTS.md").read_text(encoding="utf-8") == instructions
+    assert (project / "openspec/config.yaml").read_text(encoding="utf-8") == config
+    assert (project / "existing-context.md").read_text(encoding="utf-8") == "Approved context.\n"
+
+
+def test_official_init_blocks_without_overwriting_customized_integration(tmp_path):
+    project = tmp_path / "existing-project"
+    skill_path = project / ".agents/skills/openspec-propose/SKILL.md"
+    skill_path.parent.mkdir(parents=True)
+    custom_skill = "# Existing customized skill\nKeep this content.\n"
+    skill_path.write_text(custom_skill, encoding="utf-8")
+
+    with pytest.raises(RuntimeError, match="conflicts with the installed official version"):
+        OpenSpecAdapter().install_official_integrations(project, ["codex"])
+
+    assert skill_path.read_text(encoding="utf-8") == custom_skill
+    assert not (project / "openspec/config.yaml").exists()
+
+
 def test_official_init_fails_closed_for_unselected_or_unsupported_agents(tmp_path):
     with pytest.raises(ValueError, match="supports only selected"):
         OpenSpecAdapter().install_official_integrations(Path(tmp_path), ["openrouter"])
@@ -83,6 +113,32 @@ def test_official_setup_rejects_symlinked_integration_targets_before_init(tmp_pa
             "no_animation_supported": True,
         },
     )
+    with pytest.raises(ValueError, match="contains a symlink"):
+        adapter.install_official_integrations(project, ["codex"])
+
+    assert list(outside.iterdir()) == []
+
+
+def test_official_setup_rejects_symlinked_skill_directory_before_init(tmp_path, monkeypatch):
+    project = tmp_path / "project"
+    outside = tmp_path / "outside"
+    project.mkdir()
+    outside.mkdir()
+    skills = project / ".agents/skills"
+    skills.mkdir(parents=True)
+    (skills / "openspec-propose").symlink_to(outside, target_is_directory=True)
+    adapter = OpenSpecAdapter()
+    monkeypatch.setattr(
+        adapter,
+        "inspect_cli",
+        lambda: {
+            "available": True,
+            "version": "test-version",
+            "init_tools_supported": True,
+            "no_animation_supported": True,
+        },
+    )
+
     with pytest.raises(ValueError, match="contains a symlink"):
         adapter.install_official_integrations(project, ["codex"])
 
