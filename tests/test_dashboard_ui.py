@@ -27,6 +27,16 @@ def test_pwa_bootstrap_is_read_only_and_does_not_load_legacy_controllers() -> No
     assert "innerHTML" not in dashboard
     assert "identity.textContent" in dashboard
     assert all(not path.exists() for path in legacy_clients)
+    for retired_control in (
+        "onboardProjectForm",
+        "onboardProjectBtn",
+        "backlogActionToolbar",
+        "discoverBacklogBtn",
+        "startWorkBtn",
+        "autoRefreshToggle",
+        "navTabProjects",
+    ):
+        assert retired_control not in index
 
     for legacy in (
         "backlog_controller",
