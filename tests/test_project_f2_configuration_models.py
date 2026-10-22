@@ -387,7 +387,7 @@ def test_connection_verification_keeps_ticket_and_git_repositories_separate(
         },
     }
     project = ProjectService(in_memory_uow).create_configured_project(
-        _configuration(provider_connections=connections)
+        _configuration(repository="code-owner/target", provider_connections=connections)
     )
     observed = []
 
@@ -422,6 +422,70 @@ def test_connection_verification_keeps_ticket_and_git_repositories_separate(
     ]
 
 
+def test_git_pr_connection_cannot_detach_from_immutable_project_repository(in_memory_uow):
+    connections = _configuration().provider_connections
+    connections["git_pr"].repository_url = "https://github.com/other/repository"
+    with pytest.raises(ValueError, match="match the immutable project repository"):
+        ProjectService(in_memory_uow).create_configured_project(
+            _configuration(provider_connections=connections)
+        )
+    assert in_memory_uow.projects.list_all() == []
+
+    project = ProjectService(in_memory_uow).create_configured_project(_configuration())
+    invalid = _configuration().provider_connections
+    invalid["git_pr"].repository_url = "other/repository"
+    with pytest.raises(ValueError, match="match the immutable project repository"):
+        ProjectService(in_memory_uow).update_configuration(
+            project.project_id,
+            ProjectConfigurationPatch(provider_connections=invalid),
+        )
+    unchanged = in_memory_uow.projects.get_by_id(project.project_id)
+    assert unchanged.provider_connections["git_pr"]["repository_url"] == "example/demo"
+
+
+def test_git_pr_mutation_gate_fails_closed_before_branch_or_pr_write(
+    in_memory_uow, monkeypatch
+):
+    from minime.adapters.github import GitHubAdapter
+    from minime.domain.enums import ExternalOutcome, ExternalReasonCode, RetrySafety
+    from minime.domain.models import ExternalActionResult
+    from minime.services.project_connection_service import ProjectConnectionService
+
+    project = ProjectService(in_memory_uow).create_configured_project(_configuration())
+    mutations = []
+
+    class DeniedAdapter:
+        def verify_connection_permissions(self, repository, responsibility):
+            assert repository == "example/demo"
+            assert responsibility == "git_pr"
+            return ExternalActionResult(
+                outcome=ExternalOutcome.UNKNOWN,
+                source_adapter="test",
+                reason_code=ExternalReasonCode.EVIDENCE_INSUFFICIENT,
+                retry_safety=RetrySafety.SAFE,
+            )
+
+        def create_remote_branch(self, *_args):
+            mutations.append("branch")
+
+        def create_pull_request(self, *_args, **_kwargs):
+            mutations.append("pull_request")
+
+    monkeypatch.setattr(
+        GitHubAdapter,
+        "for_project_connection",
+        classmethod(lambda _cls, _project_id, _connection, _store: DeniedAdapter()),
+    )
+    service = ProjectConnectionService()
+
+    with pytest.raises(PermissionError, match="not authorized for mutations"):
+        service.create_remote_branch(project, "minime/bootstrap", "a" * 40)
+    with pytest.raises(PermissionError, match="not authorized for mutations"):
+        service.create_pull_request(project, "minime/bootstrap", "title", "body", "a" * 40)
+
+    assert mutations == []
+
+
 def test_project_connection_factory_resolves_only_requested_responsibility(
     in_memory_uow, monkeypatch
 ):
@@ -430,6 +494,7 @@ def test_project_connection_factory_resolves_only_requested_responsibility(
 
     project = ProjectService(in_memory_uow).create_configured_project(
         _configuration(
+            repository="code-owner/target",
             provider_connections={
                 "tickets": {
                     "provider_id": "github",

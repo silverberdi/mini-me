@@ -6,7 +6,7 @@ from typing import Any
 
 from minime.adapters.github import GitHubAdapter
 from minime.domain.enums import ExternalOutcome
-from minime.domain.models import Project
+from minime.domain.models import ExternalActionResult, Project
 from minime.services.project_credential_store import ProjectCredentialStore
 
 
@@ -63,3 +63,50 @@ class ProjectConnectionService:
                 "permissions": result.data.get("permissions") if result.data else None,
             }
         return results
+
+    def require_git_pr_write(self, project: Project) -> GitHubAdapter:
+        """Return the bound GitHub adapter only after proving its current write grants.
+
+        Bootstrap/incremental publishers must use this gate before branch, push, or
+        pull-request mutations. Unknown permission evidence is treated as denial.
+        """
+        adapter = self.adapter_for(project, "git_pr")
+        repository = project.provider_connections["git_pr"]["repository_url"]
+        result = adapter.verify_connection_permissions(repository, "git_pr")
+        if result.outcome != ExternalOutcome.SUCCESS:
+            raise PermissionError(
+                "GitHub Git/PR connection is not authorized for mutations: "
+                + result.reason_code.value.lower()
+            )
+        return adapter
+
+    def create_remote_branch(
+        self, project: Project, branch: str, base_sha: str
+    ) -> ExternalActionResult[str]:
+        """Create/reconcile a project branch only after live permission verification."""
+        adapter = self.require_git_pr_write(project)
+        repository = project.provider_connections["git_pr"]["repository_url"]
+        return adapter.create_remote_branch(repository, branch, base_sha)
+
+    def create_pull_request(
+        self,
+        project: Project,
+        branch: str,
+        title: str,
+        body: str,
+        head_sha: str,
+        *,
+        draft: bool = True,
+    ) -> ExternalActionResult[dict[str, Any]]:
+        """Publish a PR only after live permission verification for this project."""
+        adapter = self.require_git_pr_write(project)
+        repository = project.provider_connections["git_pr"]["repository_url"]
+        return adapter.create_pull_request(
+            repository,
+            branch,
+            project.base_branch,
+            title,
+            body,
+            head_sha,
+            draft=draft,
+        )

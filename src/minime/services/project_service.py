@@ -61,6 +61,8 @@ class ProjectService:
                 raise ValueError(f"Provider connection '{key}' must use a GitHub repository URL")
             normalized_connections[key] = value.model_dump(mode="json")
             normalized_connections[key]["repository_url"] = connection_repository
+        if normalized_connections["git_pr"]["repository_url"] != repository:
+            raise ValueError("Git/PR connection repository must match the immutable project repository")
         if self.uow.projects.get_by_id(project_id):
             raise ValueError(f"Project with ID '{project_id}' is already registered")
         for existing in self.uow.projects.list_all():
@@ -367,6 +369,12 @@ class ProjectService:
                             raise ValueError("project_app connection has no protected credential")
                         connection["secret_reference"] = reference
                     connections[key] = connection
+                if connections["git_pr"]["repository_url"] != normalize_repository_identity(
+                    project.repository
+                ):
+                    raise ValueError(
+                        "Git/PR connection repository must match the immutable project repository"
+                    )
                 project.provider_connections = connections
             if patch.agent_profiles is not None:
                 expected = {"thinking", "execution", "independent_review", "fallback"}
