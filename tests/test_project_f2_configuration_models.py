@@ -695,6 +695,37 @@ def test_versioned_project_api_creates_brownfield_configuration(in_memory_uow, m
     assert "private_key" not in response.text
 
 
+def test_versioned_project_api_rejects_greenfield_without_zip_before_persistence(
+    in_memory_uow, monkeypatch, tmp_path
+):
+    from fastapi.testclient import TestClient
+
+    from minime.api.app import app, get_current_operator, get_uow
+
+    async def profiles_available(self, profiles):
+        assert profiles
+
+    monkeypatch.setattr(
+        "minime.api.app.ProjectCatalogService.validate_project_profiles", profiles_available
+    )
+    monkeypatch.setenv("MINIME_AUTH_ENABLED", "false")
+    monkeypatch.setenv("MINIME_PROJECT_SECRET_ROOT", str(tmp_path / "secrets"))
+    app.dependency_overrides[get_uow] = lambda: in_memory_uow
+    app.dependency_overrides[get_current_operator] = lambda: object()
+    try:
+        response = TestClient(app).post(
+            "/api/v1/projects",
+            json=_configuration(project_type=ProjectType.GREENFIELD).model_dump(mode="json"),
+        )
+    finally:
+        app.dependency_overrides.clear()
+
+    assert response.status_code == 400
+    assert "validated ZIP" in response.json()["detail"]
+    assert in_memory_uow.projects.get_by_id("demo") is None
+    assert not (tmp_path / "secrets").exists()
+
+
 def test_authenticated_api_stores_project_key_outside_persistence(in_memory_uow, monkeypatch, tmp_path):
     import json
     import stat
