@@ -9,7 +9,7 @@ mini me conserva un registro de proyectos y una ruta de onboarding heredada, per
 - Configurar los cuatro roles por proyecto con capacidades, modelos, esfuerzos, workflows y skills descubiertos/verificados; mantener independencia del revisor, gasto autorizado y límites finitos. F2 usará el agente de pensamiento real durante el onboarding.
 - Preparar un GREENFIELD en workspace administrado y rama aislada: instalar/verificar OpenSpec oficial y las integraciones nativas requeridas, organizar fielmente el ZIP con el agente de pensamiento, enlazar contexto canónico y publicar el primer PR. El proyecto solo queda preparado después de confirmar el merge.
 - Permitir añadir ZIP de contexto de forma incremental mediante rama y PR nuevos; el contexto efectivo no cambia antes del merge.
-- Migrar PostgreSQL con Alembic de forma conservadora, conservar identidad, bindings, seguridad y evidencia operativa necesaria, retirar campos/rutas de backlog local y de admisión sin vigencia y probar datos existentes, backup y reversibilidad.
+- Migrar PostgreSQL con Alembic de forma conservadora, ajustar explícitamente los **dos proyectos ya registrados** (`mini-me` y `mini-me-fixture`) y sus repositorios/bindings/contextos previos sin reenrolarlos como Greenfield ni generar ZIP/PR ficticio, preservar su capacidad para F3/F5 y el aislamiento E2E, conservar identidad, bindings, seguridad y evidencia operativa necesaria, retirar campos/rutas de backlog local y de admisión sin vigencia y probar datos existentes, backup y reversibilidad.
 - Reconciliar las rutas duplicadas de alta y los consumidores de los campos reemplazados; conservar autenticación, Git/GitHub, aislamiento, worktrees, presupuesto, secretos y despacho/evidencia nativos reutilizables.
 
 ## Capabilities
