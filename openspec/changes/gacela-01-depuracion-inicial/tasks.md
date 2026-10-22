@@ -1,9 +1,9 @@
 ## 1. Baseline and removal ledger
 
-- [ ] 1.1 Capture the candidate base SHA, Alembic head, configured scheduler state, process observation, and PostgreSQL schema/FK/index/row-count inventory without invoking agents or changing runtime state; save redacted evidence.
-- [ ] 1.2 Produce the F1 Removal Ledger for every identified writer, caller, DI/config registration, API/CLI/UI entry point, test, package dependency, model, repository, table, column, index and foreign key; mark REMOVE, MIGRATE, RETAIN-WITH-REASON, or F2–F6 reservation with evidence.
+- [x] 1.1 Capture the candidate base SHA, Alembic head, configured scheduler state, process observation, and PostgreSQL schema/FK/index/row-count inventory without invoking agents or changing runtime state; save redacted evidence.
+- [x] 1.2 Produce the F1 Removal Ledger for every identified writer, caller, DI/config registration, API/CLI/UI entry point, test, package dependency, model, repository, table, column, index and foreign key; mark REMOVE, MIGRATE, RETAIN-WITH-REASON, or F2–F6 reservation with evidence.
 - [ ] 1.3 Update the historical reconciliation inventory and Removal Ledger in `design.md` with every non-archived Change/spec, its slug, filesystem status, durable/external reference, contract conflict and owning F2–F6 phase; record the future native OpenSpec update/sync/archive route without invoking it, retain command output as evidence without creating a separate report, and stop for human direction if a live process or external operation is found.
-- [ ] 1.4 Take and verify a protected representative PostgreSQL backup/restore before any destructive migration; document the recovery owner and the exact restoration command without storing secrets.
+- [x] 1.4 Take and verify a protected representative PostgreSQL backup/restore before any destructive migration; document the recovery owner and the exact restoration command without storing secrets.
 
 ## 2. Retire OpenSpec emulations and legacy execution graph
 

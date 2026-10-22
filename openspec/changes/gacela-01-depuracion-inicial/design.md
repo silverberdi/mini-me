@@ -33,6 +33,23 @@ The implementation phase must regenerate this ledger from source references, dat
 
 Historical Alembic revisions are immutable. F1 adds one revision from the actual head, with `upgrade` guarded by preflight/export evidence and a tested `downgrade`/restore procedure; it does not edit previous migration files.
 
+### F1 implementation Removal Ledger (candidate worktree)
+
+Observed against candidate base `aac7def3855625305978ec3cd8d3bcda207a372c`, with no mini me daemon/worker process observed. PostgreSQL listeners were present on ports 5432 and 54333, so neither was treated as an application target. The only write verification used a newly created disposable database on port 54333 and removed it after the test.
+
+| Item | Callers/writers verified | Decision and F1 result |
+| --- | --- | --- |
+| `OpenSpecGenerator`, deterministic authoring, intake reconciliation and publishing | `IntakeService`, `IntakeReconciliationService`, generator tests | **REMOVE**: generator, intake and reconciliation modules deleted. Native installed skills, `OpenSpecAdapter`, structural validation and `native_openspec_apply` identity/evidence code remain. |
+| Custom sync/archive and post-merge closure | `OpenSpecSyncService`, `PostMergeReconciliationService`, scheduler/recovery/control-plane graph | **REMOVE**: modules deleted. Historical Changes remain untouched; F3 must use installed native update/sync/archive after authorization. |
+| Legacy pipeline/orchestration/scheduler/discovery/readiness/classification | API, CLI groups, TUI actions, service DI and legacy queue models | **REMOVE/DISABLE**: execution modules and classifiers deleted; API returns HTTP 410 with `code=operation_unavailable`; CLI legacy groups exit 2 before DB/provider access. No scheduler is configured to run. |
+| Context inspection and project/Git safety | `ContextDiscoveryService`, project onboarding, `OpenSpecAdapter`, repository/worktree binding | **RETAIN**: context inspection no longer writes a local backlog. Auth, project registration, Git/GitHub binding, worktree isolation, secret handling and candidate/evidence tables remain. |
+| `backlog_items` | Local intake/context projection only | **REMOVE**: no retained F1 consumer. Revision `gacela01_retire_legacy_admission_state` drops it; restore requires the protected pre-upgrade dump. |
+| `work_queue_snapshots`, `scheduler_decision_records` | Scheduler ranking/admission only | **REMOVE**: no retained F1 consumer. Same revision drops both after scheduler entry points are denied. |
+| `task_classification_snapshots`, `changes.latest_classification_snapshot_id`, `jobs.classification_snapshot_id` | Candidate/run evidence and future continuity review | **RETAIN-WITH-REASON (F3/F6)**: not dropped because the references are durable evidence and no approved replacement exists. |
+| runs, jobs, candidates, worktree ownership, auth, project/repository binding, provider/budget evidence | Retained safety and continuity consumers | **RETAIN-WITH-REASON (F3/F6)**. F1 makes no execution path reachable through them. |
+
+Migration evidence: `.venv/bin/alembic upgrade r02_contract_review_budget_identity`, representative inserts, `pg_dump -Fc`, `.venv/bin/alembic upgrade head`, schema absence check, `.venv/bin/alembic downgrade r02_contract_review_budget_identity`, schema restoration check, database recreation and `pg_restore` all passed on `minime_gacela01_verify_18266`; that database was dropped. The protected dump is `/tmp/minime-gacela01-verify-18266.dump` and contains no credentials.
+
 ## Goals / Non-Goals
 
 **Goals:**

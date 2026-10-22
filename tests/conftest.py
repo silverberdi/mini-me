@@ -2971,9 +2971,10 @@ def publish_verified_intake_workspace(
     Scheduler-admission tests use this helper when they exercise the real tick.
     It deliberately avoids synthetic ownerships, SHAs, or local-only refs.
     """
+    from minime.services.intake_service import IntakeService
+
     from minime.domain.enums import ReadinessState, SagaType, WorkItemSource, WorkItemStatus
     from minime.domain.models import BacklogItem
-    from minime.services.intake_service import IntakeService
     from minime.services.saga_engine import SagaEngine
 
     item = uow.backlog_items.get_by_project_and_key(project.project_id, change_name)

@@ -187,7 +187,7 @@ class PathsConfig(BaseModel):
 
 class SchedulerConfig(BaseModel):
     max_global_jobs: int = 1
-    mode: str = "RUN"
+    mode: str = "DISABLED"
     one_active_implementation_per_project: bool = True
     max_review_rounds: int = 2
 

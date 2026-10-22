@@ -22,7 +22,14 @@ from minime.domain.models import (
     Event,
     utc_now,
 )
-from minime.services.openspec_generator import slugify
+
+
+def slugify(text: str) -> str:
+    """Normalize a local discovery key; this does not author OpenSpec artifacts."""
+    import re
+
+    text = re.sub(r"[^\\w\\s-]", "", text.lower().strip())
+    return re.sub(r"[\\s_-]+", "-", text).strip("-") or "context-item"
 
 logger = logging.getLogger(__name__)
 
@@ -350,28 +357,9 @@ class ContextDiscoveryService:
         return report, discovered_items
 
     def discover_context(self, project_id: str) -> ContextDiscoveryReport:
-        """Scan repository context sources and reconcile backlog items."""
-        report, discovered_items = self.discover_context_pure(project_id)
+        """Scan retained repository context without creating a local backlog."""
+        report, _ = self.discover_context_pure(project_id)
         now = report.discovered_at
-
-        # 6. Reconcile discovered items into PostgreSQL non-destructively
-        for item in discovered_items:
-            existing = self.uow.backlog_items.get_by_project_and_key(project_id, item.item_key)
-            if not existing:
-                self.uow.backlog_items.save(item)
-            else:
-                if existing.status in (WorkItemStatus.COMPLETED, WorkItemStatus.CANCELLED):
-                    if item.status not in (WorkItemStatus.COMPLETED, WorkItemStatus.CANCELLED):
-                        logger.warning(
-                            f"Contradiction detected: BacklogItem '{item.item_key}' is terminally '{existing.status.value}' but external evidence suggests active."
-                        )
-                else:
-                    updated = existing.model_copy(
-                        update={
-                            "updated_at": now,
-                        }
-                    )
-                    self.uow.backlog_items.save(updated)
 
         # Save event
         event = Event(
@@ -382,7 +370,7 @@ class ContextDiscoveryService:
                 "facts_count": len(report.discovered_facts),
                 "inferred_count": len(report.inferred_structure),
                 "missing_count": len(report.missing_required_context),
-                "items_count": len(discovered_items),
+                "items_count": 0,
             },
             timestamp=now,
         )
@@ -396,6 +384,5 @@ class ContextDiscoveryService:
         project_id: str,
         operator_email: str | None = None,
     ) -> list[BacklogItem]:
-        """Discover context and return the complete synced backlog for a project."""
-        self.discover_context(project_id)
-        return self.uow.backlog_items.list_by_project(project_id)
+        """Legacy local backlog synchronization was retired in F1."""
+        return []

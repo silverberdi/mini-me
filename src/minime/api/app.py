@@ -79,26 +79,21 @@ from minime.services.budget_service import BudgetService
 from minime.services.capacity_lifecycle_service import CapacityLifecycleService
 from minime.services.container_preview_service import ContainerPreviewService
 from minime.services.context_discovery_service import ContextDiscoveryService
-from minime.services.control_plane_service import ControlPlaneService
 from minime.services.current_check_batch import validate_current_checks_batch
-from minime.services.dashboard_service import (
-    DashboardChangeDetailResponse,
-    DashboardOverviewResponse,
-    OperationsDashboardService,
-    TimelineEventDTO,
-)
-from minime.services.intake_service import IntakeService
-from minime.services.orchestration_service import OrchestrationService
+from minime.services.legacy_unavailable import UnavailableLegacyService, unavailable_payload
 from minime.services.project_onboarding_service import ProjectOnboardingService
 from minime.services.project_service import ProjectService
 from minime.services.provider_health_service import ProviderHealthService
-from minime.services.readiness_service import ReadinessService
-from minime.services.restart_recovery_service import RestartRecoveryService
-from minime.services.scheduler_service import SchedulerService
 from minime.services.status_service import StatusService
 from minime.services.validation_authority_service import ValidationAuthorityService
 
 logger = logging.getLogger(__name__)
+
+# These names only protect still-registered legacy routes while the middleware
+# returns HTTP 410. They cannot execute a legacy behavior if called directly.
+IntakeService = ReadinessService = SchedulerService = OrchestrationService = UnavailableLegacyService
+ControlPlaneService = OperationsDashboardService = UnavailableLegacyService
+DashboardOverviewResponse = DashboardChangeDetailResponse = TimelineEventDTO = Any
 
 
 @asynccontextmanager
@@ -108,12 +103,7 @@ async def lifespan(app: FastAPI):
     try:
         sess = db_manager.sessionmaker()
         uow = PostgresPersistenceUnitOfWork(sess)
-        # Startup: reconcile active jobs only if explicitly configured for API process
-        if os.environ.get("MINIME_ENABLE_API_STARTUP_RECOVERY", "false").lower() in ("true", "1"):
-            recovery_service = RestartRecoveryService(uow, project_root=".")
-            reconciled = recovery_service.reconcile_on_startup()
-            if reconciled:
-                logger.info(f"Reconciled {len(reconciled)} jobs on API startup.")
+        # F1 deliberately has no autonomous recovery or execution on API startup.
 
         # Seed authorized operators from configuration or environment
         try:
@@ -231,10 +221,10 @@ ContextServiceDep = Annotated[ContextDiscoveryService, Depends(get_context_servi
 
 
 def get_intake_service(uow: UowDep, github_adapter: GitHubAdapterDep) -> IntakeService:
-    return IntakeService(uow, github_adapter=github_adapter)
+    raise RuntimeError("Legacy intake is unavailable in F1.")
 
 
-IntakeServiceDep = Annotated[IntakeService, Depends(get_intake_service)]
+IntakeServiceDep = Annotated[Any, Depends(get_intake_service)]
 
 
 PUBLIC_EXEMPT_PATHS = {
@@ -272,6 +262,10 @@ async def auth_middleware(request: Request, call_next):
         else config.auth.enabled
     )
     if not auth_enabled:
+        unavailable = _legacy_operation_for_path(request.url.path)
+        if unavailable is not None:
+            operation, phase = unavailable
+            return JSONResponse(status_code=status.HTTP_410_GONE, content=unavailable_payload(operation, phase))
         return await call_next(request)
 
     path = request.url.path
@@ -340,7 +334,38 @@ async def auth_middleware(request: Request, call_next):
         if sess:
             sess.close()
 
+    unavailable = _legacy_operation_for_path(request.url.path)
+    if unavailable is not None:
+        operation, phase = unavailable
+        return JSONResponse(status_code=status.HTTP_410_GONE, content=unavailable_payload(operation, phase))
     return await call_next(request)
+
+
+LEGACY_UNAVAILABLE_PREFIXES: tuple[tuple[str, str], ...] = (
+    ("/scheduler", "F3"),
+    ("/api/v1/scheduler", "F3"),
+    ("/api/v1/queue", "F3"),
+    ("/api/v1/orchestration", "F3"),
+    ("/api/v1/dashboard", "F5"),
+)
+
+
+def _legacy_operation_for_path(path: str) -> tuple[str, str] | None:
+    """Map only retired mutation/execution routes to an explicit F1 denial."""
+    if "/backlog" in path or path.endswith("/discover") or "/readiness" in path:
+        return ("legacy_intake_or_readiness", "F2")
+    if path.startswith("/projects/") and path.endswith("/jobs"):
+        return ("legacy_job_execution", "F3")
+    if path.startswith("/jobs/"):
+        return ("legacy_job_execution", "F3")
+    if path.startswith("/api/v1/projects/") and (
+        path.endswith("/context/discover") or "/backlog" in path
+    ):
+        return ("legacy_intake_or_readiness", "F2")
+    for prefix, phase in LEGACY_UNAVAILABLE_PREFIXES:
+        if path.startswith(prefix):
+            return ("legacy_operation", phase)
+    return None
 
 
 def get_current_operator(
@@ -750,18 +775,7 @@ def prepare_backlog_item_endpoint(
     intake_service: IntakeServiceDep,
 ) -> WorkItemPrepareResult:
     """Prepare canonical execution artifacts (GitHub Issue, Project Item, OpenSpec change)."""
-    try:
-        from minime.services.recovery_convergence_service import RecoveryConvergenceService
-
-        rec_svc = RecoveryConvergenceService(
-            intake_service.uow, project_root=intake_service.project_root
-        )
-        claim_ctx = rec_svc.acquire_claim(f"intake:{project_id}:{item_key}")
-        return intake_service.prepare_work_item(
-            project_id, item_key, operator_email="operator", claim_context=claim_ctx
-        )
-    except ValueError as e:
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e))
+    raise HTTPException(status_code=status.HTTP_410_GONE, detail=unavailable_payload("legacy_intake", "F2"))
 
 
 @app.post("/api/v1/projects/{project_id}/backlog/{item_key}/answer", tags=["backlog"])
@@ -1331,23 +1345,7 @@ def resume_orchestration(
     uow: Annotated[PersistenceUnitOfWork, Depends(get_uow)],
 ) -> dict[str, Any]:
     """Resume an existing orchestration run from its persisted checkpoint."""
-    try:
-        from minime.domain.enums import RecoverySource
-        from minime.services.recovery_convergence_service import RecoveryConvergenceService
-
-        rec_svc = RecoveryConvergenceService(uow, project_root=req.project_root or ".")
-        rec_svc.request_run_continuation(req.run_id, source=RecoverySource.API)
-        service = OrchestrationService(uow, project_root=req.project_root or ".")
-        status_view = service.get_status(req.run_id)
-        return status_view.model_dump()
-    except ValueError as e:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(e))
-    except Exception as e:
-        logger.error(f"Error during orchestration resume: {e}")
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Orchestration resume failed: {e}",
-        )
+    raise HTTPException(status_code=status.HTTP_410_GONE, detail=unavailable_payload("legacy_orchestration", "F3"))
 
 
 @app.get("/api/v1/orchestration/{run_id}/status", tags=["orchestration"])

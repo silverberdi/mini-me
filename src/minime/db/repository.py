@@ -18,7 +18,6 @@ from minime.db.models import (
     AuthAuditEventModel,
     AuthorizedOperatorModel,
     AuthSessionModel,
-    BacklogItemModel,
     BlockerClaimModel,
     BudgetLedgerModel,
     BudgetReservationModel,
@@ -58,10 +57,8 @@ from minime.db.models import (
     RecoveryDecisionModel,
     ReviewFindingModel,
     ReviewModel,
-    SchedulerDecisionRecordModel,
     TaskClassificationSnapshotModel,
     ValidationRunModel,
-    WorkQueueSnapshotModel,
 )
 from minime.domain.enums import (
     PRIMARY_PROVIDERS,
@@ -230,6 +227,13 @@ from minime.domain.models import (
     generate_uuid,
     utc_now,
 )
+
+
+class _RetiredPersistenceModel:
+    """Name-only sentinel; F1 no longer maps legacy admission tables."""
+
+
+BacklogItemModel = WorkQueueSnapshotModel = SchedulerDecisionRecordModel = _RetiredPersistenceModel
 
 
 def _decimal_to_float(value: Decimal | float | None) -> float | None:
@@ -5924,13 +5928,10 @@ class PostgresPersistenceUnitOfWork(PersistenceUnitOfWork):
         self.preview_sessions = PostgresPreviewSessionRepository(session)
         self.validation_runs = PostgresValidationRunRepository(session)
         self.operator_actions = PostgresOperatorActionRepository(session)
-        self.work_queue = PostgresWorkQueueRepository(session)
-        self.scheduler_decisions = PostgresSchedulerDecisionRepository(session)
         self.provider_efficiency = PostgresProviderEfficiencyMetricsRepository(session)
         self.authorized_operators = PostgresAuthorizedOperatorRepository(session)
         self.auth_sessions = PostgresAuthSessionRepository(session)
         self.auth_audit_events = PostgresAuthAuditEventRepository(session)
-        self.backlog_items = PostgresBacklogItemRepository(session)
         self.integrity_findings = PostgresIntegrityFindingRepository(session)
         self.classification_snapshots = PostgresTaskClassificationSnapshotRepository(session)
         self.project_managed_repository_bindings = (

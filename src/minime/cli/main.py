@@ -22,13 +22,9 @@ from minime.domain.enums import (
 from minime.domain.models import OperatorActionRequest
 from minime.logging import configure_logging, get_logger
 from minime.services.budget_service import BudgetService
-from minime.services.control_plane_service import ControlPlaneService
-from minime.services.orchestration_service import OrchestrationService
+from minime.services.legacy_unavailable import UnavailableLegacyService, unavailable_payload
 from minime.services.project_service import ProjectService
 from minime.services.provider_health_service import ProviderHealthService
-from minime.services.readiness_service import ReadinessService
-from minime.services.restart_recovery_service import RestartRecoveryService
-from minime.services.scheduler_service import SchedulerService
 from minime.services.status_service import StatusService
 
 # Auto-discover canonical environment files (.env, /etc/minime/minime.env)
@@ -59,9 +55,14 @@ app.add_typer(action_app, name="action")
 
 logger = get_logger("cli")
 
+ReadinessService = SchedulerService = OrchestrationService = ControlPlaneService = (
+    RestartRecoveryService
+) = UnavailableLegacyService
+
 
 @app.callback()
 def main_callback(
+    ctx: typer.Context,
     verbose: bool = typer.Option(False, "--verbose", "-v", help="Enable verbose log output"),
     json_logs: bool = typer.Option(False, "--json-logs", help="Output logs in JSON format"),
 ) -> None:
@@ -69,6 +70,9 @@ def main_callback(
     discover_and_load_env_file()
     log_level = 10 if verbose else 20  # DEBUG vs INFO
     configure_logging(level=log_level, json_output=json_logs)
+    if ctx.invoked_subcommand in {"run", "scheduler", "queue", "orchestrate", "action", "tui"}:
+        typer.echo(json.dumps(unavailable_payload("legacy_operation", "F3")))
+        raise typer.Exit(code=2)
 
 
 @app.command("status")

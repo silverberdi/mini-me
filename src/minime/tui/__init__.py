@@ -1,7 +1,10 @@
-"""mini me TUI operator console package."""
+"""The legacy operational TUI is unavailable until the F5 replacement."""
 
-from minime.tui.app import MiniMeTuiApp, run_tui
-from minime.tui.client import TuiQueryClient
+from minime.services.legacy_unavailable import LegacyOperationUnavailable
+
+
+def run_tui(*_args, **_kwargs) -> None:
+    raise LegacyOperationUnavailable("operation_unavailable: legacy_tui (owner phase F5)")
 
 __all__ = [
     "MiniMeTuiApp",

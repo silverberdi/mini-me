@@ -778,22 +778,7 @@ class ProviderHealthService:
         )
 
     def _has_actionable_ready_work_for_provider(self, provider: str) -> bool:
-        """Check if there is at least one actionable READY work queue item waiting on this provider."""
-        try:
-            items = self.uow.work_queue.list_all()
-        except Exception:
-            return False
-
-        for item in items:
-            readiness_val = getattr(item.readiness_state, "value", item.readiness_state)
-            is_ready = readiness_val == "READY" or getattr(item, "admission_eligible", False)
-            if is_ready:
-                proj = self.uow.projects.get_by_id(item.project_id)
-                if proj:
-                    impl = getattr(proj, "implementer", None) or "codex"
-                    rev = getattr(proj, "reviewer", None) or "antigravity"
-                    if impl == provider or rev == provider:
-                        return True
+        """F1 has no local admission queue, so probes cannot be work-triggered."""
         return False
 
     async def check_and_probe_provider(

@@ -108,50 +108,9 @@ class ProjectModel(Base):
     jobs: Mapped[list[JobModel]] = relationship(
         "JobModel", back_populates="project", cascade="all, delete-orphan"
     )
-    backlog_items: Mapped[list[BacklogItemModel]] = relationship(
-        "BacklogItemModel", back_populates="project", cascade="all, delete-orphan"
-    )
     sagas: Mapped[list[DurableSagaModel]] = relationship(
         "DurableSagaModel", back_populates="project", cascade="all, delete-orphan"
     )
-
-
-class BacklogItemModel(Base):
-    __tablename__ = "backlog_items"
-    __table_args__ = (
-        UniqueConstraint("project_id", "item_key", name="uq_backlog_items_project_key"),
-    )
-
-    id: Mapped[str] = mapped_column(String(64), primary_key=True)
-    project_id: Mapped[str] = mapped_column(
-        String(64), ForeignKey("projects.id", ondelete="CASCADE"), nullable=False, index=True
-    )
-    item_key: Mapped[str] = mapped_column(String(128), nullable=False, index=True)
-    title: Mapped[str] = mapped_column(String(255), nullable=False)
-    description: Mapped[str] = mapped_column(Text, default="", nullable=False)
-    priority: Mapped[str] = mapped_column(String(32), default="NORMAL", nullable=False)
-    status: Mapped[str] = mapped_column(String(32), default="BACKLOG", nullable=False, index=True)
-    source: Mapped[str] = mapped_column(String(32), default="LOCAL_BACKLOG", nullable=False)
-    source_location: Mapped[str | None] = mapped_column(String(255), nullable=True)
-    dependencies: Mapped[list[str]] = mapped_column(JSON, default=list, nullable=False)
-    readiness_state: Mapped[str] = mapped_column(String(32), default="NOT_READY", nullable=False)
-    unmet_readiness_reasons: Mapped[list[str]] = mapped_column(JSON, default=list, nullable=False)
-    human_questions: Mapped[list[str]] = mapped_column(JSON, default=list, nullable=False)
-    human_answers: Mapped[list[dict[str, Any]]] = mapped_column(JSON, default=list, nullable=False)
-    acceptance_criteria: Mapped[list[str]] = mapped_column(JSON, default=list, nullable=False)
-    github_issue_number: Mapped[int | None] = mapped_column(Integer, nullable=True)
-    github_issue_url: Mapped[str | None] = mapped_column(String(512), nullable=True)
-    github_project_item_id: Mapped[str | None] = mapped_column(String(128), nullable=True)
-    openspec_change_name: Mapped[str | None] = mapped_column(String(128), nullable=True)
-    run_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
-    created_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), default=utc_now, nullable=False
-    )
-    updated_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), default=utc_now, onupdate=utc_now, nullable=False
-    )
-
-    project: Mapped[ProjectModel] = relationship("ProjectModel", back_populates="backlog_items")
 
 
 class ProjectBindingModel(Base):
@@ -1249,70 +1208,6 @@ class OperatorActionRecordModel(Base):
     parameters_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict, nullable=False)
     result_payload_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict, nullable=False)
     created_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), default=utc_now, nullable=False, index=True
-    )
-
-    project: Mapped[ProjectModel] = relationship("ProjectModel")
-    run: Mapped[OrchestrationRunModel | None] = relationship("OrchestrationRunModel")
-
-
-class WorkQueueSnapshotModel(Base):
-    __tablename__ = "work_queue_snapshots"
-    __table_args__ = (
-        UniqueConstraint(
-            "project_id", "change_name", name="uq_work_queue_snapshots_project_change"
-        ),
-    )
-
-    id: Mapped[str] = mapped_column(String(64), primary_key=True)
-    project_id: Mapped[str] = mapped_column(
-        String(64), ForeignKey("projects.id", ondelete="CASCADE"), nullable=False, index=True
-    )
-    change_name: Mapped[str] = mapped_column(String(128), nullable=False, index=True)
-    github_issue_number: Mapped[int | None] = mapped_column(Integer, nullable=True)
-    github_issue_title: Mapped[str | None] = mapped_column(String(512), nullable=True)
-    github_project_item_id: Mapped[str | None] = mapped_column(String(128), nullable=True)
-    priority: Mapped[str] = mapped_column(String(32), default="NORMAL", nullable=False)
-    roadmap_stage: Mapped[int | None] = mapped_column(Integer, nullable=True)
-    dependencies: Mapped[list[str]] = mapped_column(JSON, default=list, nullable=False)
-    readiness_state: Mapped[str] = mapped_column(String(32), default="NOT_READY", nullable=False)
-    unmet_readiness_reasons: Mapped[list[str]] = mapped_column(JSON, default=list, nullable=False)
-    blocked_reason: Mapped[str | None] = mapped_column(Text, nullable=True)
-    admission_eligible: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
-    priority_score: Mapped[float] = mapped_column(Float, default=0.0, nullable=False)
-    discovered_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), default=utc_now, nullable=False
-    )
-    last_evaluated_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), default=utc_now, nullable=False
-    )
-
-    project: Mapped[ProjectModel] = relationship("ProjectModel")
-
-
-class SchedulerDecisionRecordModel(Base):
-    __tablename__ = "scheduler_decision_records"
-
-    id: Mapped[str] = mapped_column(String(64), primary_key=True)
-    project_id: Mapped[str] = mapped_column(
-        String(64), ForeignKey("projects.id", ondelete="CASCADE"), nullable=False, index=True
-    )
-    change_name: Mapped[str] = mapped_column(String(128), nullable=False, index=True)
-    github_issue_number: Mapped[int | None] = mapped_column(Integer, nullable=True)
-    decision: Mapped[str] = mapped_column(String(32), nullable=False, index=True)
-    reason_code: Mapped[str | None] = mapped_column(String(64), nullable=True, index=True)
-    reason_summary: Mapped[str] = mapped_column(Text, default="", nullable=False)
-    priority_score: Mapped[float] = mapped_column(Float, default=0.0, nullable=False)
-    selected_implementer: Mapped[str | None] = mapped_column(String(64), nullable=True)
-    concurrency_snapshot: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict, nullable=False)
-    capacity_snapshot: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict, nullable=False)
-    run_id: Mapped[str | None] = mapped_column(
-        String(64),
-        ForeignKey("orchestration_runs.id", ondelete="SET NULL"),
-        nullable=True,
-        index=True,
-    )
-    evaluated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=utc_now, nullable=False, index=True
     )
 

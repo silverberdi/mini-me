@@ -856,13 +856,10 @@ class PersistenceUnitOfWork(ABC):
     preview_sessions: PreviewSessionRepositoryInterface
     validation_runs: ValidationRunRepositoryInterface
     operator_actions: OperatorActionRepositoryInterface
-    work_queue: WorkQueueRepositoryInterface
-    scheduler_decisions: SchedulerDecisionRepositoryInterface
     provider_efficiency: ProviderEfficiencyMetricsRepositoryInterface
     authorized_operators: AuthorizedOperatorRepositoryInterface
     auth_sessions: AuthSessionRepositoryInterface
     auth_audit_events: AuthAuditEventRepositoryInterface
-    backlog_items: BacklogItemRepositoryInterface
     integrity_findings: IntegrityFindingRepositoryInterface
     classification_snapshots: TaskClassificationSnapshotRepositoryInterface
     project_managed_repository_bindings: ProjectManagedRepositoryBindingRepositoryInterface
