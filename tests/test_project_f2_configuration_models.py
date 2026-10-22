@@ -604,6 +604,28 @@ def test_project_cli_update_uses_shared_configuration_service(in_memory_uow, tmp
     assert in_memory_uow.projects.get_by_id("demo").display_name == "Updated from CLI"
 
 
+def test_project_cli_rejects_unsupported_configuration_without_database_or_command_execution(
+    tmp_path, monkeypatch
+):
+    from typer.testing import CliRunner
+
+    from minime.cli import main as cli
+
+    patch_path = tmp_path / "patch.json"
+    patch_path.write_text('{"repository":"attacker/other","command":"touch /tmp/unsafe"}')
+
+    def unexpected_database_access():
+        raise AssertionError("invalid CLI patch must be rejected before database access")
+
+    monkeypatch.setattr(cli.db_manager, "session", unexpected_database_access)
+    result = CliRunner().invoke(cli.app, ["project", "update", "demo", str(patch_path)])
+
+    assert result.exit_code == 1
+    assert "project update failed" in result.output
+    assert "Extra inputs are not permitted" in result.output
+    assert not (tmp_path / "unsafe").exists()
+
+
 def test_project_cli_prompts_for_credentials_without_echoing_them(
     in_memory_uow, tmp_path, monkeypatch
 ):
@@ -741,6 +763,62 @@ def test_versioned_project_api_creates_brownfield_configuration(in_memory_uow, m
     assert response.status_code == 201, response.json()
     assert response.json()["onboarding_status"] == "CONFIGURED"
     assert "private_key" not in response.text
+
+
+def test_versioned_project_api_lifecycle_and_queries_are_configuration_only(
+    in_memory_uow, monkeypatch
+):
+    from fastapi.testclient import TestClient
+
+    from minime.api.app import app, get_current_operator, get_uow
+
+    async def profiles_available(self, profiles):
+        assert profiles
+
+    monkeypatch.setattr(
+        "minime.api.app.ProjectCatalogService.validate_project_profiles", profiles_available
+    )
+    monkeypatch.setenv("MINIME_AUTH_ENABLED", "false")
+    app.dependency_overrides[get_uow] = lambda: in_memory_uow
+    app.dependency_overrides[get_current_operator] = lambda: object()
+    try:
+        client = TestClient(app)
+        created = client.post("/api/v1/projects", json=_configuration().model_dump(mode="json"))
+        listed = client.get("/api/v1/projects")
+        detail = client.get("/api/v1/projects/demo")
+        updated = client.patch("/api/v1/projects/demo", json={"display_name": "Updated"})
+        paused = client.post("/api/v1/projects/demo/pause")
+        activated = client.post("/api/v1/projects/demo/activate")
+    finally:
+        app.dependency_overrides.clear()
+
+    assert created.status_code == 201
+    assert listed.status_code == 200 and len(listed.json()) == 1
+    assert detail.status_code == 200 and detail.json()["onboarding_status"] == "CONFIGURED"
+    assert updated.status_code == 200 and updated.json()["display_name"] == "Updated"
+    assert paused.status_code == 200 and paused.json()["status"] == "PAUSED"
+    assert activated.status_code == 200 and activated.json()["status"] == "ACTIVE"
+    assert activated.json()["onboarding_status"] == "CONFIGURED"
+    assert in_memory_uow.jobs.list_by_project("demo") == []
+
+
+def test_provider_catalog_api_is_authenticated_and_contains_metadata_only(monkeypatch):
+    from fastapi.testclient import TestClient
+
+    from minime.api.app import app, get_current_operator
+
+    monkeypatch.setenv("MINIME_AUTH_ENABLED", "false")
+    app.dependency_overrides[get_current_operator] = lambda: object()
+    try:
+        response = TestClient(app).get("/api/v1/catalogs/providers")
+    finally:
+        app.dependency_overrides.clear()
+
+    assert response.status_code == 200
+    providers = response.json()
+    assert {item["id"] for item in providers} == {"github", "ado"}
+    assert all("repository_url" not in item for item in providers)
+    assert "secret_reference" not in response.text
 
 
 def test_versioned_project_api_rejects_greenfield_without_zip_before_persistence(
@@ -900,3 +978,39 @@ def test_agent_catalog_requires_authentication(in_memory_uow):
         app.dependency_overrides.clear()
 
     assert response.status_code == 401
+
+
+def test_agent_catalog_api_returns_only_validated_local_capabilities(in_memory_uow, monkeypatch):
+    from fastapi.testclient import TestClient
+
+    from minime.api.app import app, get_current_operator, get_uow
+
+    async def observed_catalog(self, project_root=None):
+        assert project_root is None
+        return {
+            "agents": [
+                {
+                    "id": "codex",
+                    "available": True,
+                    "capability_status": "OBSERVED_READ_ONLY",
+                    "models": {"verified-model": ["medium"]},
+                }
+            ],
+            "capability_discovery": "read-only; no inference or provider probe was invoked",
+        }
+
+    monkeypatch.setattr(
+        "minime.api.app.ProjectCatalogService.agent_catalog", observed_catalog
+    )
+    monkeypatch.setenv("MINIME_AUTH_ENABLED", "false")
+    app.dependency_overrides[get_uow] = lambda: in_memory_uow
+    app.dependency_overrides[get_current_operator] = lambda: object()
+    try:
+        response = TestClient(app).get("/api/v1/catalogs/agents")
+    finally:
+        app.dependency_overrides.clear()
+
+    assert response.status_code == 200
+    assert response.json()["agents"][0]["models"] == {"verified-model": ["medium"]}
+    assert "private_key" not in response.text
+    assert "api_key" not in response.text
