@@ -1,5 +1,7 @@
 import asyncio
 
+import pytest
+
 from minime.config import AppConfig, CliInvocationConfig, ProviderConfig
 from minime.services.project_catalog_service import ProjectCatalogService
 
@@ -87,6 +89,40 @@ def test_catalog_does_not_fabricate_models_when_discovery_fails(monkeypatch):
 
     assert catalog["agents"][0]["models"] == {}
     assert catalog["agents"][0]["capability_status"] == "UNAVAILABLE"
+
+
+def test_text_only_provider_is_not_exposed_as_an_agent_capability():
+    text_provider = ProviderConfig(
+        type="api",
+        command="text-api",
+        roles=["implementer", "reviewer"],
+        file_edit_roles=["implementer"],
+        read_only_roles=["reviewer"],
+        invocation={
+            "implementer": CliInvocationConfig(args=["call"]),
+            "reviewer": CliInvocationConfig(args=["call"]),
+        },
+    )
+    catalog = ProjectCatalogService(
+        AppConfig(providers={"text": text_provider}), _NativeSetup()
+    )
+    assert asyncio.run(catalog.agent_catalog())["agents"] == []
+
+
+def test_profile_resolution_rejects_unavailable_prompt_transport():
+    from minime.config import resolve_cli_invocation
+
+    bad = ProviderConfig(
+        command="codex",
+        roles=["implementer"],
+        invocation={
+            "implementer": CliInvocationConfig(
+                args=["exec"], prompt_transport="file", model="m", effort="medium"
+            )
+        },
+    )
+    with pytest.raises(ValueError, match="Unsupported prompt transport"):
+        resolve_cli_invocation("codex", "implementer", AppConfig(providers={"codex": bad}))
 
 
 def test_provider_catalog_separates_metadata_from_connections():
