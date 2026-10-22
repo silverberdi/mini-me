@@ -11,7 +11,12 @@ class _NativeSetup:
         return {"available": True, "init_tools_supported": True, "version": "test"}
 
     def inspect_integrations(self, root, agents):
-        return {"complete": True, "agents": agents, "root": str(root)}
+        return {
+            "complete": True,
+            "agents": agents,
+            "root": str(root),
+            "integrations": {"codex": ["propose", "verify-change"]},
+        }
 
     def discover_official_integrations(self, agents):
         integrations = {"codex": ["propose", "verify-change"]}
@@ -89,6 +94,58 @@ def test_catalog_does_not_fabricate_models_when_discovery_fails(monkeypatch):
 
     assert catalog["agents"][0]["models"] == {}
     assert catalog["agents"][0]["capability_status"] == "UNAVAILABLE"
+
+
+def test_target_workspace_catalog_requires_the_full_official_integration_set(monkeypatch):
+    import minime.services.project_catalog_service as catalog_module
+
+    monkeypatch.setattr(catalog_module.shutil, "which", lambda _: "/bin/fake-codex")
+    monkeypatch.setattr(
+        catalog_module,
+        "get_provider_adapter",
+        lambda provider_id, config: _Capabilities(
+            provider_id, {"models": {"live-codex": ["medium"]}}
+        ),
+    )
+
+    catalog = asyncio.run(
+        ProjectCatalogService(_config(), _NativeSetup()).agent_catalog("/verified/workspace")
+    )
+
+    assert catalog["agents"][0]["installed_integrations"]["complete"] is True
+    assert catalog["agents"][0]["installed_integrations"]["integrations"]["codex"] == [
+        "propose", "verify-change"
+    ]
+
+
+def test_project_profile_workflows_and_skills_must_exist_in_target_workspace(monkeypatch):
+    import minime.services.project_catalog_service as catalog_module
+    from minime.domain.models import ProjectAgentProfile
+
+    monkeypatch.setattr(catalog_module.shutil, "which", lambda _: "/bin/fake-codex")
+    monkeypatch.setattr(
+        catalog_module,
+        "get_provider_adapter",
+        lambda provider_id, config: _Capabilities(
+            provider_id, {"models": {"live-codex": ["medium"]}}
+        ),
+    )
+    service = ProjectCatalogService(_config(), _NativeSetup())
+    profiles = {
+        "thinking": ProjectAgentProfile(
+            agent_id="codex",
+            model_id="live-codex",
+            effort="medium",
+            workflows=["$openspec-propose"],
+            skills=["openspec-propose"],
+        )
+    }
+
+    asyncio.run(service.validate_project_profiles(profiles, "/verified/workspace"))
+
+    profiles["thinking"].workflows = ["$openspec-sync-specs"]
+    with pytest.raises(ValueError, match="unverified native workflows"):
+        asyncio.run(service.validate_project_profiles(profiles, "/verified/workspace"))
 
 
 def test_text_only_provider_is_not_exposed_as_an_agent_capability():

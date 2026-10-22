@@ -161,9 +161,17 @@ class ProjectCatalogService:
                     ]
                     entry["available_skills"] = []
                 if project_root is not None:
-                    entry["installed_integrations"] = self.openspec.inspect_integrations(
+                    installed = self.openspec.inspect_integrations(
                         project_root, [provider_id]
                     )
+                    installed_names = set(
+                        installed.get("integrations", {}).get(provider_id, [])
+                    )
+                    official_names = set(operations)
+                    installed["complete"] = bool(installed.get("complete")) and (
+                        installed_names == official_names
+                    )
+                    entry["installed_integrations"] = installed
                 else:
                     entry["installed_integrations"] = None
             agents.append(entry)
@@ -173,9 +181,11 @@ class ProjectCatalogService:
             "capability_discovery": "read-only; no inference or provider probe was invoked",
         }
 
-    async def validate_project_profiles(self, profiles: dict[str, Any]) -> None:
+    async def validate_project_profiles(
+        self, profiles: dict[str, Any], project_root: str | Path | None = None
+    ) -> None:
         """Fail closed unless every selected profile is observed and usable locally."""
-        catalog = await self.agent_catalog()
+        catalog = await self.agent_catalog(project_root)
         agents = {item["id"]: item for item in catalog["agents"]}
         role_map = {
             "thinking": ("implementer", "file_edit_roles"),
@@ -209,9 +219,20 @@ class ProjectCatalogService:
                 raise ValueError(
                     f"Selected agent '{provider_id}' has no verified official OpenSpec setup"
                 )
+            installed = agent.get("installed_integrations")
+            if project_root is not None and (
+                not isinstance(installed, dict) or not installed.get("complete")
+            ):
+                raise ValueError(
+                    f"Selected agent '{provider_id}' does not have a complete official OpenSpec installation in the project workspace"
+                )
             workflow_commands = {
                 item["command"] for item in agent.get("native_workflows", [])
             }
+            if project_root is not None:
+                installed_names = set(installed.get("integrations", {}).get(provider_id, []))
+                prefix = "$openspec-" if provider_id == "codex" else "/opsx-"
+                workflow_commands = {prefix + name for name in installed_names}
             unsupported_workflows = set(profile.workflows) - workflow_commands
             if unsupported_workflows:
                 raise ValueError(
@@ -219,6 +240,11 @@ class ProjectCatalogService:
                     + ", ".join(sorted(unsupported_workflows))
                 )
             unsupported_skills = set(profile.skills) - set(agent.get("available_skills", []))
+            if project_root is not None and provider_id == "codex":
+                unsupported_skills = set(profile.skills) - {
+                    f"openspec-{name}"
+                    for name in installed.get("integrations", {}).get(provider_id, [])
+                }
             if unsupported_skills:
                 raise ValueError(
                     f"Profile '{profile_name}' requests unverified skills: "
