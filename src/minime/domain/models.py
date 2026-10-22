@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 import uuid
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -153,9 +154,9 @@ class ProjectAgentProfile(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
-    agent_id: str
-    model_id: str
-    effort: str
+    agent_id: str = Field(min_length=1, max_length=64)
+    model_id: str = Field(min_length=1, max_length=128)
+    effort: str = Field(min_length=1, max_length=32)
     workflows: list[str] = Field(default_factory=list)
     skills: list[str] = Field(default_factory=list)
 
@@ -216,8 +217,12 @@ class ProjectConfigurationInput(BaseModel):
             raise ValueError("repository is required")
         if not self.base_branch.strip():
             raise ValueError("base_branch must not be empty")
+        if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,63}", self.project_id):
+            raise ValueError("project_id must be a safe 1-64 character identifier")
         if not {"tickets", "git_pr"}.issubset(self.provider_connections):
             raise ValueError("tickets and git_pr provider connections are required")
+        if set(self.provider_connections) - {"tickets", "git_pr"}:
+            raise ValueError("Only tickets and git_pr provider responsibilities are supported in F2")
         for connection in self.provider_connections.values():
             if connection.auth_mode == "project_app" and not (
                 connection.secret_reference or self.github_app_credentials
@@ -253,6 +258,11 @@ class ProjectConfigurationPatch(BaseModel):
             raise ValueError("display_name must not be empty")
         if self.base_branch is not None and not self.base_branch.strip():
             raise ValueError("base_branch must not be empty")
+        if self.provider_connections is not None:
+            if not {"tickets", "git_pr"}.issubset(self.provider_connections):
+                raise ValueError("tickets and git_pr provider connections are required")
+            if set(self.provider_connections) - {"tickets", "git_pr"}:
+                raise ValueError("Only tickets and git_pr provider responsibilities are supported in F2")
         for connection in (self.provider_connections or {}).values():
             if connection.secret_reference and not self.github_app_credentials:
                 raise ValueError("secret references are server-owned and cannot be supplied by operators")

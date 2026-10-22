@@ -50,6 +50,25 @@ def test_project_configuration_defaults_optional_branch_to_main():
     assert _configuration().base_branch == "main"
 
 
+def test_project_configuration_rejects_unsafe_identity_and_unimplemented_responsibility():
+    with pytest.raises(ValidationError, match="safe 1-64 character identifier"):
+        _configuration(project_id="../demo")
+
+    connections = _configuration().provider_connections
+    connections["ado"] = ProjectProviderConnection(
+        provider_id="github",
+        repository_url="https://github.com/example/demo",
+        auth_mode="environment_app",
+    )
+    with pytest.raises(ValidationError, match="Only tickets and git_pr"):
+        _configuration(provider_connections=connections)
+
+
+def test_project_agent_profile_rejects_empty_catalog_identity():
+    with pytest.raises(ValidationError):
+        ProjectAgentProfile(agent_id="", model_id="model", effort="medium")
+
+
 def test_project_configuration_keeps_ticket_and_git_connections_separate():
     project = _configuration()
     assert project.provider_connections["tickets"].repository_url.endswith("/demo")
