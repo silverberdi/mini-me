@@ -151,6 +151,9 @@ class OpenSpecAdapter(OpenSpecAdapterInterface):
             ".agents/skills",
             ".agent",
             ".agent/workflows",
+            "AGENTS.md",
+            ".agents/AGENTS.md",
+            ".agent/AGENTS.md",
             "openspec",
             "openspec/config.yaml",
         ):

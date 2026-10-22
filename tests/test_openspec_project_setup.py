@@ -143,3 +143,27 @@ def test_official_setup_rejects_symlinked_skill_directory_before_init(tmp_path, 
         adapter.install_official_integrations(project, ["codex"])
 
     assert list(outside.iterdir()) == []
+
+
+def test_official_setup_rejects_symlinked_agent_instruction_before_init(tmp_path, monkeypatch):
+    project = tmp_path / "project"
+    project.mkdir()
+    outside = tmp_path / "operator-instructions.md"
+    outside.write_text("Do not modify this file.\n", encoding="utf-8")
+    (project / "AGENTS.md").symlink_to(outside)
+    adapter = OpenSpecAdapter()
+    monkeypatch.setattr(
+        adapter,
+        "inspect_cli",
+        lambda: {
+            "available": True,
+            "version": "test-version",
+            "init_tools_supported": True,
+            "no_animation_supported": True,
+        },
+    )
+
+    with pytest.raises(ValueError, match="contains a symlink"):
+        adapter.install_official_integrations(project, ["codex"])
+
+    assert outside.read_text(encoding="utf-8") == "Do not modify this file.\n"
