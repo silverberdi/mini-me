@@ -921,6 +921,10 @@ class GitPullRequestAdapter(Protocol):
 
     def get_repository_default_branch(self, repository: str) -> ExternalActionResult[str]: ...
 
+    def get_repository_branch_head(
+        self, repository: str, branch: str
+    ) -> ExternalActionResult[str]: ...
+
     def create_remote_branch(
         self, repository: str, branch: str, base_sha: str
     ) -> ExternalActionResult[str]: ...

@@ -145,3 +145,5 @@ An experiment with the installed OpenSpec CLI found that `openspec init --tools`
 The same guard checks nested OpenSpec skill/workflow directories and files for symlinks before native setup; a nested selected skill directory escaping to a sibling directory is denied before `openspec init`. `tests/test_openspec_project_setup.py`: **9 passed**; Ruff: PASS.
 
 The native setup guard also rejects symlinked root/agent-equivalent `AGENTS.md` paths before initialization; the external target remains byte-for-byte unchanged in the regression. Setup suite: **10 passed**; Ruff: PASS.
+
+The Git/PR adapter now exposes exact remote branch-head observation without a local clone, and the project connection service verifies the selected project's repository identity and current grants before returning that read. Branch ref/SHA and gate-order regressions pass; the combined GitHub/configuration suite is **64 passed** with Ruff PASS. No live credential is available here, so task 2.5's real-permission evidence and tasks 4.1–4.2's integrated bootstrap use remain open.

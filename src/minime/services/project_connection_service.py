@@ -88,6 +88,14 @@ class ProjectConnectionService:
         repository = project.provider_connections["git_pr"]["repository_url"]
         return adapter.create_remote_branch(repository, branch, base_sha)
 
+    def get_repository_branch_head(
+        self, project: Project, branch: str
+    ) -> ExternalActionResult[str]:
+        """Observe a requested project branch after verifying its exact Git/PR grant."""
+        adapter = self.require_git_pr_write(project)
+        repository = project.provider_connections["git_pr"]["repository_url"]
+        return adapter.get_repository_branch_head(repository, branch)
+
     def create_pull_request(
         self,
         project: Project,

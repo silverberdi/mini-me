@@ -60,6 +60,25 @@ def test_project_github_adapter_creates_branch_from_observed_commit_and_reconcil
     assert len(created) == 1
 
 
+def test_project_github_adapter_observes_remote_branch_sha():
+    branch_sha = "b" * 40
+
+    def handler(request):
+        assert request.method == "GET"
+        assert request.url.path == "/repos/owner/repo/git/ref/heads/main"
+        return httpx.Response(
+            200,
+            json={"ref": "refs/heads/main", "object": {"sha": branch_sha}},
+        )
+
+    result = GitHubAdapter(auth=_StaticAuth(handler)).get_repository_branch_head(
+        "owner/repo", "main"
+    )
+
+    assert result.outcome == ExternalOutcome.SUCCESS
+    assert result.data == branch_sha
+
+
 def test_project_github_adapter_blocks_branch_reuse_with_a_different_base():
     observed_sha = "b" * 40
     posts = []

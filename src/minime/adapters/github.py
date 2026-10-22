@@ -466,6 +466,12 @@ class GitHubAdapter(GitHubAdapterInterface):
                 error_message="GitHub branch state is unobservable.",
             )
 
+    def get_repository_branch_head(
+        self, repository: str, branch: str
+    ) -> ExternalActionResult[str]:
+        """Read an exact remote branch head without requiring a local clone."""
+        return self._observe_remote_branch_sha(repository, branch)
+
     def create_remote_branch(
         self, repository: str, branch: str, base_sha: str
     ) -> ExternalActionResult[str]:

@@ -573,6 +573,52 @@ def test_git_pr_mutation_gate_uses_project_repository_after_grant_verification(
     ]
 
 
+def test_project_branch_observation_uses_grant_checked_git_pr_connection(
+    in_memory_uow, monkeypatch
+):
+    from minime.adapters.github import GitHubAdapter
+    from minime.domain.enums import ExternalOutcome, ExternalReasonCode, RetrySafety
+    from minime.domain.models import ExternalActionResult
+    from minime.services.project_connection_service import ProjectConnectionService
+
+    project = ProjectService(in_memory_uow).create_configured_project(_configuration())
+    sha = "b" * 40
+    calls = []
+
+    class Adapter:
+        def verify_connection_permissions(self, repository, responsibility):
+            calls.append(("verify", repository, responsibility))
+            return ExternalActionResult(
+                outcome=ExternalOutcome.SUCCESS,
+                source_adapter="test",
+                reason_code=ExternalReasonCode.EXECUTION_SUCCESS,
+                retry_safety=RetrySafety.SAFE,
+            )
+
+        def get_repository_branch_head(self, repository, branch):
+            calls.append(("branch", repository, branch))
+            return ExternalActionResult(
+                outcome=ExternalOutcome.SUCCESS,
+                source_adapter="test",
+                reason_code=ExternalReasonCode.EXECUTION_SUCCESS,
+                retry_safety=RetrySafety.SAFE,
+                data=sha,
+            )
+
+    monkeypatch.setattr(
+        GitHubAdapter,
+        "for_project_connection",
+        classmethod(lambda *_args, **_kwargs: Adapter()),
+    )
+    result = ProjectConnectionService().get_repository_branch_head(project, "main")
+
+    assert result.data == sha
+    assert calls == [
+        ("verify", "example/demo", "git_pr"),
+        ("branch", "example/demo", "main"),
+    ]
+
+
 def test_project_connection_factory_resolves_only_requested_responsibility(
     in_memory_uow, monkeypatch
 ):
