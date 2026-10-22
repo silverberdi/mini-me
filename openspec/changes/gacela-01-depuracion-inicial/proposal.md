@@ -20,10 +20,10 @@ La implementación actual conserva una arquitectura heredada que genera y fusion
 
 ### Modified Capabilities
 
-- Ninguna. Las especificaciones vigentes bajo `openspec/specs/` pertenecen al legado reconciliado y no se modificarán como autoridad de producto en F1.
+- Ninguna. Las especificaciones históricas bajo `openspec/specs/` se preservan sin reescritura como evidencia; cuando contradicen el contrato rector 1.2 no son autoridad de producto ni de ejecución para F1.
 
 ## Impact
 
 - Afecta `openspec_generator`, `openspec_sync`, `post_merge_service`, gates/lifecycle, intake/readiness/discovery/scheduler, pipeline/orchestration y sus consumidores de API, CLI, TUI/PWA y pruebas.
 - Afecta modelos, interfaces, repositorios y migraciones Alembic relacionados con backlog local, cola, decisiones de scheduler, clasificación, y registros exclusivos de flujos heredados; el conjunto final se decide solo tras el Removal Ledger y el análisis de datos reales.
-- Mantiene FastAPI, autenticación, registros de proyecto aprovechables, integraciones Git/GitHub, aislamiento de worktrees y los controles de secretos/autorización/costo. No habilita scheduler, no ejecuta agentes ni introduce servicios, APIs, frameworks o infraestructura nuevos.
+- Mantiene FastAPI, autenticación, registros de proyecto aprovechables, integraciones Git/GitHub, aislamiento de worktrees, la integración oficial de lectura/validación estructural de OpenSpec y los controles de secretos/autorización/costo. No habilita scheduler, no ejecuta agentes ni introduce servicios, APIs, frameworks o infraestructura nuevos.

@@ -11,6 +11,7 @@ See [proposal.md](proposal.md) for motivation and the three delta specifications
 | Semantic completion/transition substitute | `VerifyGate`, `ExecutionPipelineService`, `OrchestrationService`, `NativeOpenSpecApply`, `implementer_runner`, reviewer/auditor prompt runners and their API/CLI dispatches | **REMOVE/DISABLE** where the responsibility is legacy workflow execution. F3 owns the replacement flow; no dispatch, provider spend, or candidate mutation in F1. |
 | Local ticket intake, backlog projection, priority and autonomous admission | `IntakeService`, `ReadinessService`, `WorkDiscoveryService`, `SchedulerService`, `classification_rules`, `TaskClassifier`, `TaskComplexityRiskClassifier`; scheduler observer; queue endpoints/commands/UI | **REMOVE/DISABLE**. GitHub will be the F2 ticket source; F1 has no ticket selection or autonomous start. |
 | Durable recovery/sagas/claims and external action retries | `RecoveryConvergenceService`, `SagaEngine`, `RestartRecoveryService`, `PostMergeReconciliationService` | **RESERVE F3** after real process/DB evidence distinguishes minimal continuation from legacy execution. Do not delete merely because it is complex. It must not drive retired paths in F1. |
+| Native OpenSpec integration reusable by F3 | Installed official OpenSpec skills, `OpenSpecAdapter`, CLI status/instructions/structural validation, `OpenSpecIntegrity` read-only callers, repository/worktree binding and candidate/evidence identity records with retained consumers | **CONSERVE** subject to focused tests. Preserve skills and the non-semantic dispatch/identity/evidence boundary needed to invoke and evidence a future native workflow; it may inspect native artifacts and CLI results but SHALL NOT generate, merge, archive, infer or mutate their semantic content. |
 | Project identity, repository safety and worktree isolation | project/binding services, `GitHubAdapter`, `repository_identity`, `WorkspaceGuard`, `WorktreeManager`, managed repository/worktree ownership | **CONSERVE** subject to focused tests. They protect the future F2/F3 flow and do not author OpenSpec semantics. |
 | Auth and secrets | FastAPI auth middleware, `AuthService`, authorized operators/sessions/audit tables | **CONSERVE**. |
 | Preview, dashboard/PWA/TUI operator surfaces | preview/validation/dashboard/control-plane services and static/TUI clients | **RESERVE F5**, except remove widgets/routes exclusively showing retired queue/lifecycle actions; do not build the new UI now. |
@@ -49,9 +50,9 @@ Historical Alembic revisions are immutable. F1 adds one revision from the actual
 
 ## Decisions
 
-### 1. Delete semantic writers first; do not emulate their replacement
+### 1. Delete semantic writers while retaining the official read-only OpenSpec boundary
 
-Remove the generator, sync/archive merger, their dependency injection and all callers. Replace their externally reachable behavior with a shared, minimal unavailable response where a public contract must remain temporarily recognizable; otherwise remove the endpoint/command. `OpenSpecAdapter` structural reads and repository guards survive only if the ledger proves they are non-semantic.
+Remove the generator, sync/archive merger, their dependency injection and all callers. Replace their externally reachable behavior with a shared, minimal unavailable response where a public contract must remain temporarily recognizable; otherwise remove the endpoint/command. Preserve `OpenSpecAdapter` and structural validation only as an official-CLI/read-only integration for existing native artifacts; the ledger must demonstrate that no retained method authors, merges, archives, moves or semantically interprets OpenSpec content.
 
 Alternative rejected: retain renamed generators or convert them into prompt templates. That still makes mini me the semantic OpenSpec author and contradicts the contract.
 
@@ -73,9 +74,15 @@ Before creating destructive DDL, implementation captures: schema revision, row c
 
 Alternative rejected: a migration that unconditionally drops every legacy table or rewrites historical revisions.
 
-### 5. Historical Changes are inspected, never executed
+### 5. Historical Changes and contradictory specs are inspected, never executed or rewritten
 
-The reconciliation report is a planning/evidence artifact generated from `openspec list/status`, filesystem metadata, durable DB records and process observation. It lists slug/status/conflicting authority/live-reference verdict without calling `apply`, `continue`, `archive`, or mutating directories. A real active external/durable operation is a blocker for any touching deletion, not authorization to advance it.
+The Removal Ledger and historical reconciliation inventory live in this `design.md`, updated during implementation with command references and candidate-bound results rather than copied into a new report. The inventory is generated from `openspec list/status`, filesystem metadata, durable DB records and process observation. It lists slug/status/conflicting authority/live-reference verdict without calling `apply`, `continue`, `archive`, or mutating directories. Historical specs remain immutable evidence; the contract rector and F1 delta specs govern contradictions. Each conflict is mapped to its owning F2–F6 phase and, once that phase is authorized, is reconciled by an agent using the installed native OpenSpec update workflow before any apply; any later sync/archive uses its native workflow after the authorized merge. F1 records that route but never invokes it. A real active external/durable operation is a blocker for any touching deletion, not authorization to advance it.
+
+### 6. Retain the minimal F3 handoff substrate without retaining the legacy engine
+
+Keep the installed official skills, CLI adapter/structural validation, verified repository and worktree identity, and candidate/evidence records that the Removal Ledger proves have a retained F3 consumer. Remove the legacy prompt orchestration, semantic gates and custom lifecycle behavior around them. The retained substrate does not itself dispatch an agent in F1; it only preserves the identity and evidence contract with which F3 can call the native workflow.
+
+Alternative rejected: preserve `ExecutionPipelineService` or `OrchestrationService` wholesale as a future dispatcher. Their current semantic and lifecycle responsibilities are exactly the legacy behavior F1 is retiring.
 
 ## Risks / Trade-offs
 
@@ -93,6 +100,6 @@ The reconciliation report is a planning/evidence artifact generated from `opensp
 3. Implement in the dependency order above; migrate retained clients/tests to explicit unavailable or surviving read-only behavior.
 4. Add and exercise the new Alembic revision against an empty database and representative populated restore. Verify `upgrade`, `downgrade`, and restore without editing historical revisions.
 5. Run reachability checks plus unit/integration and real retained API/CLI functional flows after deletion. Confirm retired calls cannot enqueue, dispatch, mutate or spend.
-6. Produce candidate-bound evidence: removal diff, symbols/callers absent, database before/after counts, migration revision, denial results, retained-capability results, and historical-change reconciliation inventory.
+6. Update the in-design Removal Ledger/inventory and retain candidate-bound command evidence: removal diff, symbols/callers absent, database before/after counts, migration revision, denial results, retained-capability results, and historical-change reconciliation observations. Do not create a separate bureaucratic report.
 
 Rollback: stop at the failed migration before further deletion; use Alembic downgrade only where verified, otherwise restore the protected pre-migration backup. Revert the candidate code as one unit so no caller remains pointed at a removed schema. No production deployment is part of F1; CI/CD remains external.

@@ -2,12 +2,12 @@
 
 - [ ] 1.1 Capture the candidate base SHA, Alembic head, configured scheduler state, process observation, and PostgreSQL schema/FK/index/row-count inventory without invoking agents or changing runtime state; save redacted evidence.
 - [ ] 1.2 Produce the F1 Removal Ledger for every identified writer, caller, DI/config registration, API/CLI/UI entry point, test, package dependency, model, repository, table, column, index and foreign key; mark REMOVE, MIGRATE, RETAIN-WITH-REASON, or F2–F6 reservation with evidence.
-- [ ] 1.3 Inventory every non-archived historical Change/spec and reconcile its slug, filesystem status, durable/external reference and contract conflict as read-only evidence; stop for human direction if a live process or external operation is found.
+- [ ] 1.3 Update the historical reconciliation inventory and Removal Ledger in `design.md` with every non-archived Change/spec, its slug, filesystem status, durable/external reference, contract conflict and owning F2–F6 phase; record the future native OpenSpec update/sync/archive route without invoking it, retain command output as evidence without creating a separate report, and stop for human direction if a live process or external operation is found.
 - [ ] 1.4 Take and verify a protected representative PostgreSQL backup/restore before any destructive migration; document the recovery owner and the exact restoration command without storing secrets.
 
 ## 2. Retire OpenSpec emulations and legacy execution graph
 
-- [ ] 2.1 Remove `OpenSpecGenerator`, its deterministic artifact writers and all Intake/Reconciliation/publishing callers, generator-specific fixtures and dependencies; preserve only non-semantic OpenSpec structural inspection that has a ledger-backed consumer.
+- [ ] 2.1 Remove `OpenSpecGenerator`, its deterministic artifact writers and all Intake/Reconciliation/publishing callers, generator-specific fixtures and dependencies; preserve installed official OpenSpec skills, `OpenSpecAdapter`/official CLI status and structural validation, and the ledger-backed repository/worktree/candidate/evidence identity substrate needed by F3, without retaining a semantic dispatcher.
 - [ ] 2.2 Remove `OpenSpecSyncService` semantic merge/archive behavior and `PostMergeReconciliationService` consumers that write OpenSpec/closure state; retain separately justified Git/worktree safety checks without semantic replacement.
 - [ ] 2.3 Remove or disable legacy verify, apply, pipeline, orchestration, recovery and prompt-runner paths that advance or emulate OpenSpec workflow stages; ensure no provider invocation, candidate mutation or spending path remains reachable through them.
 - [ ] 2.4 Remove obsolete service wiring, domain interfaces/models, imports, tests and dependencies made exclusively unreachable by 2.1–2.3; preserve useful regression coverage by converting it to retained/denial contracts.
@@ -31,4 +31,4 @@
 - [ ] 5.1 Run Ruff, relevant type/static checks, and the focused unit/integration suites after all removals; record commands, revisions and failures/resolution against the candidate SHA.
 - [ ] 5.2 Run a real local API/CLI functional scenario with authentication and retained project/repository diagnostics, plus denied invocations of each retired API/CLI operation; prove no job, run, queue item, agent call or external side effect is created.
 - [ ] 5.3 Run the runnable application in its supported local/container test environment and verify UI/TUI surfaces neither expose active legacy execution controls nor claim unavailable operations succeeded; no production deployment is performed.
-- [ ] 5.4 Publish the completed Removal Ledger and reconciliation inventory with final symbol/caller searches, before/after database evidence, Alembic revision, test results, candidate SHA and any approved RETAIN-WITH-REASON exceptions.
+- [ ] 5.4 Complete the Removal Ledger and reconciliation inventory in `design.md`, with references to final symbol/caller searches, before/after database evidence, Alembic revision, test results, candidate SHA and any approved RETAIN-WITH-REASON exceptions; retain execution evidence without creating a separate report.

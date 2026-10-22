@@ -17,6 +17,23 @@ mini me SHALL NOT generate the semantic contents of a proposal, design, specific
 - **THEN** mini me SHALL reject the operation as unavailable pending F3
 - **AND** SHALL NOT merge Markdown, move a Change directory, or update closure state as a substitute.
 
+### Requirement: Official OpenSpec integration is retained as read-only structural support
+mini me SHALL retain the official OpenSpec CLI/adapter integration needed to locate, inspect and structurally validate existing native artifacts. This integration SHALL NOT author content, infer requirements, merge deltas, archive directories, or stand in for an agent workflow.
+
+#### Scenario: Existing native Change is inspected
+- **WHEN** an operator or retained safety path requests the status or structural validation of an existing native OpenSpec Change
+- **THEN** mini me SHALL obtain and expose only the official structural result and repository-safe evidence
+- **AND** SHALL NOT modify the Change or manufacture a semantic verdict.
+
+### Requirement: Reusable native-workflow handoff substrate is preserved
+mini me SHALL preserve the installed official OpenSpec skills, verified repository/worktree identity, and candidate/evidence identity mechanisms that have a retained F3 consumer. F1 SHALL NOT preserve a legacy semantic dispatcher merely because it contains those mechanisms.
+
+#### Scenario: Legacy execution component is evaluated for removal
+- **WHEN** F1 evaluates a legacy execution, pipeline, or orchestration component
+- **THEN** the Removal Ledger SHALL separate its reusable native-workflow identity/evidence dependency from its semantic workflow emulation
+- **AND** SHALL preserve only the former when a retained F3 consumer is evidenced
+- **AND** SHALL NOT dispatch an agent or invoke a workflow in F1.
+
 ### Requirement: Retired lifecycle semantics do not advance work
 mini me SHALL NOT execute legacy verify gates, execution prompts, orchestration transitions, recovery logic, or post-merge reconciliation when their purpose is to emulate an OpenSpec workflow. A request that reaches a retired operation SHALL fail explicitly without dispatching an agent, changing a candidate, or spending provider budget.
 
