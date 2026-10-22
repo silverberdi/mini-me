@@ -394,6 +394,54 @@ def test_connection_verification_keeps_ticket_and_git_repositories_separate(
     ]
 
 
+def test_project_connection_factory_resolves_only_requested_responsibility(
+    in_memory_uow, monkeypatch
+):
+    from minime.adapters.github import GitHubAdapter
+    from minime.services.project_connection_service import ProjectConnectionService
+
+    project = ProjectService(in_memory_uow).create_configured_project(
+        _configuration(
+            provider_connections={
+                "tickets": {
+                    "provider_id": "github",
+                    "repository_url": "tickets-owner/source",
+                    "auth_mode": "environment_app",
+                },
+                "git_pr": {
+                    "provider_id": "github",
+                    "repository_url": "code-owner/target",
+                    "auth_mode": "environment_app",
+                },
+            }
+        )
+    )
+    observed = []
+
+    class Adapter:
+        pass
+
+    def create_adapter(cls, project_id, connection, credential_store):
+        observed.append((project_id, connection["repository_url"], credential_store))
+        return Adapter()
+
+    monkeypatch.setattr(GitHubAdapter, "for_project_connection", classmethod(create_adapter))
+    service = ProjectConnectionService()
+
+    tickets_adapter = service.adapter_for(project, "tickets")
+    git_adapter = service.adapter_for(project, "git_pr")
+
+    assert isinstance(tickets_adapter, Adapter)
+    assert isinstance(git_adapter, Adapter)
+    assert [item[:2] for item in observed] == [
+        ("demo", "tickets-owner/source"),
+        ("demo", "code-owner/target"),
+    ]
+    assert observed[0][2] is observed[1][2]
+    with pytest.raises(ValueError, match="Unknown project connection responsibility"):
+        service.adapter_for(project, "other")
+
+
 def test_public_project_payload_hides_host_reference_without_mutating_durable_project(
     in_memory_uow,
 ):

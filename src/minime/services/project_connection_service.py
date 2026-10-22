@@ -16,6 +16,21 @@ class ProjectConnectionService:
     def __init__(self, credential_store: ProjectCredentialStore | None = None) -> None:
         self.credential_store = credential_store or ProjectCredentialStore()
 
+    def adapter_for(self, project: Project, responsibility: str) -> GitHubAdapter:
+        """Resolve a fresh GitHub adapter for exactly one configured responsibility."""
+        if responsibility not in {"tickets", "git_pr"}:
+            raise ValueError("Unknown project connection responsibility")
+        connection = project.provider_connections.get(responsibility)
+        if not isinstance(connection, dict) or connection.get("provider_id") != "github":
+            raise ValueError(f"Project {responsibility} connection is not configured")
+        repository = connection.get("repository_url")
+        if not isinstance(repository, str) or not repository.strip():
+            raise ValueError(f"Project {responsibility} connection has no repository identity")
+        # GitHubAdapter creates an isolated auth/token cache for this project/app.
+        return GitHubAdapter.for_project_connection(
+            project.project_id, connection, self.credential_store
+        )
+
     def verify(self, project: Project) -> dict[str, Any]:
         results: dict[str, Any] = {}
         for responsibility in ("tickets", "git_pr"):
@@ -27,9 +42,7 @@ class ProjectConnectionService:
                 }
                 continue
             try:
-                adapter = GitHubAdapter.for_project_connection(
-                    project.project_id, connection, self.credential_store
-                )
+                adapter = self.adapter_for(project, responsibility)
                 result = adapter.verify_connection_permissions(
                     connection.get("repository_url", ""), responsibility
                 )
