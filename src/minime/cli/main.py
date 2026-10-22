@@ -30,6 +30,7 @@ app = typer.Typer(
     add_completion=False,
 )
 project_app = typer.Typer(help="Manage retained project configuration.")
+project_catalog_app = typer.Typer(help="Read-only provider and agent capability catalogs.")
 scheduler_app = typer.Typer(help="Retired in F1; F3 owns its replacement.")
 queue_app = typer.Typer(help="Retired in F1; F3 owns its replacement.")
 orchestrate_app = typer.Typer(help="Retired in F1; F3 owns its replacement.")
@@ -37,6 +38,7 @@ action_app = typer.Typer(help="Retired in F1; F3 owns its replacement.")
 providers_app = typer.Typer(help="Read-only provider diagnostics.")
 budget_app = typer.Typer(help="Read-only budget diagnostics.")
 app.add_typer(project_app, name="project")
+project_app.add_typer(project_catalog_app, name="catalog")
 app.add_typer(scheduler_app, name="scheduler")
 app.add_typer(queue_app, name="queue")
 app.add_typer(orchestrate_app, name="orchestrate")
@@ -95,6 +97,24 @@ def list_projects(json_output: bool = typer.Option(False, "--json")) -> None:
         return
     for project in projects:
         typer.echo(f"{project.project_id} {project.repository} [{project.status.value}]")
+
+
+@project_catalog_app.command("providers")
+def list_project_provider_catalog() -> None:
+    """Show provider metadata without project connections or credential values."""
+    catalog = ProjectCatalogService().provider_catalog()
+    typer.echo(json.dumps(catalog, indent=2))
+
+
+@project_catalog_app.command("agents")
+def list_project_agent_catalog() -> None:
+    """Discover configured CLI/model/native-OpenSpec capabilities read-only."""
+    try:
+        catalog = asyncio.run(ProjectCatalogService().agent_catalog())
+    except Exception as exc:
+        typer.echo(f"agent catalog unavailable: {exc}", err=True)
+        raise typer.Exit(code=1) from exc
+    typer.echo(json.dumps(catalog, indent=2))
 
 
 @project_app.command("create")
