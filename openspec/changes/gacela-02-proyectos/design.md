@@ -133,6 +133,16 @@ No se añaden acciones de inicio de ticket/trabajo ni scheduler.
 
 La propuesta no fija nombres finales de columna/JSON ni modifica schema ahora; Apply puede elegir el mapeo más pequeño, siempre que preserve el comportamiento observable y la reversibilidad anterior.
 
+### F2 targeted migration of the two already-registered projects (Issue #170 section J)
+
+This is migration of *existing registry rows*, not the postponed general Brownfield import. The operational inventory identified by the operator has precisely two registrations: project `mini-me` bound to `silverberdi/mini-me` (the application must later run F5/F6 on itself through F3), and project `mini-me-fixture` bound to `silverberdi/mini-me-r01-e2e-20261014` (the isolated E2E fixture). These are source-backed identities to VERIFY against the real database and managed-repository bindings before modifying either row, not assumptions that override actual rows. Do not create duplicate projects or re-register them.
+
+For each, inspect exact id, URL, branch/base, worktree/managed binding, existing `openspec/` and `AGENTS.md`, current configuration and existing budget/auth references; preserve Git/PR/Issue evidence, project identity, worktrees and history. Convert existing project configuration to the new per-project fields using only verified current values and supported agent/model/effort capabilities. Missing thinking/reviewer/fallback or auth cannot be guessed or silently assigned; record concrete missing settings with truthful `CONFIGURED`/`BLOCKED` status. Keep GitHub auth explicit; never copy the fixture's connections or secret references to the real project or vice versa.
+
+The two already-existing repositories SHALL NOT be reinitialized as new GREENFIELD, forced through an invented ZIP upload, or required to generate a first-bootstrap PR retroactively. Their approved existing OpenSpec/config/context can be recognized as a narrowly scoped **legacy-migration readiness evidence path** after checking repository identity, approved branch, valid managed workspace, actual context/skills/agent capability, selected credentials, and any required authorization. If verifiable and fully configured, preserve their ability to operate under F3; otherwise show the precise remaining blocker. A legacy READY flag alone is insufficient evidence. Do NOT convert this bounded historical compatibility path into a generally applicable Brownfield onboarding workflow; a newly registered BROWNFIELD remains `CONFIGURED` and not prepared.
+
+Prove the migration with representative copies of both observed rows and associated bindings in disposable PostgreSQL, including upgrade/downgrade/restore and post-migration project GET/CLI checks. No direct mutation of production DB during planning. F2 acceptance must not strand `mini-me` such that it cannot be used to execute F5 after F3; resolve concrete configuration blockers under the same F2 Change where authorized, not by making up profile defaults or importing arbitrary repo context.
+
 ## Security, external effects and observability
 
 - Mantener FastAPI auth (`get_current_operator`/Google sessions) en todas las mutaciones/catalogs con política vigente; sin endpoints anónimos de conexión.
