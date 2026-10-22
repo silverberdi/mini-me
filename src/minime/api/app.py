@@ -62,6 +62,7 @@ from minime.services.context_discovery_service import ContextDiscoveryService
 from minime.services.current_check_batch import validate_current_checks_batch
 from minime.services.legacy_unavailable import unavailable_payload
 from minime.services.project_catalog_service import ProjectCatalogService
+from minime.services.project_connection_service import ProjectConnectionService
 from minime.services.project_service import ProjectService
 from minime.services.provider_health_service import ProviderHealthService
 from minime.services.status_service import StatusService
@@ -468,6 +469,22 @@ def activate_project(project_id: str, _operator: AuthenticatedOperatorDep, uow: 
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
 
 
+@app.post("/api/v1/projects/{project_id}/connections/verify", tags=["projects"])
+def verify_project_connections(
+    project_id: str,
+    _operator: AuthenticatedOperatorDep,
+    uow: UowDep,
+) -> dict[str, Any]:
+    """Read-only verification of repository identity and project-scoped App grants."""
+    project = uow.projects.get_by_id(project_id)
+    if project is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Project not found")
+    return {
+        "project_id": project_id,
+        "connections": ProjectConnectionService().verify(project),
+    }
+
+
 class JobRunRequest(BaseModel):
     change_name: str
     project_root: str = "."
@@ -656,9 +673,13 @@ def onboard_project_endpoint() -> None:
 @app.get("/api/v1/projects/{project_id}/context", tags=["projects"])
 def get_project_context_endpoint(
     project_id: str,
+    _operator: AuthenticatedOperatorDep,
+    uow: UowDep,
     context_service: ContextServiceDep,
 ) -> ContextDiscoveryReport:
     """Get categorized context report (discovered facts, inferred structure, missing context)."""
+    if uow.projects.get_by_id(project_id) is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Project not found")
     try:
         return context_service.discover_context_pure(project_id)
     except ValueError as e:

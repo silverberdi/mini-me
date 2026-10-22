@@ -17,6 +17,7 @@ from minime.logging import configure_logging
 from minime.services.budget_service import BudgetService
 from minime.services.legacy_unavailable import unavailable_payload
 from minime.services.project_catalog_service import ProjectCatalogService
+from minime.services.project_connection_service import ProjectConnectionService
 from minime.services.project_service import ProjectService
 from minime.services.provider_health_service import ProviderHealthService
 from minime.services.status_service import StatusService
@@ -206,6 +207,24 @@ def pause_project(project_id: str = typer.Argument(...)) -> None:
 @project_app.command("activate")
 def activate_project(project_id: str = typer.Argument(...)) -> None:
     _set_project_lifecycle(project_id, active=True)
+
+
+@project_app.command("verify-connections")
+def verify_project_connections(project_id: str = typer.Argument(...)) -> None:
+    """Read-only verify configured GitHub identities and App grants."""
+    try:
+        with db_manager.session() as session:
+            uow = PostgresPersistenceUnitOfWork(session)
+            project = uow.projects.get_by_id(project_id)
+            if project is None:
+                raise ValueError("project not found")
+            connections = ProjectConnectionService().verify(project)
+    except Exception as exc:
+        typer.echo(f"connection verification unavailable: {exc}", err=True)
+        raise typer.Exit(code=1) from exc
+    typer.echo(json.dumps({"project_id": project_id, "connections": connections}, indent=2))
+    if any(not result["verified"] for result in connections.values()):
+        raise typer.Exit(code=2)
 
 
 @app.command("serve")

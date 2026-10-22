@@ -198,6 +198,62 @@ def test_project_github_app_adapters_keep_credentials_and_token_caches_isolated(
     assert adapter_a.auth._cached is None and adapter_b.auth._cached is None
 
 
+def test_connection_verification_keeps_ticket_and_git_repositories_separate(
+    in_memory_uow, monkeypatch
+):
+    from minime.adapters.github import GitHubAdapter
+    from minime.domain.enums import ExternalOutcome, ExternalReasonCode, RetrySafety
+    from minime.domain.models import ExternalActionResult
+    from minime.services.project_connection_service import ProjectConnectionService
+
+    connections = {
+        "tickets": {
+            "provider_id": "github",
+            "repository_url": "tickets-owner/source",
+            "auth_mode": "environment_app",
+        },
+        "git_pr": {
+            "provider_id": "github",
+            "repository_url": "code-owner/target",
+            "auth_mode": "environment_app",
+        },
+    }
+    project = ProjectService(in_memory_uow).create_configured_project(
+        _configuration(provider_connections=connections)
+    )
+    observed = []
+
+    class FakeAdapter:
+        def __init__(self, repository):
+            self.repository = repository
+
+        def verify_connection_permissions(self, repository, responsibility):
+            assert repository == self.repository
+            observed.append((repository, responsibility))
+            return ExternalActionResult(
+                outcome=ExternalOutcome.SUCCESS,
+                source_adapter="test",
+                reason_code=ExternalReasonCode.EXECUTION_SUCCESS,
+                retry_safety=RetrySafety.SAFE,
+                data={"repository": repository, "permissions": {"read": "read"}},
+            )
+
+    def create_adapter(cls, project_id, connection, credential_store):
+        assert project_id == project.project_id
+        assert credential_store is not None
+        return FakeAdapter(connection["repository_url"])
+
+    monkeypatch.setattr(GitHubAdapter, "for_project_connection", classmethod(create_adapter))
+    result = ProjectConnectionService().verify(project)
+
+    assert result["tickets"]["verified"] is True
+    assert result["git_pr"]["verified"] is True
+    assert observed == [
+        ("tickets-owner/source", "tickets"),
+        ("code-owner/target", "git_pr"),
+    ]
+
+
 def test_public_project_payload_hides_host_reference_without_mutating_durable_project(
     in_memory_uow,
 ):
@@ -319,11 +375,17 @@ def test_project_query_aliases_require_authenticated_operator(in_memory_uow):
         client = TestClient(app)
         listed = client.get("/projects")
         retrieved = client.get("/projects/not-a-real-project")
+        context = client.get("/api/v1/projects/not-a-real-project/context")
+        verify_connections = client.post(
+            "/api/v1/projects/not-a-real-project/connections/verify"
+        )
     finally:
         app.dependency_overrides.clear()
 
     assert listed.status_code == 401
     assert retrieved.status_code == 401
+    assert context.status_code == 401
+    assert verify_connections.status_code == 401
 
 
 def test_versioned_project_api_creates_brownfield_configuration(in_memory_uow, monkeypatch):
