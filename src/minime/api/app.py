@@ -27,46 +27,30 @@ from minime.db.repository import PostgresPersistenceUnitOfWork
 from minime.db.session import db_manager
 from minime.domain.enums import (
     AuthEventType,
-    EventType,
     OperatorActionType,
     OperatorAuthDecision,
-    PreviewStatus,
     ProjectStatus,
-    ValidationVerdict,
 )
 from minime.domain.interfaces import PersistenceUnitOfWork
 from minime.domain.models import (
     ActionDescriptor,
-    AdmissionResult,
     AuthorizedOperator,
     AuthStatusDTO,
-    BacklogItem,
     Change,
     ContextDiscoveryReport,
     EfficiencyTelemetryView,
-    Event,
     Job,
     JobLog,
     OperatorActionRecord,
     OperatorActionRequest,
     OperatorActionResult,
     OperatorIdentityDTO,
-    PreviewSession,
     Project,
     ProjectOnboardingInput,
     ProjectOnboardingResult,
     ProviderEfficiencyMetrics,
     ProviderHealth,
-    QueueExplainReport,
-    SchedulerDecisionRecord,
     SchedulerStatus,
-    SchedulerStatusView,
-    WorkItemAnswerInput,
-    WorkItemCreateInput,
-    WorkItemPrepareResult,
-    WorkItemUpdateInput,
-    WorkQueueItem,
-    utc_now,
 )
 from minime.logging import redact_secrets
 from minime.services.auth_service import (
@@ -77,28 +61,17 @@ from minime.services.auth_service import (
 )
 from minime.services.budget_service import BudgetService
 from minime.services.capacity_lifecycle_service import CapacityLifecycleService
-from minime.services.container_preview_service import ContainerPreviewService
 from minime.services.context_discovery_service import ContextDiscoveryService
-from minime.services.control_plane_service import ControlPlaneService
 from minime.services.current_check_batch import validate_current_checks_batch
-from minime.services.dashboard_service import (
-    DashboardChangeDetailResponse,
-    DashboardOverviewResponse,
-    OperationsDashboardService,
-    TimelineEventDTO,
-)
-from minime.services.intake_service import IntakeService
-from minime.services.orchestration_service import OrchestrationService
+from minime.services.legacy_unavailable import unavailable_payload
 from minime.services.project_onboarding_service import ProjectOnboardingService
 from minime.services.project_service import ProjectService
 from minime.services.provider_health_service import ProviderHealthService
-from minime.services.readiness_service import ReadinessService
-from minime.services.restart_recovery_service import RestartRecoveryService
-from minime.services.scheduler_service import SchedulerService
 from minime.services.status_service import StatusService
 from minime.services.validation_authority_service import ValidationAuthorityService
 
 logger = logging.getLogger(__name__)
+
 
 
 @asynccontextmanager
@@ -108,12 +81,7 @@ async def lifespan(app: FastAPI):
     try:
         sess = db_manager.sessionmaker()
         uow = PostgresPersistenceUnitOfWork(sess)
-        # Startup: reconcile active jobs only if explicitly configured for API process
-        if os.environ.get("MINIME_ENABLE_API_STARTUP_RECOVERY", "false").lower() in ("true", "1"):
-            recovery_service = RestartRecoveryService(uow, project_root=".")
-            reconciled = recovery_service.reconcile_on_startup()
-            if reconciled:
-                logger.info(f"Reconciled {len(reconciled)} jobs on API startup.")
+        # F1 deliberately has no autonomous recovery or execution on API startup.
 
         # Seed authorized operators from configuration or environment
         try:
@@ -230,12 +198,6 @@ def get_context_service(uow: UowDep) -> ContextDiscoveryService:
 ContextServiceDep = Annotated[ContextDiscoveryService, Depends(get_context_service)]
 
 
-def get_intake_service(uow: UowDep, github_adapter: GitHubAdapterDep) -> IntakeService:
-    return IntakeService(uow, github_adapter=github_adapter)
-
-
-IntakeServiceDep = Annotated[IntakeService, Depends(get_intake_service)]
-
 
 PUBLIC_EXEMPT_PATHS = {
     "/health",
@@ -272,6 +234,10 @@ async def auth_middleware(request: Request, call_next):
         else config.auth.enabled
     )
     if not auth_enabled:
+        unavailable = _legacy_operation_for_path(request.url.path)
+        if unavailable is not None:
+            operation, phase = unavailable
+            return JSONResponse(status_code=status.HTTP_410_GONE, content=unavailable_payload(operation, phase))
         return await call_next(request)
 
     path = request.url.path
@@ -340,7 +306,38 @@ async def auth_middleware(request: Request, call_next):
         if sess:
             sess.close()
 
+    unavailable = _legacy_operation_for_path(request.url.path)
+    if unavailable is not None:
+        operation, phase = unavailable
+        return JSONResponse(status_code=status.HTTP_410_GONE, content=unavailable_payload(operation, phase))
     return await call_next(request)
+
+
+LEGACY_UNAVAILABLE_PREFIXES: tuple[tuple[str, str], ...] = (
+    ("/scheduler", "F3"),
+    ("/api/v1/scheduler", "F3"),
+    ("/api/v1/queue", "F3"),
+    ("/api/v1/orchestration", "F3"),
+    ("/api/v1/dashboard", "F5"),
+)
+
+
+def _legacy_operation_for_path(path: str) -> tuple[str, str] | None:
+    """Map only retired mutation/execution routes to an explicit F1 denial."""
+    if "/backlog" in path or path.endswith("/discover") or "/readiness" in path:
+        return ("legacy_intake_or_readiness", "F2")
+    if path.startswith("/projects/") and path.endswith("/jobs"):
+        return ("legacy_job_execution", "F3")
+    if path.startswith("/jobs/"):
+        return ("legacy_job_execution", "F3")
+    if path.startswith("/api/v1/projects/") and (
+        path.endswith("/context/discover") or "/backlog" in path
+    ):
+        return ("legacy_intake_or_readiness", "F2")
+    for prefix, phase in LEGACY_UNAVAILABLE_PREFIXES:
+        if path.startswith(prefix):
+            return ("legacy_operation", phase)
+    return None
 
 
 def get_current_operator(
@@ -650,8 +647,7 @@ def get_project_context_endpoint(
 ) -> ContextDiscoveryReport:
     """Get categorized context report (discovered facts, inferred structure, missing context)."""
     try:
-        report, _ = context_service.discover_context_pure(project_id)
-        return report
+        return context_service.discover_context_pure(project_id)
     except ValueError as e:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(e))
 
@@ -671,23 +667,14 @@ def discover_project_context_endpoint(
 @app.get("/api/v1/projects/{project_id}/backlog", tags=["backlog"])
 def list_backlog_items_endpoint(
     project_id: str,
-    uow: UowDep,
-    intake_service: IntakeServiceDep,
     status_filter: str | None = Query(default=None, alias="status"),
     priority: str | None = None,
     limit: int = 100,
-) -> list[BacklogItem]:
-    """List normalized backlog items for a project."""
-    project = uow.projects.get_by_id(project_id)
-    if not project:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail=f"Project '{project_id}' not found",
-        )
-    # Reconcile projections with underlying execution/archive reality
-    intake_service.reconcile_backlog_projections(project_id)
-    return uow.backlog_items.list_by_project(
-        project_id, status=status_filter, priority=priority, limit=limit
+) -> list[dict[str, Any]]:
+    """The local backlog projection was retired; F2 owns its replacement."""
+    raise HTTPException(
+        status_code=status.HTTP_410_GONE,
+        detail=unavailable_payload("legacy_intake_or_readiness", "F2"),
     )
 
 
@@ -696,50 +683,38 @@ def list_backlog_items_endpoint(
 )
 def create_backlog_item_endpoint(
     project_id: str,
-    req: WorkItemCreateInput,
     request: Request,
-    intake_service: IntakeServiceDep,
-) -> BacklogItem:
-    """Create a new work item in the backlog."""
-    operator_email = getattr(request.state, "operator_email", "operator")
-    try:
-        return intake_service.create_work_item(project_id, req, operator_email=operator_email)
-    except ValueError as e:
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e))
+) -> dict[str, Any]:
+    """The local backlog projection was retired; F2 owns its replacement."""
+    raise HTTPException(
+        status_code=status.HTTP_410_GONE,
+        detail=unavailable_payload("legacy_intake_or_readiness", "F2"),
+    )
 
 
 @app.get("/api/v1/projects/{project_id}/backlog/{item_key}", tags=["backlog"])
 def get_backlog_item_endpoint(
     project_id: str,
     item_key: str,
-    uow: UowDep,
-) -> BacklogItem:
-    """Get full details of a backlog work item."""
-    item = uow.backlog_items.get_by_project_and_key(project_id, item_key)
-    if not item:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail=f"Work item '{item_key}' not found in project '{project_id}'",
-        )
-    return item
+) -> dict[str, Any]:
+    """The local backlog projection was retired; F2 owns its replacement."""
+    raise HTTPException(
+        status_code=status.HTTP_410_GONE,
+        detail=unavailable_payload("legacy_intake_or_readiness", "F2"),
+    )
 
 
 @app.patch("/api/v1/projects/{project_id}/backlog/{item_key}", tags=["backlog"])
 def update_backlog_item_endpoint(
     project_id: str,
     item_key: str,
-    req: WorkItemUpdateInput,
     request: Request,
-    intake_service: IntakeServiceDep,
-) -> BacklogItem:
-    """Update title, description, priority, or criteria of a backlog item."""
-    operator_email = getattr(request.state, "operator_email", "operator")
-    try:
-        return intake_service.update_work_item(
-            project_id, item_key, req, operator_email=operator_email
-        )
-    except ValueError as e:
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e))
+) -> dict[str, Any]:
+    """The local backlog projection was retired; F2 owns its replacement."""
+    raise HTTPException(
+        status_code=status.HTTP_410_GONE,
+        detail=unavailable_payload("legacy_intake_or_readiness", "F2"),
+    )
 
 
 @app.post("/api/v1/projects/{project_id}/backlog/{item_key}/prepare", tags=["backlog"])
@@ -747,39 +722,22 @@ def prepare_backlog_item_endpoint(
     project_id: str,
     item_key: str,
     request: Request,
-    intake_service: IntakeServiceDep,
-) -> WorkItemPrepareResult:
+) -> dict[str, Any]:
     """Prepare canonical execution artifacts (GitHub Issue, Project Item, OpenSpec change)."""
-    try:
-        from minime.services.recovery_convergence_service import RecoveryConvergenceService
-
-        rec_svc = RecoveryConvergenceService(
-            intake_service.uow, project_root=intake_service.project_root
-        )
-        claim_ctx = rec_svc.acquire_claim(f"intake:{project_id}:{item_key}")
-        return intake_service.prepare_work_item(
-            project_id, item_key, operator_email="operator", claim_context=claim_ctx
-        )
-    except ValueError as e:
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e))
+    raise HTTPException(status_code=status.HTTP_410_GONE, detail=unavailable_payload("legacy_intake", "F2"))
 
 
 @app.post("/api/v1/projects/{project_id}/backlog/{item_key}/answer", tags=["backlog"])
 def answer_backlog_item_question_endpoint(
     project_id: str,
     item_key: str,
-    req: WorkItemAnswerInput,
     request: Request,
-    intake_service: IntakeServiceDep,
-) -> BacklogItem:
-    """Answer a NEEDS_HUMAN question to unblock preparation and reach READY."""
-    operator_email = getattr(request.state, "operator_email", "operator")
-    try:
-        return intake_service.answer_human_question(
-            project_id, item_key, req, operator_email=operator_email
-        )
-    except ValueError as e:
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e))
+) -> dict[str, Any]:
+    """The local backlog projection was retired; F2 owns its replacement."""
+    raise HTTPException(
+        status_code=status.HTTP_410_GONE,
+        detail=unavailable_payload("legacy_intake_or_readiness", "F2"),
+    )
 
 
 @app.post("/api/v1/projects/{project_id}/backlog/{item_key}/start", tags=["backlog"])
@@ -787,14 +745,12 @@ def start_backlog_item_endpoint(
     project_id: str,
     item_key: str,
     request: Request,
-    intake_service: IntakeServiceDep,
-) -> BacklogItem:
-    """Start execution of a READY work item through the autonomous scheduler."""
-    operator_email = getattr(request.state, "operator_email", "operator")
-    try:
-        return intake_service.start_work_item(project_id, item_key, operator_email=operator_email)
-    except ValueError as e:
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e))
+) -> dict[str, Any]:
+    """The local backlog projection was retired; F2 owns its replacement."""
+    raise HTTPException(
+        status_code=status.HTTP_410_GONE,
+        detail=unavailable_payload("legacy_intake_or_readiness", "F2"),
+    )
 
 
 @app.delete(
@@ -806,12 +762,12 @@ def delete_backlog_item_endpoint(
     project_id: str,
     item_key: str,
     request: Request,
-    intake_service: IntakeServiceDep,
 ) -> Response:
-    """Cancel / remove a backlog item."""
-    operator_email = getattr(request.state, "operator_email", "operator")
-    intake_service.delete_work_item(project_id, item_key, operator_email=operator_email)
-    return Response(status_code=status.HTTP_204_NO_CONTENT)
+    """The local backlog projection was retired; F2 owns its replacement."""
+    raise HTTPException(
+        status_code=status.HTTP_410_GONE,
+        detail=unavailable_payload("legacy_intake_or_readiness", "F2"),
+    )
 
 
 @app.get("/projects/{project_id}/changes")
@@ -829,6 +785,7 @@ def discover_project_changes(
     project_root: str,
     uow: UowDep,
 ) -> list[Change]:
+    """Inspect native Change directories without creating local workflow state."""
     service = ProjectService(uow)
     project = service.get_project(project_id)
     if not project:
@@ -838,11 +795,7 @@ def discover_project_changes(
         )
 
     adapter = OpenSpecAdapter()
-    discovered = adapter.discover_changes(project, project_root)
-    for change in discovered:
-        uow.changes.save(change)
-    uow.commit()
-    return discovered
+    return adapter.discover_changes(project, project_root)
 
 
 @app.get("/projects/{project_id}/changes/{change_name}/readiness")
@@ -853,14 +806,7 @@ def evaluate_readiness(
     uow: UowDep,
     current_active_change: str | None = None,
 ) -> dict[str, Any]:
-    service = ReadinessService(uow)
-    eval_result = service.evaluate_change_readiness_pure(
-        project_id=project_id,
-        change_name=change_name,
-        project_root=project_root,
-        current_active_change=current_active_change,
-    )
-    return eval_result.model_dump()
+    raise HTTPException(status_code=status.HTTP_410_GONE, detail=unavailable_payload("legacy_readiness", "F2"))
 
 
 @app.post("/projects/{project_id}/jobs", status_code=status.HTTP_202_ACCEPTED)
@@ -869,26 +815,7 @@ async def run_project_job(
     req: JobRunRequest,
     uow: UowDep,
 ) -> Job:
-    try:
-        scheduler = SchedulerService(
-            uow,
-            project_root=req.project_root,
-            readiness_service=ReadinessService(
-                uow, github_adapter=getattr(app.state, "github_adapter", None)
-            ),
-        )
-        _decision, record, run = scheduler.admit_work_item(
-            project_id, req.change_name, drive_admitted=True
-        )
-        if run is None:
-            reason = record.reason_summary if record else "Admission blocked by scheduler policy."
-            raise ValueError(reason)
-        job = uow.jobs.get_by_id(run.active_job_id) if run.active_job_id else None
-        if not job:
-            raise ValueError("Admitted run has no executable job.")
-        return job
-    except ValueError as e:
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e))
+    raise HTTPException(status_code=status.HTTP_410_GONE, detail=unavailable_payload("legacy_job_execution", "F3"))
 
 
 @app.get("/projects/{project_id}/jobs")
@@ -1234,33 +1161,7 @@ def admit_orchestration(
     req: OrchestrationAdmitRequest,
     uow: Annotated[PersistenceUnitOfWork, Depends(get_uow)],
 ) -> dict[str, Any]:
-    """Admit a single change into autonomous orchestration via the converged scheduler authority."""
-    scheduler = SchedulerService(
-        uow,
-        project_root=req.project_root or ".",
-        readiness_service=ReadinessService(
-            uow, github_adapter=getattr(app.state, "github_adapter", None)
-        ),
-    )
-    _decision, record, run = scheduler.admit_work_item(
-        req.project_id, req.change_name, drive_admitted=False
-    )
-    if run is not None:
-        return AdmissionResult(admitted=True, run=run).model_dump()
-    return AdmissionResult(
-        admitted=False,
-        refusal_reason=(
-            record.reason_summary if record else "Admission blocked by scheduler policy."
-        ),
-        refusal_details={
-            "code": record.reason_code.value if record and record.reason_code else None,
-            "operational_decision": (
-                record.operational_decision.value
-                if record and record.operational_decision
-                else None
-            ),
-        },
-    ).model_dump()
+    raise HTTPException(status_code=status.HTTP_410_GONE, detail=unavailable_payload("legacy_orchestration", "F3"))
 
 
 @app.get("/api/v1/openspec/integrity", tags=["openspec"])
@@ -1283,14 +1184,12 @@ def get_openspec_integrity(
 @app.post("/api/v1/openspec/integrity/audit", tags=["openspec"])
 def run_openspec_integrity_audit(
     project_id: str,
-    uow: Annotated[PersistenceUnitOfWork, Depends(get_uow)],
 ) -> dict[str, Any]:
-    """Trigger a fresh OpenSpec integrity audit for a project."""
-    from minime.services.openspec_integrity import OpenSpecIntegrityService
-
-    service = OpenSpecIntegrityService(uow, project_root=".")
-    audit = service.run_audit(project_id)
-    return audit.model_dump()
+    """F1 retains inspection only; agent-produced native validation belongs to F3."""
+    raise HTTPException(
+        status_code=status.HTTP_410_GONE,
+        detail=unavailable_payload("openspec_integrity_audit", "F3"),
+    )
 
 
 @app.post("/api/v1/orchestration/start", tags=["orchestration"])
@@ -1298,31 +1197,7 @@ def start_orchestration(
     req: OrchestrationStartRequest,
     uow: Annotated[PersistenceUnitOfWork, Depends(get_uow)],
 ) -> dict[str, Any]:
-    """Start autonomous orchestration for a single READY change via the scheduler authority."""
-    scheduler = SchedulerService(
-        uow,
-        project_root=req.project_root or ".",
-        readiness_service=ReadinessService(
-            uow, github_adapter=getattr(app.state, "github_adapter", None)
-        ),
-    )
-    try:
-        _decision, record, run = scheduler.admit_work_item(
-            req.project_id, req.change_name, drive_admitted=True
-        )
-        if run is None:
-            reason = record.reason_summary if record else "Admission blocked by scheduler policy."
-            raise ValueError(reason)
-        status_view = scheduler.orchestration_service.get_status(run.run_id)
-        return status_view.model_dump()
-    except ValueError as e:
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e))
-    except Exception as e:
-        logger.error(f"Error during orchestration start: {e}")
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Orchestration failed: {e}",
-        )
+    raise HTTPException(status_code=status.HTTP_410_GONE, detail=unavailable_payload("legacy_orchestration", "F3"))
 
 
 @app.post("/api/v1/orchestration/resume", tags=["orchestration"])
@@ -1331,23 +1206,7 @@ def resume_orchestration(
     uow: Annotated[PersistenceUnitOfWork, Depends(get_uow)],
 ) -> dict[str, Any]:
     """Resume an existing orchestration run from its persisted checkpoint."""
-    try:
-        from minime.domain.enums import RecoverySource
-        from minime.services.recovery_convergence_service import RecoveryConvergenceService
-
-        rec_svc = RecoveryConvergenceService(uow, project_root=req.project_root or ".")
-        rec_svc.request_run_continuation(req.run_id, source=RecoverySource.API)
-        service = OrchestrationService(uow, project_root=req.project_root or ".")
-        status_view = service.get_status(req.run_id)
-        return status_view.model_dump()
-    except ValueError as e:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(e))
-    except Exception as e:
-        logger.error(f"Error during orchestration resume: {e}")
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Orchestration resume failed: {e}",
-        )
+    raise HTTPException(status_code=status.HTTP_410_GONE, detail=unavailable_payload("legacy_orchestration", "F3"))
 
 
 @app.get("/api/v1/orchestration/{run_id}/status", tags=["orchestration"])
@@ -1355,13 +1214,7 @@ def get_orchestration_status(
     run_id: str,
     uow: Annotated[PersistenceUnitOfWork, Depends(get_uow)],
 ) -> dict[str, Any]:
-    """Get secret-redacted operational status for an orchestration run."""
-    service = OrchestrationService(uow)
-    try:
-        status_view = service.get_status(run_id)
-        return status_view.model_dump()
-    except ValueError as e:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(e))
+    raise HTTPException(status_code=status.HTTP_410_GONE, detail=unavailable_payload("legacy_orchestration", "F3"))
 
 
 @app.get("/api/v1/orchestration/runs", tags=["orchestration"])
@@ -1388,10 +1241,8 @@ def list_orchestration_runs(
 @app.get("/api/v1/dashboard/overview", tags=["dashboard"])
 def get_dashboard_overview(
     uow: Annotated[PersistenceUnitOfWork, Depends(get_uow)],
-) -> DashboardOverviewResponse:
-    """Get high-level operations dashboard overview."""
-    service = OperationsDashboardService(uow)
-    return service.get_overview()
+) -> dict[str, Any]:
+    raise HTTPException(status_code=status.HTTP_410_GONE, detail=unavailable_payload("legacy_dashboard", "F5"))
 
 
 @app.get("/api/v1/dashboard/changes/{project_id}/{change_name}", tags=["dashboard"])
@@ -1400,26 +1251,16 @@ def get_dashboard_change_detail(
     change_name: str,
     uow: Annotated[PersistenceUnitOfWork, Depends(get_uow)],
     run_id: str | None = None,
-) -> DashboardChangeDetailResponse:
-    """Get comprehensive execution detail for a specific change and its latest/selected run."""
-    service = OperationsDashboardService(uow)
-    try:
-        return service.get_change_detail(project_id, change_name, run_id=run_id)
-    except ValueError as e:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(e))
+) -> dict[str, Any]:
+    raise HTTPException(status_code=status.HTTP_410_GONE, detail=unavailable_payload("legacy_dashboard", "F5"))
 
 
 @app.get("/api/v1/dashboard/runs/{run_id}", tags=["dashboard"])
 def get_dashboard_run_detail(
     run_id: str,
     uow: Annotated[PersistenceUnitOfWork, Depends(get_uow)],
-) -> DashboardChangeDetailResponse:
-    """Get comprehensive execution detail for an exact orchestration run."""
-    service = OperationsDashboardService(uow)
-    try:
-        return service.get_run_detail(run_id)
-    except ValueError as e:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(e))
+) -> dict[str, Any]:
+    raise HTTPException(status_code=status.HTTP_410_GONE, detail=unavailable_payload("legacy_dashboard", "F5"))
 
 
 @app.get("/api/v1/dashboard/events", tags=["dashboard"])
@@ -1429,15 +1270,8 @@ def get_dashboard_events(
     change_name: str | None = None,
     run_id: str | None = None,
     limit: Annotated[int, Query(ge=1, le=500)] = 100,
-) -> list[TimelineEventDTO]:
-    """Get chronological event timeline for the operations dashboard."""
-    service = OperationsDashboardService(uow)
-    return service.get_events_timeline(
-        project_id=project_id,
-        change_name=change_name,
-        run_id=run_id,
-        limit=limit,
-    )
+) -> list[dict[str, Any]]:
+    raise HTTPException(status_code=status.HTTP_410_GONE, detail=unavailable_payload("legacy_dashboard", "F5"))
 
 
 # -----------------------------------------------------------------------------
@@ -1458,15 +1292,7 @@ def get_change_efficiency_telemetry(
     change_name: str,
     uow: Annotated[PersistenceUnitOfWork, Depends(get_uow)],
 ) -> EfficiencyTelemetryView:
-    """Get aggregated provider efficiency and self-hosting metrics for a change."""
-    service = OperationsDashboardService(uow)
-    view = service.get_efficiency_telemetry(project_id, change_name)
-    if not view:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail=f"No provider efficiency metrics recorded for '{project_id}/{change_name}'.",
-        )
-    return view
+    raise HTTPException(status_code=status.HTTP_410_GONE, detail=unavailable_payload("legacy_dashboard", "F5"))
 
 
 @app.get(
@@ -1482,9 +1308,7 @@ def list_project_efficiency_metrics(
     uow: Annotated[PersistenceUnitOfWork, Depends(get_uow)],
     limit: Annotated[int, Query(ge=1, le=100)] = 50,
 ) -> list[ProviderEfficiencyMetrics]:
-    """List operational efficiency metric facts for a project."""
-    service = OperationsDashboardService(uow)
-    return service.list_project_efficiency(project_id, limit=limit)
+    raise HTTPException(status_code=status.HTTP_410_GONE, detail=unavailable_payload("legacy_dashboard", "F5"))
 
 
 # -----------------------------------------------------------------------------
@@ -1492,205 +1316,21 @@ def list_project_efficiency_metrics(
 # -----------------------------------------------------------------------------
 
 
-class PreviewBuildRequest(BaseModel):
-    project_id: str
-    change_name: str
-    run_id: str | None = None
-    job_id: str | None = None
-    candidate_generation: int = 1
-    head_sha: str
-    base_sha: str
-    worktree_path: str = "."
-    dockerfile: str = "Dockerfile"
-    tag: str | None = None
-
-
-class PreviewStartRequest(BaseModel):
-    preview_id: str
-    internal_port: int = 8787
-    env_vars: dict[str, str] = Field(default_factory=dict)
-    probe_health: bool = True
-    health_path: str = "/api/v1/health"
-
-
-class ValidationSubmitRequest(BaseModel):
-    project_id: str
-    change_name: str
-    head_sha: str
-    base_sha: str
-    image_digest: str
-    verdict: str = "PASS"
-    scenario_results: list[dict[str, Any]] = Field(default_factory=list)
-    run_id: str | None = None
-    preview_id: str | None = None
-    candidate_generation: int = 1
-    notes: str | None = None
-    operator: str = "operator"
-
-
 @app.post("/api/v1/previews/build", tags=["previews"])
-async def build_preview_image(
-    req: PreviewBuildRequest,
-    uow: Annotated[PersistenceUnitOfWork, Depends(get_uow)],
-) -> dict[str, Any]:
-    project = uow.projects.get_by_id(req.project_id)
-    if not project:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail=f"Project '{req.project_id}' not found.",
-        )
-
-    preview_svc = ContainerPreviewService(uow)
-    tag = (
-        req.tag
-        or f"minime-preview:{req.project_id}-{req.change_name}-gen{req.candidate_generation}"
+async def build_preview_image() -> dict[str, Any]:
+    """F1 does not build or persist preview artifacts; that UI flow belongs to F5."""
+    raise HTTPException(
+        status_code=status.HTTP_410_GONE,
+        detail=unavailable_payload("container_preview", "F5"),
     )
-    try:
-        image_digest = await preview_svc.build_image(
-            worktree_path=req.worktree_path,
-            tag=tag,
-            dockerfile=req.dockerfile,
-        )
-    except Exception as e:
-        logger.error(f"Preview build failed: {e}")
-        session = PreviewSession(
-            project_id=req.project_id,
-            change_name=req.change_name,
-            run_id=req.run_id,
-            job_id=req.job_id,
-            candidate_generation=req.candidate_generation,
-            head_sha=req.head_sha,
-            base_sha=req.base_sha,
-            image_digest="",
-            status=PreviewStatus.FAILED,
-            failure_reason=str(e),
-            failure_code="BUILD_FAILED",
-        )
-        uow.preview_sessions.save(session)
-        uow.events.save(
-            Event(
-                project_id=req.project_id,
-                change_id=req.change_name,
-                event_type=EventType.PREVIEW_FAILED,
-                payload={"error": str(e), "head_sha": req.head_sha},
-            )
-        )
-        uow.commit()
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Preview build failed: {e}",
-        )
-
-    session = PreviewSession(
-        project_id=req.project_id,
-        change_name=req.change_name,
-        run_id=req.run_id,
-        job_id=req.job_id,
-        candidate_generation=req.candidate_generation,
-        head_sha=req.head_sha,
-        base_sha=req.base_sha,
-        image_digest=image_digest,
-        status=PreviewStatus.BUILDING,
-    )
-    uow.preview_sessions.save(session)
-    uow.events.save(
-        Event(
-            project_id=req.project_id,
-            change_id=req.change_name,
-            event_type=EventType.PREVIEW_BUILDING,
-            payload={"preview_id": session.preview_id, "image_digest": image_digest, "tag": tag},
-        )
-    )
-    uow.commit()
-    return {
-        "preview_id": session.preview_id,
-        "image_digest": image_digest,
-        "tag": tag,
-        "status": session.status.value,
-    }
-
 
 @app.post("/api/v1/previews/start", tags=["previews"])
-async def start_preview_container(
-    req: PreviewStartRequest,
-    uow: Annotated[PersistenceUnitOfWork, Depends(get_uow)],
-) -> dict[str, Any]:
-    session = uow.preview_sessions.get_by_id(req.preview_id)
-    if not session:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail=f"Preview session '{req.preview_id}' not found.",
-        )
-
-    preview_svc = ContainerPreviewService(uow)
-    image_target = session.image_digest
-    try:
-        session.status = PreviewStatus.STARTING
-        uow.preview_sessions.save(session)
-        uow.commit()
-
-        container_id, preview_url, host_port = await preview_svc.start_preview_container(
-            preview_session=session,
-            image_tag_or_digest=image_target,
-            internal_port=req.internal_port,
-            env_vars=req.env_vars,
-        )
-        session.container_id = container_id
-        session.preview_url = preview_url
-        session.allocated_port = host_port
-        session.status = PreviewStatus.PROBING
-        uow.preview_sessions.save(session)
-        uow.commit()
-
-        if req.probe_health:
-            is_healthy = await preview_svc.probe_health(
-                preview_url=preview_url,
-                health_path=req.health_path,
-            )
-            if not is_healthy:
-                session.status = PreviewStatus.FAILED
-                session.failure_reason = "Health probe timed out."
-                session.failure_code = "HEALTH_PROBE_FAILED"
-                uow.preview_sessions.save(session)
-                uow.commit()
-                raise HTTPException(
-                    status_code=status.HTTP_502_BAD_GATEWAY,
-                    detail="Preview container launched but health probe failed.",
-                )
-
-        session.status = PreviewStatus.READY
-        session.ready_at = utc_now()
-        uow.preview_sessions.save(session)
-        uow.events.save(
-            Event(
-                project_id=session.project_id,
-                change_id=session.change_name,
-                event_type=EventType.PREVIEW_READY,
-                payload={
-                    "preview_id": session.preview_id,
-                    "preview_url": preview_url,
-                    "port": host_port,
-                },
-            )
-        )
-        uow.commit()
-        return {
-            "preview_id": session.preview_id,
-            "status": session.status.value,
-            "preview_url": preview_url,
-            "allocated_port": host_port,
-            "container_id": container_id,
-        }
-    except HTTPException:
-        raise
-    except Exception as e:
-        session.status = PreviewStatus.FAILED
-        session.failure_reason = str(e)
-        session.failure_code = "START_FAILED"
-        uow.preview_sessions.save(session)
-        uow.commit()
-        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=str(e))
-
+async def start_preview_container() -> dict[str, Any]:
+    """F1 never launches containers from a compatibility endpoint."""
+    raise HTTPException(
+        status_code=status.HTTP_410_GONE,
+        detail=unavailable_payload("container_preview", "F5"),
+    )
 
 @app.get("/api/v1/previews/{preview_id}", tags=["previews"])
 def get_preview_session(
@@ -1754,27 +1394,20 @@ def get_latest_preview_for_change(
 @app.post("/api/v1/previews/{preview_id}/teardown", tags=["previews"])
 async def teardown_preview_session(
     preview_id: str,
-    uow: Annotated[PersistenceUnitOfWork, Depends(get_uow)],
 ) -> dict[str, Any]:
-    session = uow.preview_sessions.get_by_id(preview_id)
-    if not session:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail="Preview session not found.",
-        )
-    preview_svc = ContainerPreviewService(uow)
-    await preview_svc.teardown_preview(session)
-    return {"preview_id": preview_id, "status": PreviewStatus.TERMINATED.value}
-
+    """F1 does not operate preview containers."""
+    raise HTTPException(
+        status_code=status.HTTP_410_GONE,
+        detail=unavailable_payload("container_preview", "F5"),
+    )
 
 @app.post("/api/v1/previews/reconcile", tags=["previews"])
-async def reconcile_orphan_previews(
-    uow: Annotated[PersistenceUnitOfWork, Depends(get_uow)],
-) -> dict[str, Any]:
-    preview_svc = ContainerPreviewService(uow)
-    cleaned = await preview_svc.reconcile_orphan_previews()
-    return {"cleaned_containers": cleaned, "count": len(cleaned)}
-
+async def reconcile_orphan_previews() -> dict[str, Any]:
+    """F1 must not inspect or mutate Docker state."""
+    raise HTTPException(
+        status_code=status.HTTP_410_GONE,
+        detail=unavailable_payload("container_preview", "F5"),
+    )
 
 @app.get("/api/v1/validations/scenarios/{project_id}/{change_name}", tags=["validations"])
 def get_validation_scenarios_endpoint(
@@ -1806,39 +1439,12 @@ def get_validation_scenarios_endpoint(
 
 @app.post("/api/v1/validations/submit", tags=["validations"])
 def submit_validation(
-    req: ValidationSubmitRequest,
-    request: Request,
-    uow: Annotated[PersistenceUnitOfWork, Depends(get_uow)],
 ) -> dict[str, Any]:
-    verdict = ValidationVerdict.PASS if req.verdict.upper() == "PASS" else ValidationVerdict.FAIL
-    authenticated_operator = getattr(request.state, "operator", None)
-    # The request body is client-controlled and is never an identity authority.
-    # Auth-disabled local environments get an explicit non-identity marker.
-    actor_identity = getattr(authenticated_operator, "email", None) or "unauthenticated"
-    val_svc = ValidationAuthorityService(uow)
-    validation = val_svc.record_validation(
-        project_id=req.project_id,
-        change_name=req.change_name,
-        head_sha=req.head_sha,
-        base_sha=req.base_sha,
-        image_digest=req.image_digest,
-        verdict=verdict,
-        scenario_results=req.scenario_results,
-        run_id=req.run_id,
-        preview_id=req.preview_id,
-        generation=req.candidate_generation,
-        notes=req.notes,
-        operator=actor_identity,
+    """F1 keeps no candidate-validation writer before the F5 UI exists."""
+    raise HTTPException(
+        status_code=status.HTTP_410_GONE,
+        detail=unavailable_payload("candidate_validation", "F5"),
     )
-    return {
-        "validation_id": validation.validation_id,
-        "verdict": validation.verdict.value,
-        "head_sha": validation.head_sha,
-        "base_sha": validation.base_sha,
-        "image_digest": validation.image_digest,
-        "created_at": validation.created_at.isoformat(),
-    }
-
 
 @app.get("/api/v1/validations/authority/{project_id}/{change_name}", tags=["validations"])
 def get_candidate_validation_authority_endpoint(
@@ -1887,15 +1493,7 @@ def discover_actions_endpoint(
     run_id: str,
     uow: Annotated[PersistenceUnitOfWork, Depends(get_uow)],
 ) -> list[ActionDescriptor]:
-    """Discover available operator actions for a run with enabled/disabled explanations."""
-    run = uow.orchestration_runs.get_by_id(run_id)
-    if not run:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail=f"Orchestration run '{run_id}' not found.",
-        )
-    cp_service = ControlPlaneService(uow)
-    return cp_service.get_available_actions(run_id)
+    raise HTTPException(status_code=status.HTTP_410_GONE, detail=unavailable_payload("legacy_control_plane", "F3"))
 
 
 @app.get(
@@ -1907,8 +1505,7 @@ def discover_control_plane_actions_endpoint(
     run_id: str,
     uow: Annotated[PersistenceUnitOfWork, Depends(get_uow)],
 ) -> list[ActionDescriptor]:
-    """Stable control-plane discovery route for presentation clients."""
-    return discover_actions_endpoint(run_id, uow)
+    raise HTTPException(status_code=status.HTTP_410_GONE, detail=unavailable_payload("legacy_control_plane", "F3"))
 
 
 @app.post(
@@ -1922,13 +1519,7 @@ def execute_action_endpoint(
     request_body: OperatorActionRequest,
     uow: Annotated[PersistenceUnitOfWork, Depends(get_uow)],
 ) -> OperatorActionResult:
-    """Execute a governed operator action with optimistic concurrency and idempotency."""
-    if request_body.run_id != run_id or request_body.action_type != action_type:
-        request_body = request_body.model_copy(
-            update={"run_id": run_id, "action_type": action_type}
-        )
-    cp_service = ControlPlaneService(uow)
-    return cp_service.execute_action(request_body)
+    raise HTTPException(status_code=status.HTTP_410_GONE, detail=unavailable_payload("legacy_control_plane", "F3"))
 
 
 @app.post(
@@ -1941,11 +1532,7 @@ def execute_action_generic_endpoint(
     request_body: OperatorActionRequest,
     uow: Annotated[PersistenceUnitOfWork, Depends(get_uow)],
 ) -> OperatorActionResult:
-    """Execute a governed operator action."""
-    if request_body.run_id != run_id:
-        request_body = request_body.model_copy(update={"run_id": run_id})
-    cp_service = ControlPlaneService(uow)
-    return cp_service.execute_action(request_body)
+    raise HTTPException(status_code=status.HTTP_410_GONE, detail=unavailable_payload("legacy_control_plane", "F3"))
 
 
 @app.post(
@@ -1957,8 +1544,7 @@ def execute_control_plane_action_endpoint(
     request_body: OperatorActionRequest,
     uow: Annotated[PersistenceUnitOfWork, Depends(get_uow)],
 ) -> OperatorActionResult:
-    """Stable mutation route for presentation clients."""
-    return execute_action_generic_endpoint(request_body.run_id, request_body, uow)
+    raise HTTPException(status_code=status.HTTP_410_GONE, detail=unavailable_payload("legacy_control_plane", "F3"))
 
 
 @app.get(
@@ -1971,15 +1557,7 @@ def get_action_history_endpoint(
     uow: Annotated[PersistenceUnitOfWork, Depends(get_uow)],
     limit: int = 50,
 ) -> list[OperatorActionRecord]:
-    """Fetch audit trail of operator actions executed for a run."""
-    run = uow.orchestration_runs.get_by_id(run_id)
-    if not run:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail=f"Orchestration run '{run_id}' not found.",
-        )
-    cp_service = ControlPlaneService(uow)
-    return cp_service.list_action_history(run_id, limit=limit)
+    raise HTTPException(status_code=status.HTTP_410_GONE, detail=unavailable_payload("legacy_control_plane", "F3"))
 
 
 # -----------------------------------------------------------------------------
@@ -1990,69 +1568,63 @@ def get_action_history_endpoint(
 @app.get(
     "/api/v1/queue",
     tags=["queue"],
-    response_model=list[WorkQueueItem],
 )
 def list_queue_items_endpoint(
     uow: Annotated[PersistenceUnitOfWork, Depends(get_uow)],
     project_id: str | None = None,
     ready_only: bool = False,
-) -> list[WorkQueueItem]:
-    """List candidate work items in the scheduler queue."""
-    scheduler = SchedulerService(uow)
-    if ready_only:
-        items = uow.work_queue.list_ready(project_id)
-    else:
-        items = uow.work_queue.list_all(project_id)
-    return scheduler.rank_candidates(items)
+) -> list[dict[str, Any]]:
+    """The local work queue was retired; F3 owns selection and execution."""
+    raise HTTPException(
+        status_code=status.HTTP_410_GONE,
+        detail=unavailable_payload("legacy_queue", "F3"),
+    )
 
 
 @app.get(
     "/api/v1/queue/{change_name}/explain",
     tags=["queue"],
-    response_model=QueueExplainReport,
 )
 def explain_queue_item_endpoint(
     change_name: str,
     uow: Annotated[PersistenceUnitOfWork, Depends(get_uow)],
     project_id: str = "mini-me",
-) -> QueueExplainReport:
-    """Get detailed explainability report for a work item's priority and blockers."""
-    scheduler = SchedulerService(uow)
-    try:
-        return scheduler.explain_item_priority(project_id, change_name)
-    except ValueError as exc:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail=str(exc),
-        ) from exc
+) -> dict[str, Any]:
+    """The local work queue was retired; F3 owns selection and execution."""
+    raise HTTPException(
+        status_code=status.HTTP_410_GONE,
+        detail=unavailable_payload("legacy_queue", "F3"),
+    )
 
 
 @app.get(
     "/api/v1/scheduler/status",
     tags=["scheduler"],
-    response_model=SchedulerStatusView,
 )
 def get_scheduler_status_endpoint(
     uow: Annotated[PersistenceUnitOfWork, Depends(get_uow)],
     project_id: str | None = None,
-) -> SchedulerStatusView:
-    """Get operational status view of the autonomous scheduler and queue."""
-    scheduler = SchedulerService(uow)
-    return scheduler.get_status(project_id)
+) -> dict[str, Any]:
+    """The scheduler was retired and remains disabled during F1."""
+    raise HTTPException(
+        status_code=status.HTTP_410_GONE,
+        detail=unavailable_payload("legacy_scheduler", "F3"),
+    )
 
 
 @app.post(
     "/api/v1/scheduler/tick",
     tags=["scheduler"],
-    response_model=list[SchedulerDecisionRecord],
 )
 def trigger_scheduler_tick_endpoint(
     uow: Annotated[PersistenceUnitOfWork, Depends(get_uow)],
     project_id: str | None = None,
-) -> list[SchedulerDecisionRecord]:
-    """Trigger a single scheduler evaluation and admission tick."""
-    scheduler = SchedulerService(uow)
-    return scheduler.tick(project_id)
+) -> list[dict[str, Any]]:
+    """The scheduler was retired and remains disabled during F1."""
+    raise HTTPException(
+        status_code=status.HTTP_410_GONE,
+        detail=unavailable_payload("legacy_scheduler", "F3"),
+    )
 
 
 # -----------------------------------------------------------------------------

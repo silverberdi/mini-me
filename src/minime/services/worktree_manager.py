@@ -422,18 +422,12 @@ class WorktreeManager:
             resolve_published_intake_ownership,
         )
 
-        backlog_repo = getattr(self.uow, "backlog_items", None)
-        linked_item = (
-            backlog_repo.get_by_openspec_change_name(project_id, change_name)
-            if backlog_repo
-            else None
-        )
         ownership = (
             resolve_published_intake_ownership(
                 intake_repo,
                 project_id=project_id,
                 change_name=change_name,
-                item_key=linked_item.item_key if linked_item else None,
+                item_key=None,
                 allow_released=True,
             )
             if intake_repo

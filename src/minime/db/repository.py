@@ -18,7 +18,6 @@ from minime.db.models import (
     AuthAuditEventModel,
     AuthorizedOperatorModel,
     AuthSessionModel,
-    BacklogItemModel,
     BlockerClaimModel,
     BudgetLedgerModel,
     BudgetReservationModel,
@@ -58,18 +57,12 @@ from minime.db.models import (
     RecoveryDecisionModel,
     ReviewFindingModel,
     ReviewModel,
-    SchedulerDecisionRecordModel,
     TaskClassificationSnapshotModel,
     ValidationRunModel,
-    WorkQueueSnapshotModel,
 )
 from minime.domain.enums import (
     PRIMARY_PROVIDERS,
     READ_ONLY_REVIEW_PROVIDERS,
-    AdmissionBlockCondition,
-    AdmissionDecision,
-    AdmissionDecisionKind,
-    AdmissionRefusalCode,
     AttemptProductivityClass,
     AuditFindingSeverity,
     AuditRiskLevel,
@@ -101,7 +94,6 @@ from minime.domain.enums import (
     ProjectStatus,
     ProviderHealthStatus,
     ProviderResultClass,
-    QueuePriority,
     ReadinessState,
     RecoveryClassification,
     RecoveryDecisionStatus,
@@ -114,8 +106,6 @@ from minime.domain.enums import (
     SagaType,
     TaskClass,
     ValidationVerdict,
-    WorkItemSource,
-    WorkItemStatus,
     WorktreeCreationState,
 )
 from minime.domain.exceptions import LifecycleBypassError, StaleClaimError
@@ -125,7 +115,6 @@ from minime.domain.interfaces import (
     AuthAuditEventRepositoryInterface,
     AuthorizedOperatorRepositoryInterface,
     AuthSessionRepositoryInterface,
-    BacklogItemRepositoryInterface,
     BlockerClaimRepositoryInterface,
     BudgetLedgerRepositoryInterface,
     BudgetReservationRepositoryInterface,
@@ -165,10 +154,8 @@ from minime.domain.interfaces import (
     RecoveryDecisionRepositoryInterface,
     ReviewFindingRepositoryInterface,
     ReviewRepositoryInterface,
-    SchedulerDecisionRepositoryInterface,
     TaskClassificationSnapshotRepositoryInterface,
     ValidationRunRepositoryInterface,
-    WorkQueueRepositoryInterface,
 )
 from minime.domain.models import (
     AUTHORITATIVE_PRICING_SOURCES,
@@ -177,7 +164,6 @@ from minime.domain.models import (
     AuthAuditEvent,
     AuthorizedOperator,
     AuthSession,
-    BacklogItem,
     BlockerClaim,
     BudgetLedgerEntry,
     BudgetReservation,
@@ -193,7 +179,6 @@ from minime.domain.models import (
     EvidenceDiagnostic,
     ExternalActionAttempt,
     GitOperation,
-    HumanAnswerRecord,
     IntakeWorkspaceCreationState,
     IntakeWorkspaceOwnership,
     IntakeWorkspacePublicationState,
@@ -222,11 +207,9 @@ from minime.domain.models import (
     RecoveryDecision,
     Review,
     ReviewFinding,
-    SchedulerDecisionRecord,
     TaskClassificationSnapshot,
     TaskRiskProfile,
     ValidationRun,
-    WorkQueueItem,
     generate_uuid,
     utc_now,
 )
@@ -276,50 +259,6 @@ def project_model_to_domain(model: ProjectModel) -> Project:
         auto_admit=getattr(model, "auto_admit", True),
         max_concurrent_jobs=getattr(model, "max_concurrent_jobs", 1),
         status=ProjectStatus(model.status),
-        created_at=model.created_at,
-        updated_at=model.updated_at,
-    )
-
-
-def backlog_item_model_to_domain(model: BacklogItemModel) -> BacklogItem:
-    answers: list[HumanAnswerRecord] = []
-    if model.human_answers:
-        for a in model.human_answers:
-            if isinstance(a, dict):
-                answers.append(
-                    HumanAnswerRecord(
-                        question=a.get("question", ""),
-                        answer=a.get("answer", ""),
-                        answered_by=a.get("answered_by", "operator"),
-                        answered_at=datetime.fromisoformat(a["answered_at"])
-                        if "answered_at" in a and isinstance(a["answered_at"], str)
-                        else utc_now(),
-                    )
-                )
-
-    return BacklogItem(
-        item_id=model.id,
-        project_id=model.project_id,
-        item_key=model.item_key,
-        title=model.title,
-        description=model.description or "",
-        priority=QueuePriority(model.priority) if model.priority else QueuePriority.NORMAL,
-        status=WorkItemStatus(model.status) if model.status else WorkItemStatus.BACKLOG,
-        source=WorkItemSource(model.source) if model.source else WorkItemSource.LOCAL_BACKLOG,
-        source_location=model.source_location,
-        dependencies=model.dependencies or [],
-        readiness_state=ReadinessState(model.readiness_state)
-        if model.readiness_state
-        else ReadinessState.NOT_READY,
-        unmet_readiness_reasons=model.unmet_readiness_reasons or [],
-        human_questions=model.human_questions or [],
-        human_answers=answers,
-        acceptance_criteria=model.acceptance_criteria or [],
-        github_issue_number=model.github_issue_number,
-        github_issue_url=model.github_issue_url,
-        github_project_item_id=model.github_project_item_id,
-        openspec_change_name=model.openspec_change_name,
-        run_id=model.run_id,
         created_at=model.created_at,
         updated_at=model.updated_at,
     )
@@ -4120,260 +4059,6 @@ class PostgresOperatorActionRepository(OperatorActionRepositoryInterface):
         return [operator_action_record_model_to_domain(m) for m in models]
 
 
-def work_queue_item_domain_to_model(item: WorkQueueItem) -> WorkQueueSnapshotModel:
-    return WorkQueueSnapshotModel(
-        id=item.queue_item_id,
-        project_id=item.project_id,
-        change_name=item.change_name,
-        github_issue_number=item.github_issue_number,
-        github_issue_title=item.github_issue_title,
-        github_project_item_id=item.github_project_item_id,
-        priority=item.priority.value if hasattr(item.priority, "value") else str(item.priority),
-        roadmap_stage=item.roadmap_stage,
-        dependencies=item.dependencies,
-        readiness_state=item.readiness_state.value
-        if hasattr(item.readiness_state, "value")
-        else str(item.readiness_state),
-        unmet_readiness_reasons=item.unmet_readiness_reasons,
-        blocked_reason=item.blocked_reason,
-        admission_eligible=item.admission_eligible,
-        priority_score=item.priority_score,
-        discovered_at=item.discovered_at,
-        last_evaluated_at=item.last_evaluated_at,
-    )
-
-
-def work_queue_item_model_to_domain(model: WorkQueueSnapshotModel) -> WorkQueueItem:
-    return WorkQueueItem(
-        queue_item_id=model.id,
-        project_id=model.project_id,
-        change_name=model.change_name,
-        github_issue_number=model.github_issue_number,
-        github_issue_title=model.github_issue_title,
-        github_project_item_id=model.github_project_item_id,
-        priority=QueuePriority(model.priority) if model.priority else QueuePriority.NORMAL,
-        roadmap_stage=model.roadmap_stage,
-        dependencies=model.dependencies or [],
-        readiness_state=ReadinessState(model.readiness_state)
-        if model.readiness_state
-        else ReadinessState.NOT_READY,
-        unmet_readiness_reasons=model.unmet_readiness_reasons or [],
-        blocked_reason=model.blocked_reason,
-        admission_eligible=model.admission_eligible,
-        priority_score=float(model.priority_score or 0.0),
-        discovered_at=model.discovered_at,
-        last_evaluated_at=model.last_evaluated_at,
-    )
-
-
-def scheduler_decision_domain_to_model(
-    decision: SchedulerDecisionRecord,
-) -> SchedulerDecisionRecordModel:
-    # The scheduler_decision_records table has no dedicated operational-decision
-    # columns; persist the canonical operational truth inside the existing
-    # capacity_snapshot JSON column (no migration) so it survives reload.
-    operational = {
-        "operational_decision": decision.operational_decision.value
-        if decision.operational_decision
-        else None,
-        "block_condition": decision.block_condition.value if decision.block_condition else None,
-        "eligible_reviewer": decision.eligible_reviewer,
-        "safe_executable_pair_exists": decision.safe_executable_pair_exists,
-        "has_deterministic_eta": decision.has_deterministic_eta,
-        "cooldown_until": decision.cooldown_until.isoformat() if decision.cooldown_until else None,
-    }
-    capacity_snapshot = {**(decision.capacity_snapshot or {}), "_operational": operational}
-
-    return SchedulerDecisionRecordModel(
-        id=decision.decision_id,
-        project_id=decision.project_id,
-        change_name=decision.change_name,
-        github_issue_number=decision.github_issue_number,
-        decision=decision.decision.value
-        if hasattr(decision.decision, "value")
-        else str(decision.decision),
-        reason_code=decision.reason_code.value
-        if decision.reason_code and hasattr(decision.reason_code, "value")
-        else (str(decision.reason_code) if decision.reason_code else None),
-        reason_summary=decision.reason_summary,
-        priority_score=decision.priority_score,
-        selected_implementer=decision.selected_implementer,
-        concurrency_snapshot=decision.concurrency_snapshot,
-        capacity_snapshot=capacity_snapshot,
-        run_id=decision.run_id,
-        evaluated_at=decision.evaluated_at,
-    )
-
-
-def scheduler_decision_model_to_domain(
-    model: SchedulerDecisionRecordModel,
-) -> SchedulerDecisionRecord:
-    capacity_snapshot = model.capacity_snapshot or {}
-    operational = capacity_snapshot.get("_operational") or {}
-
-    operational_decision = None
-    if operational.get("operational_decision"):
-        try:
-            operational_decision = AdmissionDecisionKind(operational["operational_decision"])
-        except ValueError:
-            operational_decision = None
-
-    block_condition = None
-    if operational.get("block_condition"):
-        try:
-            block_condition = AdmissionBlockCondition(operational["block_condition"])
-        except ValueError:
-            block_condition = None
-
-    cooldown_until = None
-    if operational.get("cooldown_until"):
-        try:
-            cooldown_until = datetime.fromisoformat(operational["cooldown_until"])
-        except ValueError:
-            cooldown_until = None
-
-    return SchedulerDecisionRecord(
-        decision_id=model.id,
-        project_id=model.project_id,
-        change_name=model.change_name,
-        github_issue_number=model.github_issue_number,
-        decision=AdmissionDecision(model.decision),
-        reason_code=AdmissionRefusalCode(model.reason_code) if model.reason_code else None,
-        reason_summary=model.reason_summary or "",
-        priority_score=float(model.priority_score or 0.0),
-        selected_implementer=model.selected_implementer,
-        operational_decision=operational_decision,
-        block_condition=block_condition,
-        eligible_reviewer=operational.get("eligible_reviewer"),
-        safe_executable_pair_exists=bool(operational.get("safe_executable_pair_exists", False)),
-        has_deterministic_eta=bool(operational.get("has_deterministic_eta", False)),
-        cooldown_until=cooldown_until,
-        concurrency_snapshot=model.concurrency_snapshot or {},
-        capacity_snapshot=capacity_snapshot,
-        run_id=model.run_id,
-        evaluated_at=model.evaluated_at,
-    )
-
-
-class PostgresWorkQueueRepository(WorkQueueRepositoryInterface):
-    def __init__(self, session: Session):
-        self.session = session
-
-    def save(self, item: WorkQueueItem) -> None:
-        stmt = (
-            select(WorkQueueSnapshotModel)
-            .where(
-                WorkQueueSnapshotModel.project_id == item.project_id,
-                WorkQueueSnapshotModel.change_name == item.change_name,
-            )
-            .limit(1)
-        )
-        existing = self.session.scalars(stmt).first()
-        if existing:
-            existing.github_issue_number = item.github_issue_number
-            existing.github_issue_title = item.github_issue_title
-            existing.github_project_item_id = item.github_project_item_id
-            existing.priority = (
-                item.priority.value if hasattr(item.priority, "value") else str(item.priority)
-            )
-            existing.roadmap_stage = item.roadmap_stage
-            existing.dependencies = item.dependencies
-            existing.readiness_state = (
-                item.readiness_state.value
-                if hasattr(item.readiness_state, "value")
-                else str(item.readiness_state)
-            )
-            existing.unmet_readiness_reasons = item.unmet_readiness_reasons
-            existing.blocked_reason = item.blocked_reason
-            existing.admission_eligible = item.admission_eligible
-            existing.priority_score = item.priority_score
-            existing.last_evaluated_at = item.last_evaluated_at
-        else:
-            model = work_queue_item_domain_to_model(item)
-            self.session.add(model)
-
-    def get_by_id(self, queue_item_id: str) -> WorkQueueItem | None:
-        model = self.session.get(WorkQueueSnapshotModel, queue_item_id)
-        return work_queue_item_model_to_domain(model) if model else None
-
-    def get_by_project_and_change(self, project_id: str, change_name: str) -> WorkQueueItem | None:
-        stmt = (
-            select(WorkQueueSnapshotModel)
-            .where(
-                WorkQueueSnapshotModel.project_id == project_id,
-                WorkQueueSnapshotModel.change_name == change_name,
-            )
-            .limit(1)
-        )
-        model = self.session.scalars(stmt).first()
-        return work_queue_item_model_to_domain(model) if model else None
-
-    def list_all(self, project_id: str | None = None) -> list[WorkQueueItem]:
-        stmt = select(WorkQueueSnapshotModel)
-        if project_id:
-            stmt = stmt.where(WorkQueueSnapshotModel.project_id == project_id)
-        stmt = stmt.order_by(
-            desc(WorkQueueSnapshotModel.priority_score), WorkQueueSnapshotModel.discovered_at
-        )
-        models = self.session.scalars(stmt).all()
-        return [work_queue_item_model_to_domain(m) for m in models]
-
-    def list_ready(self, project_id: str | None = None) -> list[WorkQueueItem]:
-        stmt = select(WorkQueueSnapshotModel).where(
-            WorkQueueSnapshotModel.admission_eligible.is_(True)
-        )
-        if project_id:
-            stmt = stmt.where(WorkQueueSnapshotModel.project_id == project_id)
-        stmt = stmt.order_by(
-            desc(WorkQueueSnapshotModel.priority_score), WorkQueueSnapshotModel.discovered_at
-        )
-        models = self.session.scalars(stmt).all()
-        return [work_queue_item_model_to_domain(m) for m in models]
-
-    def delete(self, queue_item_id: str) -> None:
-        model = self.session.get(WorkQueueSnapshotModel, queue_item_id)
-        if model:
-            self.session.delete(model)
-
-
-class PostgresSchedulerDecisionRepository(SchedulerDecisionRepositoryInterface):
-    def __init__(self, session: Session):
-        self.session = session
-
-    def save(self, decision: SchedulerDecisionRecord) -> None:
-        model = scheduler_decision_domain_to_model(decision)
-        self.session.add(model)
-
-    def get_by_id(self, decision_id: str) -> SchedulerDecisionRecord | None:
-        model = self.session.get(SchedulerDecisionRecordModel, decision_id)
-        return scheduler_decision_model_to_domain(model) if model else None
-
-    def list_by_change(
-        self, project_id: str, change_name: str, limit: int = 50
-    ) -> list[SchedulerDecisionRecord]:
-        stmt = (
-            select(SchedulerDecisionRecordModel)
-            .where(
-                SchedulerDecisionRecordModel.project_id == project_id,
-                SchedulerDecisionRecordModel.change_name == change_name,
-            )
-            .order_by(desc(SchedulerDecisionRecordModel.evaluated_at))
-            .limit(limit)
-        )
-        models = self.session.scalars(stmt).all()
-        return [scheduler_decision_model_to_domain(m) for m in models]
-
-    def list_recent(
-        self, project_id: str | None = None, limit: int = 100
-    ) -> list[SchedulerDecisionRecord]:
-        stmt = select(SchedulerDecisionRecordModel)
-        if project_id:
-            stmt = stmt.where(SchedulerDecisionRecordModel.project_id == project_id)
-        stmt = stmt.order_by(desc(SchedulerDecisionRecordModel.evaluated_at)).limit(limit)
-        models = self.session.scalars(stmt).all()
-        return [scheduler_decision_model_to_domain(m) for m in models]
-
-
 def provider_efficiency_metrics_model_to_domain(
     model: ProviderEfficiencyMetricsModel,
 ) -> ProviderEfficiencyMetrics:
@@ -4741,118 +4426,6 @@ class PostgresAuthAuditEventRepository(AuthAuditEventRepositoryInterface):
         stmt = stmt.order_by(desc(AuthAuditEventModel.timestamp)).limit(limit)
         models = self.session.scalars(stmt).all()
         return [auth_audit_event_model_to_domain(m) for m in models]
-
-
-class PostgresBacklogItemRepository(BacklogItemRepositoryInterface):
-    def __init__(self, session: Session):
-        self.session = session
-
-    def save(self, item: BacklogItem) -> None:
-        existing = self.session.get(BacklogItemModel, item.item_id)
-        answers_payload = [
-            {
-                "question": a.question,
-                "answer": a.answer,
-                "answered_by": a.answered_by,
-                "answered_at": a.answered_at.isoformat(),
-            }
-            for a in item.human_answers
-        ]
-        if existing:
-            if item.status.value != existing.status:
-                raise LifecycleBypassError(
-                    f"Direct lifecycle status mutation on existing BacklogItem '{item.item_key}' via generic save() is forbidden. "
-                    f"Status change from '{existing.status}' to '{item.status.value}' must execute via LifecycleTransitionAuthority."
-                )
-            existing.title = item.title
-            existing.description = item.description
-            existing.priority = item.priority.value
-            existing.source = item.source.value
-            existing.source_location = item.source_location
-            existing.dependencies = item.dependencies
-            existing.readiness_state = item.readiness_state.value
-            existing.unmet_readiness_reasons = item.unmet_readiness_reasons
-            existing.human_questions = item.human_questions
-            existing.human_answers = answers_payload
-            existing.acceptance_criteria = item.acceptance_criteria
-            existing.github_issue_number = item.github_issue_number
-            existing.github_issue_url = item.github_issue_url
-            existing.github_project_item_id = item.github_project_item_id
-            existing.openspec_change_name = item.openspec_change_name
-            existing.run_id = item.run_id
-            existing.updated_at = item.updated_at
-        else:
-            model = BacklogItemModel(
-                id=item.item_id,
-                project_id=item.project_id,
-                item_key=item.item_key,
-                title=item.title,
-                description=item.description,
-                priority=item.priority.value,
-                status=item.status.value,
-                source=item.source.value,
-                source_location=item.source_location,
-                dependencies=item.dependencies,
-                readiness_state=item.readiness_state.value,
-                unmet_readiness_reasons=item.unmet_readiness_reasons,
-                human_questions=item.human_questions,
-                human_answers=answers_payload,
-                acceptance_criteria=item.acceptance_criteria,
-                github_issue_number=item.github_issue_number,
-                github_issue_url=item.github_issue_url,
-                github_project_item_id=item.github_project_item_id,
-                openspec_change_name=item.openspec_change_name,
-                run_id=item.run_id,
-                created_at=item.created_at,
-                updated_at=item.updated_at,
-            )
-            self.session.add(model)
-
-    def get_by_id(self, item_id: str) -> BacklogItem | None:
-        model = self.session.get(BacklogItemModel, item_id)
-        return backlog_item_model_to_domain(model) if model else None
-
-    def get_by_project_and_key(self, project_id: str, item_key: str) -> BacklogItem | None:
-        stmt = (
-            select(BacklogItemModel)
-            .where(BacklogItemModel.project_id == project_id)
-            .where(BacklogItemModel.item_key == item_key)
-        )
-        model = self.session.scalars(stmt).first()
-        return backlog_item_model_to_domain(model) if model else None
-
-    def get_by_openspec_change_name(self, project_id: str, change_name: str) -> BacklogItem | None:
-        stmt = (
-            select(BacklogItemModel)
-            .where(BacklogItemModel.project_id == project_id)
-            .where(
-                (BacklogItemModel.openspec_change_name == change_name)
-                | (BacklogItemModel.item_key == change_name)
-            )
-        )
-        model = self.session.scalars(stmt).first()
-        return backlog_item_model_to_domain(model) if model else None
-
-    def list_by_project(
-        self,
-        project_id: str,
-        status: str | None = None,
-        priority: str | None = None,
-        limit: int = 100,
-    ) -> list[BacklogItem]:
-        stmt = select(BacklogItemModel).where(BacklogItemModel.project_id == project_id)
-        if status:
-            stmt = stmt.where(BacklogItemModel.status == status)
-        if priority:
-            stmt = stmt.where(BacklogItemModel.priority == priority)
-        stmt = stmt.order_by(desc(BacklogItemModel.created_at)).limit(limit)
-        models = self.session.scalars(stmt).all()
-        return [backlog_item_model_to_domain(m) for m in models]
-
-    def delete(self, item_id: str) -> None:
-        model = self.session.get(BacklogItemModel, item_id)
-        if model:
-            self.session.delete(model)
 
 
 def classification_snapshot_model_to_domain(
@@ -5924,13 +5497,10 @@ class PostgresPersistenceUnitOfWork(PersistenceUnitOfWork):
         self.preview_sessions = PostgresPreviewSessionRepository(session)
         self.validation_runs = PostgresValidationRunRepository(session)
         self.operator_actions = PostgresOperatorActionRepository(session)
-        self.work_queue = PostgresWorkQueueRepository(session)
-        self.scheduler_decisions = PostgresSchedulerDecisionRepository(session)
         self.provider_efficiency = PostgresProviderEfficiencyMetricsRepository(session)
         self.authorized_operators = PostgresAuthorizedOperatorRepository(session)
         self.auth_sessions = PostgresAuthSessionRepository(session)
         self.auth_audit_events = PostgresAuthAuditEventRepository(session)
-        self.backlog_items = PostgresBacklogItemRepository(session)
         self.integrity_findings = PostgresIntegrityFindingRepository(session)
         self.classification_snapshots = PostgresTaskClassificationSnapshotRepository(session)
         self.project_managed_repository_bindings = (

@@ -461,7 +461,7 @@ async def test_checks_runner_isolates_bytecode_via_pythonpycacheprefix(tmp_path:
     assert result.passed is True
     assert "PREFIX=" in result.results[0].output_snippet
     assert "NONE" not in result.results[0].output_snippet
-    assert "minime_pycache" in result.results[0].output_snippet
+    assert "/minime/pycache/" in result.results[0].output_snippet
     # Verify no __pycache__ was created inside tmp_path
     assert not (tmp_path / "__pycache__").exists()
 

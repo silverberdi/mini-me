@@ -12,7 +12,7 @@ paths:
 
 scheduler:
   max_global_jobs: 1
-  mode: RUN
+  mode: DISABLED
   one_active_implementation_per_project: true
   max_review_rounds: 2
 

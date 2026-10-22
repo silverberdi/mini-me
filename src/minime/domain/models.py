@@ -16,10 +16,6 @@ from minime.domain.enums import (
     PRIMARY_PROVIDERS,
     READ_ONLY_REVIEW_PROVIDERS,
     ActionRiskLevel,
-    AdmissionBlockCondition,
-    AdmissionDecision,
-    AdmissionDecisionKind,
-    AdmissionRefusalCode,
     AttemptProductivityClass,
     AuditFindingSeverity,
     AuditRiskLevel,
@@ -59,7 +55,6 @@ from minime.domain.enums import (
     ProviderHealthStatus,
     ProviderResultClass,
     PullRequestLookupState,
-    QueuePriority,
     ReadinessState,
     RecoveryClassification,
     RecoveryDecisionStatus,
@@ -76,8 +71,6 @@ from minime.domain.enums import (
     TaskComplexity,
     TaskSurfaceKind,
     ValidationVerdict,
-    WorkItemSource,
-    WorkItemStatus,
     WorkspaceOperation,
     WorkspaceRole,
     WorktreeCreationState,
@@ -1139,126 +1132,6 @@ class OperatorActionRecord(BaseModel):
     created_at: datetime = Field(default_factory=utc_now)
 
 
-class WorkQueueItem(BaseModel):
-    """Evaluated backlog work item in the scheduler queue."""
-
-    queue_item_id: str = Field(default_factory=generate_uuid)
-    project_id: str
-    change_name: str
-    github_issue_number: int | None = None
-    github_issue_title: str | None = None
-    github_project_item_id: str | None = None
-    priority: QueuePriority = QueuePriority.NORMAL
-    roadmap_stage: int | None = None
-    dependencies: list[str] = Field(default_factory=list)
-    readiness_state: ReadinessState = ReadinessState.NOT_READY
-    unmet_readiness_reasons: list[str] = Field(default_factory=list)
-    blocked_reason: str | None = None
-    admission_eligible: bool = False
-    priority_score: float = 0.0
-    discovered_at: datetime = Field(default_factory=utc_now)
-    last_evaluated_at: datetime = Field(default_factory=utc_now)
-
-
-class AdmissionEvaluationResult(BaseModel):
-    """Normalized operational result of a converged scheduler admission evaluation."""
-
-    decision: AdmissionDecisionKind
-    project_id: str
-    change_name: str
-    safe_executable_pair_exists: bool = False
-    eligible_implementer: str | None = None
-    eligible_reviewer: str | None = None
-    block_condition: AdmissionBlockCondition | None = None
-    rationale: str = ""
-    cooldown_until: datetime | None = None
-    has_deterministic_eta: bool = False
-    evidence_complete: bool = True
-    legacy_decision: AdmissionDecision = AdmissionDecision.REFUSED
-    legacy_refusal_code: AdmissionRefusalCode | None = None
-    refusal_details: dict[str, Any] = Field(default_factory=dict)
-
-    def __iter__(self):
-        return iter(
-            (
-                self.legacy_decision,
-                self.legacy_refusal_code,
-                self.rationale,
-                self.eligible_implementer,
-            )
-        )
-
-    def __getitem__(self, index: int):
-        return (
-            self.legacy_decision,
-            self.legacy_refusal_code,
-            self.rationale,
-            self.eligible_implementer,
-        )[index]
-
-
-class SchedulerDecisionRecord(BaseModel):
-    """Immutable audit record of a scheduler admission evaluation."""
-
-    decision_id: str = Field(default_factory=generate_uuid)
-    project_id: str
-    change_name: str
-    github_issue_number: int | None = None
-    decision: AdmissionDecision
-    reason_code: AdmissionRefusalCode | None = None
-    reason_summary: str
-    priority_score: float = 0.0
-    selected_implementer: str | None = None
-    operational_decision: AdmissionDecisionKind | None = None
-    block_condition: AdmissionBlockCondition | None = None
-    eligible_reviewer: str | None = None
-    safe_executable_pair_exists: bool = False
-    has_deterministic_eta: bool = False
-    cooldown_until: datetime | None = None
-    concurrency_snapshot: dict[str, Any] = Field(default_factory=dict)
-    capacity_snapshot: dict[str, Any] = Field(default_factory=dict)
-    refusal_details: dict[str, Any] = Field(default_factory=dict)
-    run_id: str | None = None
-    evaluated_at: datetime = Field(default_factory=utc_now)
-
-
-class QueueExplainReport(BaseModel):
-    """Explainability report for work item queue position, score, and blockers."""
-
-    project_id: str
-    change_name: str
-    github_issue_number: int | None = None
-    readiness_state: ReadinessState
-    admission_eligible: bool
-    priority: QueuePriority
-    base_score: float
-    aging_bonus: float
-    roadmap_precedence_penalty: float
-    total_score: float
-    queue_position: int | None = None
-    blockers: list[str] = Field(default_factory=list)
-    refusal_code: AdmissionRefusalCode | None = None
-    operational_decision: AdmissionDecisionKind | None = None
-    block_condition: AdmissionBlockCondition | None = None
-    selection_rationale: str
-    evaluated_at: datetime = Field(default_factory=utc_now)
-
-
-class SchedulerStatusView(BaseModel):
-    """Operational status view of the autonomous scheduler and queue."""
-
-    mode: SchedulerMode = SchedulerMode.RUN
-    queue_depth: int = 0
-    ready_count: int = 0
-    blocked_count: int = 0
-    active_runs_count: int = 0
-    max_global_jobs: int = 1
-    next_candidate: WorkQueueItem | None = None
-    recent_decisions: list[SchedulerDecisionRecord] = Field(default_factory=list)
-    provider_health: dict[str, str] = Field(default_factory=dict)
-    evaluated_at: datetime = Field(default_factory=utc_now)
-
-
 class TaskClassificationResult(BaseModel):
     """Deterministic result of evaluating task and attempt classification."""
 
@@ -1404,55 +1277,6 @@ class AuthStatusDTO(BaseModel):
     session_expires_at: str | None = None
 
 
-class HumanAnswerRecord(BaseModel):
-    """Immutable record of an operator answering a NEEDS_HUMAN question."""
-
-    question: str
-    answer: str
-    answered_by: str = "operator"
-    answered_at: datetime = Field(default_factory=utc_now)
-
-
-class BacklogItem(BaseModel):
-    """Normalized backlog work item in the product intake layer."""
-
-    item_id: str = Field(default_factory=generate_uuid)
-    project_id: str
-    item_key: str
-    title: str
-    description: str = ""
-    priority: QueuePriority = QueuePriority.NORMAL
-    status: WorkItemStatus = WorkItemStatus.BACKLOG
-    source: WorkItemSource = WorkItemSource.LOCAL_BACKLOG
-    source_location: str | None = None
-    dependencies: list[str] = Field(default_factory=list)
-    readiness_state: ReadinessState = ReadinessState.NOT_READY
-    unmet_readiness_reasons: list[str] = Field(default_factory=list)
-    human_questions: list[str] = Field(default_factory=list)
-    human_answers: list[HumanAnswerRecord] = Field(default_factory=list)
-    acceptance_criteria: list[str] = Field(default_factory=list)
-    github_issue_number: int | None = None
-    github_issue_url: str | None = None
-    github_project_item_id: str | None = None
-    openspec_change_name: str | None = None
-    run_id: str | None = None
-    created_at: datetime = Field(default_factory=utc_now)
-    updated_at: datetime = Field(default_factory=utc_now)
-
-    @computed_field
-    @property
-    def is_admitted(self) -> bool:
-        return (
-            self.status in (WorkItemStatus.RUNNING, WorkItemStatus.COMPLETED)
-            or self.run_id is not None
-        )
-
-    @computed_field
-    @property
-    def is_ready(self) -> bool:
-        return self.readiness_state == ReadinessState.READY
-
-
 class DiscoveredContextFact(BaseModel):
     """Structured fact discovered from repository context."""
 
@@ -1506,48 +1330,6 @@ class ProjectOnboardingResult(BaseModel):
     @property
     def discovered_items_count(self) -> int:
         return self.discovered_context.discovered_items_count if self.discovered_context else 0
-
-
-class WorkItemCreateInput(BaseModel):
-    """Input schema for creating a new backlog work item."""
-
-    title: str
-    item_key: str | None = None
-    description: str = ""
-    priority: QueuePriority = QueuePriority.NORMAL
-    acceptance_criteria: list[str] = Field(default_factory=list)
-    dependencies: list[str] = Field(default_factory=list)
-    source: WorkItemSource = WorkItemSource.MANUAL_INTAKE
-    source_location: str | None = None
-
-
-class WorkItemUpdateInput(BaseModel):
-    """Input schema for updating an existing backlog work item."""
-
-    title: str | None = None
-    description: str | None = None
-    priority: QueuePriority | None = None
-    acceptance_criteria: list[str] | None = None
-    dependencies: list[str] | None = None
-
-
-class WorkItemAnswerInput(BaseModel):
-    """Input schema for answering a NEEDS_HUMAN question."""
-
-    question: str
-    answer: str
-
-
-class WorkItemPrepareResult(BaseModel):
-    """Outcome of preparing canonical artifacts for a work item."""
-
-    item: BacklogItem
-    openspec_change_name: str | None = None
-    github_issue_number: int | None = None
-    github_project_item_id: str | None = None
-    readiness_state: ReadinessState
-    unmet_readiness_reasons: list[str] = Field(default_factory=list)
-    human_questions: list[str] = Field(default_factory=list)
 
 
 class TaskRiskProfile(BaseModel):

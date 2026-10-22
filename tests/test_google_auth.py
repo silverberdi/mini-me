@@ -186,11 +186,10 @@ def test_authorized_operator_succeeds_with_cookie(
     assert me_data["operator"]["email"] == "authorized_operator@example.com"
     assert me_data["operator"]["display_name"] == "Lead Ops"
 
-    # 2. Check protected dashboard endpoint
+    # 2. An authenticated legacy dashboard request is explicitly unavailable.
     dash_resp = client.get("/api/v1/dashboard/overview")
-    assert dash_resp.status_code == 200
-    dash_data = dash_resp.json()
-    assert "system_status" in dash_data
+    assert dash_resp.status_code == 410
+    assert dash_resp.json()["code"] == "operation_unavailable"
 
 
 def test_authorized_operator_succeeds_with_bearer_token(
@@ -208,7 +207,8 @@ def test_authorized_operator_succeeds_with_bearer_token(
 
     headers = {"Authorization": f"Bearer {raw_token}"}
     resp = client.get("/api/v1/dashboard/overview", headers=headers)
-    assert resp.status_code == 200
+    assert resp.status_code == 410
+    assert resp.json()["code"] == "operation_unavailable"
 
 
 # =============================================================================

@@ -1337,7 +1337,10 @@ class AgentProcessConfinement:
         except OSError:
             pass
         try:
-            await asyncio.wait_for(process.communicate(), timeout=5.0)
+            # Stream readers are already active in the caller. Waiting for the
+            # process avoids competing ``communicate()`` readers that can force
+            # a graceful SIGTERM handler to be killed before it flushes.
+            await asyncio.wait_for(process.wait(), timeout=5.0)
             return
         except Exception:
             pass
@@ -1346,7 +1349,7 @@ class AgentProcessConfinement:
         except OSError:
             pass
         try:
-            await process.communicate()
+            await process.wait()
         except Exception:
             pass
 

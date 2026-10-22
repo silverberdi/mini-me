@@ -1,10 +1,5 @@
-"""mini me TUI operator console package."""
+"""TUI compatibility boundary; F5 owns the replacement UI."""
 
 from minime.tui.app import MiniMeTuiApp, run_tui
-from minime.tui.client import TuiQueryClient
 
-__all__ = [
-    "MiniMeTuiApp",
-    "TuiQueryClient",
-    "run_tui",
-]
+__all__ = ["MiniMeTuiApp", "run_tui"]

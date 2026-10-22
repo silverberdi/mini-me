@@ -17,15 +17,13 @@ from minime.config import ProbeConfig
 from minime.db.models import Base
 from minime.db.repository import PostgresPersistenceUnitOfWork
 from minime.db.retry import TransactionRetryWrapper
-from minime.domain.enums import ProviderHealthStatus, QueuePriority, ReadinessState
+from minime.domain.enums import ProviderHealthStatus
 from minime.domain.models import (
     Job,
     OpenRouterBudgetPolicy,
     OpenRouterPricingSnapshot,
     Project,
     ProviderHealth,
-    WorkQueueItem,
-    utc_now,
 )
 from minime.services.budget_service import BudgetService
 from minime.services.provider_health_service import ProviderHealthService
@@ -232,10 +230,10 @@ class _ExpensiveAdapter(FakeProviderAdapter):
         return True
 
 
-def test_t09_provider_probe_contention_serialization(
+def test_t09_provider_probe_does_not_dispatch_without_retired_queue(
     pg_session_factory: sessionmaker[Session], monkeypatch
 ):
-    """T09: Prove row locking on provider health get_by_provider_for_update() serializes expensive probe reservations."""
+    """F1: expensive probes do not dispatch when no work queue exists."""
     provider = "codex"
     cfg = ProbeConfig(cooldown_seconds=0, backoff_base_seconds=0, backoff_max_seconds=0, max_per_hour=1)
     adapter = _ExpensiveAdapter(name=provider, available=False)
@@ -246,21 +244,10 @@ def test_t09_provider_probe_contention_serialization(
     with pg_session_factory() as session:
         uow = PostgresPersistenceUnitOfWork(session)
         uow.projects.save(Project(project_id="p-t09", display_name="P9", repository="o/r", implementer=provider))
-        uow.work_queue.save(
-            WorkQueueItem(
-                project_id="p-t09",
-                change_name="c-t09",
-                priority=QueuePriority.NORMAL,
-                readiness_state=ReadinessState.READY,
-                discovered_at=utc_now(),
-            )
-        )
         uow.provider_health.save(
             ProviderHealth(health_id=f"ph-{provider}", provider=provider, status=ProviderHealthStatus.EXHAUSTED)
         )
         uow.commit()
-
-    dispatched: list[int] = []
 
     def worker(idx: int):
         import asyncio
@@ -268,9 +255,7 @@ def test_t09_provider_probe_contention_serialization(
         with pg_session_factory() as session:
             uow = PostgresPersistenceUnitOfWork(session)
             srv = ProviderHealthService(uow, probe_config=cfg)
-            res = asyncio.run(srv.check_and_probe_provider(provider))
-            if res:
-                dispatched.append(idx)
+            asyncio.run(srv.check_and_probe_provider(provider))
 
     threads = [threading.Thread(target=worker, args=(i,)) for i in range(3)]
     for t in threads:
@@ -278,8 +263,7 @@ def test_t09_provider_probe_contention_serialization(
     for t in threads:
         t.join()
 
-    # Exactly 1 expensive probe dispatched despite 3 concurrent sessions
-    assert adapter.probe_call_count == 1
+    assert adapter.probe_call_count == 0
 
 
 def test_t14_provider_health_stale_writer_protection(pg_session_factory: sessionmaker[Session]):
