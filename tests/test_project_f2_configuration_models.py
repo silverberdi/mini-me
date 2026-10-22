@@ -216,6 +216,15 @@ def test_project_service_rejects_review_by_thinking_author(in_memory_uow):
     assert in_memory_uow.projects.get_by_id("demo") is None
 
 
+def test_project_service_does_not_use_stale_static_model_catalog(in_memory_uow):
+    configuration = _configuration()
+    configuration.agent_profiles["thinking"].model_id = "newly-observed-model"
+
+    project = ProjectService(in_memory_uow).create_configured_project(configuration)
+
+    assert project.agent_profiles["thinking"]["model_id"] == "newly-observed-model"
+
+
 def test_project_credentials_are_kept_out_of_project_configuration(in_memory_uow, tmp_path):
     import json
     import stat

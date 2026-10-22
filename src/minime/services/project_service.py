@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import shutil
 from typing import Any
 
 from minime.domain.enums import EventType, ProjectOnboardingStatus, ProjectStatus, ProjectType
@@ -52,7 +51,7 @@ class ProjectService:
             raise ValueError("GREENFIELD requires a validated ZIP bootstrap operation")
         project_id = configuration.project_id.strip()
         repository = normalize_repository_identity(configuration.repository)
-        self._validate_agent_profiles(configuration.agent_profiles)
+        self._validate_profile_author_separation(configuration.agent_profiles)
         normalized_connections: dict[str, dict[str, Any]] = {}
         for key, value in configuration.provider_connections.items():
             connection_repository = normalize_repository_identity(value.repository_url)
@@ -276,7 +275,7 @@ class ProjectService:
         if patch.github_app_credentials and patch.provider_connections is None:
             raise ValueError("updating GitHub App credentials requires an explicit provider connection update")
         if patch.agent_profiles is not None:
-            self._validate_agent_profiles(patch.agent_profiles)
+            self._validate_profile_author_separation(patch.agent_profiles)
 
         binding = self.uow.project_managed_repository_bindings.get_by_project_id(project_id)
         changed_base_branch = (
@@ -392,40 +391,17 @@ class ProjectService:
             raise
 
     @staticmethod
-    def _validate_agent_profiles(profiles) -> None:
-        """Resolve chosen profiles against configured, installed file-capable CLIs."""
-        from minime.config import (
-            load_config,
-            resolve_cli_invocation,
-        )
+    def _validate_profile_author_separation(profiles) -> None:
+        """Keep author/reviewer identity distinct without consulting static catalogs.
 
-        role_names = {
-            "thinking": "implementer",
-            "execution": "implementer",
-            "independent_review": "reviewer",
-            "fallback": "implementer",
-        }
-        config = load_config()
+        Runtime model, effort, role, and transport capability checks belong to
+        ProjectCatalogService at the authenticated API/CLI boundary; static YAML
+        model lists are not authoritative for project profiles.
+        """
         normalized_ids: dict[str, str] = {}
         for role, profile in profiles.items():
             agent_id = profile.agent_id.strip().lower()
             provider_id = "antigravity" if agent_id == "agy" else agent_id
-            provider = config.providers.get(provider_id)
-            if provider is None or provider.type != "cli" or not provider.enabled:
-                raise ValueError(f"Agent '{agent_id}' is not an enabled native CLI provider")
-            executable = (provider.command or "").strip().split(maxsplit=1)
-            if not executable or shutil.which(executable[0]) is None:
-                raise ValueError(f"Agent '{agent_id}' executable is not installed")
-            try:
-                resolve_cli_invocation(
-                    provider_id,
-                    role_names[role],
-                    config,
-                    model=profile.model_id,
-                    effort=profile.effort,
-                )
-            except ValueError as exc:
-                raise ValueError(f"Agent profile '{role}' cannot be invoked: {exc}") from exc
             normalized_ids[role] = provider_id
         reviewer_id = normalized_ids.get("independent_review")
         for author_role in ("thinking", "execution"):

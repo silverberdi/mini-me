@@ -63,3 +63,27 @@ def test_native_integration_inspection_fails_closed_when_extended_lifecycle_is_m
 
     assert evidence["complete"] is False
     assert "verify-change" in evidence["required_operations"]["codex"]
+
+
+def test_official_setup_rejects_symlinked_integration_targets_before_init(tmp_path, monkeypatch):
+    project = tmp_path / "project"
+    outside = tmp_path / "outside"
+    project.mkdir()
+    outside.mkdir()
+    (project / ".agents").symlink_to(outside, target_is_directory=True)
+    adapter = OpenSpecAdapter()
+
+    monkeypatch.setattr(
+        adapter,
+        "inspect_cli",
+        lambda: {
+            "available": True,
+            "version": "test-version",
+            "init_tools_supported": True,
+            "no_animation_supported": True,
+        },
+    )
+    with pytest.raises(ValueError, match="contains a symlink"):
+        adapter.install_official_integrations(project, ["codex"])
+
+    assert list(outside.iterdir()) == []
