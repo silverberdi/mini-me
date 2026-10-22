@@ -190,6 +190,31 @@ def test_project_update_preserves_identity_and_can_change_settings(in_memory_uow
     assert updated.base_branch == "develop"
 
 
+def test_project_cli_update_uses_shared_configuration_service(in_memory_uow, tmp_path, monkeypatch):
+    from contextlib import contextmanager
+
+    from typer.testing import CliRunner
+
+    from minime.cli import main as cli
+
+    service = ProjectService(in_memory_uow)
+    service.create_configured_project(_configuration())
+
+    @contextmanager
+    def session():
+        yield in_memory_uow
+
+    monkeypatch.setattr(cli.db_manager, "session", session)
+    monkeypatch.setattr(cli, "PostgresPersistenceUnitOfWork", lambda value: value)
+    patch_path = tmp_path / "patch.json"
+    patch_path.write_text('{"display_name":"Updated from CLI"}', encoding="utf-8")
+    result = CliRunner().invoke(cli.app, ["project", "update", "demo", str(patch_path)])
+
+    assert result.exit_code == 0, result.output
+    assert "updated demo" in result.output
+    assert in_memory_uow.projects.get_by_id("demo").display_name == "Updated from CLI"
+
+
 def test_project_patch_rejects_identity_fields():
     with pytest.raises(ValidationError, match="Extra inputs are not permitted"):
         ProjectConfigurationPatch.model_validate({"repository": "attacker/other"})

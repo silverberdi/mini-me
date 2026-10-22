@@ -11,7 +11,7 @@ import uvicorn
 from minime.config import discover_and_load_env_file
 from minime.db.repository import PostgresPersistenceUnitOfWork
 from minime.db.session import db_manager
-from minime.domain.models import ProjectConfigurationInput
+from minime.domain.models import ProjectConfigurationInput, ProjectConfigurationPatch
 from minime.logging import configure_logging
 from minime.services.budget_service import BudgetService
 from minime.services.legacy_unavailable import unavailable_payload
@@ -142,6 +142,39 @@ def show_project(project_id: str = typer.Argument(...), json_output: bool = type
             f"{project.project_id} {project.repository} "
             f"[{project.status.value}/{project.onboarding_status.value}]"
         )
+
+
+@project_app.command("update")
+def update_project(
+    project_id: str = typer.Argument(...),
+    config_path: str = typer.Argument(..., exists=True, readable=True),
+) -> None:
+    """Update mutable project settings from a non-secret JSON patch."""
+    try:
+        with open(config_path, encoding="utf-8") as stream:
+            raw = json.load(stream)
+        if "github_app_credentials" in raw:
+            raise ValueError(
+                "Do not put GitHub App credentials in the configuration file; enter them only at the hidden prompt"
+            )
+        if any(
+            isinstance(value, dict) and value.get("auth_mode") == "project_app"
+            for value in raw.get("provider_connections", {}).values()
+        ):
+            raw["github_app_credentials"] = {
+                "app_id": typer.prompt("GitHub App ID"),
+                "installation_id": typer.prompt("GitHub installation ID"),
+                "private_key": typer.prompt("GitHub App private key", hide_input=True),
+            }
+        patch = ProjectConfigurationPatch.model_validate(raw)
+        with db_manager.session() as session:
+            project = ProjectService(PostgresPersistenceUnitOfWork(session)).update_configuration(
+                project_id, patch
+            )
+    except Exception as exc:
+        typer.echo(f"project update failed: {exc}", err=True)
+        raise typer.Exit(code=1) from exc
+    typer.echo(f"updated {project.project_id} [{project.onboarding_status.value}]")
 
 
 def _set_project_lifecycle(project_id: str, active: bool) -> None:
