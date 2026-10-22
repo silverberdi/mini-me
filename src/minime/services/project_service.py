@@ -149,6 +149,131 @@ class ProjectService:
         self.uow.commit()
         return project
 
+    def observe_bootstrap_merge(self, project_id: str) -> dict[str, Any]:
+        """Advance Greenfield readiness only from an exact provider-observed PR merge."""
+        from minime.domain.enums import ExternalOutcome
+        from minime.services.project_connection_service import ProjectConnectionService
+
+        project = self.uow.projects.get_by_id(project_id)
+        if project is None:
+            raise ValueError(f"Project '{project_id}' not found")
+        if project.project_type != ProjectType.GREENFIELD:
+            raise ValueError("Bootstrap merge observation applies only to Greenfield projects")
+        if project.onboarding_status not in {
+            ProjectOnboardingStatus.PR_PENDING,
+            ProjectOnboardingStatus.BOOTSTRAP_PENDING,
+            ProjectOnboardingStatus.AWAITING_REVIEW,
+        }:
+            return {
+                "project_id": project_id,
+                "onboarding_status": project.onboarding_status.value,
+                "observed": False,
+                "reason": "project_has_no_pending_bootstrap_pr",
+            }
+        checkpoint = project.onboarding_checkpoint
+        required = (
+            "pull_request_number",
+            "pull_request_url",
+            "bootstrap_branch",
+            "head_sha",
+            "base_branch",
+        )
+        if any(not checkpoint.get(field) for field in required):
+            return {
+                "project_id": project_id,
+                "onboarding_status": project.onboarding_status.value,
+                "observed": False,
+                "reason": "bootstrap_pr_identity_incomplete",
+            }
+        try:
+            pr_number = int(checkpoint["pull_request_number"])
+        except (TypeError, ValueError):
+            pr_number = 0
+        if pr_number <= 0:
+            return {
+                "project_id": project_id,
+                "onboarding_status": project.onboarding_status.value,
+                "observed": False,
+                "reason": "bootstrap_pr_identity_incomplete",
+            }
+        try:
+            adapter = ProjectConnectionService(self.credential_store).adapter_for(
+                project, "git_pr"
+            )
+        except (ValueError, RuntimeError):
+            return {
+                "project_id": project_id,
+                "onboarding_status": project.onboarding_status.value,
+                "observed": False,
+                "reason": "git_pr_connection_unavailable",
+            }
+        result = adapter.get_pull_request_details(
+            project.provider_connections["git_pr"]["repository_url"],
+            pr_number,
+        )
+        if result.outcome != ExternalOutcome.SUCCESS or not isinstance(result.data, dict):
+            return {
+                "project_id": project_id,
+                "onboarding_status": project.onboarding_status.value,
+                "observed": False,
+                "reason": "pull_request_unobservable",
+            }
+        details = result.data
+        try:
+            configured_repository = normalize_repository_identity(
+                project.provider_connections["git_pr"]["repository_url"]
+            )
+            observed_repository = normalize_repository_identity(str(details.get("repository", "")))
+        except (KeyError, TypeError, ValueError):
+            configured_repository = observed_repository = ""
+        exact_identity = bool(configured_repository) and (
+            observed_repository == configured_repository
+            and details.get("number") == pr_number
+            and details.get("url") == checkpoint["pull_request_url"]
+            and details.get("head_branch") == checkpoint["bootstrap_branch"]
+            and details.get("head_sha") == checkpoint["head_sha"]
+            and details.get("base_branch") == checkpoint["base_branch"] == project.base_branch
+        )
+        if not exact_identity:
+            return {
+                "project_id": project_id,
+                "onboarding_status": project.onboarding_status.value,
+                "observed": False,
+                "reason": "pull_request_identity_mismatch",
+            }
+        if not details.get("is_merged"):
+            return {
+                "project_id": project_id,
+                "onboarding_status": project.onboarding_status.value,
+                "observed": True,
+                "merged": False,
+                "pull_request_number": pr_number,
+            }
+        if not details.get("merge_commit_sha") or not details.get("merged_at"):
+            return {
+                "project_id": project_id,
+                "onboarding_status": project.onboarding_status.value,
+                "observed": False,
+                "reason": "merge_postcondition_incomplete",
+            }
+        project.onboarding_status = ProjectOnboardingStatus.PREPARED
+        project.onboarding_reasons = []
+        project.onboarding_checkpoint = {
+            **checkpoint,
+            "merge_commit_sha": details["merge_commit_sha"],
+            "merge_observed_at": utc_now().isoformat(),
+        }
+        project.updated_at = utc_now()
+        self.uow.projects.save(project)
+        self.uow.commit()
+        return {
+            "project_id": project_id,
+            "onboarding_status": project.onboarding_status.value,
+            "observed": True,
+            "merged": True,
+            "merge_commit_sha": details["merge_commit_sha"],
+        }
+
     def update_configuration(
         self, project_id: str, patch: ProjectConfigurationPatch
     ) -> Project:

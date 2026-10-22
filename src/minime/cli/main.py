@@ -188,6 +188,22 @@ def onboarding_status(project_id: str = typer.Argument(...)) -> None:
     typer.echo(json.dumps(state, indent=2, default=str))
 
 
+@project_app.command("observe-bootstrap-merge")
+def observe_bootstrap_merge(project_id: str = typer.Argument(...)) -> None:
+    """Read the recorded Greenfield PR and update status only on exact merge proof."""
+    try:
+        with db_manager.session() as session:
+            result = ProjectService(
+                PostgresPersistenceUnitOfWork(session)
+            ).observe_bootstrap_merge(project_id)
+    except Exception as exc:
+        typer.echo(f"bootstrap merge observation unavailable: {exc}", err=True)
+        raise typer.Exit(code=1) from exc
+    typer.echo(json.dumps(result, indent=2, default=str))
+    if result.get("observed") is False:
+        raise typer.Exit(code=2)
+
+
 @project_app.command("update")
 def update_project(
     project_id: str = typer.Argument(...),

@@ -463,6 +463,21 @@ def get_project_onboarding_state(
     return ProjectService.public_onboarding_state(project)
 
 
+@app.post("/api/v1/projects/{project_id}/onboarding/observe-merge", tags=["projects"])
+def observe_project_bootstrap_merge(
+    project_id: str,
+    _operator: AuthenticatedOperatorDep,
+    uow: UowDep,
+) -> dict[str, Any]:
+    """Read the exact recorded bootstrap PR and persist PREPARED only after merge proof."""
+    try:
+        return ProjectService(uow).observe_bootstrap_merge(project_id)
+    except ValueError as exc:
+        message = str(exc)
+        code = status.HTTP_404_NOT_FOUND if message.endswith("not found") else status.HTTP_409_CONFLICT
+        raise HTTPException(status_code=code, detail=message) from exc
+
+
 @app.post("/api/v1/projects/{project_id}/pause", tags=["projects"])
 def pause_project(project_id: str, _operator: AuthenticatedOperatorDep, uow: UowDep) -> dict[str, Any]:
     try:

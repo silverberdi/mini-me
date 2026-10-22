@@ -767,6 +767,125 @@ def test_greenfield_activation_api_returns_conflict_before_state_change(in_memor
     assert in_memory_uow.jobs.list_by_project("new-project") == []
 
 
+def test_bootstrap_merge_observation_requires_exact_pr_identity_and_merge_proof(
+    in_memory_uow, monkeypatch
+):
+    from types import SimpleNamespace
+
+    from minime.domain.enums import ExternalOutcome, ProjectOnboardingStatus
+    from minime.domain.models import Project
+    from minime.services.project_connection_service import ProjectConnectionService
+
+    project = Project(
+        project_id="greenfield",
+        display_name="Greenfield",
+        repository="example/greenfield",
+        project_type=ProjectType.GREENFIELD,
+        base_branch="main",
+        provider_connections={
+            "git_pr": {
+                "provider_id": "github",
+                "repository_url": "example/greenfield",
+                "auth_mode": "environment_app",
+            }
+        },
+        onboarding_status=ProjectOnboardingStatus.AWAITING_REVIEW,
+        onboarding_checkpoint={
+            "pull_request_number": 12,
+            "pull_request_url": "https://github.com/example/greenfield/pull/12",
+            "bootstrap_branch": "minime/bootstrap-greenfield",
+            "base_branch": "main",
+            "head_sha": "candidate-sha",
+        },
+    )
+    in_memory_uow.projects.save(project)
+
+    details = {
+        "repository": "example/greenfield",
+        "number": 12,
+        "url": "https://github.com/example/greenfield/pull/12",
+        "head_branch": "minime/bootstrap-greenfield",
+        "head_sha": "candidate-sha",
+        "base_branch": "main",
+        "is_merged": True,
+        "merged_at": "2026-10-22T12:00:00Z",
+        "merge_commit_sha": "merge-sha",
+    }
+
+    class Adapter:
+        def get_pull_request_details(self, repository, number):
+            assert repository == "example/greenfield" and number == 12
+            return SimpleNamespace(outcome=ExternalOutcome.SUCCESS, data=details)
+
+    monkeypatch.setattr(ProjectConnectionService, "adapter_for", lambda *_args: Adapter())
+    result = ProjectService(in_memory_uow).observe_bootstrap_merge("greenfield")
+
+    assert result["merged"] is True
+    assert result["merge_commit_sha"] == "merge-sha"
+    stored = in_memory_uow.projects.get_by_id("greenfield")
+    assert stored.onboarding_status == ProjectOnboardingStatus.PREPARED
+    assert stored.onboarding_checkpoint["merge_commit_sha"] == "merge-sha"
+    assert in_memory_uow.jobs.list_by_project("greenfield") == []
+
+
+def test_bootstrap_merge_observation_does_not_prepare_stale_or_unobservable_pr(
+    in_memory_uow, monkeypatch
+):
+    from types import SimpleNamespace
+
+    from minime.domain.enums import ExternalOutcome, ProjectOnboardingStatus
+    from minime.domain.models import Project
+    from minime.services.project_connection_service import ProjectConnectionService
+
+    project = Project(
+        project_id="greenfield",
+        display_name="Greenfield",
+        repository="example/greenfield",
+        project_type=ProjectType.GREENFIELD,
+        provider_connections={
+            "git_pr": {
+                "provider_id": "github",
+                "repository_url": "example/greenfield",
+                "auth_mode": "environment_app",
+            }
+        },
+        onboarding_status=ProjectOnboardingStatus.AWAITING_REVIEW,
+        onboarding_checkpoint={
+            "pull_request_number": 12,
+            "pull_request_url": "https://github.com/example/greenfield/pull/12",
+            "bootstrap_branch": "minime/bootstrap-greenfield",
+            "base_branch": "main",
+            "head_sha": "expected-sha",
+        },
+    )
+    in_memory_uow.projects.save(project)
+    details = {
+        "repository": "example/greenfield",
+        "number": 12,
+        "url": "https://github.com/example/greenfield/pull/12",
+        "head_branch": "minime/bootstrap-greenfield",
+        "head_sha": "stale-sha",
+        "base_branch": "main",
+        "is_merged": True,
+        "merged_at": "2026-10-22T12:00:00Z",
+        "merge_commit_sha": "merge-sha",
+    }
+    monkeypatch.setattr(
+        ProjectConnectionService,
+        "adapter_for",
+        lambda *_args: SimpleNamespace(
+            get_pull_request_details=lambda *_args: SimpleNamespace(
+                outcome=ExternalOutcome.SUCCESS, data=details
+            )
+        ),
+    )
+    result = ProjectService(in_memory_uow).observe_bootstrap_merge("greenfield")
+    assert result["reason"] == "pull_request_identity_mismatch"
+    assert in_memory_uow.projects.get_by_id("greenfield").onboarding_status == (
+        ProjectOnboardingStatus.AWAITING_REVIEW
+    )
+
+
 def test_greenfield_service_rejects_without_zip_before_persistence(in_memory_uow):
     configuration = _configuration(project_type=ProjectType.GREENFIELD)
 
@@ -805,6 +924,9 @@ def test_project_query_aliases_require_authenticated_operator(in_memory_uow):
         verify_connections = client.post(
             "/api/v1/projects/not-a-real-project/connections/verify"
         )
+        observe_merge = client.post(
+            "/api/v1/projects/not-a-real-project/onboarding/observe-merge"
+        )
     finally:
         app.dependency_overrides.clear()
 
@@ -813,6 +935,7 @@ def test_project_query_aliases_require_authenticated_operator(in_memory_uow):
     assert context.status_code == 401
     assert onboarding.status_code == 401
     assert verify_connections.status_code == 401
+    assert observe_merge.status_code == 401
 
 
 def test_versioned_project_api_creates_brownfield_configuration(in_memory_uow, monkeypatch):
