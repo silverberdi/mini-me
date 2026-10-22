@@ -1,6 +1,7 @@
 import io
 import stat
 import zipfile
+from pathlib import Path
 
 import pytest
 
@@ -27,6 +28,20 @@ def test_extracts_regular_context_files_with_hash_and_restrictive_mode(tmp_path)
     assert stat.S_IMODE(file_path.stat().st_mode) == 0o600
     assert result.files == ("docs/requirements.md",)
     assert len(result.sha256) == 64
+
+
+def test_extracts_console_sorter_context_supplied_for_f2_e2e(tmp_path):
+    fixture_root = Path(__file__).parent / "fixtures/gacela-02-proyectos"
+    package = (fixture_root / "console-sorter-context.zip").read_bytes()
+    source = (fixture_root / "console-sorter-context.md").read_bytes()
+
+    result = ContextArchiveExtractor().extract(package, tmp_path / "sorter-workspace")
+
+    extracted = tmp_path / "sorter-workspace/console-sorter-context.md"
+    assert extracted.read_bytes() == source
+    assert result.files == ("console-sorter-context.md",)
+    assert result.sha256
+    assert "diez números" in extracted.read_text(encoding="utf-8")
 
 
 @pytest.mark.parametrize(
