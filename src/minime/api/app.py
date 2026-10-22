@@ -39,7 +39,6 @@ from minime.domain.models import (
     ActionDescriptor,
     AuthorizedOperator,
     AuthStatusDTO,
-    BacklogItem,
     Change,
     ContextDiscoveryReport,
     EfficiencyTelemetryView,
@@ -56,15 +55,7 @@ from minime.domain.models import (
     ProjectOnboardingResult,
     ProviderEfficiencyMetrics,
     ProviderHealth,
-    QueueExplainReport,
-    SchedulerDecisionRecord,
     SchedulerStatus,
-    SchedulerStatusView,
-    WorkItemAnswerInput,
-    WorkItemCreateInput,
-    WorkItemPrepareResult,
-    WorkItemUpdateInput,
-    WorkQueueItem,
     utc_now,
 )
 from minime.logging import redact_secrets
@@ -663,8 +654,7 @@ def get_project_context_endpoint(
 ) -> ContextDiscoveryReport:
     """Get categorized context report (discovered facts, inferred structure, missing context)."""
     try:
-        report, _ = context_service.discover_context_pure(project_id)
-        return report
+        return context_service.discover_context_pure(project_id)
     except ValueError as e:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(e))
 
@@ -687,7 +677,7 @@ def list_backlog_items_endpoint(
     status_filter: str | None = Query(default=None, alias="status"),
     priority: str | None = None,
     limit: int = 100,
-) -> list[BacklogItem]:
+) -> list[dict[str, Any]]:
     """The local backlog projection was retired; F2 owns its replacement."""
     raise HTTPException(
         status_code=status.HTTP_410_GONE,
@@ -700,9 +690,8 @@ def list_backlog_items_endpoint(
 )
 def create_backlog_item_endpoint(
     project_id: str,
-    req: WorkItemCreateInput,
     request: Request,
-) -> BacklogItem:
+) -> dict[str, Any]:
     """The local backlog projection was retired; F2 owns its replacement."""
     raise HTTPException(
         status_code=status.HTTP_410_GONE,
@@ -714,7 +703,7 @@ def create_backlog_item_endpoint(
 def get_backlog_item_endpoint(
     project_id: str,
     item_key: str,
-) -> BacklogItem:
+) -> dict[str, Any]:
     """The local backlog projection was retired; F2 owns its replacement."""
     raise HTTPException(
         status_code=status.HTTP_410_GONE,
@@ -726,9 +715,8 @@ def get_backlog_item_endpoint(
 def update_backlog_item_endpoint(
     project_id: str,
     item_key: str,
-    req: WorkItemUpdateInput,
     request: Request,
-) -> BacklogItem:
+) -> dict[str, Any]:
     """The local backlog projection was retired; F2 owns its replacement."""
     raise HTTPException(
         status_code=status.HTTP_410_GONE,
@@ -741,7 +729,7 @@ def prepare_backlog_item_endpoint(
     project_id: str,
     item_key: str,
     request: Request,
-) -> WorkItemPrepareResult:
+) -> dict[str, Any]:
     """Prepare canonical execution artifacts (GitHub Issue, Project Item, OpenSpec change)."""
     raise HTTPException(status_code=status.HTTP_410_GONE, detail=unavailable_payload("legacy_intake", "F2"))
 
@@ -750,9 +738,8 @@ def prepare_backlog_item_endpoint(
 def answer_backlog_item_question_endpoint(
     project_id: str,
     item_key: str,
-    req: WorkItemAnswerInput,
     request: Request,
-) -> BacklogItem:
+) -> dict[str, Any]:
     """The local backlog projection was retired; F2 owns its replacement."""
     raise HTTPException(
         status_code=status.HTTP_410_GONE,
@@ -765,7 +752,7 @@ def start_backlog_item_endpoint(
     project_id: str,
     item_key: str,
     request: Request,
-) -> BacklogItem:
+) -> dict[str, Any]:
     """The local backlog projection was retired; F2 owns its replacement."""
     raise HTTPException(
         status_code=status.HTTP_410_GONE,
@@ -1811,13 +1798,12 @@ def get_action_history_endpoint(
 @app.get(
     "/api/v1/queue",
     tags=["queue"],
-    response_model=list[WorkQueueItem],
 )
 def list_queue_items_endpoint(
     uow: Annotated[PersistenceUnitOfWork, Depends(get_uow)],
     project_id: str | None = None,
     ready_only: bool = False,
-) -> list[WorkQueueItem]:
+) -> list[dict[str, Any]]:
     """The local work queue was retired; F3 owns selection and execution."""
     raise HTTPException(
         status_code=status.HTTP_410_GONE,
@@ -1828,13 +1814,12 @@ def list_queue_items_endpoint(
 @app.get(
     "/api/v1/queue/{change_name}/explain",
     tags=["queue"],
-    response_model=QueueExplainReport,
 )
 def explain_queue_item_endpoint(
     change_name: str,
     uow: Annotated[PersistenceUnitOfWork, Depends(get_uow)],
     project_id: str = "mini-me",
-) -> QueueExplainReport:
+) -> dict[str, Any]:
     """The local work queue was retired; F3 owns selection and execution."""
     raise HTTPException(
         status_code=status.HTTP_410_GONE,
@@ -1845,12 +1830,11 @@ def explain_queue_item_endpoint(
 @app.get(
     "/api/v1/scheduler/status",
     tags=["scheduler"],
-    response_model=SchedulerStatusView,
 )
 def get_scheduler_status_endpoint(
     uow: Annotated[PersistenceUnitOfWork, Depends(get_uow)],
     project_id: str | None = None,
-) -> SchedulerStatusView:
+) -> dict[str, Any]:
     """The scheduler was retired and remains disabled during F1."""
     raise HTTPException(
         status_code=status.HTTP_410_GONE,
@@ -1861,12 +1845,11 @@ def get_scheduler_status_endpoint(
 @app.post(
     "/api/v1/scheduler/tick",
     tags=["scheduler"],
-    response_model=list[SchedulerDecisionRecord],
 )
 def trigger_scheduler_tick_endpoint(
     uow: Annotated[PersistenceUnitOfWork, Depends(get_uow)],
     project_id: str | None = None,
-) -> list[SchedulerDecisionRecord]:
+) -> list[dict[str, Any]]:
     """The scheduler was retired and remains disabled during F1."""
     raise HTTPException(
         status_code=status.HTTP_410_GONE,

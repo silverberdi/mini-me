@@ -28,7 +28,7 @@ class StatusService:
         return {
             "runtime_engine": "mini-me-runtime",
             "status": "SELF_HOSTING_READY",
-            "autonomous_queue": True,
+            "autonomous_queue": False,
         }
 
     def get_runtime_environment_diagnostic(self) -> dict[str, Any]:
