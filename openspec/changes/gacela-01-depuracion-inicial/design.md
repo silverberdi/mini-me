@@ -1,0 +1,98 @@
+## Context
+
+See [proposal.md](proposal.md) for motivation and the three delta specifications for behavioral commitments. The `2b76c592` baseline contains a legacy control plane whose responsibilities overlap OpenSpec and the ticket source. The F1 implementation must be a deletion-led change: it may add only the smallest explicit unavailable boundary, the new Alembic revision, and proof fixtures required to retire code safely.
+
+### Observed responsibility and consumer inventory
+
+| Responsibility today | Concrete owners and direct consumers | F1 classification |
+| --- | --- | --- |
+| Semantic creation of proposal/design/spec/task Markdown | `OpenSpecGenerator`; `IntakeService._load_or_generate_openspec`; `IntakeReconciliationService`; intake workspace publishing and generator-specific tests | **REMOVE**. Native agent `openspec-propose` is the semantic authority; F3 will connect it. No Python replacement. |
+| Semantic merge and archive of OpenSpec | `OpenSpecSyncService.sync_change_specs/archive_change`; `PostMergeReconciliationService`; `ControlPlaneService`, `RecoveryConvergenceService`, `SchedulerService`; post-merge/lifecycle tests | **REMOVE**. F3 will invoke native sync/archive. Preserve only non-semantic Git/worktree identity checks where separately useful. |
+| Semantic completion/transition substitute | `VerifyGate`, `ExecutionPipelineService`, `OrchestrationService`, `NativeOpenSpecApply`, `implementer_runner`, reviewer/auditor prompt runners and their API/CLI dispatches | **REMOVE/DISABLE** where the responsibility is legacy workflow execution. F3 owns the replacement flow; no dispatch, provider spend, or candidate mutation in F1. |
+| Local ticket intake, backlog projection, priority and autonomous admission | `IntakeService`, `ReadinessService`, `WorkDiscoveryService`, `SchedulerService`, `classification_rules`, `TaskClassifier`, `TaskComplexityRiskClassifier`; scheduler observer; queue endpoints/commands/UI | **REMOVE/DISABLE**. GitHub will be the F2 ticket source; F1 has no ticket selection or autonomous start. |
+| Durable recovery/sagas/claims and external action retries | `RecoveryConvergenceService`, `SagaEngine`, `RestartRecoveryService`, `PostMergeReconciliationService` | **RESERVE F3** after real process/DB evidence distinguishes minimal continuation from legacy execution. Do not delete merely because it is complex. It must not drive retired paths in F1. |
+| Project identity, repository safety and worktree isolation | project/binding services, `GitHubAdapter`, `repository_identity`, `WorkspaceGuard`, `WorktreeManager`, managed repository/worktree ownership | **CONSERVE** subject to focused tests. They protect the future F2/F3 flow and do not author OpenSpec semantics. |
+| Auth and secrets | FastAPI auth middleware, `AuthService`, authorized operators/sessions/audit tables | **CONSERVE**. |
+| Preview, dashboard/PWA/TUI operator surfaces | preview/validation/dashboard/control-plane services and static/TUI clients | **RESERVE F5**, except remove widgets/routes exclusively showing retired queue/lifecycle actions; do not build the new UI now. |
+| Provider-specific capacity, budgets, review/audit and efficiency engines | provider health/budget/reviewer/audit/efficiency services and their models | **RESERVE F3/F4/F6** until the configured-role policy is implemented. Disable only callers exclusively reached from removed legacy execution. |
+
+### Persistent-state inventory
+
+The implementation phase must regenerate this ledger from source references, database constraints and a representative populated PostgreSQL backup before destructive DDL. Initial candidates are:
+
+| Structures | Evidence and F1 action |
+| --- | --- |
+| `backlog_items`; project backlog/roadmap/context-source fields introduced in `019_work_intake_and_backlog_items` | Used by Intake/Readiness/Discovery/Scheduler and backlog API. **REMOVE** only after all such callers and public surfaces are retired; GitHub remains source of tickets. Export/classify rows before DDL; preserve binding fields still required by project registration. |
+| `work_queue_snapshots`, `scheduler_decision_records` (`014_autonomous_queue_work_selection`) | Repository owners are `PostgresWorkQueueRepository`/`PostgresSchedulerDecisionRepository`; production behavior is `SchedulerService`. **REMOVE** after scheduler/queue surfaces are gone and no foreign-key or live-data dependency remains. |
+| `task_classification_snapshots` plus job/change snapshot references (`024_task_classification_snapshots`) | Produced/consumed by task classifiers and legacy pipeline/orchestration. **REMOVE** if the ledger confirms no retained continuity consumer; otherwise **RETAIN-WITH-REASON** for F3/F6. |
+| `provider_efficiency_metrics` and legacy efficiency fields | Dashboard/API still consume them; the new contract has no efficiency optimizer. **RESERVE F6** unless the F1 caller census proves the whole surface is exclusively retired and data retention is settled. |
+| `jobs`, attempts, runs, candidates, reviews/audits, sagas, claims, external actions, worktree ownership and provider/budget records | Extensive direct consumers, foreign keys and possible continuity evidence. **RETAIN** in F1, but quarantine all legacy execution entry points. Their later minimum shape belongs to F3/F6. |
+| `projects`, bindings, managed repository bindings; auth tables | Explicit contract responsibilities. **RETAIN**. |
+| previews/validation/operator action tables | Still consumed by UI/control-plane and linked to F5. **RESERVE F5/F6**. |
+
+Historical Alembic revisions are immutable. F1 adds one revision from the actual head, with `upgrade` guarded by preflight/export evidence and a tested `downgrade`/restore procedure; it does not edit previous migration files.
+
+## Goals / Non-Goals
+
+**Goals:**
+
+- One deletion order that removes legacy writers before their consumers and database structures, leaving no silent compatibility path.
+- A small fail-closed boundary for public operations whose replacement is F2/F3/F5/F6.
+- Measurable preservation of FastAPI authentication, useful project/repository configuration, Git/GitHub integration, worktree isolation, secret handling and retained continuity evidence.
+- An auditable reconciliation inventory for historical Changes/specs without treating their directories as active work.
+
+**Non-Goals:**
+
+- F2 project configuration/ticket-source implementation; F3 native lifecycle, agents, reviews, human interaction, PR and sync/archive; F4 skills; F5 UI; F6 remaining cleanup.
+- New workflow engine, scheduler, recovery system, semantic verifier, queue, provider router, deployment system, API version, framework, service, or persistence abstraction.
+- Applying/archiving/deleting historical Changes, starting services/jobs, running migrations, spending provider budget, deployment, or closing tickets during F1 planning or its verification setup.
+
+## Decisions
+
+### 1. Delete semantic writers first; do not emulate their replacement
+
+Remove the generator, sync/archive merger, their dependency injection and all callers. Replace their externally reachable behavior with a shared, minimal unavailable response where a public contract must remain temporarily recognizable; otherwise remove the endpoint/command. `OpenSpecAdapter` structural reads and repository guards survive only if the ledger proves they are non-semantic.
+
+Alternative rejected: retain renamed generators or convert them into prompt templates. That still makes mini me the semantic OpenSpec author and contradicts the contract.
+
+### 2. Quarantine the legacy execution graph before deleting durable evidence
+
+Delete/disable in this order: (1) API/CLI/UI commands and background triggers; (2) scheduler/discovery/admission and intake generation; (3) pipeline/orchestration/gates/post-merge writers; (4) service constructors, DI/config and tests; (5) domain interfaces/repos/models; (6) database structures. Each removal step repeats reachability checks, so a table cannot be dropped while its model/repository/foreign key still serves a retained responsibility.
+
+Alternative rejected: drop models/tables first. It risks orphaned endpoints, failed restart behavior and unclassified data loss.
+
+### 3. Use explicit unavailable semantics, not success-shaped compatibility
+
+For retained API paths return a machine-readable `operation_unavailable` result with the owning future phase and no mutation; retained CLI commands use a non-zero exit. Static UI/TUI elements exclusively wired to retired operations disappear or present the same unavailable state. The design intentionally does not specify a new F2/F3 API.
+
+Alternative rejected: leave endpoints returning empty lists or `200`; this falsely represents operational capability.
+
+### 4. Make migration evidence a prerequisite, with recoverable data handling
+
+Before creating destructive DDL, implementation captures: schema revision, row counts, FK/index graph, production-like backup/restore proof, active durable references, and a per-structure REMOVE/MIGRATE/RETAIN-WITH-REASON decision. The migration exports only data needed for a retained legal/operational record to a protected, documented restoration path; data that is neither needed nor allowed to persist is removed only after that decision. Downgrade recreates schema safely; rollback of data follows the tested backup path rather than pretending a drop is lossless.
+
+Alternative rejected: a migration that unconditionally drops every legacy table or rewrites historical revisions.
+
+### 5. Historical Changes are inspected, never executed
+
+The reconciliation report is a planning/evidence artifact generated from `openspec list/status`, filesystem metadata, durable DB records and process observation. It lists slug/status/conflicting authority/live-reference verdict without calling `apply`, `continue`, `archive`, or mutating directories. A real active external/durable operation is a blocker for any touching deletion, not authorization to advance it.
+
+## Risks / Trade-offs
+
+- **Hidden dynamic caller or DI wiring** → search imports, registration/config, static JS/TUI clients, CLI commands and service construction; boot the retained app and exercise denial paths after each removal.
+- **Live history or foreign keys block schema deletion** → inventory populated DB and constraints before Alembic; retain with a reason and future phase instead of guessing.
+- **A disabled legacy endpoint breaks an operator** → return explicit unavailable behavior and document target phase; preserve read-only status/auth/repository diagnostics.
+- **Accidental scheduler/provider activity during cleanup** → remove all trigger paths, test denial with spies/fakes, retain scheduler disabled in configuration and never invoke providers in acceptance tests.
+- **Historical artifacts mistaken for active work** → distinguish filesystem presence, process state, DB active state and remote side effects; record blockers without mutation.
+- **Deletion hides regressions** → retain valuable safety tests by rewriting them around denial/retained contracts; run focused regression and post-removal functional checks.
+
+## Migration Plan
+
+1. Capture baseline SHA, Alembic head, schema/FK/index inventory, protected backup and live-process/durable-reference observations.
+2. Complete and review the Removal Ledger, including API/CLI/UI/config/test/dynamic callers and per-table data decision.
+3. Implement in the dependency order above; migrate retained clients/tests to explicit unavailable or surviving read-only behavior.
+4. Add and exercise the new Alembic revision against an empty database and representative populated restore. Verify `upgrade`, `downgrade`, and restore without editing historical revisions.
+5. Run reachability checks plus unit/integration and real retained API/CLI functional flows after deletion. Confirm retired calls cannot enqueue, dispatch, mutate or spend.
+6. Produce candidate-bound evidence: removal diff, symbols/callers absent, database before/after counts, migration revision, denial results, retained-capability results, and historical-change reconciliation inventory.
+
+Rollback: stop at the failed migration before further deletion; use Alembic downgrade only where verified, otherwise restore the protected pre-migration backup. Revert the candidate code as one unit so no caller remains pointed at a removed schema. No production deployment is part of F1; CI/CD remains external.
