@@ -753,7 +753,7 @@ def test_project_cli_update_uses_shared_configuration_service(in_memory_uow, tmp
     monkeypatch.setattr(cli.db_manager, "session", session)
     monkeypatch.setattr(cli, "PostgresPersistenceUnitOfWork", lambda value: value)
 
-    async def profiles_available(self, profiles):
+    async def profiles_available(self, profiles, project_root=None):
         assert profiles
 
     monkeypatch.setattr(cli.ProjectCatalogService, "validate_project_profiles", profiles_available)
@@ -1321,6 +1321,44 @@ def test_agent_catalog_requires_authentication(in_memory_uow):
         app.dependency_overrides.clear()
 
     assert response.status_code == 401
+
+
+def test_agent_catalog_project_workspace_requires_bound_git_identity(
+    in_memory_uow, tmp_path, monkeypatch
+):
+    from minime.domain.models import ProjectManagedRepositoryBinding
+    from minime.services import workspace_guard
+
+    project = ProjectService(in_memory_uow).create_configured_project(_configuration())
+    root = tmp_path / "managed" / project.project_id
+    root.mkdir(parents=True)
+    in_memory_uow.project_managed_repository_bindings.save(
+        ProjectManagedRepositoryBinding(
+            project_id=project.project_id,
+            canonical_repository_identity=project.repository,
+            managed_repository_root=str(root),
+            worktree_parent_dir=str(root / ".minime/worktrees"),
+        )
+    )
+    monkeypatch.setattr(
+        workspace_guard.ManagedWorkspaceGuard,
+        "verify_managed_repository_ownership_marker",
+        lambda *_args, **_kwargs: (True, "", None, None),
+    )
+    monkeypatch.setattr(
+        workspace_guard.ManagedWorkspaceGuard,
+        "verify_git_repository_identity",
+        lambda *_args, **_kwargs: (True, None),
+    )
+
+    assert ProjectService(in_memory_uow).verified_managed_workspace_root(project.project_id) == root
+
+    monkeypatch.setattr(
+        workspace_guard.ManagedWorkspaceGuard,
+        "verify_git_repository_identity",
+        lambda *_args, **_kwargs: (False, "repository identity mismatch"),
+    )
+    assert ProjectService(in_memory_uow).verified_managed_workspace_root(project.project_id) is None
 
 
 def test_agent_catalog_api_returns_only_validated_local_capabilities(in_memory_uow, monkeypatch):

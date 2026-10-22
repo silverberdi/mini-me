@@ -242,12 +242,23 @@ def update_project(
                 "private_key": typer.prompt("GitHub App private key", hide_input=True),
             }
         patch = ProjectConfigurationPatch.model_validate(raw)
-        if patch.agent_profiles is not None:
-            asyncio.run(ProjectCatalogService().validate_project_profiles(patch.agent_profiles))
         with db_manager.session() as session:
-            project = ProjectService(PostgresPersistenceUnitOfWork(session)).update_configuration(
-                project_id, patch
-            )
+            service = ProjectService(PostgresPersistenceUnitOfWork(session))
+            if patch.agent_profiles is not None:
+                binding = service.uow.project_managed_repository_bindings.get_by_project_id(
+                    project_id
+                )
+                workspace_root = service.verified_managed_workspace_root(project_id)
+                if binding is not None and workspace_root is None:
+                    raise ValueError(
+                        "Project agent profiles cannot be changed while its managed workspace identity is invalid"
+                    )
+                asyncio.run(
+                    ProjectCatalogService().validate_project_profiles(
+                        patch.agent_profiles, project_root=workspace_root
+                    )
+                )
+            project = service.update_configuration(project_id, patch)
     except Exception as exc:
         typer.echo(f"project update failed: {exc}", err=True)
         raise typer.Exit(code=1) from exc

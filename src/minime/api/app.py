@@ -67,7 +67,6 @@ from minime.services.project_service import ProjectService
 from minime.services.provider_health_service import ProviderHealthService
 from minime.services.status_service import StatusService
 from minime.services.validation_authority_service import ValidationAuthorityService
-from minime.services.workspace_guard import ManagedWorkspaceGuard, is_binding_fully_valid
 
 logger = logging.getLogger(__name__)
 
@@ -395,18 +394,14 @@ async def project_agent_catalog(
     project_id: str | None = None,
 ) -> dict[str, Any]:
     """Expose locally configured, read-only discovered agent capabilities."""
-    project_root: Path | None = None
-    if project_id:
-        binding = uow.project_managed_repository_bindings.get_by_project_id(project_id)
-        if binding is not None and is_binding_fully_valid(binding):
-            root = Path(binding.managed_repository_root)
-            guard = ManagedWorkspaceGuard(uow)
-            marker_ok, _, _, _ = guard.verify_managed_repository_ownership_marker(
-                str(root), project_id, binding.canonical_repository_identity,
-                binding.ownership_marker_filename,
-            )
-            if marker_ok and root.is_dir() and not root.is_symlink():
-                project_root = root
+    project_root = (
+        ProjectService(uow).verified_managed_workspace_root(project_id) if project_id else None
+    )
+    if project_id and project_root is None:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="Project workspace binding is unavailable or does not match its repository identity",
+        )
     return await ProjectCatalogService().agent_catalog(project_root)
 
 
@@ -441,9 +436,19 @@ async def update_project_configuration(
     uow: UowDep,
 ) -> dict[str, Any]:
     try:
-        if patch.agent_profiles is not None:
-            await ProjectCatalogService().validate_project_profiles(patch.agent_profiles)
         service = ProjectService(uow)
+        if service.get_project(project_id) is None:
+            raise ValueError(f"Project '{project_id}' not found")
+        if patch.agent_profiles is not None:
+            workspace_root = service.verified_managed_workspace_root(project_id)
+            binding = uow.project_managed_repository_bindings.get_by_project_id(project_id)
+            if binding is not None and workspace_root is None:
+                raise ValueError(
+                    "Project agent profiles cannot be changed while its managed workspace identity is invalid"
+                )
+            await ProjectCatalogService().validate_project_profiles(
+                patch.agent_profiles, project_root=workspace_root
+            )
         return service.public_project_payload(service.update_configuration(project_id, patch))
     except ValueError as exc:
         message = str(exc)

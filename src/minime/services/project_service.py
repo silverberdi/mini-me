@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from pathlib import Path
 from typing import Any
 
 from minime.domain.enums import EventType, ProjectOnboardingStatus, ProjectStatus, ProjectType
@@ -423,6 +424,29 @@ class ProjectService:
 
     def list_projects(self) -> list[Project]:
         return self.uow.projects.list_all()
+
+    def verified_managed_workspace_root(self, project_id: str) -> Path | None:
+        """Resolve a workspace only when its durable binding, marker, and remote agree."""
+        from minime.services.workspace_guard import ManagedWorkspaceGuard, is_binding_fully_valid
+
+        binding = self.uow.project_managed_repository_bindings.get_by_project_id(project_id)
+        if binding is None or not is_binding_fully_valid(binding):
+            return None
+        root = Path(binding.managed_repository_root)
+        if root.is_symlink() or not root.is_dir():
+            return None
+        try:
+            guard = ManagedWorkspaceGuard(self.uow)
+            marker_ok, _, _, _ = guard.verify_managed_repository_ownership_marker(
+                str(root), project_id, binding.canonical_repository_identity,
+                binding.ownership_marker_filename,
+            )
+            identity_ok, _ = guard.verify_git_repository_identity(
+                str(root), binding.canonical_repository_identity, remote_name=binding.remote_name
+            )
+        except (OSError, RuntimeError, ValueError):
+            return None
+        return root if marker_ok and identity_ok else None
 
     @staticmethod
     def public_project_payload(project: Project) -> dict[str, Any]:
