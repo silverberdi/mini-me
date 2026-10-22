@@ -49,6 +49,8 @@ def test_extracts_console_sorter_context_supplied_for_f2_e2e(tmp_path):
     [
         (("../escape.txt", b"bad", stat.S_IFREG | 0o600), "traversal"),
         (("tool.sh", b"echo bad", stat.S_IFREG | 0o755), "executable"),
+        (("nested.zip", b"not executed", stat.S_IFREG | 0o600), "executable"),
+        ((".env.local", b"API_KEY=placeholder", stat.S_IFREG | 0o600), "secret-bearing"),
         (("secrets.pem", b"-----BEGIN PRIVATE KEY-----", stat.S_IFREG | 0o600), "secret"),
         (("link", b"target", stat.S_IFLNK | 0o777), "links"),
     ],

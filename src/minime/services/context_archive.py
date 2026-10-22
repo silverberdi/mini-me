@@ -33,14 +33,23 @@ class ContextArchiveExtractor:
     rejected_suffixes = {
         ".app",
         ".bat",
+        ".bz2",
         ".cmd",
         ".com",
         ".dll",
         ".dylib",
         ".exe",
+        ".gz",
+        ".jar",
         ".msi",
-        ".ps1",
+        ".rar",
         ".sh",
+        ".tar",
+        ".tgz",
+        ".xz",
+        ".7z",
+        ".zip",
+        ".ps1",
     }
 
     def extract(self, archive: bytes, destination: str | Path) -> ExtractedContextPackage:
@@ -104,8 +113,12 @@ class ContextArchiveExtractor:
                     continue
                 if file_type == stat.S_IFDIR or (unix_mode & 0o111):
                     raise UnsafeContextArchive("Context archive executable files are forbidden")
+                if _is_secret_path(normalized):
+                    raise UnsafeContextArchive("Context archive contains a secret-bearing file path")
                 if Path(normalized).suffix.lower() in self.rejected_suffixes:
-                    raise UnsafeContextArchive("Context archive contains a disallowed executable file")
+                    raise UnsafeContextArchive(
+                        "Context archive contains a disallowed executable or nested archive file"
+                    )
                 if info.file_size > self.max_file_bytes:
                     raise UnsafeContextArchive("Context archive contains an oversized file")
                 total += info.file_size
@@ -172,4 +185,18 @@ def _contains_secret_marker(payload: bytes) -> bool:
             b"akia",
             b"aws_secret_access_key",
         )
+    )
+
+
+def _is_secret_path(relative_path: str) -> bool:
+    """Reject common credential filenames before their contents reach an agent or Git."""
+    path = PurePosixPath(relative_path)
+    name = path.name.casefold()
+    return (
+        name == ".env"
+        or name.startswith(".env.")
+        or name in {"id_rsa", "id_ed25519", "credentials", "secrets.json"}
+        or path.suffix.casefold() in {".der", ".key", ".p12", ".pfx", ".pem"}
+        or ".ssh" in {part.casefold() for part in path.parts}
+        or ".aws" in {part.casefold() for part in path.parts}
     )
