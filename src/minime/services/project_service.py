@@ -159,11 +159,15 @@ class ProjectService:
             raise ValueError(f"Project '{project_id}' not found")
         if project.project_type != ProjectType.GREENFIELD:
             raise ValueError("Bootstrap merge observation applies only to Greenfield projects")
+        retryable_block = project.onboarding_status == ProjectOnboardingStatus.BLOCKED and any(
+            reason.startswith("BOOTSTRAP_PR_") or reason.startswith("BOOTSTRAP_MERGE_")
+            for reason in project.onboarding_reasons
+        )
         if project.onboarding_status not in {
             ProjectOnboardingStatus.PR_PENDING,
             ProjectOnboardingStatus.BOOTSTRAP_PENDING,
             ProjectOnboardingStatus.AWAITING_REVIEW,
-        }:
+        } and not retryable_block:
             return {
                 "project_id": project_id,
                 "onboarding_status": project.onboarding_status.value,
@@ -179,45 +183,28 @@ class ProjectService:
             "base_branch",
         )
         if any(not checkpoint.get(field) for field in required):
-            return {
-                "project_id": project_id,
-                "onboarding_status": project.onboarding_status.value,
-                "observed": False,
-                "reason": "bootstrap_pr_identity_incomplete",
-            }
+            return self._block_bootstrap_observation(project, "BOOTSTRAP_PR_IDENTITY_INCOMPLETE")
         try:
             pr_number = int(checkpoint["pull_request_number"])
         except (TypeError, ValueError):
             pr_number = 0
         if pr_number <= 0:
-            return {
-                "project_id": project_id,
-                "onboarding_status": project.onboarding_status.value,
-                "observed": False,
-                "reason": "bootstrap_pr_identity_incomplete",
-            }
+            return self._block_bootstrap_observation(project, "BOOTSTRAP_PR_IDENTITY_INCOMPLETE")
         try:
             adapter = ProjectConnectionService(self.credential_store).adapter_for(
                 project, "git_pr"
             )
         except (ValueError, RuntimeError):
-            return {
-                "project_id": project_id,
-                "onboarding_status": project.onboarding_status.value,
-                "observed": False,
-                "reason": "git_pr_connection_unavailable",
-            }
-        result = adapter.get_pull_request_details(
-            project.provider_connections["git_pr"]["repository_url"],
-            pr_number,
-        )
+            return self._block_bootstrap_observation(project, "BOOTSTRAP_PR_CONNECTION_UNAVAILABLE")
+        try:
+            result = adapter.get_pull_request_details(
+                project.provider_connections["git_pr"]["repository_url"],
+                pr_number,
+            )
+        except Exception:
+            return self._block_bootstrap_observation(project, "BOOTSTRAP_PR_UNOBSERVABLE")
         if result.outcome != ExternalOutcome.SUCCESS or not isinstance(result.data, dict):
-            return {
-                "project_id": project_id,
-                "onboarding_status": project.onboarding_status.value,
-                "observed": False,
-                "reason": "pull_request_unobservable",
-            }
+            return self._block_bootstrap_observation(project, "BOOTSTRAP_PR_UNOBSERVABLE")
         details = result.data
         try:
             configured_repository = normalize_repository_identity(
@@ -235,13 +222,10 @@ class ProjectService:
             and details.get("base_branch") == checkpoint["base_branch"] == project.base_branch
         )
         if not exact_identity:
-            return {
-                "project_id": project_id,
-                "onboarding_status": project.onboarding_status.value,
-                "observed": False,
-                "reason": "pull_request_identity_mismatch",
-            }
+            return self._block_bootstrap_observation(project, "BOOTSTRAP_PR_IDENTITY_MISMATCH")
         if not details.get("is_merged"):
+            if details.get("state") == "closed":
+                return self._block_bootstrap_observation(project, "BOOTSTRAP_PR_CLOSED_UNMERGED")
             return {
                 "project_id": project_id,
                 "onboarding_status": project.onboarding_status.value,
@@ -250,12 +234,7 @@ class ProjectService:
                 "pull_request_number": pr_number,
             }
         if not details.get("merge_commit_sha") or not details.get("merged_at"):
-            return {
-                "project_id": project_id,
-                "onboarding_status": project.onboarding_status.value,
-                "observed": False,
-                "reason": "merge_postcondition_incomplete",
-            }
+            return self._block_bootstrap_observation(project, "BOOTSTRAP_MERGE_POSTCONDITION_INCOMPLETE")
         project.onboarding_status = ProjectOnboardingStatus.PREPARED
         project.onboarding_reasons = []
         project.onboarding_checkpoint = {
@@ -272,6 +251,20 @@ class ProjectService:
             "observed": True,
             "merged": True,
             "merge_commit_sha": details["merge_commit_sha"],
+        }
+
+    def _block_bootstrap_observation(self, project: Project, reason: str) -> dict[str, Any]:
+        """Persist a bounded bootstrap observation blocker without exposing provider detail."""
+        project.onboarding_status = ProjectOnboardingStatus.BLOCKED
+        project.onboarding_reasons = [reason]
+        project.updated_at = utc_now()
+        self.uow.projects.save(project)
+        self.uow.commit()
+        return {
+            "project_id": project.project_id,
+            "onboarding_status": project.onboarding_status.value,
+            "observed": False,
+            "reason": reason.lower(),
         }
 
     def update_configuration(

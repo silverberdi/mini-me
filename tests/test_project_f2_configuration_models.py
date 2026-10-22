@@ -880,9 +880,9 @@ def test_bootstrap_merge_observation_does_not_prepare_stale_or_unobservable_pr(
         ),
     )
     result = ProjectService(in_memory_uow).observe_bootstrap_merge("greenfield")
-    assert result["reason"] == "pull_request_identity_mismatch"
+    assert result["reason"] == "bootstrap_pr_identity_mismatch"
     assert in_memory_uow.projects.get_by_id("greenfield").onboarding_status == (
-        ProjectOnboardingStatus.AWAITING_REVIEW
+        ProjectOnboardingStatus.BLOCKED
     )
 
 
