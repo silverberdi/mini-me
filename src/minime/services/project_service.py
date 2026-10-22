@@ -149,7 +149,7 @@ class ProjectService:
                     key: value.model_dump(mode="json")
                     for key, value in configuration.agent_profiles.items()
                 },
-                execution_policy=configuration.execution_policy,
+                execution_policy=configuration.execution_policy.model_dump(mode="json"),
                 onboarding_status=ProjectOnboardingStatus.CONFIGURED,
                 onboarding_reasons=[
                     "Brownfield adaptation is deferred; project is configuration-only."
@@ -300,7 +300,7 @@ class ProjectService:
                     for key, value in patch.agent_profiles.items()
                 }
             if patch.execution_policy is not None:
-                project.execution_policy = patch.execution_policy
+                project.execution_policy = patch.execution_policy.model_dump(mode="json")
             project.updated_at = utc_now()
             self.uow.projects.save(project)
             self.uow.commit()

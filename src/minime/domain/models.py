@@ -163,6 +163,27 @@ class ProjectAgentProfile(BaseModel):
     skills: list[str] = Field(default_factory=list)
 
 
+class ProjectExecutionPolicy(BaseModel):
+    """Finite per-project review, correction, and fallback authorization limits."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    max_review_rounds: int = Field(default=2, ge=1, le=3)
+    max_correction_attempts: int = Field(default=2, ge=0, le=3)
+    code_review_policy: str = Field(default="risk_based", pattern="^(required|risk_based|disabled)$")
+    fallback_authorized: bool = False
+    fallback_daily_cap_usd: Decimal = Field(default=Decimal("0"), ge=0, max_digits=8, decimal_places=2)
+    fallback_monthly_cap_usd: Decimal = Field(default=Decimal("0"), ge=0, max_digits=8, decimal_places=2)
+
+    @model_validator(mode="after")
+    def require_fallback_budget(self) -> "ProjectExecutionPolicy":
+        if self.fallback_authorized and (
+            self.fallback_daily_cap_usd <= 0 or self.fallback_monthly_cap_usd <= 0
+        ):
+            raise ValueError("authorized fallback requires positive finite daily and monthly caps")
+        return self
+
+
 class ProjectGitHubAppCredentials(BaseModel):
     """Transient authenticated intake; private key is never persisted in PostgreSQL."""
 
@@ -183,7 +204,7 @@ class ProjectConfigurationInput(BaseModel):
     base_branch: str = "main"
     provider_connections: dict[str, ProjectProviderConnection]
     agent_profiles: dict[str, ProjectAgentProfile]
-    execution_policy: dict[str, Any] = Field(default_factory=dict)
+    execution_policy: ProjectExecutionPolicy = Field(default_factory=ProjectExecutionPolicy)
     github_app_credentials: ProjectGitHubAppCredentials | None = None
 
     @model_validator(mode="after")
@@ -224,7 +245,7 @@ class ProjectConfigurationPatch(BaseModel):
     base_branch: str | None = None
     provider_connections: dict[str, ProjectProviderConnection] | None = None
     agent_profiles: dict[str, ProjectAgentProfile] | None = None
-    execution_policy: dict[str, Any] | None = None
+    execution_policy: ProjectExecutionPolicy | None = None
     github_app_credentials: ProjectGitHubAppCredentials | None = None
 
     @model_validator(mode="after")

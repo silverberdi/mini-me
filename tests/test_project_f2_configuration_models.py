@@ -148,6 +148,44 @@ def test_project_configuration_requires_four_explicit_profiles():
         _configuration(agent_profiles=profiles)
 
 
+def test_project_execution_policy_is_finite_and_paid_fallback_is_explicit():
+    from minime.domain.models import ProjectExecutionPolicy
+
+    defaults = ProjectExecutionPolicy()
+    assert defaults.fallback_authorized is False
+    assert defaults.max_review_rounds == 2
+    assert defaults.max_correction_attempts == 2
+    with pytest.raises(ValidationError, match="positive finite daily and monthly caps"):
+        ProjectExecutionPolicy(fallback_authorized=True)
+    with pytest.raises(ValidationError):
+        ProjectExecutionPolicy(max_correction_attempts=100)
+    authorized = ProjectExecutionPolicy(
+        fallback_authorized=True,
+        fallback_daily_cap_usd="5.00",
+        fallback_monthly_cap_usd="25.00",
+    )
+    assert authorized.fallback_authorized is True
+
+
+def test_project_persists_four_profiles_and_validated_policy(in_memory_uow):
+    configuration = _configuration(
+        execution_policy={
+            "max_review_rounds": 3,
+            "max_correction_attempts": 1,
+            "code_review_policy": "required",
+            "fallback_authorized": False,
+        }
+    )
+    project = ProjectService(in_memory_uow).create_configured_project(configuration)
+
+    assert set(project.agent_profiles) == {
+        "thinking", "execution", "independent_review", "fallback"
+    }
+    assert project.execution_policy["max_review_rounds"] == 3
+    assert project.execution_policy["max_correction_attempts"] == 1
+    assert project.execution_policy["fallback_authorized"] is False
+
+
 def test_project_service_rejects_review_by_thinking_author(in_memory_uow):
     configuration = _configuration()
     configuration.agent_profiles["independent_review"].agent_id = "codex"
