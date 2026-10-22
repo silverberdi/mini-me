@@ -211,6 +211,9 @@ class ProjectConfigurationInput(BaseModel):
         missing = expected - set(self.agent_profiles)
         if missing:
             raise ValueError("Missing agent profiles: " + ", ".join(sorted(missing)))
+        unknown = set(self.agent_profiles) - expected
+        if unknown:
+            raise ValueError("Unknown agent profiles: " + ", ".join(sorted(unknown)))
         if not self.project_id.strip() or not self.display_name.strip():
             raise ValueError("project_id and display_name are required")
         if not self.repository.strip():
@@ -263,6 +266,14 @@ class ProjectConfigurationPatch(BaseModel):
                 raise ValueError("tickets and git_pr provider connections are required")
             if set(self.provider_connections) - {"tickets", "git_pr"}:
                 raise ValueError("Only tickets and git_pr provider responsibilities are supported in F2")
+        if self.agent_profiles is not None:
+            expected = {"thinking", "execution", "independent_review", "fallback"}
+            missing = expected - set(self.agent_profiles)
+            if missing:
+                raise ValueError("Missing agent profiles: " + ", ".join(sorted(missing)))
+            unknown = set(self.agent_profiles) - expected
+            if unknown:
+                raise ValueError("Unknown agent profiles: " + ", ".join(sorted(unknown)))
         for connection in (self.provider_connections or {}).values():
             if connection.secret_reference and not self.github_app_credentials:
                 raise ValueError("secret references are server-owned and cannot be supplied by operators")

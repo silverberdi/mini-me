@@ -167,6 +167,15 @@ def test_project_configuration_requires_four_explicit_profiles():
         _configuration(agent_profiles=profiles)
 
 
+def test_project_configuration_rejects_profiles_outside_the_four_contract_roles():
+    profiles = _configuration().agent_profiles
+    profiles["planner"] = ProjectAgentProfile(
+        agent_id="codex", model_id="gpt-5.6-luna", effort="medium"
+    )
+    with pytest.raises(ValidationError, match="Unknown agent profiles: planner"):
+        _configuration(agent_profiles=profiles)
+
+
 def test_project_execution_policy_is_finite_and_paid_fallback_is_explicit():
     from minime.domain.models import ProjectExecutionPolicy
 
