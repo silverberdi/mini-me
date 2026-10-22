@@ -709,6 +709,64 @@ def test_brownfield_service_registers_configuration_without_prepared_claim(in_me
     assert in_memory_uow.projects.get_by_id("demo").onboarding_status.value == "CONFIGURED"
 
 
+def test_greenfield_activation_requires_previously_observed_bootstrap_merge(in_memory_uow):
+    from minime.domain.enums import ProjectOnboardingStatus, ProjectStatus
+    from minime.domain.models import Project
+
+    in_memory_uow.projects.save(
+        Project(
+            project_id="new-project",
+            display_name="New Project",
+            repository="example/new-project",
+            project_type=ProjectType.GREENFIELD,
+            onboarding_status=ProjectOnboardingStatus.AWAITING_REVIEW,
+            status=ProjectStatus.PAUSED,
+        )
+    )
+    service = ProjectService(in_memory_uow)
+    with pytest.raises(ValueError, match="exact bootstrap PR merge is observed"):
+        service.set_lifecycle("new-project", active=True)
+    assert in_memory_uow.projects.get_by_id("new-project").status == ProjectStatus.PAUSED
+    assert in_memory_uow.jobs.list_by_project("new-project") == []
+
+    project = in_memory_uow.projects.get_by_id("new-project")
+    project.onboarding_status = ProjectOnboardingStatus.PREPARED
+    in_memory_uow.projects.save(project)
+    active = service.set_lifecycle("new-project", active=True)
+    assert active.onboarding_status == ProjectOnboardingStatus.PREPARED
+    assert in_memory_uow.jobs.list_by_project("new-project") == []
+
+
+def test_greenfield_activation_api_returns_conflict_before_state_change(in_memory_uow, monkeypatch):
+    from fastapi.testclient import TestClient
+
+    from minime.api.app import app, get_current_operator, get_uow
+    from minime.domain.enums import ProjectOnboardingStatus, ProjectStatus
+    from minime.domain.models import Project
+
+    in_memory_uow.projects.save(
+        Project(
+            project_id="new-project",
+            display_name="New Project",
+            repository="example/new-project",
+            project_type=ProjectType.GREENFIELD,
+            status=ProjectStatus.PAUSED,
+            onboarding_status=ProjectOnboardingStatus.AWAITING_REVIEW,
+        )
+    )
+    monkeypatch.setenv("MINIME_AUTH_ENABLED", "false")
+    app.dependency_overrides[get_uow] = lambda: in_memory_uow
+    app.dependency_overrides[get_current_operator] = lambda: object()
+    try:
+        response = TestClient(app).post("/api/v1/projects/new-project/activate")
+    finally:
+        app.dependency_overrides.clear()
+
+    assert response.status_code == 409
+    assert in_memory_uow.projects.get_by_id("new-project").status == ProjectStatus.PAUSED
+    assert in_memory_uow.jobs.list_by_project("new-project") == []
+
+
 def test_greenfield_service_rejects_without_zip_before_persistence(in_memory_uow):
     configuration = _configuration(project_type=ProjectType.GREENFIELD)
 

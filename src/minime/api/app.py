@@ -478,7 +478,9 @@ def activate_project(project_id: str, _operator: AuthenticatedOperatorDep, uow: 
         service = ProjectService(uow)
         return service.public_project_payload(service.set_lifecycle(project_id, active=True))
     except ValueError as exc:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
+        message = str(exc)
+        code = status.HTTP_404_NOT_FOUND if message.endswith("not found") else status.HTTP_409_CONFLICT
+        raise HTTPException(status_code=code, detail=message) from exc
 
 
 @app.post("/api/v1/projects/{project_id}/connections/verify", tags=["projects"])

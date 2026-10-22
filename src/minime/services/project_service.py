@@ -135,6 +135,14 @@ class ProjectService:
         project = self.uow.projects.get_by_id(project_id)
         if project is None:
             raise ValueError(f"Project '{project_id}' not found")
+        if (
+            active
+            and project.project_type == ProjectType.GREENFIELD
+            and project.onboarding_status != ProjectOnboardingStatus.PREPARED
+        ):
+            raise ValueError(
+                "Greenfield project cannot be activated before its exact bootstrap PR merge is observed"
+            )
         project.status = ProjectStatus.ACTIVE if active else ProjectStatus.PAUSED
         project.updated_at = utc_now()
         self.uow.projects.save(project)
