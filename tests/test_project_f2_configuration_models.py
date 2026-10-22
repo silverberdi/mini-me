@@ -50,6 +50,15 @@ def test_project_configuration_defaults_optional_branch_to_main():
     assert _configuration().base_branch == "main"
 
 
+@pytest.mark.parametrize("branch", ["bad branch", "main..", "topic/"])
+def test_project_configuration_rejects_invalid_git_branch_names(branch):
+    with pytest.raises(ValidationError, match="valid Git branch name"):
+        _configuration(base_branch=branch)
+
+    with pytest.raises(ValidationError, match="valid Git branch name"):
+        ProjectConfigurationPatch(base_branch=branch)
+
+
 def test_project_configuration_rejects_unsafe_identity_and_unimplemented_responsibility():
     with pytest.raises(ValidationError, match="safe 1-64 character identifier"):
         _configuration(project_id="../demo")

@@ -5,13 +5,22 @@ from __future__ import annotations
 import hashlib
 import json
 import re
+import subprocess
 import uuid
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from decimal import Decimal
 from typing import Any, Generic, TypeVar
 
-from pydantic import BaseModel, ConfigDict, Field, SecretStr, computed_field, model_validator
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    SecretStr,
+    computed_field,
+    field_validator,
+    model_validator,
+)
 
 from minime.domain.enums import (
     PRIMARY_PROVIDERS,
@@ -82,6 +91,22 @@ from minime.domain.enums import (
 def utc_now() -> datetime:
     """Return the current datetime with UTC timezone."""
     return datetime.now(UTC)
+
+
+def _is_valid_git_branch_name(value: str) -> bool:
+    if not isinstance(value, str) or not value or value.startswith("-"):
+        return False
+    try:
+        result = subprocess.run(
+            ["git", "check-ref-format", "--branch", value],
+            capture_output=True,
+            text=True,
+            timeout=5,
+            check=False,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return False
+    return result.returncode == 0
 
 
 def generate_uuid() -> str:
@@ -240,6 +265,13 @@ class ProjectConfigurationInput(BaseModel):
             raise ValueError("GitHub App credentials were supplied but no connection selects project_app")
         return self
 
+    @field_validator("base_branch")
+    @classmethod
+    def validate_base_branch(cls, value: str) -> str:
+        if not _is_valid_git_branch_name(value):
+            raise ValueError("base_branch must be a valid Git branch name")
+        return value
+
 
 class ProjectConfigurationPatch(BaseModel):
     """Mutable project configuration fields; identity is intentionally omitted."""
@@ -282,6 +314,13 @@ class ProjectConfigurationPatch(BaseModel):
             ):
                 raise ValueError("project_app connections require credentials or an existing reference")
         return self
+
+    @field_validator("base_branch")
+    @classmethod
+    def validate_base_branch(cls, value: str | None) -> str | None:
+        if value is not None and not _is_valid_git_branch_name(value):
+            raise ValueError("base_branch must be a valid Git branch name")
+        return value
 
 
 class ProjectBinding(BaseModel):
