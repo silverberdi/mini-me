@@ -6,6 +6,7 @@ import hashlib
 import io
 import os
 import stat
+import unicodedata
 import zipfile
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
@@ -98,7 +99,7 @@ class ContextArchiveExtractor:
                 if len(path.parts) > self.max_path_depth:
                     raise UnsafeContextArchive("Context archive path nesting exceeds the limit")
                 normalized = path.as_posix().rstrip("/")
-                folded = normalized.casefold()
+                folded = unicodedata.normalize("NFC", normalized).casefold()
                 if folded in seen:
                     raise UnsafeContextArchive("Context archive contains duplicate or colliding paths")
                 seen.add(folded)
@@ -133,7 +134,10 @@ class ContextArchiveExtractor:
 
             for _info, relative in entries:
                 parts = PurePosixPath(relative).parts
-                if any("/".join(parts[:index]).casefold() in files for index in range(1, len(parts))):
+                if any(
+                    unicodedata.normalize("NFC", "/".join(parts[:index])).casefold() in files
+                    for index in range(1, len(parts))
+                ):
                     raise UnsafeContextArchive("Context archive contains a file/directory path collision")
 
             validated_payloads: dict[str, bytes] = {}

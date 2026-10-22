@@ -132,6 +132,8 @@ Archive-policy continuation (2026-10-22): the ZIP manifest validator now rejects
 
 The same manifest gate now rejects common secret-bearing filenames and key/certificate suffixes before reading or extracting entries. `tests/test_context_archive.py`: **11 passed**; targeted Ruff: PASS. Existing byte-marker screening remains in place; this bounded filename/content policy is not represented as comprehensive secret detection.
 
+The ZIP path-collision check now normalizes Unicode to NFC before case folding, preventing canonically equivalent paths from reaching writes on normalization-insensitive filesystems. The composed/decomposed collision regression is included; `tests/test_context_archive.py`: **12 passed**; Ruff: PASS.
+
 Configuration validation now rejects extra role names on both create and full-profile PATCH, in addition to requiring the four contract roles. `tests/test_project_f2_configuration_models.py`: **50 passed**; Ruff: PASS. This guards the schema contract but does not itself complete task 1.2 because Greenfield ZIP-backed registration remains unimplemented.
 
 The CLI agent catalog now accepts an optional `--project-id` and validates the exact bound repository identity before reporting that workspace's installed native OpenSpec set; its no-project mode remains read-only local capability discovery. `tests/test_project_cli_catalog.py`: **4 passed**; changed CLI/catalog test Ruff: PASS. This does not demonstrate agent invocation or publish a Greenfield result.

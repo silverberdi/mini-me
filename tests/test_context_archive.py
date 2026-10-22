@@ -76,6 +76,21 @@ def test_rejects_case_colliding_paths(tmp_path):
         ContextArchiveExtractor().extract(package, tmp_path / "extracted")
 
 
+def test_rejects_unicode_normalization_colliding_paths_before_writes(tmp_path):
+    package = _zip(
+        [
+            ("docs/café.md", b"one", stat.S_IFREG | 0o600),
+            ("docs/cafe\u0301.md", b"two", stat.S_IFREG | 0o600),
+        ]
+    )
+    target = tmp_path / "extracted"
+
+    with pytest.raises(UnsafeContextArchive, match="colliding"):
+        ContextArchiveExtractor().extract(package, target)
+
+    assert list(target.iterdir()) == []
+
+
 def test_rejects_late_secret_before_writing_any_archive_entries(tmp_path):
     package = _zip(
         [
