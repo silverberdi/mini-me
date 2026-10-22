@@ -18,6 +18,8 @@ def test_pwa_bootstrap_is_read_only_and_does_not_load_legacy_controllers() -> No
     assert "Observabilidad en transición" in dashboard
     assert "/api/v1/auth/me" in dashboard
     assert "No se iniciará ningún trabajo" in dashboard
+    assert "innerHTML" not in dashboard
+    assert "identity.textContent" in dashboard
 
     for legacy in (
         "backlog_controller",

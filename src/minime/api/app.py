@@ -37,7 +37,6 @@ from minime.domain.enums import (
 from minime.domain.interfaces import PersistenceUnitOfWork
 from minime.domain.models import (
     ActionDescriptor,
-    AdmissionResult,
     AuthorizedOperator,
     AuthStatusDTO,
     BacklogItem,
@@ -89,12 +88,6 @@ from minime.services.validation_authority_service import ValidationAuthorityServ
 
 logger = logging.getLogger(__name__)
 
-# Compatibility route annotations remain until F2/F3 replace their public
-# contracts. Their handlers deny requests directly and never instantiate a
-# retired service.
-IntakeService = ReadinessService = SchedulerService = OrchestrationService = Any
-ControlPlaneService = OperationsDashboardService = Any
-DashboardOverviewResponse = DashboardChangeDetailResponse = TimelineEventDTO = Any
 
 
 @asynccontextmanager
@@ -220,12 +213,6 @@ def get_context_service(uow: UowDep) -> ContextDiscoveryService:
 
 ContextServiceDep = Annotated[ContextDiscoveryService, Depends(get_context_service)]
 
-
-def get_intake_service(uow: UowDep, github_adapter: GitHubAdapterDep) -> IntakeService:
-    raise RuntimeError("Legacy intake is unavailable in F1.")
-
-
-IntakeServiceDep = Annotated[Any, Depends(get_intake_service)]
 
 
 PUBLIC_EXEMPT_PATHS = {
@@ -697,8 +684,6 @@ def discover_project_context_endpoint(
 @app.get("/api/v1/projects/{project_id}/backlog", tags=["backlog"])
 def list_backlog_items_endpoint(
     project_id: str,
-    uow: UowDep,
-    intake_service: IntakeServiceDep,
     status_filter: str | None = Query(default=None, alias="status"),
     priority: str | None = None,
     limit: int = 100,
@@ -717,7 +702,6 @@ def create_backlog_item_endpoint(
     project_id: str,
     req: WorkItemCreateInput,
     request: Request,
-    intake_service: IntakeServiceDep,
 ) -> BacklogItem:
     """The local backlog projection was retired; F2 owns its replacement."""
     raise HTTPException(
@@ -730,7 +714,6 @@ def create_backlog_item_endpoint(
 def get_backlog_item_endpoint(
     project_id: str,
     item_key: str,
-    uow: UowDep,
 ) -> BacklogItem:
     """The local backlog projection was retired; F2 owns its replacement."""
     raise HTTPException(
@@ -745,7 +728,6 @@ def update_backlog_item_endpoint(
     item_key: str,
     req: WorkItemUpdateInput,
     request: Request,
-    intake_service: IntakeServiceDep,
 ) -> BacklogItem:
     """The local backlog projection was retired; F2 owns its replacement."""
     raise HTTPException(
@@ -759,7 +741,6 @@ def prepare_backlog_item_endpoint(
     project_id: str,
     item_key: str,
     request: Request,
-    intake_service: IntakeServiceDep,
 ) -> WorkItemPrepareResult:
     """Prepare canonical execution artifacts (GitHub Issue, Project Item, OpenSpec change)."""
     raise HTTPException(status_code=status.HTTP_410_GONE, detail=unavailable_payload("legacy_intake", "F2"))
@@ -771,7 +752,6 @@ def answer_backlog_item_question_endpoint(
     item_key: str,
     req: WorkItemAnswerInput,
     request: Request,
-    intake_service: IntakeServiceDep,
 ) -> BacklogItem:
     """The local backlog projection was retired; F2 owns its replacement."""
     raise HTTPException(
@@ -785,7 +765,6 @@ def start_backlog_item_endpoint(
     project_id: str,
     item_key: str,
     request: Request,
-    intake_service: IntakeServiceDep,
 ) -> BacklogItem:
     """The local backlog projection was retired; F2 owns its replacement."""
     raise HTTPException(
@@ -803,7 +782,6 @@ def delete_backlog_item_endpoint(
     project_id: str,
     item_key: str,
     request: Request,
-    intake_service: IntakeServiceDep,
 ) -> Response:
     """The local backlog projection was retired; F2 owns its replacement."""
     raise HTTPException(
@@ -851,14 +829,7 @@ def evaluate_readiness(
     uow: UowDep,
     current_active_change: str | None = None,
 ) -> dict[str, Any]:
-    service = ReadinessService(uow)
-    eval_result = service.evaluate_change_readiness_pure(
-        project_id=project_id,
-        change_name=change_name,
-        project_root=project_root,
-        current_active_change=current_active_change,
-    )
-    return eval_result.model_dump()
+    raise HTTPException(status_code=status.HTTP_410_GONE, detail=unavailable_payload("legacy_readiness", "F2"))
 
 
 @app.post("/projects/{project_id}/jobs", status_code=status.HTTP_202_ACCEPTED)
@@ -867,26 +838,7 @@ async def run_project_job(
     req: JobRunRequest,
     uow: UowDep,
 ) -> Job:
-    try:
-        scheduler = SchedulerService(
-            uow,
-            project_root=req.project_root,
-            readiness_service=ReadinessService(
-                uow, github_adapter=getattr(app.state, "github_adapter", None)
-            ),
-        )
-        _decision, record, run = scheduler.admit_work_item(
-            project_id, req.change_name, drive_admitted=True
-        )
-        if run is None:
-            reason = record.reason_summary if record else "Admission blocked by scheduler policy."
-            raise ValueError(reason)
-        job = uow.jobs.get_by_id(run.active_job_id) if run.active_job_id else None
-        if not job:
-            raise ValueError("Admitted run has no executable job.")
-        return job
-    except ValueError as e:
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e))
+    raise HTTPException(status_code=status.HTTP_410_GONE, detail=unavailable_payload("legacy_job_execution", "F3"))
 
 
 @app.get("/projects/{project_id}/jobs")
@@ -1232,33 +1184,7 @@ def admit_orchestration(
     req: OrchestrationAdmitRequest,
     uow: Annotated[PersistenceUnitOfWork, Depends(get_uow)],
 ) -> dict[str, Any]:
-    """Admit a single change into autonomous orchestration via the converged scheduler authority."""
-    scheduler = SchedulerService(
-        uow,
-        project_root=req.project_root or ".",
-        readiness_service=ReadinessService(
-            uow, github_adapter=getattr(app.state, "github_adapter", None)
-        ),
-    )
-    _decision, record, run = scheduler.admit_work_item(
-        req.project_id, req.change_name, drive_admitted=False
-    )
-    if run is not None:
-        return AdmissionResult(admitted=True, run=run).model_dump()
-    return AdmissionResult(
-        admitted=False,
-        refusal_reason=(
-            record.reason_summary if record else "Admission blocked by scheduler policy."
-        ),
-        refusal_details={
-            "code": record.reason_code.value if record and record.reason_code else None,
-            "operational_decision": (
-                record.operational_decision.value
-                if record and record.operational_decision
-                else None
-            ),
-        },
-    ).model_dump()
+    raise HTTPException(status_code=status.HTTP_410_GONE, detail=unavailable_payload("legacy_orchestration", "F3"))
 
 
 @app.get("/api/v1/openspec/integrity", tags=["openspec"])
@@ -1296,31 +1222,7 @@ def start_orchestration(
     req: OrchestrationStartRequest,
     uow: Annotated[PersistenceUnitOfWork, Depends(get_uow)],
 ) -> dict[str, Any]:
-    """Start autonomous orchestration for a single READY change via the scheduler authority."""
-    scheduler = SchedulerService(
-        uow,
-        project_root=req.project_root or ".",
-        readiness_service=ReadinessService(
-            uow, github_adapter=getattr(app.state, "github_adapter", None)
-        ),
-    )
-    try:
-        _decision, record, run = scheduler.admit_work_item(
-            req.project_id, req.change_name, drive_admitted=True
-        )
-        if run is None:
-            reason = record.reason_summary if record else "Admission blocked by scheduler policy."
-            raise ValueError(reason)
-        status_view = scheduler.orchestration_service.get_status(run.run_id)
-        return status_view.model_dump()
-    except ValueError as e:
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e))
-    except Exception as e:
-        logger.error(f"Error during orchestration start: {e}")
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Orchestration failed: {e}",
-        )
+    raise HTTPException(status_code=status.HTTP_410_GONE, detail=unavailable_payload("legacy_orchestration", "F3"))
 
 
 @app.post("/api/v1/orchestration/resume", tags=["orchestration"])
@@ -1337,13 +1239,7 @@ def get_orchestration_status(
     run_id: str,
     uow: Annotated[PersistenceUnitOfWork, Depends(get_uow)],
 ) -> dict[str, Any]:
-    """Get secret-redacted operational status for an orchestration run."""
-    service = OrchestrationService(uow)
-    try:
-        status_view = service.get_status(run_id)
-        return status_view.model_dump()
-    except ValueError as e:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(e))
+    raise HTTPException(status_code=status.HTTP_410_GONE, detail=unavailable_payload("legacy_orchestration", "F3"))
 
 
 @app.get("/api/v1/orchestration/runs", tags=["orchestration"])
@@ -1370,10 +1266,8 @@ def list_orchestration_runs(
 @app.get("/api/v1/dashboard/overview", tags=["dashboard"])
 def get_dashboard_overview(
     uow: Annotated[PersistenceUnitOfWork, Depends(get_uow)],
-) -> DashboardOverviewResponse:
-    """Get high-level operations dashboard overview."""
-    service = OperationsDashboardService(uow)
-    return service.get_overview()
+) -> dict[str, Any]:
+    raise HTTPException(status_code=status.HTTP_410_GONE, detail=unavailable_payload("legacy_dashboard", "F5"))
 
 
 @app.get("/api/v1/dashboard/changes/{project_id}/{change_name}", tags=["dashboard"])
@@ -1382,26 +1276,16 @@ def get_dashboard_change_detail(
     change_name: str,
     uow: Annotated[PersistenceUnitOfWork, Depends(get_uow)],
     run_id: str | None = None,
-) -> DashboardChangeDetailResponse:
-    """Get comprehensive execution detail for a specific change and its latest/selected run."""
-    service = OperationsDashboardService(uow)
-    try:
-        return service.get_change_detail(project_id, change_name, run_id=run_id)
-    except ValueError as e:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(e))
+) -> dict[str, Any]:
+    raise HTTPException(status_code=status.HTTP_410_GONE, detail=unavailable_payload("legacy_dashboard", "F5"))
 
 
 @app.get("/api/v1/dashboard/runs/{run_id}", tags=["dashboard"])
 def get_dashboard_run_detail(
     run_id: str,
     uow: Annotated[PersistenceUnitOfWork, Depends(get_uow)],
-) -> DashboardChangeDetailResponse:
-    """Get comprehensive execution detail for an exact orchestration run."""
-    service = OperationsDashboardService(uow)
-    try:
-        return service.get_run_detail(run_id)
-    except ValueError as e:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(e))
+) -> dict[str, Any]:
+    raise HTTPException(status_code=status.HTTP_410_GONE, detail=unavailable_payload("legacy_dashboard", "F5"))
 
 
 @app.get("/api/v1/dashboard/events", tags=["dashboard"])
@@ -1411,15 +1295,8 @@ def get_dashboard_events(
     change_name: str | None = None,
     run_id: str | None = None,
     limit: Annotated[int, Query(ge=1, le=500)] = 100,
-) -> list[TimelineEventDTO]:
-    """Get chronological event timeline for the operations dashboard."""
-    service = OperationsDashboardService(uow)
-    return service.get_events_timeline(
-        project_id=project_id,
-        change_name=change_name,
-        run_id=run_id,
-        limit=limit,
-    )
+) -> list[dict[str, Any]]:
+    raise HTTPException(status_code=status.HTTP_410_GONE, detail=unavailable_payload("legacy_dashboard", "F5"))
 
 
 # -----------------------------------------------------------------------------
@@ -1440,15 +1317,7 @@ def get_change_efficiency_telemetry(
     change_name: str,
     uow: Annotated[PersistenceUnitOfWork, Depends(get_uow)],
 ) -> EfficiencyTelemetryView:
-    """Get aggregated provider efficiency and self-hosting metrics for a change."""
-    service = OperationsDashboardService(uow)
-    view = service.get_efficiency_telemetry(project_id, change_name)
-    if not view:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail=f"No provider efficiency metrics recorded for '{project_id}/{change_name}'.",
-        )
-    return view
+    raise HTTPException(status_code=status.HTTP_410_GONE, detail=unavailable_payload("legacy_dashboard", "F5"))
 
 
 @app.get(
@@ -1464,9 +1333,7 @@ def list_project_efficiency_metrics(
     uow: Annotated[PersistenceUnitOfWork, Depends(get_uow)],
     limit: Annotated[int, Query(ge=1, le=100)] = 50,
 ) -> list[ProviderEfficiencyMetrics]:
-    """List operational efficiency metric facts for a project."""
-    service = OperationsDashboardService(uow)
-    return service.list_project_efficiency(project_id, limit=limit)
+    raise HTTPException(status_code=status.HTTP_410_GONE, detail=unavailable_payload("legacy_dashboard", "F5"))
 
 
 # -----------------------------------------------------------------------------
@@ -1869,15 +1736,7 @@ def discover_actions_endpoint(
     run_id: str,
     uow: Annotated[PersistenceUnitOfWork, Depends(get_uow)],
 ) -> list[ActionDescriptor]:
-    """Discover available operator actions for a run with enabled/disabled explanations."""
-    run = uow.orchestration_runs.get_by_id(run_id)
-    if not run:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail=f"Orchestration run '{run_id}' not found.",
-        )
-    cp_service = ControlPlaneService(uow)
-    return cp_service.get_available_actions(run_id)
+    raise HTTPException(status_code=status.HTTP_410_GONE, detail=unavailable_payload("legacy_control_plane", "F3"))
 
 
 @app.get(
@@ -1889,8 +1748,7 @@ def discover_control_plane_actions_endpoint(
     run_id: str,
     uow: Annotated[PersistenceUnitOfWork, Depends(get_uow)],
 ) -> list[ActionDescriptor]:
-    """Stable control-plane discovery route for presentation clients."""
-    return discover_actions_endpoint(run_id, uow)
+    raise HTTPException(status_code=status.HTTP_410_GONE, detail=unavailable_payload("legacy_control_plane", "F3"))
 
 
 @app.post(
@@ -1904,13 +1762,7 @@ def execute_action_endpoint(
     request_body: OperatorActionRequest,
     uow: Annotated[PersistenceUnitOfWork, Depends(get_uow)],
 ) -> OperatorActionResult:
-    """Execute a governed operator action with optimistic concurrency and idempotency."""
-    if request_body.run_id != run_id or request_body.action_type != action_type:
-        request_body = request_body.model_copy(
-            update={"run_id": run_id, "action_type": action_type}
-        )
-    cp_service = ControlPlaneService(uow)
-    return cp_service.execute_action(request_body)
+    raise HTTPException(status_code=status.HTTP_410_GONE, detail=unavailable_payload("legacy_control_plane", "F3"))
 
 
 @app.post(
@@ -1923,11 +1775,7 @@ def execute_action_generic_endpoint(
     request_body: OperatorActionRequest,
     uow: Annotated[PersistenceUnitOfWork, Depends(get_uow)],
 ) -> OperatorActionResult:
-    """Execute a governed operator action."""
-    if request_body.run_id != run_id:
-        request_body = request_body.model_copy(update={"run_id": run_id})
-    cp_service = ControlPlaneService(uow)
-    return cp_service.execute_action(request_body)
+    raise HTTPException(status_code=status.HTTP_410_GONE, detail=unavailable_payload("legacy_control_plane", "F3"))
 
 
 @app.post(
@@ -1939,8 +1787,7 @@ def execute_control_plane_action_endpoint(
     request_body: OperatorActionRequest,
     uow: Annotated[PersistenceUnitOfWork, Depends(get_uow)],
 ) -> OperatorActionResult:
-    """Stable mutation route for presentation clients."""
-    return execute_action_generic_endpoint(request_body.run_id, request_body, uow)
+    raise HTTPException(status_code=status.HTTP_410_GONE, detail=unavailable_payload("legacy_control_plane", "F3"))
 
 
 @app.get(
@@ -1953,15 +1800,7 @@ def get_action_history_endpoint(
     uow: Annotated[PersistenceUnitOfWork, Depends(get_uow)],
     limit: int = 50,
 ) -> list[OperatorActionRecord]:
-    """Fetch audit trail of operator actions executed for a run."""
-    run = uow.orchestration_runs.get_by_id(run_id)
-    if not run:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail=f"Orchestration run '{run_id}' not found.",
-        )
-    cp_service = ControlPlaneService(uow)
-    return cp_service.list_action_history(run_id, limit=limit)
+    raise HTTPException(status_code=status.HTTP_410_GONE, detail=unavailable_payload("legacy_control_plane", "F3"))
 
 
 # -----------------------------------------------------------------------------

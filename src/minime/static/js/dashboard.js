@@ -14,12 +14,16 @@ function showReadOnlyTransition(operator) {
   const panel = document.createElement("section");
   panel.className = "panel";
   panel.setAttribute("aria-live", "polite");
-  panel.innerHTML = `
-    <h2>Observabilidad en transición</h2>
-    <p>La cola, admisión, orquestación y panel operativo heredados fueron retirados en F1.</p>
-    <p>La interfaz operativa será sustituida en F5. No se iniciará ningún trabajo desde esta pantalla.</p>
-    <p class="text-muted">Operador: ${operator || "autorizado"}</p>
-  `;
+  const heading = document.createElement("h2");
+  heading.textContent = "Observabilidad en transición";
+  const retired = document.createElement("p");
+  retired.textContent = "La cola, admisión, orquestación y panel operativo heredados fueron retirados en F1.";
+  const replacement = document.createElement("p");
+  replacement.textContent = "La interfaz operativa será sustituida en F5. No se iniciará ningún trabajo desde esta pantalla.";
+  const identity = document.createElement("p");
+  identity.className = "text-muted";
+  identity.textContent = `Operador: ${operator || "autorizado"}`;
+  panel.append(heading, retired, replacement, identity);
   content.append(panel);
 }
 
