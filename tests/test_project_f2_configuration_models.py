@@ -486,6 +486,75 @@ def test_git_pr_mutation_gate_fails_closed_before_branch_or_pr_write(
     assert mutations == []
 
 
+def test_git_pr_mutation_gate_uses_project_repository_after_grant_verification(
+    in_memory_uow, monkeypatch
+):
+    from minime.adapters.github import GitHubAdapter
+    from minime.domain.enums import ExternalOutcome, ExternalReasonCode, RetrySafety
+    from minime.domain.models import ExternalActionResult
+    from minime.services.project_connection_service import ProjectConnectionService
+
+    project = ProjectService(in_memory_uow).create_configured_project(_configuration())
+    calls = []
+
+    class AllowedAdapter:
+        def verify_connection_permissions(self, repository, responsibility):
+            calls.append(("verify", repository, responsibility))
+            return ExternalActionResult(
+                outcome=ExternalOutcome.SUCCESS,
+                source_adapter="test",
+                reason_code=ExternalReasonCode.EXECUTION_SUCCESS,
+                retry_safety=RetrySafety.SAFE,
+            )
+
+        def create_remote_branch(self, repository, branch, sha):
+            calls.append(("branch", repository, branch, sha))
+            return ExternalActionResult(
+                outcome=ExternalOutcome.SUCCESS,
+                source_adapter="test",
+                reason_code=ExternalReasonCode.EXECUTION_SUCCESS,
+                retry_safety=RetrySafety.UNSAFE,
+                data=sha,
+            )
+
+        def create_pull_request(self, *args, **kwargs):
+            calls.append(("pr", *args, kwargs))
+            return ExternalActionResult(
+                outcome=ExternalOutcome.SUCCESS,
+                source_adapter="test",
+                reason_code=ExternalReasonCode.EXECUTION_SUCCESS,
+                retry_safety=RetrySafety.UNSAFE,
+                data={"number": 5},
+            )
+
+    monkeypatch.setattr(
+        GitHubAdapter,
+        "for_project_connection",
+        classmethod(lambda _cls, _project_id, _connection, _store: AllowedAdapter()),
+    )
+    service = ProjectConnectionService()
+    sha = "a" * 40
+    assert service.create_remote_branch(project, "minime/bootstrap", sha).data == sha
+    assert service.create_pull_request(project, "minime/bootstrap", "title", "body", sha).data == {
+        "number": 5
+    }
+    assert calls == [
+        ("verify", "example/demo", "git_pr"),
+        ("branch", "example/demo", "minime/bootstrap", sha),
+        ("verify", "example/demo", "git_pr"),
+        (
+            "pr",
+            "example/demo",
+            "minime/bootstrap",
+            "main",
+            "title",
+            "body",
+            sha,
+            {"draft": True},
+        ),
+    ]
+
+
 def test_project_connection_factory_resolves_only_requested_responsibility(
     in_memory_uow, monkeypatch
 ):

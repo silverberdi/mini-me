@@ -67,7 +67,7 @@ class ProjectConnectionService:
     def require_git_pr_write(self, project: Project) -> GitHubAdapter:
         """Return the bound GitHub adapter only after proving its current write grants.
 
-        Bootstrap/incremental publishers must use this gate before branch, push, or
+        Bootstrap/incremental publishers must use this gate before branch or
         pull-request mutations. Unknown permission evidence is treated as denial.
         """
         adapter = self.adapter_for(project, "git_pr")
