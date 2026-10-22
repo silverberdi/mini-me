@@ -122,9 +122,6 @@ class Project(BaseModel):
     agent_profiles: dict[str, Any] = Field(default_factory=dict)
     execution_policy: dict[str, Any] = Field(default_factory=dict)
     onboarding_checkpoint: dict[str, Any] = Field(default_factory=dict)
-    auto_prepare: bool = True
-    auto_admit: bool = True
-    max_concurrent_jobs: int = 1
     status: ProjectStatus = ProjectStatus.ACTIVE
     created_at: datetime = Field(default_factory=utc_now)
     updated_at: datetime = Field(default_factory=utc_now)

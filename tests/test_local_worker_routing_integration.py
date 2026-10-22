@@ -199,8 +199,7 @@ async def test_reserved_benchmark_case_escalates_zero_ollama():
 
     service = LocalWorkerService(adapter=adapter)
     benchmark_instruction = (
-        "Repair the stale test fixture in tests/test_autonomous_intake_admission.py so "
-        "test_auto_admit_single_concurrency_deterministic_selection matches the current "
+        "Repair the stale project-discovery fixture so it matches the current "
         "discovery/readiness contract. Modify only this test file. Preserve runtime behavior; "
         "source files forbidden."
     )

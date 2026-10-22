@@ -31,6 +31,17 @@ def test_models_metadata_tables():
     assert "openrouter_pricing_snapshots" in tables
     assert "budget_reservations" in tables
     assert "budget_ledger" in tables
+    project_columns = set(tables["projects"].columns.keys())
+    assert not {
+        "auto_prepare",
+        "auto_admit",
+        "max_concurrent_jobs",
+    } & project_columns
+    assert not {
+        "auto_prepare",
+        "auto_admit",
+        "max_concurrent_jobs",
+    } & set(Project.model_fields)
     # Verify uniqueness constraint on project_bindings (project_id, openspec_change_name)
     pb_table = tables["project_bindings"]
     constraint_names = {c.name for c in pb_table.constraints}
@@ -71,6 +82,9 @@ def test_alembic_offline_postgres_migration():
     assert "NUMERIC" in sql
     assert "waiting_provider" in sql
     assert "TIMESTAMP WITH TIME ZONE" in sql
+    assert "DROP COLUMN auto_prepare" in sql
+    assert "DROP COLUMN auto_admit" in sql
+    assert "DROP COLUMN max_concurrent_jobs" in sql
 
 
 def test_restart_persistence_simulation(in_memory_uow):

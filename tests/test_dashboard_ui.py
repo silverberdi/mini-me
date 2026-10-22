@@ -11,6 +11,12 @@ def test_pwa_bootstrap_is_read_only_and_does_not_load_legacy_controllers() -> No
     bootstrap = (static_dir / "js" / "app.js").read_text(encoding="utf-8")
     dashboard = (static_dir / "js" / "dashboard.js").read_text(encoding="utf-8")
     service_worker = (static_dir / "sw.js").read_text(encoding="utf-8")
+    legacy_clients = (
+        static_dir / "js" / "controllers" / "backlog_controller.js",
+        static_dir / "js" / "controllers" / "projects_controller.js",
+        static_dir / "js" / "views" / "backlog_view.js",
+        static_dir / "js" / "views" / "projects_view.js",
+    )
 
     assert "mini me" in index
     assert 'src="/static/js/app.js"' in index
@@ -20,6 +26,7 @@ def test_pwa_bootstrap_is_read_only_and_does_not_load_legacy_controllers() -> No
     assert "No se iniciará ningún trabajo" in dashboard
     assert "innerHTML" not in dashboard
     assert "identity.textContent" in dashboard
+    assert all(not path.exists() for path in legacy_clients)
 
     for legacy in (
         "backlog_controller",
