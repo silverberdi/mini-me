@@ -30,3 +30,10 @@ def test_project_agent_catalog_cli_uses_read_only_discovery(monkeypatch):
 
     assert result.exit_code == 0
     assert json.loads(result.output)["agents"][0]["id"] == "codex"
+
+
+def test_project_context_cli_is_registered_as_a_read_only_operation():
+    result = CliRunner().invoke(app, ["project", "context", "--help"])
+
+    assert result.exit_code == 0
+    assert "verified managed repository binding" in result.output

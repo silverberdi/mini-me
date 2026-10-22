@@ -20,11 +20,11 @@ class ContextDiscoveryService:
     def __init__(
         self,
         uow: PersistenceUnitOfWork,
-        project_root: str | Path = ".",
+        project_root: str | Path | None = None,
         openspec_adapter: OpenSpecAdapter | None = None,
     ):
         self.uow = uow
-        self.project_root = Path(project_root).resolve()
+        self.project_root = Path(project_root).resolve() if project_root is not None else None
         self.openspec_adapter = openspec_adapter or OpenSpecAdapter()
 
     def discover_context_pure(self, project_id: str) -> ContextDiscoveryReport:
@@ -35,7 +35,7 @@ class ContextDiscoveryService:
         facts: list[DiscoveredContextFact] = []
         structure: list[str] = []
         missing: list[str] = []
-        root = self.project_root
+        root = self.project_root or self._resolve_bound_project_root(project_id)
         readme = next((root / name for name in ("README.md", "readme.md", "README.MD") if (root / name).exists()), None)
         if readme:
             try:
@@ -69,6 +69,46 @@ class ContextDiscoveryService:
             discovered_items_count=0,
             discovered_at=utc_now(),
         )
+
+    def _resolve_bound_project_root(self, project_id: str) -> Path:
+        """Resolve a repository only from its validated durable binding and marker."""
+        from minime.domain.enums import ExternalOutcome, WorkspaceOperation, WorkspaceRole
+        from minime.domain.models import WorkspaceMutationRequest
+        from minime.services.workspace_guard import ManagedWorkspaceGuard, is_binding_fully_valid
+
+        bindings = getattr(self.uow, "project_managed_repository_bindings", None)
+        binding = bindings.get_by_project_id(project_id) if bindings else None
+        if not is_binding_fully_valid(binding):
+            raise ValueError("Project repository binding is missing or invalid")
+        root = Path(binding.managed_repository_root)
+        if root.is_symlink() or not root.is_dir():
+            raise ValueError("Bound project repository is not safely available")
+        guard = ManagedWorkspaceGuard(self.uow)
+        marker_ok, _, _, _ = guard.verify_managed_repository_ownership_marker(
+            str(root),
+            project_id,
+            binding.canonical_repository_identity,
+            binding.ownership_marker_filename,
+        )
+        identity_ok, _ = guard.verify_git_repository_identity(
+            str(root), binding.canonical_repository_identity, binding.remote_name
+        )
+        decision = guard.evaluate_mutation(
+            WorkspaceMutationRequest(
+                project_id=project_id,
+                target_path=str(root),
+                requested_operation=WorkspaceOperation.READ,
+            )
+        )
+        if not (
+            marker_ok
+            and identity_ok
+            and decision.allowed
+            and decision.outcome == ExternalOutcome.SUCCESS
+            and decision.workspace_role == WorkspaceRole.MANAGED_REPOSITORY
+        ):
+            raise ValueError("Bound project repository identity or read authorization is unverified")
+        return root.resolve()
 
     def discover_context(self, project_id: str) -> ContextDiscoveryReport:
         report = self.discover_context_pure(project_id)

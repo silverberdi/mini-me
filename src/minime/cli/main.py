@@ -15,6 +15,7 @@ from minime.db.session import db_manager
 from minime.domain.models import ProjectConfigurationInput, ProjectConfigurationPatch
 from minime.logging import configure_logging
 from minime.services.budget_service import BudgetService
+from minime.services.context_discovery_service import ContextDiscoveryService
 from minime.services.legacy_unavailable import unavailable_payload
 from minime.services.project_catalog_service import ProjectCatalogService
 from minime.services.project_connection_service import ProjectConnectionService
@@ -170,6 +171,20 @@ def show_project(project_id: str = typer.Argument(...), json_output: bool = type
             f"{project.project_id} {project.repository} "
             f"[{project.status.value}/{project.onboarding_status.value}]"
         )
+
+
+@project_app.command("context")
+def show_project_context(project_id: str = typer.Argument(...)) -> None:
+    """Read context from the project's verified managed repository binding."""
+    try:
+        with db_manager.session() as session:
+            report = ContextDiscoveryService(
+                PostgresPersistenceUnitOfWork(session)
+            ).discover_context_pure(project_id)
+    except Exception as exc:
+        typer.echo(f"project context unavailable: {exc}", err=True)
+        raise typer.Exit(code=1) from exc
+    typer.echo(report.model_dump_json(indent=2))
 
 
 @project_app.command("onboarding-status")

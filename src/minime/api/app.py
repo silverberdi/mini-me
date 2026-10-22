@@ -712,7 +712,8 @@ def get_project_context_endpoint(
     try:
         return context_service.discover_context_pure(project_id)
     except ValueError as e:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(e))
+        code = status.HTTP_404_NOT_FOUND if str(e).endswith("not found.") else status.HTTP_409_CONFLICT
+        raise HTTPException(status_code=code, detail=str(e)) from e
 
 
 @app.post("/api/v1/projects/{project_id}/context/discover", tags=["projects"])
