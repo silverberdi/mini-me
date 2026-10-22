@@ -44,6 +44,7 @@ class GitHubRemoteError(RuntimeError):
 class _CachedInstallationToken:
     value: str
     expires_at: datetime
+    permissions: dict[str, str] | None = None
 
 
 @dataclass(frozen=True)
@@ -148,12 +149,28 @@ class GitHubAppAuth:
                 raise ValueError
         except (ValueError, KeyError, TypeError, AttributeError):
             raise GitHubAuthorizationError("GitHub App token response was invalid.") from None
-        self._cached = _CachedInstallationToken(token, expires_at.astimezone(UTC))
+        permissions = payload.get("permissions")
+        normalized_permissions = (
+            {str(name): str(level).lower() for name, level in permissions.items()}
+            if isinstance(permissions, dict)
+            else None
+        )
+        self._cached = _CachedInstallationToken(
+            token, expires_at.astimezone(UTC), normalized_permissions
+        )
         return token
 
 
 def _safe_error(value: str, secrets: list[str] | None = None) -> str:
     return redact_secrets(value, secrets)
+
+
+def _github_permission_satisfies(actual: str | None, required: str) -> bool:
+    if required == "read":
+        return actual in {"read", "write"}
+    if required == "write":
+        return actual == "write"
+    return actual == required
 
 
 class GitHubAdapter(GitHubAdapterInterface):
@@ -303,6 +320,76 @@ class GitHubAdapter(GitHubAdapterInterface):
                 provider_detail=str(exc),
                 error_message=str(exc),
             )
+
+    def verify_connection_permissions(
+        self, repository: str, responsibility: str
+    ) -> ExternalActionResult[dict[str, Any]]:
+        """Check the bound repo and App token grants without performing a mutation."""
+        required_by_responsibility = {
+            "tickets": {"issues": "read"},
+            "git_pr": {"contents": "write", "pull_requests": "write"},
+        }
+        required = required_by_responsibility.get(responsibility)
+        if required is None:
+            raise ValueError("Unknown GitHub connection responsibility")
+        identity = self.verify_repository(repository)
+        if identity.outcome != ExternalOutcome.SUCCESS:
+            return ExternalActionResult(
+                outcome=identity.outcome,
+                source_adapter="github_rest",
+                reason_code=identity.reason_code,
+                retry_safety=identity.retry_safety,
+                error_message=identity.error_message,
+                provider_detail=identity.provider_detail,
+            )
+        try:
+            self._token()
+        except GitHubAuthorizationError:
+            return ExternalActionResult(
+                outcome=ExternalOutcome.FAILURE,
+                source_adapter="github_rest",
+                reason_code=ExternalReasonCode.AUTH_REQUIRED,
+                retry_safety=RetrySafety.SAFE,
+                error_message="GitHub App authorization is unavailable.",
+            )
+        cached = getattr(self.auth, "_cached", None)
+        permissions = cached.permissions if cached else None
+        if permissions is None:
+            return ExternalActionResult(
+                outcome=ExternalOutcome.UNKNOWN,
+                source_adapter="github_rest",
+                reason_code=ExternalReasonCode.EVIDENCE_INSUFFICIENT,
+                retry_safety=RetrySafety.SAFE,
+                error_message="GitHub App permission grants were not observable; connection is not verified.",
+            )
+        missing = [
+            name
+            for name, required_level in required.items()
+            if not _github_permission_satisfies(permissions.get(name), required_level)
+        ]
+        if missing:
+            return ExternalActionResult(
+                outcome=ExternalOutcome.FAILURE,
+                source_adapter="github_rest",
+                reason_code=ExternalReasonCode.AUTH_REQUIRED,
+                retry_safety=RetrySafety.SAFE,
+                error_message=(
+                    f"GitHub App lacks required permissions for {responsibility}: "
+                    + ", ".join(missing)
+                ),
+                provider_detail="required_permissions_missing",
+            )
+        return ExternalActionResult(
+            outcome=ExternalOutcome.SUCCESS,
+            source_adapter="github_rest",
+            reason_code=ExternalReasonCode.EXECUTION_SUCCESS,
+            retry_safety=RetrySafety.SAFE,
+            data={
+                "repository": self._repo(repository),
+                "responsibility": responsibility,
+                "permissions": {name: permissions[name] for name in required},
+            },
+        )
 
     def validate_issue_binding(
         self, expected_repository: str, issue_number: int, github_repository: str | None = None

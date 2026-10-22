@@ -1,4 +1,5 @@
 import json
+from datetime import UTC, datetime, timedelta
 
 import httpx
 
@@ -60,3 +61,38 @@ def test_issue_comment_blocks_post_when_history_is_unobservable():
 
     assert result.outcome == ExternalOutcome.UNKNOWN
     assert "POST blocked" in result.error_message
+
+
+def test_project_connection_permission_check_requires_exact_repo_and_grants():
+    from minime.adapters.github import _CachedInstallationToken
+
+    def handler(request):
+        assert request.method == "GET"
+        return httpx.Response(200, json={"full_name": "owner/repo"})
+
+    auth = _StaticAuth(handler)
+    auth._cached = _CachedInstallationToken(
+        "test-token",
+        datetime.now(UTC) + timedelta(hours=1),
+        {"contents": "write", "pull_requests": "write"},
+    )
+    result = GitHubAdapter(auth=auth).verify_connection_permissions("owner/repo", "git_pr")
+
+    assert result.outcome == ExternalOutcome.SUCCESS
+    assert result.data["repository"] == "owner/repo"
+    assert result.data["permissions"] == {"contents": "write", "pull_requests": "write"}
+
+
+def test_project_connection_permission_check_fails_closed_when_grants_missing():
+    from minime.adapters.github import _CachedInstallationToken
+
+    auth = _StaticAuth(lambda _: httpx.Response(200, json={"full_name": "owner/repo"}))
+    auth._cached = _CachedInstallationToken(
+        "test-token",
+        datetime.now(UTC) + timedelta(hours=1),
+        {"contents": "read", "pull_requests": "read"},
+    )
+    result = GitHubAdapter(auth=auth).verify_connection_permissions("owner/repo", "git_pr")
+
+    assert result.outcome == ExternalOutcome.FAILURE
+    assert "contents, pull_requests" in result.error_message
