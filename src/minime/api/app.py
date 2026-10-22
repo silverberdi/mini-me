@@ -80,7 +80,7 @@ from minime.services.capacity_lifecycle_service import CapacityLifecycleService
 from minime.services.container_preview_service import ContainerPreviewService
 from minime.services.context_discovery_service import ContextDiscoveryService
 from minime.services.current_check_batch import validate_current_checks_batch
-from minime.services.legacy_unavailable import UnavailableLegacyService, unavailable_payload
+from minime.services.legacy_unavailable import unavailable_payload
 from minime.services.project_onboarding_service import ProjectOnboardingService
 from minime.services.project_service import ProjectService
 from minime.services.provider_health_service import ProviderHealthService
@@ -89,10 +89,11 @@ from minime.services.validation_authority_service import ValidationAuthorityServ
 
 logger = logging.getLogger(__name__)
 
-# These names only protect still-registered legacy routes while the middleware
-# returns HTTP 410. They cannot execute a legacy behavior if called directly.
-IntakeService = ReadinessService = SchedulerService = OrchestrationService = UnavailableLegacyService
-ControlPlaneService = OperationsDashboardService = UnavailableLegacyService
+# Compatibility route annotations remain until F2/F3 replace their public
+# contracts. Their handlers deny requests directly and never instantiate a
+# retired service.
+IntakeService = ReadinessService = SchedulerService = OrchestrationService = Any
+ControlPlaneService = OperationsDashboardService = Any
 DashboardOverviewResponse = DashboardChangeDetailResponse = TimelineEventDTO = Any
 
 
@@ -702,17 +703,10 @@ def list_backlog_items_endpoint(
     priority: str | None = None,
     limit: int = 100,
 ) -> list[BacklogItem]:
-    """List normalized backlog items for a project."""
-    project = uow.projects.get_by_id(project_id)
-    if not project:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail=f"Project '{project_id}' not found",
-        )
-    # Reconcile projections with underlying execution/archive reality
-    intake_service.reconcile_backlog_projections(project_id)
-    return uow.backlog_items.list_by_project(
-        project_id, status=status_filter, priority=priority, limit=limit
+    """The local backlog projection was retired; F2 owns its replacement."""
+    raise HTTPException(
+        status_code=status.HTTP_410_GONE,
+        detail=unavailable_payload("legacy_intake_or_readiness", "F2"),
     )
 
 
@@ -725,12 +719,11 @@ def create_backlog_item_endpoint(
     request: Request,
     intake_service: IntakeServiceDep,
 ) -> BacklogItem:
-    """Create a new work item in the backlog."""
-    operator_email = getattr(request.state, "operator_email", "operator")
-    try:
-        return intake_service.create_work_item(project_id, req, operator_email=operator_email)
-    except ValueError as e:
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e))
+    """The local backlog projection was retired; F2 owns its replacement."""
+    raise HTTPException(
+        status_code=status.HTTP_410_GONE,
+        detail=unavailable_payload("legacy_intake_or_readiness", "F2"),
+    )
 
 
 @app.get("/api/v1/projects/{project_id}/backlog/{item_key}", tags=["backlog"])
@@ -739,14 +732,11 @@ def get_backlog_item_endpoint(
     item_key: str,
     uow: UowDep,
 ) -> BacklogItem:
-    """Get full details of a backlog work item."""
-    item = uow.backlog_items.get_by_project_and_key(project_id, item_key)
-    if not item:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail=f"Work item '{item_key}' not found in project '{project_id}'",
-        )
-    return item
+    """The local backlog projection was retired; F2 owns its replacement."""
+    raise HTTPException(
+        status_code=status.HTTP_410_GONE,
+        detail=unavailable_payload("legacy_intake_or_readiness", "F2"),
+    )
 
 
 @app.patch("/api/v1/projects/{project_id}/backlog/{item_key}", tags=["backlog"])
@@ -757,14 +747,11 @@ def update_backlog_item_endpoint(
     request: Request,
     intake_service: IntakeServiceDep,
 ) -> BacklogItem:
-    """Update title, description, priority, or criteria of a backlog item."""
-    operator_email = getattr(request.state, "operator_email", "operator")
-    try:
-        return intake_service.update_work_item(
-            project_id, item_key, req, operator_email=operator_email
-        )
-    except ValueError as e:
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e))
+    """The local backlog projection was retired; F2 owns its replacement."""
+    raise HTTPException(
+        status_code=status.HTTP_410_GONE,
+        detail=unavailable_payload("legacy_intake_or_readiness", "F2"),
+    )
 
 
 @app.post("/api/v1/projects/{project_id}/backlog/{item_key}/prepare", tags=["backlog"])
@@ -786,14 +773,11 @@ def answer_backlog_item_question_endpoint(
     request: Request,
     intake_service: IntakeServiceDep,
 ) -> BacklogItem:
-    """Answer a NEEDS_HUMAN question to unblock preparation and reach READY."""
-    operator_email = getattr(request.state, "operator_email", "operator")
-    try:
-        return intake_service.answer_human_question(
-            project_id, item_key, req, operator_email=operator_email
-        )
-    except ValueError as e:
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e))
+    """The local backlog projection was retired; F2 owns its replacement."""
+    raise HTTPException(
+        status_code=status.HTTP_410_GONE,
+        detail=unavailable_payload("legacy_intake_or_readiness", "F2"),
+    )
 
 
 @app.post("/api/v1/projects/{project_id}/backlog/{item_key}/start", tags=["backlog"])
@@ -803,12 +787,11 @@ def start_backlog_item_endpoint(
     request: Request,
     intake_service: IntakeServiceDep,
 ) -> BacklogItem:
-    """Start execution of a READY work item through the autonomous scheduler."""
-    operator_email = getattr(request.state, "operator_email", "operator")
-    try:
-        return intake_service.start_work_item(project_id, item_key, operator_email=operator_email)
-    except ValueError as e:
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e))
+    """The local backlog projection was retired; F2 owns its replacement."""
+    raise HTTPException(
+        status_code=status.HTTP_410_GONE,
+        detail=unavailable_payload("legacy_intake_or_readiness", "F2"),
+    )
 
 
 @app.delete(
@@ -822,10 +805,11 @@ def delete_backlog_item_endpoint(
     request: Request,
     intake_service: IntakeServiceDep,
 ) -> Response:
-    """Cancel / remove a backlog item."""
-    operator_email = getattr(request.state, "operator_email", "operator")
-    intake_service.delete_work_item(project_id, item_key, operator_email=operator_email)
-    return Response(status_code=status.HTTP_204_NO_CONTENT)
+    """The local backlog projection was retired; F2 owns its replacement."""
+    raise HTTPException(
+        status_code=status.HTTP_410_GONE,
+        detail=unavailable_payload("legacy_intake_or_readiness", "F2"),
+    )
 
 
 @app.get("/projects/{project_id}/changes")
@@ -1995,13 +1979,11 @@ def list_queue_items_endpoint(
     project_id: str | None = None,
     ready_only: bool = False,
 ) -> list[WorkQueueItem]:
-    """List candidate work items in the scheduler queue."""
-    scheduler = SchedulerService(uow)
-    if ready_only:
-        items = uow.work_queue.list_ready(project_id)
-    else:
-        items = uow.work_queue.list_all(project_id)
-    return scheduler.rank_candidates(items)
+    """The local work queue was retired; F3 owns selection and execution."""
+    raise HTTPException(
+        status_code=status.HTTP_410_GONE,
+        detail=unavailable_payload("legacy_queue", "F3"),
+    )
 
 
 @app.get(
@@ -2014,15 +1996,11 @@ def explain_queue_item_endpoint(
     uow: Annotated[PersistenceUnitOfWork, Depends(get_uow)],
     project_id: str = "mini-me",
 ) -> QueueExplainReport:
-    """Get detailed explainability report for a work item's priority and blockers."""
-    scheduler = SchedulerService(uow)
-    try:
-        return scheduler.explain_item_priority(project_id, change_name)
-    except ValueError as exc:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail=str(exc),
-        ) from exc
+    """The local work queue was retired; F3 owns selection and execution."""
+    raise HTTPException(
+        status_code=status.HTTP_410_GONE,
+        detail=unavailable_payload("legacy_queue", "F3"),
+    )
 
 
 @app.get(
@@ -2034,9 +2012,11 @@ def get_scheduler_status_endpoint(
     uow: Annotated[PersistenceUnitOfWork, Depends(get_uow)],
     project_id: str | None = None,
 ) -> SchedulerStatusView:
-    """Get operational status view of the autonomous scheduler and queue."""
-    scheduler = SchedulerService(uow)
-    return scheduler.get_status(project_id)
+    """The scheduler was retired and remains disabled during F1."""
+    raise HTTPException(
+        status_code=status.HTTP_410_GONE,
+        detail=unavailable_payload("legacy_scheduler", "F3"),
+    )
 
 
 @app.post(
@@ -2048,9 +2028,11 @@ def trigger_scheduler_tick_endpoint(
     uow: Annotated[PersistenceUnitOfWork, Depends(get_uow)],
     project_id: str | None = None,
 ) -> list[SchedulerDecisionRecord]:
-    """Trigger a single scheduler evaluation and admission tick."""
-    scheduler = SchedulerService(uow)
-    return scheduler.tick(project_id)
+    """The scheduler was retired and remains disabled during F1."""
+    raise HTTPException(
+        status_code=status.HTTP_410_GONE,
+        detail=unavailable_payload("legacy_scheduler", "F3"),
+    )
 
 
 # -----------------------------------------------------------------------------

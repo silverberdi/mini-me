@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 from datetime import datetime
+from typing import Any
 
 import typer
 import uvicorn
@@ -22,7 +23,7 @@ from minime.domain.enums import (
 from minime.domain.models import OperatorActionRequest
 from minime.logging import configure_logging, get_logger
 from minime.services.budget_service import BudgetService
-from minime.services.legacy_unavailable import UnavailableLegacyService, unavailable_payload
+from minime.services.legacy_unavailable import unavailable_payload
 from minime.services.project_service import ProjectService
 from minime.services.provider_health_service import ProviderHealthService
 from minime.services.status_service import StatusService
@@ -55,9 +56,8 @@ app.add_typer(action_app, name="action")
 
 logger = get_logger("cli")
 
-ReadinessService = SchedulerService = OrchestrationService = ControlPlaneService = (
-    RestartRecoveryService
-) = UnavailableLegacyService
+ReadinessService = SchedulerService = OrchestrationService = ControlPlaneService = Any
+RestartRecoveryService = Any
 
 
 @app.callback()

@@ -1,13 +1,5 @@
-"""The legacy operational TUI is unavailable until the F5 replacement."""
+"""TUI compatibility boundary; F5 owns the replacement UI."""
 
-from minime.services.legacy_unavailable import LegacyOperationUnavailable
+from minime.tui.app import MiniMeTuiApp, run_tui
 
-
-def run_tui(*_args, **_kwargs) -> None:
-    raise LegacyOperationUnavailable("operation_unavailable: legacy_tui (owner phase F5)")
-
-__all__ = [
-    "MiniMeTuiApp",
-    "TuiQueryClient",
-    "run_tui",
-]
+__all__ = ["MiniMeTuiApp", "run_tui"]
