@@ -157,3 +157,40 @@ class ProjectCatalogService:
             "agents": agents,
             "capability_discovery": "read-only; no inference or provider probe was invoked",
         }
+
+    async def validate_project_profiles(self, profiles: dict[str, Any]) -> None:
+        """Fail closed unless every selected profile is observed and usable locally."""
+        catalog = await self.agent_catalog()
+        agents = {item["id"]: item for item in catalog["agents"]}
+        role_map = {
+            "thinking": ("implementer", "file_edit_roles"),
+            "execution": ("implementer", "file_edit_roles"),
+            "independent_review": ("reviewer", "read_only_roles"),
+            "fallback": ("implementer", "file_edit_roles"),
+        }
+        for profile_name, profile in profiles.items():
+            provider_id = profile.agent_id.strip().lower()
+            provider_id = "antigravity" if provider_id == "agy" else provider_id
+            agent = agents.get(provider_id)
+            if agent is None:
+                raise ValueError(f"Selected agent '{provider_id}' is not locally available")
+            invocation_role, capability_field = role_map[profile_name]
+            if invocation_role not in agent["roles"] or invocation_role not in agent["invocations"]:
+                raise ValueError(
+                    f"Selected agent '{provider_id}' has no verified {invocation_role} invocation"
+                )
+            if invocation_role not in agent[capability_field]:
+                raise ValueError(
+                    f"Selected agent '{provider_id}' is not verified for {profile_name} file capability"
+                )
+            if agent["capability_status"] != "OBSERVED_READ_ONLY":
+                raise ValueError(f"Selected agent '{provider_id}' model catalog is unobservable")
+            supported_efforts = agent["models"].get(profile.model_id)
+            if supported_efforts is None or profile.effort.lower() not in supported_efforts:
+                raise ValueError(
+                    f"Model/effort for profile '{profile_name}' is not in the live {provider_id} catalog"
+                )
+            if provider_id in {"codex", "antigravity"} and not agent["native_openspec_setup"]:
+                raise ValueError(
+                    f"Selected agent '{provider_id}' has no verified official OpenSpec setup"
+                )

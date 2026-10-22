@@ -82,6 +82,46 @@ def test_f2_rejects_unimplemented_provider():
         )
 
 
+@pytest.mark.asyncio
+async def test_profile_validation_requires_live_model_and_role_evidence(monkeypatch):
+    from minime.services.project_catalog_service import ProjectCatalogService
+
+    service = ProjectCatalogService()
+
+    async def observed_catalog(_project_root=None):
+        return {
+            "agents": [
+                {
+                    "id": "codex",
+                    "roles": ["implementer"],
+                    "invocations": {"implementer": {"transport": "stdin"}},
+                    "file_edit_roles": ["implementer"],
+                    "read_only_roles": [],
+                    "capability_status": "OBSERVED_READ_ONLY",
+                    "models": {"gpt-5.6-luna": ["medium"]},
+                    "native_openspec_setup": True,
+                },
+                {
+                    "id": "antigravity",
+                    "roles": ["reviewer"],
+                    "invocations": {"reviewer": {"transport": "stdin"}},
+                    "file_edit_roles": [],
+                    "read_only_roles": ["reviewer"],
+                    "capability_status": "OBSERVED_READ_ONLY",
+                    "models": {"claude-sonnet-5-5-medium": ["medium"]},
+                    "native_openspec_setup": True,
+                },
+            ]
+        }
+
+    monkeypatch.setattr(service, "agent_catalog", observed_catalog)
+    profiles = _configuration().agent_profiles
+    await service.validate_project_profiles(profiles)
+    profiles["thinking"].model_id = "not-observed"
+    with pytest.raises(ValueError, match="live codex catalog"):
+        await service.validate_project_profiles(profiles)
+
+
 def test_project_configuration_requires_four_explicit_profiles():
     profiles = {
         name: ProjectAgentProfile(
@@ -206,6 +246,11 @@ def test_project_cli_update_uses_shared_configuration_service(in_memory_uow, tmp
 
     monkeypatch.setattr(cli.db_manager, "session", session)
     monkeypatch.setattr(cli, "PostgresPersistenceUnitOfWork", lambda value: value)
+
+    async def profiles_available(self, profiles):
+        assert profiles
+
+    monkeypatch.setattr(cli.ProjectCatalogService, "validate_project_profiles", profiles_available)
     patch_path = tmp_path / "patch.json"
     patch_path.write_text('{"display_name":"Updated from CLI"}', encoding="utf-8")
     result = CliRunner().invoke(cli.app, ["project", "update", "demo", str(patch_path)])
@@ -286,6 +331,13 @@ def test_versioned_project_api_creates_brownfield_configuration(in_memory_uow, m
 
     from minime.api.app import app, get_current_operator, get_uow
 
+    async def profiles_available(self, profiles):
+        assert profiles
+
+    monkeypatch.setattr(
+        "minime.api.app.ProjectCatalogService.validate_project_profiles", profiles_available
+    )
+
     monkeypatch.setenv("MINIME_AUTH_ENABLED", "false")
     app.dependency_overrides[get_uow] = lambda: in_memory_uow
     app.dependency_overrides[get_current_operator] = lambda: object()
@@ -308,6 +360,13 @@ def test_authenticated_api_stores_project_key_outside_persistence(in_memory_uow,
     from fastapi.testclient import TestClient
 
     from minime.api.app import app, get_current_operator, get_uow
+
+    async def profiles_available(self, profiles):
+        assert profiles
+
+    monkeypatch.setattr(
+        "minime.api.app.ProjectCatalogService.validate_project_profiles", profiles_available
+    )
 
     key = "-----BEGIN PRIVATE KEY-----\napi-secret-test\n-----END PRIVATE KEY-----"
     raw = _configuration().model_dump(mode="json")
@@ -342,6 +401,13 @@ def test_project_api_never_exposes_secret_reference(in_memory_uow, monkeypatch, 
     from fastapi.testclient import TestClient
 
     from minime.api.app import app, get_current_operator, get_uow
+
+    async def profiles_available(self, profiles):
+        assert profiles
+
+    monkeypatch.setattr(
+        "minime.api.app.ProjectCatalogService.validate_project_profiles", profiles_available
+    )
 
     raw = _configuration().model_dump(mode="json")
     raw["provider_connections"]["git_pr"]["auth_mode"] = "project_app"

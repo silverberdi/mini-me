@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 from typing import NoReturn
 
@@ -15,6 +16,7 @@ from minime.domain.models import ProjectConfigurationInput, ProjectConfiguration
 from minime.logging import configure_logging
 from minime.services.budget_service import BudgetService
 from minime.services.legacy_unavailable import unavailable_payload
+from minime.services.project_catalog_service import ProjectCatalogService
 from minime.services.project_service import ProjectService
 from minime.services.provider_health_service import ProviderHealthService
 from minime.services.status_service import StatusService
@@ -114,6 +116,11 @@ def create_project(config_path: str = typer.Argument(..., exists=True, readable=
                 "private_key": typer.prompt("GitHub App private key", hide_input=True),
             }
         configuration = ProjectConfigurationInput.model_validate(raw)
+        asyncio.run(
+            ProjectCatalogService().validate_project_profiles(
+                configuration.agent_profiles
+            )
+        )
         with db_manager.session() as session:
             project = ProjectService(PostgresPersistenceUnitOfWork(session)).create_configured_project(
                 configuration
@@ -167,6 +174,8 @@ def update_project(
                 "private_key": typer.prompt("GitHub App private key", hide_input=True),
             }
         patch = ProjectConfigurationPatch.model_validate(raw)
+        if patch.agent_profiles is not None:
+            asyncio.run(ProjectCatalogService().validate_project_profiles(patch.agent_profiles))
         with db_manager.session() as session:
             project = ProjectService(PostgresPersistenceUnitOfWork(session)).update_configuration(
                 project_id, patch

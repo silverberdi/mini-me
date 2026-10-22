@@ -416,13 +416,16 @@ def list_project_configurations(_operator: AuthenticatedOperatorDep, uow: UowDep
 
 
 @app.post("/api/v1/projects", status_code=status.HTTP_201_CREATED, tags=["projects"])
-def create_project_configuration(
+async def create_project_configuration(
     configuration: ProjectConfigurationInput,
     _operator: AuthenticatedOperatorDep,
     uow: UowDep,
 ) -> dict[str, Any]:
     """Create a configuration-only Brownfield registration; Greenfield needs ZIP bootstrap."""
     try:
+        await ProjectCatalogService().validate_project_profiles(
+            configuration.agent_profiles
+        )
         service = ProjectService(uow)
         return service.public_project_payload(service.create_configured_project(configuration))
     except ValueError as exc:
@@ -430,13 +433,15 @@ def create_project_configuration(
 
 
 @app.patch("/api/v1/projects/{project_id}", tags=["projects"])
-def update_project_configuration(
+async def update_project_configuration(
     project_id: str,
     patch: ProjectConfigurationPatch,
     _operator: AuthenticatedOperatorDep,
     uow: UowDep,
 ) -> dict[str, Any]:
     try:
+        if patch.agent_profiles is not None:
+            await ProjectCatalogService().validate_project_profiles(patch.agent_profiles)
         service = ProjectService(uow)
         return service.public_project_payload(service.update_configuration(project_id, patch))
     except ValueError as exc:
