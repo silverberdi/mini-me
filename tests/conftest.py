@@ -200,30 +200,6 @@ class ReadinessGitHubStub:
             operation_key=operation_key,
         )
 
-    def add_issue_to_project(
-        self, project_number: int, owner: str, issue_url: str, operation_key: str | None = None
-    ) -> ExternalActionResult[str]:
-        return ExternalActionResult(
-            outcome=ExternalOutcome.SUCCESS,
-            source_adapter="github_stub",
-            reason_code=ExternalReasonCode.EXECUTION_SUCCESS,
-            retry_safety=RetrySafety.UNSAFE,
-            data="PVTI_12345",
-            external_id="PVTI_12345",
-            operation_key=operation_key,
-        )
-
-    def list_project_items(
-        self, project_number: int = 2, owner: str = "silverberdi", limit: int = 50
-    ) -> ExternalActionResult[list[dict]]:
-        return ExternalActionResult(
-            outcome=ExternalOutcome.SUCCESS,
-            source_adapter="github_stub",
-            reason_code=ExternalReasonCode.EXECUTION_SUCCESS,
-            retry_safety=RetrySafety.SAFE,
-            data=[],
-        )
-
     def get_pull_request(
         self, repository: str, branch: str, base: str = "main"
     ) -> ExternalActionResult[dict]:
@@ -257,18 +233,6 @@ class ReadinessGitHubStub:
             retry_safety=RetrySafety.UNSAFE,
             data=True,
             external_id=str(issue_number),
-        )
-
-    def update_project_item_status(
-        self, project_number: int, owner: str, item_id: str, status: str = "Done"
-    ) -> ExternalActionResult[bool]:
-        return ExternalActionResult(
-            outcome=ExternalOutcome.SUCCESS,
-            source_adapter="github_stub",
-            reason_code=ExternalReasonCode.EXECUTION_SUCCESS,
-            retry_safety=RetrySafety.UNSAFE,
-            data=True,
-            external_id=item_id,
         )
 
     def delete_remote_branch(

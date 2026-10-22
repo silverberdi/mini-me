@@ -1052,26 +1052,6 @@ class GitHubAdapterInterface(ABC):
             reason_code=ExternalReasonCode.UNSUPPORTED,
         )
 
-    def add_issue_to_project(
-        self, project_number: int, owner: str, issue_url: str, operation_key: str | None = None
-    ) -> ExternalActionResult[str]:
-        return ExternalActionResult[str](
-            outcome=ExternalOutcome.UNKNOWN,
-            value="",
-            source_adapter="interface",
-            reason_code=ExternalReasonCode.UNSUPPORTED,
-        )
-
-    def list_project_items(
-        self, project_number: int = 2, owner: str = "silverberdi", limit: int = 50
-    ) -> ExternalActionResult[list[dict[str, Any]]]:
-        return ExternalActionResult[list[dict[str, Any]]](
-            outcome=ExternalOutcome.UNKNOWN,
-            value=[],
-            source_adapter="interface",
-            reason_code=ExternalReasonCode.UNSUPPORTED,
-        )
-
     def get_pull_request_details(
         self, repository: str, pr_number: int
     ) -> ExternalActionResult[dict[str, Any]]:
@@ -1092,16 +1072,6 @@ class GitHubAdapterInterface(ABC):
 
     def close_issue(
         self, repository: str, issue_number: int, comment: str | None = None
-    ) -> ExternalActionResult[bool]:
-        return ExternalActionResult[bool](
-            outcome=ExternalOutcome.UNKNOWN,
-            value=False,
-            source_adapter="interface",
-            reason_code=ExternalReasonCode.UNSUPPORTED,
-        )
-
-    def update_project_item_status(
-        self, project_number: int, owner: str, item_id: str, status: str = "Done"
     ) -> ExternalActionResult[bool]:
         return ExternalActionResult[bool](
             outcome=ExternalOutcome.UNKNOWN,

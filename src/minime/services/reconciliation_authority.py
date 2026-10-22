@@ -30,7 +30,6 @@ class ReconciliationAuthority:
             observed_result=observed_result,
             original_mutation_retry_authorized=original_mutation_retry_authorized,
         )
-
         event = Event(
             project_id="system",
             change_id=action_key,
@@ -113,71 +112,4 @@ class ReconciliationAuthority:
             source_adapter="github",
             reason_code=ExternalReasonCode.UNOBSERVABLE,
             error_message=f"Unobservable issue listing for '{operation_key}'",
-        )
-
-    def reconcile_project_item_add(
-        self,
-        github_adapter: Any,
-        project_number: int,
-        owner: str,
-        issue_url: str,
-        operation_key: str,
-    ) -> Any:
-        """Look up project item ID by exact issue URL. Fuzzy title search is forbidden."""
-        from minime.domain.enums import ExternalReasonCode
-        from minime.domain.models import ExternalActionResult
-
-        try:
-            res = github_adapter.list_project_items(project_number=project_number, owner=owner)
-            if res.outcome == ExternalOutcome.SUCCESS and res.data is not None:
-                for item in res.data:
-                    content_url = (
-                        item.get("issue_url")
-                        or item.get("content_url")
-                        or (
-                            item.get("content", {}).get("url")
-                            if isinstance(item.get("content"), dict)
-                            else None
-                        )
-                    )
-                    if content_url == issue_url:
-                        item_id = item.get("id") or item.get("item_id")
-                        return ExternalActionResult(
-                            outcome=ExternalOutcome.SUCCESS,
-                            source_adapter="github",
-                            reason_code=ExternalReasonCode.EXECUTION_SUCCESS,
-                            data=item_id,
-                            external_id=str(item_id),
-                        )
-                return ExternalActionResult(
-                    outcome=ExternalOutcome.FAILURE,
-                    source_adapter="github",
-                    reason_code=ExternalReasonCode.NOT_FOUND,
-                    error_message=f"No project item found for issue URL '{issue_url}'",
-                )
-            elif res.outcome != ExternalOutcome.SUCCESS:
-                return ExternalActionResult(
-                    outcome=ExternalOutcome.UNKNOWN,
-                    source_adapter="github",
-                    reason_code=ExternalReasonCode.UNOBSERVABLE,
-                    error_message=getattr(
-                        res, "error_message", "Listing project items returned non-success outcome."
-                    ),
-                )
-        except Exception as exc:
-            logger.warning(
-                "Failed to list project items during reconciliation for '%s': %s", issue_url, exc
-            )
-            return ExternalActionResult(
-                outcome=ExternalOutcome.UNKNOWN,
-                source_adapter="github",
-                reason_code=ExternalReasonCode.UNOBSERVABLE,
-                error_message=f"Exception during project item list reconciliation: {exc}",
-            )
-
-        return ExternalActionResult(
-            outcome=ExternalOutcome.UNKNOWN,
-            source_adapter="github",
-            reason_code=ExternalReasonCode.UNOBSERVABLE,
-            error_message=f"Unobservable project item listing for '{issue_url}'",
         )

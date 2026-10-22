@@ -171,54 +171,11 @@ def test_push_branch_verifies_remote_sha(tmp_path, monkeypatch):
     assert res_ambiguous.retry_safety == RetrySafety.UNKNOWN
 
 
-def test_update_project_item_status_verifies_postcondition(monkeypatch):
-    """Req 6: update_project_item_status re-observes project items after edit command."""
+def test_github_projects_board_operations_are_removed():
     adapter = GitHubAdapter()
-
-    # Case A: target status observed in list_project_items -> SUCCESS
-    monkeypatch.setattr(
-        adapter,
-        "list_project_items",
-        lambda p, o: ExternalActionResult(
-            outcome=ExternalOutcome.SUCCESS,
-            source_adapter="github_cli",
-            data=[{"id": "item_100", "status": "Done"}],
-            reason_code=ExternalReasonCode.EXECUTION_SUCCESS,
-        ),
-    )
-    monkeypatch.setattr("subprocess.run", lambda *a, **k: MagicMock(returncode=0))
-    res_ok = adapter.update_project_item_status(2, "silverberdi", "item_100", "Done")
-    assert res_ok.outcome == ExternalOutcome.SUCCESS
-
-    # Case B: target status NOT observed -> FAILURE/CONFLICT
-    monkeypatch.setattr(
-        adapter,
-        "list_project_items",
-        lambda p, o: ExternalActionResult(
-            outcome=ExternalOutcome.SUCCESS,
-            source_adapter="github_cli",
-            data=[{"id": "item_100", "status": "In Progress"}],
-            reason_code=ExternalReasonCode.EXECUTION_SUCCESS,
-        ),
-    )
-    res_fail = adapter.update_project_item_status(2, "silverberdi", "item_100", "Done")
-    assert res_fail.outcome == ExternalOutcome.FAILURE
-    assert res_fail.reason_code == ExternalReasonCode.CONFLICT
-
-    # Case C: list_project_items unobservable -> AMBIGUOUS (mutating edit occurred, postcondition unproven)
-    monkeypatch.setattr(
-        adapter,
-        "list_project_items",
-        lambda p, o: ExternalActionResult(
-            outcome=ExternalOutcome.UNKNOWN,
-            source_adapter="github_cli",
-            reason_code=ExternalReasonCode.UNOBSERVABLE,
-        ),
-    )
-    res_ambiguous = adapter.update_project_item_status(2, "silverberdi", "item_100", "Done")
-    assert res_ambiguous.outcome == ExternalOutcome.AMBIGUOUS
-    assert res_ambiguous.reason_code == ExternalReasonCode.POSTCONDITION_NOT_PROVEN
-    assert res_ambiguous.retry_safety == RetrySafety.UNKNOWN
+    assert not hasattr(adapter, "list_project_items")
+    assert not hasattr(adapter, "add_issue_to_project")
+    assert not hasattr(adapter, "update_project_item_status")
 
 
 def test_adversarial_observe_before_repeat_read_safe_does_not_authorize_mutation(in_memory_uow):
@@ -300,37 +257,6 @@ def test_create_issue_pre_observation_unknown_blocks_post(monkeypatch):
     assert result.outcome == ExternalOutcome.UNKNOWN
     assert result.reason_code == ExternalReasonCode.UNOBSERVABLE
     req_mock.assert_not_called()
-
-
-def test_add_issue_to_project_pre_observation_unknown_blocks_cli(monkeypatch):
-    """add_issue_to_project pre-observation list_project_items returning UNKNOWN MUST block CLI item-add."""
-    adapter = GitHubAdapter()
-
-    # Pre-observation list_project_items returns UNKNOWN
-    monkeypatch.setattr(
-        adapter,
-        "list_project_items",
-        lambda project_number, owner: ExternalActionResult(
-            outcome=ExternalOutcome.UNKNOWN,
-            source_adapter="github_cli",
-            reason_code=ExternalReasonCode.UNOBSERVABLE,
-            retry_safety=RetrySafety.SAFE,
-            error_message="Project list unobservable",
-        ),
-    )
-
-    sub_mock = MagicMock()
-    monkeypatch.setattr("subprocess.run", sub_mock)
-
-    result = adapter.add_issue_to_project(
-        project_number=2,
-        owner="silverberdi",
-        issue_url="https://github.com/silverberdi/mini-me/issues/101",
-    )
-
-    assert result.outcome == ExternalOutcome.UNKNOWN
-    assert result.reason_code == ExternalReasonCode.UNOBSERVABLE
-    sub_mock.assert_not_called()
 
 
 def test_create_issue_201_missing_identity_returns_ambiguous(monkeypatch):
