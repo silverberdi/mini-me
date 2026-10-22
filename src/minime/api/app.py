@@ -451,6 +451,18 @@ async def update_project_configuration(
         raise HTTPException(status_code=code, detail=message) from exc
 
 
+@app.get("/api/v1/projects/{project_id}/onboarding", tags=["projects"])
+def get_project_onboarding_state(
+    project_id: str,
+    _operator: AuthenticatedOperatorDep,
+    uow: UowDep,
+) -> dict[str, Any]:
+    project = ProjectService(uow).get_project(project_id)
+    if project is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Project not found")
+    return ProjectService.public_onboarding_state(project)
+
+
 @app.post("/api/v1/projects/{project_id}/pause", tags=["projects"])
 def pause_project(project_id: str, _operator: AuthenticatedOperatorDep, uow: UowDep) -> dict[str, Any]:
     try:

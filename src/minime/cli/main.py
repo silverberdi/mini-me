@@ -152,6 +152,22 @@ def show_project(project_id: str = typer.Argument(...), json_output: bool = type
         )
 
 
+@project_app.command("onboarding-status")
+def onboarding_status(project_id: str = typer.Argument(...)) -> None:
+    """Show sanitized, read-only project onboarding progress."""
+    try:
+        with db_manager.session() as session:
+            service = ProjectService(PostgresPersistenceUnitOfWork(session))
+            project = service.get_project(project_id)
+            if project is None:
+                raise ValueError("project not found")
+            state = service.public_onboarding_state(project)
+    except Exception as exc:
+        typer.echo(f"project onboarding status unavailable: {exc}", err=True)
+        raise typer.Exit(code=1) from exc
+    typer.echo(json.dumps(state, indent=2, default=str))
+
+
 @project_app.command("update")
 def update_project(
     project_id: str = typer.Argument(...),

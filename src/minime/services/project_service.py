@@ -17,7 +17,7 @@ from minime.domain.models import (
     ProjectConfigurationPatch,
     utc_now,
 )
-from minime.logging import get_logger, set_correlation_context
+from minime.logging import get_logger, redact_secrets, set_correlation_context
 from minime.services.project_credential_store import ProjectCredentialStore
 from minime.services.repository_identity import (
     normalize_repository_identity as _normalize_repository_identity,
@@ -121,6 +121,7 @@ class ProjectService:
                 )
 
         credential_ref: str | None = None
+        commit_started = False
         try:
             if configuration.github_app_credentials:
                 credentials = configuration.github_app_credentials
@@ -171,10 +172,11 @@ class ProjectService:
                     timestamp=now,
                 )
             )
+            commit_started = True
             self.uow.commit()
             return project
         except Exception:
-            if credential_ref:
+            if credential_ref and not commit_started:
                 self.credential_store.remove_github_app(project_id, credential_ref)
             self.uow.rollback()
             raise
@@ -251,6 +253,7 @@ class ProjectService:
                 )
 
         credential_ref: str | None = None
+        commit_started = False
         try:
             if patch.github_app_credentials:
                 credentials = patch.github_app_credentials
@@ -303,10 +306,11 @@ class ProjectService:
                 project.execution_policy = patch.execution_policy.model_dump(mode="json")
             project.updated_at = utc_now()
             self.uow.projects.save(project)
+            commit_started = True
             self.uow.commit()
             return project
         except Exception:
-            if credential_ref:
+            if credential_ref and not commit_started:
                 self.credential_store.remove_github_app(project_id, credential_ref)
             self.uow.rollback()
             raise
@@ -641,3 +645,34 @@ class ProjectService:
             credential_configured = bool(connection.pop("secret_reference", None))
             connection["credential_configured"] = credential_configured
         return payload
+
+    @staticmethod
+    def public_onboarding_state(project: Project) -> dict[str, Any]:
+        """Expose truthful onboarding progress without returning arbitrary checkpoint data."""
+        checkpoint_fields = {
+            "operation_revision",
+            "source_zip_sha256",
+            "provenance_reference",
+            "bootstrap_branch",
+            "base_branch",
+            "base_sha",
+            "head_sha",
+            "pull_request_number",
+            "pull_request_url",
+            "expected_base_sha",
+            "merge_commit_sha",
+            "merge_observed_at",
+        }
+        checkpoint = {
+            key: value
+            for key, value in project.onboarding_checkpoint.items()
+            if key in checkpoint_fields
+        }
+        return {
+            "project_id": project.project_id,
+            "project_type": project.project_type.value,
+            "lifecycle": project.status.value,
+            "onboarding_status": project.onboarding_status.value,
+            "reasons": [redact_secrets(reason) for reason in project.onboarding_reasons],
+            "checkpoint": checkpoint,
+        }

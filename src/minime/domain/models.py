@@ -169,7 +169,7 @@ class ProjectExecutionPolicy(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     max_review_rounds: int = Field(default=2, ge=1, le=3)
-    max_correction_attempts: int = Field(default=2, ge=0, le=3)
+    max_correction_attempts: int = Field(default=1, ge=0, le=3)
     code_review_policy: str = Field(default="risk_based", pattern="^(required|risk_based|disabled)$")
     fallback_authorized: bool = False
     fallback_daily_cap_usd: Decimal = Field(default=Decimal("0"), ge=0, max_digits=8, decimal_places=2)

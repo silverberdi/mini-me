@@ -154,7 +154,7 @@ def test_project_execution_policy_is_finite_and_paid_fallback_is_explicit():
     defaults = ProjectExecutionPolicy()
     assert defaults.fallback_authorized is False
     assert defaults.max_review_rounds == 2
-    assert defaults.max_correction_attempts == 2
+    assert defaults.max_correction_attempts == 1
     with pytest.raises(ValidationError, match="positive finite daily and monthly caps"):
         ProjectExecutionPolicy(fallback_authorized=True)
     with pytest.raises(ValidationError):
@@ -236,6 +236,84 @@ def test_project_credentials_are_kept_out_of_project_configuration(in_memory_uow
     assert stat.S_IMODE(credential_path.stat().st_mode) == 0o600
     assert "private_key" not in str(project.model_dump(mode="json"))
     assert ref not in credentials["private_key"]
+
+
+def test_project_credential_is_retained_when_database_commit_outcome_is_unknown(
+    in_memory_uow, tmp_path, monkeypatch
+):
+    from minime.services.project_credential_store import ProjectCredentialStore
+
+    credentials = {
+        "app_id": "uncertain-app",
+        "installation_id": "uncertain-installation",
+        "private_key": "-----BEGIN PRIVATE KEY-----\nuncertain\n-----END PRIVATE KEY-----",
+    }
+    connections = {
+        "tickets": {
+            "provider_id": "github",
+            "repository_url": "https://github.com/example/demo",
+            "auth_mode": "project_app",
+        },
+        "git_pr": {
+            "provider_id": "github",
+            "repository_url": "https://github.com/example/demo",
+            "auth_mode": "project_app",
+        },
+    }
+    store = ProjectCredentialStore(tmp_path / "secrets")
+
+    def uncertain_commit():
+        raise RuntimeError("commit outcome unknown")
+
+    monkeypatch.setattr(in_memory_uow, "commit", uncertain_commit)
+    with pytest.raises(RuntimeError, match="commit outcome unknown"):
+        ProjectService(in_memory_uow, credential_store=store).create_configured_project(
+            _configuration(provider_connections=connections, github_app_credentials=credentials)
+        )
+
+    saved_project = in_memory_uow.projects.get_by_id("demo")
+    reference = saved_project.provider_connections["git_pr"]["secret_reference"]
+    assert store.load_github_app("demo", reference)["private_key"] == credentials["private_key"]
+
+
+def test_project_credential_rotation_stores_new_reference_before_database_write(
+    in_memory_uow, tmp_path, monkeypatch
+):
+    from minime.services.project_credential_store import ProjectCredentialStore
+
+    store = ProjectCredentialStore(tmp_path / "secrets")
+    service = ProjectService(in_memory_uow, credential_store=store)
+    original = service.create_configured_project(_configuration())
+    new_connections = {
+        "tickets": {
+            "provider_id": "github",
+            "repository_url": "https://github.com/example/demo",
+            "auth_mode": "environment_app",
+        },
+        "git_pr": {
+            "provider_id": "github",
+            "repository_url": "https://github.com/example/demo",
+            "auth_mode": "project_app",
+        },
+    }
+    credentials = {
+        "app_id": "rotate-app",
+        "installation_id": "rotate-installation",
+        "private_key": "-----BEGIN PRIVATE KEY-----\nrotated\n-----END PRIVATE KEY-----",
+    }
+    updated = service.update_configuration(
+        original.project_id,
+        ProjectConfigurationPatch(
+            provider_connections=new_connections,
+            github_app_credentials=credentials,
+        ),
+    )
+
+    ref = updated.provider_connections["git_pr"]["secret_reference"]
+    assert store.load_github_app(original.project_id, ref)["private_key"] == credentials[
+        "private_key"
+    ]
+    assert updated.provider_connections["tickets"]["auth_mode"] == "environment_app"
 
 
 def test_project_github_app_adapters_keep_credentials_and_token_caches_isolated(tmp_path):
@@ -332,6 +410,23 @@ def test_public_project_payload_hides_host_reference_without_mutating_durable_pr
         .provider_connections["git_pr"]["secret_reference"]
         == "host-only-reference"
     )
+
+
+def test_public_onboarding_state_allows_only_known_checkpoint_fields(in_memory_uow):
+    project = ProjectService(in_memory_uow).create_configured_project(_configuration())
+    project.onboarding_checkpoint = {
+        "source_zip_sha256": "a" * 64,
+        "pull_request_number": 9,
+        "server_private_path": "/secret/server/path",
+        "private_key": "should-not-escape",
+    }
+    state = ProjectService.public_onboarding_state(project)
+
+    assert state["checkpoint"] == {
+        "source_zip_sha256": "a" * 64,
+        "pull_request_number": 9,
+    }
+    assert "should-not-escape" not in str(state)
 
 
 def test_project_update_preserves_identity_and_can_change_settings(in_memory_uow):
@@ -461,6 +556,44 @@ def test_project_cli_update_uses_shared_configuration_service(in_memory_uow, tmp
     assert in_memory_uow.projects.get_by_id("demo").display_name == "Updated from CLI"
 
 
+def test_project_cli_prompts_for_credentials_without_echoing_them(
+    in_memory_uow, tmp_path, monkeypatch
+):
+    import json
+    from contextlib import contextmanager
+
+    from typer.testing import CliRunner
+
+    from minime.cli import main as cli
+
+    ProjectService(in_memory_uow).create_configured_project(_configuration())
+
+    @contextmanager
+    def session():
+        yield in_memory_uow
+
+    monkeypatch.setattr(cli.db_manager, "session", session)
+    monkeypatch.setattr(cli, "PostgresPersistenceUnitOfWork", lambda value: value)
+    monkeypatch.setenv("MINIME_PROJECT_SECRET_ROOT", str(tmp_path / "secrets"))
+    patch_path = tmp_path / "patch.json"
+    connections = _configuration().provider_connections
+    connections["git_pr"].auth_mode = "project_app"
+    patch_path.write_text(
+        json.dumps({"provider_connections": {key: value.model_dump() for key, value in connections.items()}}),
+        encoding="utf-8",
+    )
+    private_key = "-----BEGIN PRIVATE KEY-----\ncli-secret\n-----END PRIVATE KEY-----"
+    result = CliRunner().invoke(
+        cli.app,
+        ["project", "update", "demo", str(patch_path)],
+        input=f"cli-app\ncli-installation\n{private_key}\n",
+    )
+
+    assert result.exit_code == 0, result.output
+    assert private_key not in result.output
+    assert "cli-secret" not in result.output
+
+
 def test_project_patch_rejects_identity_fields():
     with pytest.raises(ValidationError, match="Extra inputs are not permitted"):
         ProjectConfigurationPatch.model_validate({"repository": "attacker/other"})
@@ -521,6 +654,7 @@ def test_project_query_aliases_require_authenticated_operator(in_memory_uow):
         listed = client.get("/projects")
         retrieved = client.get("/projects/not-a-real-project")
         context = client.get("/api/v1/projects/not-a-real-project/context")
+        onboarding = client.get("/api/v1/projects/not-a-real-project/onboarding")
         verify_connections = client.post(
             "/api/v1/projects/not-a-real-project/connections/verify"
         )
@@ -530,6 +664,7 @@ def test_project_query_aliases_require_authenticated_operator(in_memory_uow):
     assert listed.status_code == 401
     assert retrieved.status_code == 401
     assert context.status_code == 401
+    assert onboarding.status_code == 401
     assert verify_connections.status_code == 401
 
 

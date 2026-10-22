@@ -91,3 +91,15 @@ def test_rejects_late_secret_before_writing_any_archive_entries(tmp_path):
         ContextArchiveExtractor().extract(package, target)
 
     assert list(target.iterdir()) == []
+
+
+def test_rejects_preexisting_world_readable_extraction_root(tmp_path):
+    package = _zip([("context.md", b"private context", stat.S_IFREG | 0o600)])
+    target = tmp_path / "shared"
+    target.mkdir(mode=0o755)
+    target.chmod(0o755)
+
+    with pytest.raises(UnsafeContextArchive, match="owned and private"):
+        ContextArchiveExtractor().extract(package, target)
+
+    assert list(target.iterdir()) == []

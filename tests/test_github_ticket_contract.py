@@ -1,4 +1,5 @@
 import json
+import subprocess
 from datetime import UTC, datetime, timedelta
 
 import httpx
@@ -96,3 +97,42 @@ def test_project_connection_permission_check_fails_closed_when_grants_missing():
 
     assert result.outcome == ExternalOutcome.FAILURE
     assert "contents, pull_requests" in result.error_message
+
+
+def test_git_push_error_redacts_project_installation_token(tmp_path, monkeypatch):
+    repository = tmp_path / "repo"
+    repository.mkdir()
+    subprocess.run(["git", "init", "-b", "main"], cwd=repository, check=True, capture_output=True)
+    subprocess.run(["git", "config", "user.name", "Test"], cwd=repository, check=True)
+    subprocess.run(["git", "config", "user.email", "test@example.invalid"], cwd=repository, check=True)
+    (repository / "README.md").write_text("safe", encoding="utf-8")
+    subprocess.run(["git", "add", "README.md"], cwd=repository, check=True)
+    subprocess.run(["git", "commit", "-m", "test"], cwd=repository, check=True, capture_output=True)
+    sha = subprocess.run(
+        ["git", "rev-parse", "HEAD"], cwd=repository, check=True, capture_output=True, text=True
+    ).stdout.strip()
+    subprocess.run(
+        ["git", "remote", "add", "origin", "https://github.com/owner/repo.git"],
+        cwd=repository,
+        check=True,
+    )
+    adapter = GitHubAdapter(auth=_StaticAuth(lambda _: httpx.Response(200)))
+    adapter.auth.get_installation_token = lambda: "raw-test-access-token"
+    original_run_git = adapter._run_git
+
+    def fake_run_git(args, **kwargs):
+        if "push" in args:
+            return subprocess.CompletedProcess(
+                args,
+                1,
+                "",
+                "remote rejected token raw-test-access-token (HTTP 403)",
+            )
+        return original_run_git(args, **kwargs)
+
+    monkeypatch.setattr(adapter, "_run_git", fake_run_git)
+    result = adapter.push_branch(str(repository), "origin", "candidate", sha)
+
+    assert result.outcome == ExternalOutcome.FAILURE
+    assert "raw-test-access-token" not in (result.error_message or "")
+    assert "raw-test-access-token" not in (result.provider_detail or "")

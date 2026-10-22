@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import io
+import os
 import stat
 import zipfile
 from dataclasses import dataclass
@@ -49,6 +50,16 @@ class ContextArchiveExtractor:
         if requested_root.is_symlink():
             raise UnsafeContextArchive("Context extraction root must not be a symlink")
         requested_root.mkdir(mode=0o700, parents=True, exist_ok=True)
+        try:
+            root_stat = requested_root.lstat()
+        except OSError:
+            raise UnsafeContextArchive("Context extraction root could not be inspected") from None
+        if (
+            not stat.S_ISDIR(root_stat.st_mode)
+            or stat.S_IMODE(root_stat.st_mode) & 0o077
+            or root_stat.st_uid != os.geteuid()
+        ):
+            raise UnsafeContextArchive("Context extraction root must be owned and private to the service")
         root = requested_root.resolve()
         if not root.is_dir():
             raise UnsafeContextArchive("Context extraction root is not a safe directory")
