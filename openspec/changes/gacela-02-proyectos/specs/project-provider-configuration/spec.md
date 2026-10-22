@@ -30,22 +30,26 @@ Each project SHALL configure a ticket-source provider/connection and a Git/PR pr
 - **THEN** GitHub operations for that project use that shared installation identity only because of the explicit selection
 
 #### Scenario: Use project-owned GitHub App credentials
-- **WHEN** a project selects its own supported GitHub App and supplies project-local App/installation identifiers plus a protected host secret-file reference
-- **THEN** the adapter verifies the App installation and required repository permissions using only that project's credential bundle
+- **WHEN** an authenticated operator creates or edits a project and supplies its supported GitHub App/installation identifiers and private key through the protected API input or hidden CLI prompt
+- **THEN** mini me validates the values, writes the key to host-controlled protected storage outside Git/PostgreSQL, stores only a project-scoped opaque reference and non-secret identifiers, and verifies the App installation and repository permissions using only that project's credential bundle
 
 #### Scenario: Fail closed on invalid credentials or insufficient permissions
 - **WHEN** the selected App/key/repository identity is invalid, unobservable, or lacks a required read/write/branch/push/PR permission
 - **THEN** the connection is reported blocked with an actionable reason, no substitute credential is tried, and no protected mutation is attempted
 
 ### Requirement: Credential values remain outside project persistence and external output
-Project configuration SHALL persist only authentication mode, non-secret identifiers, and a validated host-managed reference. Private-key bytes and installation tokens SHALL remain outside PostgreSQL, Git, ZIP content, agent input, API/CLI output, PRs, and logs. A project-owned secret reference SHALL resolve only within the configured host secret root and SHALL reject symlinks, traversal, and insecure file permissions.
+Authenticated project create/edit SHALL accept project-owned GitHub App credentials without requiring the operator to place a file on the server. The service SHALL write private-key bytes to host-controlled storage outside Git and PostgreSQL, using a server-generated opaque project-scoped reference, restrictive permissions, and atomic replacement; the project SHALL persist only authentication mode, non-secret identifiers, and that reference. Private-key bytes and installation tokens SHALL remain outside PostgreSQL, Git, ZIP content, agent input, API/CLI output, PRs, and logs. Client input SHALL NOT select a filesystem path; the stored reference SHALL resolve only within the configured host secret root and SHALL reject symlinks, traversal, and insecure file permissions. The existing GitHub App method and explicit shared `.env` choice remain supported; PAT and a universal vault are out of scope.
+
+#### Scenario: Update credentials without losing the working credential
+- **WHEN** an authorized operator replaces a project's GitHub App key and the new value fails validation or secure storage
+- **THEN** the prior credential reference remains active, the new key is not exposed, and no repository mutation is attempted
 
 #### Scenario: Credentials never appear in serialized surfaces
 - **WHEN** a project is read, an error is logged, or an agent dispatch is prepared
 - **THEN** secret bytes/tokens and sensitive credential contents are absent while authentication mode and a non-sensitive validation status remain observable
 
 #### Scenario: Secret path escapes configured root
-- **WHEN** a project-owned credential reference resolves outside the trusted secret root or through a symlink
+- **WHEN** a stored project-scoped credential reference resolves outside the trusted secret root or through a symlink
 - **THEN** validation fails before reading the key or invoking GitHub
 
 ### Requirement: Remote ticket source is authoritative without local ticket duplication

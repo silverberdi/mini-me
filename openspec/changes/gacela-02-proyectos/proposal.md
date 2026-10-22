@@ -4,7 +4,7 @@ mini me conserva un registro de proyectos y una ruta de onboarding heredada, per
 
 ## What Changes
 
-- Unificar alta, consulta, edición y ciclo de vida de proyectos en una sola semántica API/CLI; exigir tipo, repositorio, rama y configuraciones válidas, y exigir ZIP válido antes de persistir un GREENFIELD.
+- Unificar alta, consulta, edición y ciclo de vida de proyectos en una sola semántica API/CLI; exigir tipo, repositorio y configuraciones válidas, usar `main` si se omite la rama principal, y exigir ZIP válido antes de persistir un GREENFIELD.
 - Separar catálogos de capacidades/metadatos de proveedores y agentes de las conexiones, referencias a credenciales y perfiles que pertenecen a cada proyecto. Implementar GitHub Issues y GitHub Git/PR como responsabilidades separadas; otros proveedores no serán seleccionables ni simulados.
 - Configurar los cuatro roles por proyecto con capacidades, modelos, esfuerzos, workflows y skills descubiertos/verificados; mantener independencia del revisor, gasto autorizado y límites finitos. F2 usará el agente de pensamiento real durante el onboarding.
 - Preparar un GREENFIELD en workspace administrado y rama aislada: instalar/verificar OpenSpec oficial y las integraciones nativas requeridas, organizar fielmente el ZIP con el agente de pensamiento, enlazar contexto canónico y publicar el primer PR. El proyecto solo queda preparado después de confirmar el merge.
@@ -20,6 +20,7 @@ mini me conserva un registro de proyectos y una ruta de onboarding heredada, per
 - `greenfield-project-bootstrap`: creación GREENFIELD segura desde ZIP hasta primer PR y preparación solo tras merge.
 - `project-context-ingestion`: recepción, extracción segura y organización fiel del contexto por agente real.
 - `incremental-project-context`: ampliaciones de contexto versionadas en ramas/PR separadas.
+- `project-onboarding-continuity`: identidad durable, checkpoints e idempotencia de onboarding y recuperación ante efectos externos inciertos.
 
 ### Modified Capabilities
 - `project-registry`: reemplazar el registro heredado por tipo explícito, configuración completa, ciclo de vida veraz y reglas para GREENFIELD/BROWNFIELD.

@@ -19,7 +19,11 @@ For a valid Greenfield onboarding, mini me SHALL invoke the configured, budget-a
 
 #### Scenario: Representative context package is organized
 - **WHEN** the selected thinking CLI processes a ZIP containing product facts, constraints, a diagram, references, and a stated contradiction
-- **THEN** committed context records source paths/provenance, organizes supported categories, links the canonical context, and flags the contradiction without adding unsupported product claims
+- **THEN** committed context records source paths/provenance, organizes supported categories, links the canonical context, preserves the approved decision unless an explicit replacement was supplied, and flags the contradiction with both source references without adding unsupported product claims
+
+#### Scenario: Documentary contradiction remains reviewable
+- **WHEN** a valid package introduces a contradiction with an approved decision but does not declare an explicit replacement
+- **THEN** the new document and contradiction record are included in the candidate PR for human review; the contradiction alone does not block publication or change effective context before merge
 
 #### Scenario: Agent cannot prove source fidelity
 - **WHEN** the agent's result omits, materially alters, duplicates without reason, or cannot trace substantive supplied information

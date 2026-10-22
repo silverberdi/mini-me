@@ -1,11 +1,15 @@
 ## MODIFIED Requirements
 
 ### Requirement: Required project policy
-Project registration SHALL capture project type, immutable canonical repository identity, configured main branch, separate provider connections, four compatible agent-role profiles, applicable finite execution policy, and truthful onboarding/lifecycle status. A Greenfield project SHALL also provide a valid context ZIP before any project row is committed. A Brownfield project is configuration-only and SHALL NOT be reported prepared.
+Project registration SHALL capture project type, immutable canonical repository identity, main branch (defaulting to `main` when omitted), separate provider connections, four compatible agent-role profiles, applicable finite execution policy, and truthful onboarding/lifecycle status. A Greenfield project SHALL also provide a valid context ZIP before any project row is committed. A Brownfield project is configuration-only and SHALL NOT be reported prepared.
 
 #### Scenario: Required project configuration is incomplete
-- **WHEN** a registration request omits type, repository, branch, provider connection, or a required compatible role profile
+- **WHEN** a registration request omits type, repository, provider connection, or a required compatible role profile, or supplies an invalid branch name
 - **THEN** validation rejects it structurally and the project is not executable or prepared
+
+#### Scenario: Default the main branch when omitted
+- **WHEN** an authenticated registration request omits the optional main-branch name
+- **THEN** mini me uses `main` and continues normal repository identity and branch-existence validation
 
 #### Scenario: Required project policy is incomplete
 - **GIVEN** a project registration request missing a required configuration field
@@ -28,10 +32,10 @@ Project registration SHALL capture project type, immutable canonical repository 
 ## ADDED Requirements
 
 ### Requirement: Project type, repository configuration, and lifecycle
-Every project SHALL have an immutable project id and canonical repository identity, an explicit `GREENFIELD` or `BROWNFIELD` type, and an operator-configured main branch (defaulting to `main`). The project SHALL expose truthful onboarding status separately from active/paused lifecycle status. A Brownfield project SHALL remain merely configured until a separately authorized phase defines its adaptation; pausing SHALL prevent new work, and activation SHALL NOT start F3 ticket processing or a scheduler.
+Every project SHALL have an immutable project id and canonical repository identity, an explicit `GREENFIELD` or `BROWNFIELD` type, and a main branch explicitly provided by the operator or defaulted to `main` when omitted. The project SHALL expose truthful onboarding status separately from active/paused lifecycle status. A Brownfield project SHALL remain merely configured until a separately authorized phase defines its adaptation; pausing SHALL prevent new work, and activation SHALL NOT start F3 ticket processing or a scheduler.
 
 #### Scenario: Register a Greenfield project with a valid context package
-- **WHEN** an authenticated operator submits a valid project type, project id, repository URL, branch, provider/agent configurations, permissions, and ZIP package
+- **WHEN** an authenticated operator submits a valid project type, project id, repository URL, optional branch, provider/agent configurations, permissions, and ZIP package
 - **THEN** mini me validates them before persisting one project and begins the durable onboarding operation without changing the main branch
 
 #### Scenario: Reject Greenfield creation without a valid ZIP

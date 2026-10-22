@@ -4,7 +4,7 @@ Prepare a new Greenfield repository from supplied context through official OpenS
 ## ADDED Requirements
 
 ### Requirement: Validate repository, access, branch, workspace, and selected capabilities before mutation
-Before creating a bootstrap branch or invoking an agent, mini me SHALL verify the authenticated operator, repository URL/identity, selected base branch, configured GitHub connection and required permissions, project/workspace binding, ZIP validity, budget authorization, selected thinking-agent file-edit capability, Node/OpenSpec prerequisites, and required native workflows. Validation failure SHALL preserve main and avoid protected side effects.
+Before creating a bootstrap branch or invoking an agent, mini me SHALL verify the authenticated operator, repository URL/identity, selected base branch (defaulting to `main` when omitted), configured GitHub connection and required permissions, project/workspace binding, ZIP validity, budget authorization, selected thinking-agent file-edit capability, Node/OpenSpec prerequisites, and the complete official OpenSpec integration available and compatible with the verified CLI version for every selected agent. Validation failure SHALL preserve main and avoid protected side effects.
 
 #### Scenario: Existing main branch is used
 - **WHEN** the requested main branch exists and repository identity/permissions are verified
@@ -23,15 +23,15 @@ Before creating a bootstrap branch or invoking an agent, mini me SHALL verify th
 - **THEN** onboarding blocks before bootstrap mutation or paid agent dispatch and reports the exact missing capability
 
 ### Requirement: Install and configure official OpenSpec integrations in the isolated workspace
-The bootstrap SHALL use the official OpenSpec CLI and its supported initialization/configuration/profile operations, verify its version/dependencies, and ensure the selected agents' required native workflows/skills—including Verify when required—are actually available in the repository/runtime. It SHALL NOT install only an insufficient basic profile, create workflow wrappers that emulate OpenSpec, or overwrite compatible existing instructions.
+The bootstrap SHALL verify the actual official OpenSpec CLI version and its available capabilities, install/check dependencies, and use only the setup/configuration operations supported by that version. For every selected agent it SHALL install/configure the complete set of official commands, skills, and workflows available and compatible with that version, including extended operations such as Verify, Sync, and Archive when offered—not merely the subset immediately used by the selected profiles. It SHALL verify real installed capabilities rather than assume historical names or options. It SHALL NOT create wrappers that emulate OpenSpec or overwrite compatible existing instructions.
 
 #### Scenario: Complete official installation is available
-- **WHEN** the isolated workspace has the official CLI, prerequisites, project configuration, and all selected-agent workflows required by configured profiles
+- **WHEN** the isolated workspace has the verified official CLI version and dependencies plus the complete available compatible official integration set for every selected agent
 - **THEN** OpenSpec's own status/instructions/validation confirm the installation before context changes are committed
 
-#### Scenario: Basic profile omits required operation
-- **WHEN** official setup exposes only a basic subset and a selected role requires a missing native operation such as Verify
-- **THEN** setup installs/configures the official supported integration or blocks; it does not report the profile ready
+#### Scenario: Official integration is incomplete
+- **WHEN** the version-compatible official command/skill/workflow set for a selected agent is missing an available operation or required dependency
+- **THEN** setup installs/configures it through supported official mechanisms or blocks; it does not report the integration complete or emulate the missing operation
 
 ### Requirement: Publish the first bootstrap change only on a protected branch and PR
 All bootstrap file/Git writes SHALL occur on an independent branch rooted at the verified base; the default/main branch SHALL remain unchanged. After validation, mini me SHALL commit, push, and create one queryable first PR with exact base/head identities. Human review/approval/merge SHALL be the first human intervention expected in a valid onboarding flow; mini me SHALL NOT merge it.

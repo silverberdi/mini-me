@@ -4,7 +4,7 @@ Allow a prepared project to add documentary context by an auditable new PR while
 ## ADDED Requirements
 
 ### Requirement: Incremental context update preserves approved context and provenance
-An incremental ZIP SHALL be accepted only for an existing prepared project and SHALL be processed by its configured thinking agent against the currently approved main context. The update SHALL preserve source provenance and prior decisions, distinguish additions from explicitly requested replacements, identify duplicates and unresolved contradictions, and SHALL NOT behave as reset/reinitialization or invent product content.
+An incremental ZIP SHALL be accepted only for an existing prepared project and SHALL be processed by its configured thinking agent against the currently approved main context. The update SHALL preserve source provenance and prior decisions, distinguish additions from explicitly requested replacements, identify duplicates and unresolved contradictions, and SHALL NOT behave as reset/reinitialization or invent product content. A contradiction without an explicit replacement SHALL preserve the approved decision as authoritative, retain and classify the new source, record both source references and the contradiction, and include it in the review PR. A documentary contradiction alone SHALL NOT block PR creation; only a real safety, permission, integrity/fidelity, or publication failure may block it.
 
 #### Scenario: Add a complementary context package
 - **WHEN** an operator submits a valid new ZIP for a prepared project
@@ -12,7 +12,7 @@ An incremental ZIP SHALL be accepted only for an existing prepared project and S
 
 #### Scenario: Existing information is contradicted without explicit replacement
 - **WHEN** new source material conflicts with an approved decision and no explicit replacement is supplied
-- **THEN** the contradiction is identified in the candidate PR and the earlier approved context remains authoritative
+- **THEN** the earlier approved decision remains authoritative, the new document is retained and classified, both sources and the contradiction are recorded in the candidate PR, and the contradiction alone does not prevent creating that PR
 
 #### Scenario: Explicit replacement is supplied
 - **WHEN** the operator clearly marks a source/decision as replaced

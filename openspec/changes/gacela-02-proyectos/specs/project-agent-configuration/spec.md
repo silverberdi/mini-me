@@ -4,7 +4,7 @@ Let operators choose only verifiable agent capabilities and persist independent,
 ## ADDED Requirements
 
 ### Requirement: Agent catalog reflects executable installed capabilities
-The agent catalog SHALL derive availability from configured adapters/CLIs and verifiable installed capabilities, including invocation transport, file-edit/read-only ability, compatible roles, discoverable model/effort choices, and installed native OpenSpec skills/workflows. User input SHALL NOT be treated as an arbitrary agent, model, effort, command, workflow, or skill identifier.
+The agent catalog SHALL derive availability from configured adapters/CLIs and verifiable installed capabilities, including invocation transport, file-edit/read-only ability, compatible roles, discoverable model/effort choices, and the complete set of official OpenSpec skills/workflows available and compatible with the verified OpenSpec version. User input SHALL NOT be treated as an arbitrary agent, model, effort, command, workflow, or skill identifier.
 
 #### Scenario: Discover a usable native coding agent
 - **WHEN** an operator queries the catalog in a workspace with a configured agent CLI and installed native OpenSpec workflows
@@ -38,7 +38,7 @@ Each project SHALL configure `thinking`, `execution`, `independent_review`, and 
 - **THEN** no fallback invocation or provider charge occurs
 
 ### Requirement: Resolve each native OpenSpec workflow according to the selected agent
-Workflow resolution SHALL inspect the selected agent's installed official skill/workflow and CLI capability; provider-specific syntax and transport SHALL remain distinct. mini me SHALL NOT generate OpenSpec artifacts or emulate propose/apply/verify/sync/archive. F2 SHALL validate profiles for future compatible stages but SHALL NOT run the F3 ticket lifecycle.
+Workflow resolution SHALL inspect the verified OpenSpec version and the selected agent's complete installed compatible official skill/workflow set and CLI capability; provider-specific syntax and transport SHALL remain distinct. The selected role profile controls which verified operation is dispatched, not which official integrations are installed. mini me SHALL NOT generate OpenSpec artifacts or emulate propose/apply/verify/sync/archive. F2 SHALL validate profiles for future compatible stages but SHALL NOT run the F3 ticket lifecycle.
 
 #### Scenario: Codex and Antigravity use their installed native commands
 - **WHEN** configured agents expose different native OpenSpec invocation forms (for example Codex skill `$openspec-propose` and Antigravity `/opsx-propose`)
