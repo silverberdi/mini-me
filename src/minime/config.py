@@ -264,7 +264,6 @@ class GitHubConfig(BaseModel):
     app_id_env: str = "MINIME_GITHUB_APP_ID"
     installation_id_env: str = "MINIME_GITHUB_INSTALLATION_ID"
     private_key_path_env: str = "MINIME_GITHUB_PRIVATE_KEY_PATH"
-    global_project_number: int | None = None
 
 
 class SecurityConfig(BaseModel):

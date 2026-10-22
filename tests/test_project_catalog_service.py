@@ -139,3 +139,4 @@ def test_provider_catalog_separates_metadata_from_connections():
     assert all(field.get("write_only") for field in github["fields"] if field["name"] in {"app_id", "installation_id", "private_key"})
     assert ado["available"] is False
     assert not any("repository_url" in item for item in catalog)
+    assert not hasattr(_config().github, "global_project_number")
