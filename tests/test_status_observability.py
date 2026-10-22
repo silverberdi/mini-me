@@ -8,7 +8,7 @@ from fastapi.testclient import TestClient
 from typer.testing import CliRunner
 
 from conftest import create_isolated_openspec_change
-from minime.api.app import app, get_uow
+from minime.api.app import app, get_current_operator, get_uow
 from minime.cli.main import app as cli_app
 from minime.domain.enums import (
     AuditRiskLevel,
@@ -186,6 +186,7 @@ def test_fastapi_endpoints(in_memory_uow, tmp_path):
 
     # Override get_uow dependency with in_memory_uow
     app.dependency_overrides[get_uow] = lambda: in_memory_uow
+    app.dependency_overrides[get_current_operator] = lambda: object()
     client = TestClient(app)
 
     # Health

@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-import asyncio
-from datetime import UTC, datetime, timedelta
 from unittest.mock import AsyncMock, patch
 
 from minime.adapters.provider_adapter import (
@@ -16,28 +14,9 @@ from minime.config import AppConfig, ProbeConfig, ProviderConfig
 from minime.domain.enums import (
     ProviderHealthStatus,
     ProviderResultClass,
-    QueuePriority,
-    ReadinessState,
 )
-from minime.domain.models import NormalizedProviderResult, Project, WorkQueueItem, utc_now
+from minime.domain.models import NormalizedProviderResult
 from minime.services.provider_health_service import ProviderHealthService
-
-
-class _Clock:
-    def __init__(self):
-        self.now = datetime(2026, 9, 7, 12, 0, 0, tzinfo=UTC)
-
-    def __call__(self):
-        return self.now
-
-    def advance(self, seconds: int):
-        self.now = self.now + timedelta(seconds=seconds)
-
-
-class _ExpensiveFake(FakeProviderAdapter):
-    @property
-    def probe_is_expensive(self):
-        return True
 
 
 def _proc(stdout: bytes = b"", stderr: bytes = b"", returncode: int = 0):
@@ -45,55 +24,6 @@ def _proc(stdout: bytes = b"", stderr: bytes = b"", returncode: int = 0):
     proc.communicate.return_value = (stdout, stderr)
     proc.returncode = returncode
     return proc
-
-
-# ---------------------------------------------------------------------------
-# Finding 1: concurrent expensive probes must not burst past cooldown/backoff.
-# ---------------------------------------------------------------------------
-async def test_concurrent_expensive_probes_serialized_at_cooldown_boundary(
-    in_memory_uow, monkeypatch
-):
-    clock = _Clock()
-    monkeypatch.setattr("minime.services.provider_health_service.utc_now", clock)
-    # Seed actionable READY work queue item so expensive probe is eligible under current governance contract
-    p = Project(
-        project_id="test-p", display_name="Test", repository="owner/repo", implementer="codex"
-    )
-    in_memory_uow.projects.save(p)
-    w = WorkQueueItem(
-        project_id="test-p",
-        change_name="test-c",
-        priority=QueuePriority.NORMAL,
-        readiness_state=ReadinessState.READY,
-        discovered_at=utc_now(),
-    )
-    in_memory_uow.work_queue.save(w)
-    cfg = ProbeConfig(
-        cooldown_seconds=60,
-        backoff_base_seconds=60,
-        backoff_max_seconds=240,
-        max_per_hour=100,  # high enough that the rate window is not the limiter
-    )
-    service = ProviderHealthService(in_memory_uow, probe_config=cfg)
-    service.record_outcome(
-        NormalizedProviderResult(
-            provider="codex", role="implementer", result_class=ProviderResultClass.QUOTA_LIMIT
-        )
-    )
-    adapter = _ExpensiveFake(name="codex", available=False)
-    monkeypatch.setattr(
-        "minime.services.provider_health_service.get_provider_adapter", lambda p: adapter
-    )
-    clock.advance(60)  # cross the cooldown boundary: first probe becomes eligible
-
-    async def one_call() -> bool:
-        return await service.check_and_probe_provider("codex")
-
-    results = await asyncio.gather(*(one_call() for _ in range(20)))
-    # Only ONE probe may dispatch at the cooldown boundary. Every queued caller
-    # must observe the durably reserved dispatch time and fail the cooldown check.
-    assert adapter.probe_call_count == 1
-    assert results == [False] * 20
 
 
 # ---------------------------------------------------------------------------

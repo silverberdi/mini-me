@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from abc import ABC, abstractmethod
 from datetime import datetime
-from typing import Any
+from typing import Any, Protocol, runtime_checkable
 
 from minime.domain.enums import (
     ExternalActionStatus,
@@ -883,6 +883,67 @@ class OpenSpecAdapterInterface(ABC):
     def evaluate_artifacts(
         self, project: Project, change_name: str, project_root: str
     ) -> dict[str, Any]: ...
+
+
+@runtime_checkable
+class TicketSourceAdapter(Protocol):
+    """Narrow remote-ticket contract, independent of Git and pull requests."""
+
+    def list_issues(
+        self, repository: str, state: str = "open", limit: int = 50
+    ) -> ExternalActionResult[list[dict[str, Any]]]: ...
+
+    def get_issue(self, repository: str, issue_number: int) -> ExternalActionResult[dict[str, Any]]: ...
+
+    def create_issue(
+        self,
+        repository: str,
+        title: str,
+        body: str,
+        labels: list[str] | None = None,
+        operation_key: str | None = None,
+    ) -> ExternalActionResult[dict[str, Any]]: ...
+
+    def comment_issue(
+        self, repository: str, issue_number: int, body: str, operation_key: str
+    ) -> ExternalActionResult[dict[str, Any]]: ...
+
+    def close_issue(
+        self, repository: str, issue_number: int, comment: str | None = None
+    ) -> ExternalActionResult[bool]: ...
+
+
+@runtime_checkable
+class GitPullRequestAdapter(Protocol):
+    """Narrow repository/branch/PR contract, independent of ticket lifecycle."""
+
+    def verify_repository(self, repository: str) -> ExternalActionResult[bool]: ...
+
+    def get_remote_branch_head(
+        self, repository: str, branch: str, remote: str = "origin"
+    ) -> ExternalActionResult[str]: ...
+
+    def push_branch(
+        self, worktree_path: str, remote: str, branch: str, candidate_sha: str
+    ) -> ExternalActionResult[str]: ...
+
+    def get_pull_request(
+        self, repository: str, branch: str, base: str = "main"
+    ) -> ExternalActionResult[dict[str, Any]]: ...
+
+    def create_pull_request(
+        self,
+        repository: str,
+        branch: str,
+        base: str,
+        title: str,
+        body: str,
+        head_sha: str,
+    ) -> ExternalActionResult[dict[str, Any]]: ...
+
+    def get_pull_request_details(
+        self, repository: str, pr_number: int
+    ) -> ExternalActionResult[dict[str, Any]]: ...
 
 
 class GitHubAdapterInterface(ABC):

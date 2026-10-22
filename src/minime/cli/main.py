@@ -82,7 +82,13 @@ def list_projects(json_output: bool = typer.Option(False, "--json")) -> None:
         typer.echo(f"project listing unavailable: {exc}", err=True)
         raise typer.Exit(code=1) from exc
     if json_output:
-        typer.echo(json.dumps([project.model_dump() for project in projects], indent=2, default=str))
+        typer.echo(
+            json.dumps(
+                [ProjectService.public_project_payload(project) for project in projects],
+                indent=2,
+                default=str,
+            )
+        )
         return
     for project in projects:
         typer.echo(f"{project.project_id} {project.repository} [{project.status.value}]")
@@ -130,7 +136,7 @@ def show_project(project_id: str = typer.Argument(...), json_output: bool = type
         typer.echo(f"project not found: {project_id}", err=True)
         raise typer.Exit(code=1)
     if json_output:
-        typer.echo(project.model_dump_json(indent=2))
+        typer.echo(json.dumps(ProjectService.public_project_payload(project), indent=2, default=str))
     else:
         typer.echo(
             f"{project.project_id} {project.repository} "

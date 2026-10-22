@@ -66,11 +66,83 @@ class OpenSpecAdapter(OpenSpecAdapterInterface):
         )
         if result.returncode:
             raise RuntimeError("Official OpenSpec initialization failed; workspace remains unprepared")
+        installed = self.inspect_integrations(root, selected)
+        if not installed["complete"]:
+            raise RuntimeError(
+                "Official OpenSpec initialization did not produce the complete compatible "
+                "integration set for the selected agents"
+            )
         return {
             "version": capabilities["version"],
             "agents": selected,
+            "integrations": installed["integrations"],
             "stdout": result.stdout,
             "stderr": result.stderr,
+        }
+
+    @staticmethod
+    def inspect_integrations(project_root: str | Path, agents: list[str]) -> dict[str, Any]:
+        """Report native OpenSpec artifacts actually installed for selected agents.
+
+        The official initializer is responsible for choosing the complete set for
+        its version. This check verifies the generated files on disk and the
+        lifecycle operations required by this product; it does not generate or
+        emulate any workflow.
+        """
+        root = Path(project_root).resolve()
+        selected = sorted({agent.strip().lower() for agent in agents})
+        aliases = {"agy": "antigravity"}
+        selected = sorted({aliases.get(agent, agent) for agent in selected})
+        if not selected or not set(selected).issubset({"codex", "antigravity"}):
+            raise ValueError("OpenSpec integration inspection supports Codex and Antigravity")
+
+        integrations: dict[str, list[str]] = {}
+        required = {
+            "codex": {
+                "propose",
+                "apply-change",
+                "continue-change",
+                "update-change",
+                "verify-change",
+                "sync-specs",
+                "archive-change",
+            },
+            "antigravity": {
+                "propose",
+                "apply",
+                "continue",
+                "update",
+                "verify",
+                "sync",
+                "archive",
+            },
+        }
+        complete = True
+        for agent in selected:
+            if agent == "codex":
+                files = sorted((root / ".agents/skills").glob("openspec-*/SKILL.md"))
+                names = {
+                    path.parent.name.removeprefix("openspec-")
+                    for path in files
+                    if path.is_file() and not path.is_symlink()
+                }
+            else:
+                files = sorted((root / ".agent/workflows").glob("opsx-*.md"))
+                names = {
+                    path.stem.removeprefix("opsx-")
+                    for path in files
+                    if path.is_file() and not path.is_symlink()
+                }
+            integrations[agent] = sorted(names)
+            complete = complete and required[agent].issubset(names)
+
+        config = root / "openspec/config.yaml"
+        complete = complete and config.is_file() and not config.is_symlink()
+        return {
+            "complete": complete,
+            "integrations": integrations,
+            "required_operations": {agent: sorted(required[agent]) for agent in selected},
+            "config_present": config.is_file() and not config.is_symlink(),
         }
 
     def _run_cli(self, args: list[str], cwd: Path) -> dict[str, Any] | None:

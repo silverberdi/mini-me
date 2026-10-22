@@ -5,33 +5,21 @@ from typer.testing import CliRunner
 
 from minime.api.app import app, get_uow
 from minime.cli.main import app as cli_app
-from minime.domain.enums import JobStatus, ProviderHealthStatus, ProviderResultClass, SchedulerMode
-from minime.domain.models import Job, NormalizedProviderResult, Project, utc_now
+from minime.domain.enums import ProviderHealthStatus, ProviderResultClass
+from minime.domain.models import NormalizedProviderResult
 from minime.services.provider_health_service import ProviderHealthService
 
 runner = CliRunner()
 
 
 def test_scheduler_status_api_endpoint(in_memory_uow):
-    """Verify GET /scheduler/status returns current scheduler status."""
-    project = Project(
-        project_id="mini-me",
-        display_name="mini me",
-        repository="owner/mini-me",
-        implementer="codex",
-        reviewer="antigravity",
-    )
-    in_memory_uow.projects.save(project)
-
+    """F1 scheduler status is explicitly unavailable without activating it."""
     app.dependency_overrides[get_uow] = lambda: in_memory_uow
     client = TestClient(app)
 
     res = client.get("/scheduler/status")
-    assert res.status_code == 200
-    data = res.json()
-    assert data["mode"] == SchedulerMode.RUN.value
-    assert data["admission_allowed"] is True
-    assert data["primary_capacity_available"] is True
+    assert res.status_code == 410
+    assert "operation_unavailable" in res.text
 
 
 def test_providers_health_api_endpoint(in_memory_uow):
@@ -63,30 +51,13 @@ def test_providers_health_api_endpoint(in_memory_uow):
 
 
 def test_get_job_includes_resilience_fields(in_memory_uow):
-    """Verify GET /jobs/{job_id} includes waiting_provider, capacity/recovery reasons and expected_reset_at."""
-    reset_time = utc_now()
-    job = Job(
-        job_id="job-resilience-1",
-        project_id="mini-me",
-        change_name="005-feature",
-        implementer_role="codex",
-        status=JobStatus.WAITING_CAPACITY,
-        waiting_provider="codex",
-        capacity_block_reason="Quota limit exhausted",
-        expected_reset_at=reset_time,
-    )
-    in_memory_uow.jobs.save(job)
-
+    """Retired job routes deny requests rather than exposing legacy queue state."""
     app.dependency_overrides[get_uow] = lambda: in_memory_uow
     client = TestClient(app)
 
-    res = client.get(f"/jobs/{job.job_id}")
-    assert res.status_code == 200
-    data = res.json()
-    assert data["status"] == JobStatus.WAITING_CAPACITY.value
-    assert data["waiting_provider"] == "codex"
-    assert data["capacity_block_reason"] == "Quota limit exhausted"
-    assert data["expected_reset_at"] == reset_time.isoformat()
+    res = client.get("/jobs/legacy-job")
+    assert res.status_code == 410
+    assert "operation_unavailable" in res.text
 
 
 def test_cli_scheduler_and_providers_help():

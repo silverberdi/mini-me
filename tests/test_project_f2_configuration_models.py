@@ -221,6 +221,23 @@ def test_versioned_project_api_requires_authenticated_operator(in_memory_uow):
     assert response.status_code == 401, response.json()
 
 
+def test_project_query_aliases_require_authenticated_operator(in_memory_uow):
+    from fastapi.testclient import TestClient
+
+    from minime.api.app import app, get_uow
+
+    app.dependency_overrides[get_uow] = lambda: in_memory_uow
+    try:
+        client = TestClient(app)
+        listed = client.get("/projects")
+        retrieved = client.get("/projects/not-a-real-project")
+    finally:
+        app.dependency_overrides.clear()
+
+    assert listed.status_code == 401
+    assert retrieved.status_code == 401
+
+
 def test_versioned_project_api_creates_brownfield_configuration(in_memory_uow, monkeypatch):
     from fastapi.testclient import TestClient
 
@@ -268,12 +285,45 @@ def test_authenticated_api_stores_project_key_outside_persistence(in_memory_uow,
 
     assert response.status_code == 201, response.json()
     assert key not in response.text
+    assert response.json()["provider_connections"]["git_pr"]["credential_configured"] is True
+    assert "secret_reference" not in response.json()["provider_connections"]["git_pr"]
     project = in_memory_uow.projects.get_by_id("demo")
     reference = project.provider_connections["git_pr"]["secret_reference"]
     stored_file = tmp_path / "secrets" / "demo" / f"{reference}.json"
     assert stat.S_IMODE(stored_file.stat().st_mode) == 0o600
     assert json.loads(stored_file.read_text())["private_key"] == key
     assert key not in str(project.model_dump(mode="json"))
+
+
+def test_project_api_never_exposes_secret_reference(in_memory_uow, monkeypatch, tmp_path):
+    from fastapi.testclient import TestClient
+
+    from minime.api.app import app, get_current_operator, get_uow
+
+    raw = _configuration().model_dump(mode="json")
+    raw["provider_connections"]["git_pr"]["auth_mode"] = "project_app"
+    raw["github_app_credentials"] = {
+        "app_id": "api-app",
+        "installation_id": "api-install",
+        "private_key": "-----BEGIN PRIVATE KEY-----\nresponse-test\n-----END PRIVATE KEY-----",
+    }
+    monkeypatch.setenv("MINIME_AUTH_ENABLED", "false")
+    monkeypatch.setenv("MINIME_PROJECT_SECRET_ROOT", str(tmp_path / "secrets"))
+    app.dependency_overrides[get_uow] = lambda: in_memory_uow
+    app.dependency_overrides[get_current_operator] = lambda: object()
+    try:
+        client = TestClient(app)
+        created = client.post("/api/v1/projects", json=raw)
+        listed = client.get("/api/v1/projects")
+        retrieved = client.get("/api/v1/projects/demo")
+    finally:
+        app.dependency_overrides.clear()
+
+    assert created.status_code == 201
+    for response in (created, listed, retrieved):
+        assert response.status_code == 200 or response is created
+        assert "secret_reference" not in response.text
+        assert "response-test" not in response.text
 
 
 def test_invalid_api_request_never_echoes_private_key(in_memory_uow, monkeypatch, tmp_path):
@@ -308,21 +358,15 @@ def test_invalid_api_request_never_echoes_private_key(in_memory_uow, monkeypatch
     assert not (tmp_path / "secrets").exists()
 
 
-def test_agent_catalog_reports_installed_native_openspec_integration(in_memory_uow):
+def test_agent_catalog_requires_authentication(in_memory_uow):
     from fastapi.testclient import TestClient
 
-    from minime.api.app import app, get_current_operator, get_uow
+    from minime.api.app import app, get_uow
 
     app.dependency_overrides[get_uow] = lambda: in_memory_uow
-    app.dependency_overrides[get_current_operator] = lambda: object()
     try:
         response = TestClient(app).get("/api/v1/catalogs/agents")
     finally:
         app.dependency_overrides.clear()
 
-    assert response.status_code == 200
-    catalog = response.json()["open_spec_cli"]
-    assert catalog["version"]
-    assert catalog["complete_native_setup_supported"] is True
-    assert len(catalog["integrations"]["codex"]) >= 12
-    assert len(catalog["integrations"]["antigravity"]) >= 12
+    assert response.status_code == 401

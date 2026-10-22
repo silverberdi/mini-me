@@ -580,3 +580,14 @@ class ProjectService:
 
     def list_projects(self) -> list[Project]:
         return self.uow.projects.list_all()
+
+    @staticmethod
+    def public_project_payload(project: Project) -> dict[str, Any]:
+        """Serialize project configuration without host-secret references."""
+        payload = project.model_dump(mode="json")
+        for connection in payload.get("provider_connections", {}).values():
+            if not isinstance(connection, dict):
+                continue
+            credential_configured = bool(connection.pop("secret_reference", None))
+            connection["credential_configured"] = credential_configured
+        return payload

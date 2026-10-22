@@ -1529,6 +1529,147 @@ class GitHubAdapter(GitHubAdapterInterface):
             error_message=f"Failed to get issue #{issue_number} from remote GitHub.",
         )
 
+    def comment_issue(
+        self, repository: str, issue_number: int, body: str, operation_key: str
+    ) -> ExternalActionResult[dict[str, Any]]:
+        """Post one operation-keyed Issue comment, reconciling a prior ambiguous result."""
+        repo = self._repo(repository)
+        if issue_number < 1 or not body.strip():
+            raise ValueError("Issue comment requires a positive Issue number and non-empty body")
+        if not re.fullmatch(r"[A-Za-z0-9._:-]{1,128}", operation_key):
+            raise ValueError("Issue comment requires a safe operation key")
+        marker = f"<!-- minime-operation:{operation_key} -->"
+
+        # GitHub has no idempotency key for Issue comments. A stable body marker
+        # lets retries observe a completed POST before attempting another one.
+        for page in range(1, 21):
+            try:
+                response = self._request(
+                    "GET",
+                    f"/repos/{repo}/issues/{issue_number}/comments",
+                    params={"per_page": 100, "page": page},
+                )
+            except GitHubAuthorizationError as exc:
+                return ExternalActionResult(
+                    outcome=ExternalOutcome.FAILURE,
+                    source_adapter="github_rest",
+                    reason_code=ExternalReasonCode.AUTH_REQUIRED,
+                    retry_safety=RetrySafety.SAFE,
+                    error_message=str(exc),
+                )
+            except GitHubRemoteError:
+                return ExternalActionResult(
+                    outcome=ExternalOutcome.UNKNOWN,
+                    source_adapter="github_rest",
+                    reason_code=ExternalReasonCode.UNOBSERVABLE,
+                    retry_safety=RetrySafety.UNKNOWN,
+                    error_message="Issue comment history is unobservable; POST blocked.",
+                )
+            if response.status_code in (401, 403):
+                return ExternalActionResult(
+                    outcome=ExternalOutcome.FAILURE,
+                    source_adapter="github_rest",
+                    reason_code=ExternalReasonCode.AUTH_REQUIRED,
+                    retry_safety=RetrySafety.SAFE,
+                    provider_detail=f"HTTP {response.status_code}",
+                    error_message="GitHub App is unauthorized to inspect Issue comments.",
+                )
+            if response.status_code != 200:
+                return ExternalActionResult(
+                    outcome=ExternalOutcome.UNKNOWN,
+                    source_adapter="github_rest",
+                    reason_code=ExternalReasonCode.UNOBSERVABLE,
+                    retry_safety=RetrySafety.UNKNOWN,
+                    provider_detail=f"HTTP {response.status_code}",
+                    error_message="Issue comment idempotency could not be verified; POST blocked.",
+                )
+            try:
+                comments = response.json()
+            except ValueError:
+                comments = None
+            if not isinstance(comments, list):
+                return ExternalActionResult(
+                    outcome=ExternalOutcome.UNKNOWN,
+                    source_adapter="github_rest",
+                    reason_code=ExternalReasonCode.MALFORMED_RESPONSE,
+                    retry_safety=RetrySafety.UNKNOWN,
+                    error_message="Issue comment history response was invalid; POST blocked.",
+                )
+            existing = next(
+                (
+                    comment
+                    for comment in comments
+                    if isinstance(comment, dict)
+                    and isinstance(comment.get("body"), str)
+                    and marker in comment["body"]
+                ),
+                None,
+            )
+            if existing:
+                return ExternalActionResult(
+                    outcome=ExternalOutcome.SUCCESS,
+                    source_adapter="github_rest",
+                    reason_code=ExternalReasonCode.REUSED_EXISTING,
+                    retry_safety=RetrySafety.UNSAFE,
+                    data=existing,
+                    external_id=str(existing.get("id", "")) or None,
+                )
+            if len(comments) < 100:
+                break
+        else:
+            return ExternalActionResult(
+                outcome=ExternalOutcome.UNKNOWN,
+                source_adapter="github_rest",
+                reason_code=ExternalReasonCode.UNOBSERVABLE,
+                retry_safety=RetrySafety.UNKNOWN,
+                error_message="Issue comment history exceeds the safe reconciliation limit; POST blocked.",
+            )
+
+        try:
+            response = self._request(
+                "POST",
+                f"/repos/{repo}/issues/{issue_number}/comments",
+                json={"body": f"{body.rstrip()}\n\n{marker}"},
+            )
+        except GitHubAuthorizationError as exc:
+            return ExternalActionResult(
+                outcome=ExternalOutcome.FAILURE,
+                source_adapter="github_rest",
+                reason_code=ExternalReasonCode.AUTH_REQUIRED,
+                retry_safety=RetrySafety.UNSAFE,
+                error_message=str(exc),
+            )
+        except GitHubRemoteError:
+            return ExternalActionResult(
+                outcome=ExternalOutcome.AMBIGUOUS,
+                source_adapter="github_rest",
+                reason_code=ExternalReasonCode.UNOBSERVABLE,
+                retry_safety=RetrySafety.UNKNOWN,
+                error_message="Issue comment POST result is unobservable; retry will reconcile by operation key.",
+            )
+        if response.status_code in (200, 201):
+            try:
+                comment = response.json()
+            except ValueError:
+                comment = None
+            if isinstance(comment, dict) and comment.get("id") is not None:
+                return ExternalActionResult(
+                    outcome=ExternalOutcome.SUCCESS,
+                    source_adapter="github_rest",
+                    reason_code=ExternalReasonCode.EXECUTION_SUCCESS,
+                    retry_safety=RetrySafety.UNSAFE,
+                    data=comment,
+                    external_id=str(comment["id"]),
+                )
+        return ExternalActionResult(
+            outcome=ExternalOutcome.AMBIGUOUS,
+            source_adapter="github_rest",
+            reason_code=ExternalReasonCode.UNOBSERVABLE,
+            retry_safety=RetrySafety.UNKNOWN,
+            provider_detail=f"HTTP {response.status_code}",
+            error_message="Issue comment POST result is unobservable; retry will reconcile by operation key.",
+        )
+
     def close_issue(
         self, repository: str, issue_number: int, comment: str | None = None
     ) -> ExternalActionResult[bool]:

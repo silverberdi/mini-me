@@ -31,8 +31,27 @@ def test_official_init_installs_complete_codex_and_antigravity_integrations(tmp_
     assert {name.removesuffix("-change").removesuffix("-specs") for name in codex_names} == {
         path.stem.removeprefix("opsx-") for path in agy_workflows
     }
+    assert evidence["integrations"]["codex"] == sorted(codex_names)
+    assert evidence["integrations"]["antigravity"] == sorted(
+        path.stem.removeprefix("opsx-") for path in agy_workflows
+    )
+    assert OpenSpecAdapter.inspect_integrations(
+        project, ["codex", "antigravity"]
+    )["complete"] is True
 
 
 def test_official_init_fails_closed_for_unselected_or_unsupported_agents(tmp_path):
     with pytest.raises(ValueError, match="supports only selected"):
         OpenSpecAdapter().install_official_integrations(Path(tmp_path), ["openrouter"])
+
+
+def test_native_integration_inspection_fails_closed_when_extended_lifecycle_is_missing(tmp_path):
+    (tmp_path / ".agents/skills/openspec-propose").mkdir(parents=True)
+    (tmp_path / ".agents/skills/openspec-propose/SKILL.md").write_text("name: openspec-propose")
+    (tmp_path / "openspec").mkdir()
+    (tmp_path / "openspec/config.yaml").write_text("schema: spec-driven\n")
+
+    evidence = OpenSpecAdapter.inspect_integrations(tmp_path, ["codex"])
+
+    assert evidence["complete"] is False
+    assert "verify-change" in evidence["required_operations"]["codex"]

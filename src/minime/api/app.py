@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import logging
 import os
-import shutil
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime
 from pathlib import Path
@@ -22,12 +21,7 @@ from fastapi.responses import (
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
-from minime.adapters.openspec import OpenSpecAdapter
-from minime.config import (
-    SUPPORTED_PROVIDER_EFFORTS,
-    SUPPORTED_PROVIDER_MODELS,
-    load_config,
-)
+from minime.config import load_config
 from minime.db.repository import PostgresPersistenceUnitOfWork
 from minime.db.session import db_manager
 from minime.domain.enums import (
@@ -49,7 +43,6 @@ from minime.domain.models import (
     OperatorActionRequest,
     OperatorActionResult,
     OperatorIdentityDTO,
-    Project,
     ProjectConfigurationInput,
     ProjectConfigurationPatch,
     ProviderEfficiencyMetrics,
@@ -68,10 +61,12 @@ from minime.services.capacity_lifecycle_service import CapacityLifecycleService
 from minime.services.context_discovery_service import ContextDiscoveryService
 from minime.services.current_check_batch import validate_current_checks_batch
 from minime.services.legacy_unavailable import unavailable_payload
+from minime.services.project_catalog_service import ProjectCatalogService
 from minime.services.project_service import ProjectService
 from minime.services.provider_health_service import ProviderHealthService
 from minime.services.status_service import StatusService
 from minime.services.validation_authority_service import ValidationAuthorityService
+from minime.services.workspace_guard import ManagedWorkspaceGuard, is_binding_fully_valid
 
 logger = logging.getLogger(__name__)
 
@@ -389,78 +384,35 @@ AuthenticatedOperatorDep = Annotated[AuthorizedOperator, Depends(get_current_ope
 @app.get("/api/v1/catalogs/providers", tags=["catalogs"])
 def project_provider_catalog(_operator: AuthenticatedOperatorDep) -> list[dict[str, Any]]:
     """Return provider metadata only; project connections and secrets are never included."""
-    return [
-        {
-            "id": "github",
-            "responsibilities": ["tickets", "git_pr"],
-            "capabilities": ["issues.read", "repository.verify", "branches", "push", "pull_requests"],
-            "auth_modes": ["environment_app", "project_app"],
-            "required_fields": ["repository_url", "app_id", "installation_id", "private_key"],
-            "available": True,
-        },
-        {
-            "id": "ado",
-            "responsibilities": [],
-            "capabilities": [],
-            "auth_modes": [],
-            "required_fields": [],
-            "available": False,
-        },
-    ]
+    return ProjectCatalogService().provider_catalog()
 
 
 @app.get("/api/v1/catalogs/agents", tags=["catalogs"])
-def project_agent_catalog(_operator: AuthenticatedOperatorDep) -> dict[str, Any]:
-    """Expose only configured local executables and their configured model/effort metadata."""
-    config = load_config()
-    agents: list[dict[str, Any]] = []
-    for provider_id, provider in sorted(config.providers.items()):
-        executable = (provider.command or "").strip().split(maxsplit=1)
-        if not provider.enabled or provider.type != "cli" or not executable:
-            continue
-        resolved = shutil.which(executable[0])
-        if not resolved:
-            continue
-        agents.append(
-            {
-                "id": provider_id,
-                "executable": resolved,
-                "roles": provider.roles,
-                "transports": sorted(
-                    {invocation.prompt_transport for invocation in provider.invocation.values()}
-                ),
-                "models": sorted(SUPPORTED_PROVIDER_MODELS.get(provider_id, {})),
-                "efforts": sorted(SUPPORTED_PROVIDER_EFFORTS.get(provider_id, set())),
-                "file_capable": provider_id in {"codex", "antigravity", "agy"},
-            }
-        )
-    cli = OpenSpecAdapter().inspect_cli()
-    integration_root = Path(__file__).resolve().parents[3]
-    codex_skills = sorted(
-        path.parent.name
-        for path in (integration_root / ".agents/skills").glob("openspec-*/SKILL.md")
-    )
-    agy_workflows = sorted(
-        path.stem
-        for path in (integration_root / ".agent/workflows").glob("opsx-*.md")
-    )
-    return {
-        "agents": agents,
-        "open_spec_cli": {
-            "path": shutil.which("openspec"),
-            "version": cli["version"],
-            "complete_native_setup_supported": cli["available"] and cli["init_tools_supported"],
-            "integrations": {
-                "codex": codex_skills,
-                "antigravity": agy_workflows,
-            },
-        },
-    }
+async def project_agent_catalog(
+    _operator: AuthenticatedOperatorDep,
+    uow: UowDep,
+    project_id: str | None = None,
+) -> dict[str, Any]:
+    """Expose locally configured, read-only discovered agent capabilities."""
+    project_root: Path | None = None
+    if project_id:
+        binding = uow.project_managed_repository_bindings.get_by_project_id(project_id)
+        if binding is not None and is_binding_fully_valid(binding):
+            root = Path(binding.managed_repository_root)
+            guard = ManagedWorkspaceGuard(uow)
+            marker_ok, _, _, _ = guard.verify_managed_repository_ownership_marker(
+                str(root), project_id, binding.canonical_repository_identity,
+                binding.ownership_marker_filename,
+            )
+            if marker_ok and root.is_dir() and not root.is_symlink():
+                project_root = root
+    return await ProjectCatalogService().agent_catalog(project_root)
 
 
 @app.get("/api/v1/projects", tags=["projects"])
-def list_project_configurations(_operator: AuthenticatedOperatorDep, uow: UowDep) -> list[Project]:
-    return ProjectService(uow).list_projects()
+def list_project_configurations(_operator: AuthenticatedOperatorDep, uow: UowDep) -> list[dict[str, Any]]:
+    service = ProjectService(uow)
+    return [service.public_project_payload(project) for project in service.list_projects()]
 
 
 @app.post("/api/v1/projects", status_code=status.HTTP_201_CREATED, tags=["projects"])
@@ -468,10 +420,11 @@ def create_project_configuration(
     configuration: ProjectConfigurationInput,
     _operator: AuthenticatedOperatorDep,
     uow: UowDep,
-) -> Project:
+) -> dict[str, Any]:
     """Create a configuration-only Brownfield registration; Greenfield needs ZIP bootstrap."""
     try:
-        return ProjectService(uow).create_configured_project(configuration)
+        service = ProjectService(uow)
+        return service.public_project_payload(service.create_configured_project(configuration))
     except ValueError as exc:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
 
@@ -482,9 +435,10 @@ def update_project_configuration(
     patch: ProjectConfigurationPatch,
     _operator: AuthenticatedOperatorDep,
     uow: UowDep,
-) -> Project:
+) -> dict[str, Any]:
     try:
-        return ProjectService(uow).update_configuration(project_id, patch)
+        service = ProjectService(uow)
+        return service.public_project_payload(service.update_configuration(project_id, patch))
     except ValueError as exc:
         message = str(exc)
         code = status.HTTP_404_NOT_FOUND if message.endswith("not found") else status.HTTP_400_BAD_REQUEST
@@ -492,17 +446,19 @@ def update_project_configuration(
 
 
 @app.post("/api/v1/projects/{project_id}/pause", tags=["projects"])
-def pause_project(project_id: str, _operator: AuthenticatedOperatorDep, uow: UowDep) -> Project:
+def pause_project(project_id: str, _operator: AuthenticatedOperatorDep, uow: UowDep) -> dict[str, Any]:
     try:
-        return ProjectService(uow).set_lifecycle(project_id, active=False)
+        service = ProjectService(uow)
+        return service.public_project_payload(service.set_lifecycle(project_id, active=False))
     except ValueError as exc:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
 
 
 @app.post("/api/v1/projects/{project_id}/activate", tags=["projects"])
-def activate_project(project_id: str, _operator: AuthenticatedOperatorDep, uow: UowDep) -> Project:
+def activate_project(project_id: str, _operator: AuthenticatedOperatorDep, uow: UowDep) -> dict[str, Any]:
     try:
-        return ProjectService(uow).set_lifecycle(project_id, active=True)
+        service = ProjectService(uow)
+        return service.public_project_payload(service.set_lifecycle(project_id, active=True))
     except ValueError as exc:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
 
@@ -624,10 +580,11 @@ def get_openrouter_status(uow: UowDep, project_id: str | None = None) -> dict[st
 
 @app.get("/projects")
 def list_projects(
+    _operator: AuthenticatedOperatorDep,
     uow: UowDep,
-) -> list[Project]:
+) -> list[dict[str, Any]]:
     service = ProjectService(uow)
-    return service.list_projects()
+    return [service.public_project_payload(project) for project in service.list_projects()]
 
 
 @app.post("/projects", status_code=status.HTTP_201_CREATED)
@@ -641,8 +598,9 @@ def register_project() -> None:
 @app.get("/projects/{project_id}")
 def get_project(
     project_id: str,
+    _operator: AuthenticatedOperatorDep,
     uow: UowDep,
-) -> Project:
+) -> dict[str, Any]:
     service = ProjectService(uow)
     project = service.get_project(project_id)
     if not project:
@@ -650,7 +608,7 @@ def get_project(
             status_code=status.HTTP_404_NOT_FOUND,
             detail=f"Project '{project_id}' not found",
         )
-    return project
+    return ProjectService.public_project_payload(project)
 
 
 @app.get("/api/v1/projects/{project_id}", tags=["projects"])
@@ -658,11 +616,11 @@ def get_project_configuration(
     project_id: str,
     _operator: AuthenticatedOperatorDep,
     uow: UowDep,
-) -> Project:
+) -> dict[str, Any]:
     project = ProjectService(uow).get_project(project_id)
     if project is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Project not found")
-    return project
+    return ProjectService.public_project_payload(project)
 
 
 @app.patch("/projects/{project_id}")
