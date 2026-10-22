@@ -21,6 +21,58 @@ class OpenSpecAdapter(OpenSpecAdapterInterface):
     def __init__(self, cli_command: str = "openspec"):
         self.cli_command = cli_command
 
+    def inspect_cli(self) -> dict[str, Any]:
+        """Observe the installed CLI version and advertised setup options."""
+        try:
+            version = subprocess.run(
+                [self.cli_command, "--version"], capture_output=True, text=True, timeout=10
+            )
+            init_help = subprocess.run(
+                [self.cli_command, "init", "--help"],
+                capture_output=True,
+                text=True,
+                timeout=10,
+            )
+        except (OSError, subprocess.TimeoutExpired):
+            return {"available": False, "version": None, "init_tools_supported": False}
+        output = f"{init_help.stdout}\n{init_help.stderr}"
+        return {
+            "available": version.returncode == 0 and init_help.returncode == 0,
+            "version": version.stdout.strip() if version.returncode == 0 else None,
+            "init_tools_supported": "--tools" in output,
+            "no_animation_supported": "--no-animation" in output,
+            "help": output,
+        }
+
+    def install_official_integrations(
+        self, project_root: str | Path, agents: list[str]
+    ) -> dict[str, Any]:
+        """Run the official OpenSpec initializer for selected supported agents."""
+        allowed = {"codex", "antigravity"}
+        selected = sorted({agent.strip().lower() for agent in agents})
+        if not selected or not set(selected).issubset(allowed):
+            raise ValueError("F2 OpenSpec setup supports only selected Codex and Antigravity agents")
+        capabilities = self.inspect_cli()
+        if not capabilities["available"] or not capabilities["init_tools_supported"]:
+            raise RuntimeError("Installed OpenSpec CLI does not advertise complete agent setup support")
+        root = Path(project_root).resolve()
+        if not root.is_dir():
+            raise ValueError("OpenSpec setup target must be an existing project directory")
+        args = [self.cli_command, "init", str(root), "--tools", ",".join(selected)]
+        if capabilities["no_animation_supported"]:
+            args.append("--no-animation")
+        result = subprocess.run(
+            args, cwd=str(root.parent), capture_output=True, text=True, timeout=120, check=False
+        )
+        if result.returncode:
+            raise RuntimeError("Official OpenSpec initialization failed; workspace remains unprepared")
+        return {
+            "version": capabilities["version"],
+            "agents": selected,
+            "stdout": result.stdout,
+            "stderr": result.stderr,
+        }
+
     def _run_cli(self, args: list[str], cwd: Path) -> dict[str, Any] | None:
         """Run an OpenSpec CLI command and parse JSON output if possible."""
         try:

@@ -232,6 +232,7 @@ def project_model_to_domain(model: ProjectModel) -> Project:
         project_id=model.id,
         display_name=model.display_name,
         repository=model.repository,
+        project_type=getattr(model, "project_type", "BROWNFIELD") or "BROWNFIELD",
         base_branch=model.base_branch,
         openspec_path=model.openspec_path,
         implementer=model.implementer,
@@ -253,8 +254,12 @@ def project_model_to_domain(model: ProjectModel) -> Project:
         github_project_owner=model.github_project_owner,
         onboarding_status=ProjectOnboardingStatus(model.onboarding_status)
         if model.onboarding_status
-        else ProjectOnboardingStatus.READY_FOR_WORK,
+        else ProjectOnboardingStatus.CONFIGURED,
         onboarding_reasons=model.onboarding_reasons or [],
+        provider_connections=getattr(model, "provider_connections", None) or {},
+        agent_profiles=getattr(model, "agent_profiles", None) or {},
+        execution_policy=getattr(model, "execution_policy", None) or {},
+        onboarding_checkpoint=getattr(model, "onboarding_checkpoint", None) or {},
         auto_prepare=getattr(model, "auto_prepare", True),
         auto_admit=getattr(model, "auto_admit", True),
         max_concurrent_jobs=getattr(model, "max_concurrent_jobs", 1),
@@ -927,6 +932,11 @@ class PostgresProjectRepository(ProjectRepositoryInterface):
         if existing:
             existing.display_name = project.display_name
             existing.repository = project.repository
+            existing.project_type = project.project_type.value
+            existing.provider_connections = project.provider_connections
+            existing.agent_profiles = project.agent_profiles
+            existing.execution_policy = project.execution_policy
+            existing.onboarding_checkpoint = project.onboarding_checkpoint
             existing.base_branch = project.base_branch
             existing.openspec_path = project.openspec_path
             existing.implementer = project.implementer
@@ -958,6 +968,11 @@ class PostgresProjectRepository(ProjectRepositoryInterface):
                 id=project.project_id,
                 display_name=project.display_name,
                 repository=project.repository,
+                project_type=project.project_type.value,
+                provider_connections=project.provider_connections,
+                agent_profiles=project.agent_profiles,
+                execution_policy=project.execution_policy,
+                onboarding_checkpoint=project.onboarding_checkpoint,
                 base_branch=project.base_branch,
                 openspec_path=project.openspec_path,
                 implementer=project.implementer,

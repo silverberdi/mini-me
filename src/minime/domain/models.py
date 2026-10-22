@@ -10,7 +10,7 @@ from datetime import UTC, datetime
 from decimal import Decimal
 from typing import Any, Generic, TypeVar
 
-from pydantic import BaseModel, ConfigDict, Field, computed_field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, SecretStr, computed_field, model_validator
 
 from minime.domain.enums import (
     PRIMARY_PROVIDERS,
@@ -52,6 +52,7 @@ from minime.domain.enums import (
     ProgressClassification,
     ProjectOnboardingStatus,
     ProjectStatus,
+    ProjectType,
     ProviderHealthStatus,
     ProviderResultClass,
     PullRequestLookupState,
@@ -93,6 +94,7 @@ class Project(BaseModel):
     project_id: str
     display_name: str
     repository: str
+    project_type: ProjectType = ProjectType.BROWNFIELD
     base_branch: str = "main"
     openspec_path: str = "openspec"
     implementer: str = "codex"
@@ -114,14 +116,133 @@ class Project(BaseModel):
     backlog_path: str = "docs/ROADMAP.md"
     github_project_number: int | None = None
     github_project_owner: str | None = None
-    onboarding_status: ProjectOnboardingStatus = ProjectOnboardingStatus.READY_FOR_WORK
+    onboarding_status: ProjectOnboardingStatus = ProjectOnboardingStatus.CONFIGURED
     onboarding_reasons: list[str] = Field(default_factory=list)
+    provider_connections: dict[str, Any] = Field(default_factory=dict)
+    agent_profiles: dict[str, Any] = Field(default_factory=dict)
+    execution_policy: dict[str, Any] = Field(default_factory=dict)
+    onboarding_checkpoint: dict[str, Any] = Field(default_factory=dict)
     auto_prepare: bool = True
     auto_admit: bool = True
     max_concurrent_jobs: int = 1
     status: ProjectStatus = ProjectStatus.ACTIVE
     created_at: datetime = Field(default_factory=utc_now)
     updated_at: datetime = Field(default_factory=utc_now)
+
+
+class ProjectProviderConnection(BaseModel):
+    """Non-secret connection metadata for one project/provider responsibility."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    provider_id: str
+    repository_url: str
+    auth_mode: str
+    secret_reference: str | None = None
+
+    @model_validator(mode="after")
+    def validate_github_connection(self) -> "ProjectProviderConnection":
+        if self.provider_id != "github":
+            raise ValueError("Only the GitHub provider is implemented in F2")
+        if self.auth_mode not in {"environment_app", "project_app"}:
+            raise ValueError("auth_mode must be environment_app or project_app")
+        if self.auth_mode == "environment_app" and self.secret_reference:
+            raise ValueError("environment_app connections cannot reference project credentials")
+        return self
+
+
+class ProjectAgentProfile(BaseModel):
+    """A selected, catalog-resolved agent capability profile; no free-form command."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    agent_id: str
+    model_id: str
+    effort: str
+    workflows: list[str] = Field(default_factory=list)
+    skills: list[str] = Field(default_factory=list)
+
+
+class ProjectGitHubAppCredentials(BaseModel):
+    """Transient authenticated intake; private key is never persisted in PostgreSQL."""
+
+    app_id: str
+    installation_id: str
+    private_key: SecretStr
+
+
+class ProjectConfigurationInput(BaseModel):
+    """Validated shared contract for project configuration before persistence."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    project_id: str
+    display_name: str
+    project_type: ProjectType
+    repository: str
+    base_branch: str = "main"
+    provider_connections: dict[str, ProjectProviderConnection]
+    agent_profiles: dict[str, ProjectAgentProfile]
+    execution_policy: dict[str, Any] = Field(default_factory=dict)
+    github_app_credentials: ProjectGitHubAppCredentials | None = None
+
+    @model_validator(mode="after")
+    def validate_required_profiles(self) -> "ProjectConfigurationInput":
+        expected = {"thinking", "execution", "independent_review", "fallback"}
+        missing = expected - set(self.agent_profiles)
+        if missing:
+            raise ValueError("Missing agent profiles: " + ", ".join(sorted(missing)))
+        if not self.project_id.strip() or not self.display_name.strip():
+            raise ValueError("project_id and display_name are required")
+        if not self.repository.strip():
+            raise ValueError("repository is required")
+        if not self.base_branch.strip():
+            raise ValueError("base_branch must not be empty")
+        if not {"tickets", "git_pr"}.issubset(self.provider_connections):
+            raise ValueError("tickets and git_pr provider connections are required")
+        for connection in self.provider_connections.values():
+            if connection.auth_mode == "project_app" and not (
+                connection.secret_reference or self.github_app_credentials
+            ):
+                raise ValueError("project_app connections require credentials or a protected reference")
+            if connection.secret_reference and not self.github_app_credentials:
+                raise ValueError("secret references are server-owned and cannot be supplied by operators")
+        if self.github_app_credentials and not any(
+            connection.auth_mode == "project_app"
+            for connection in self.provider_connections.values()
+        ):
+            raise ValueError("GitHub App credentials were supplied but no connection selects project_app")
+        return self
+
+
+class ProjectConfigurationPatch(BaseModel):
+    """Mutable project configuration fields; identity is intentionally omitted."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    display_name: str | None = None
+    base_branch: str | None = None
+    provider_connections: dict[str, ProjectProviderConnection] | None = None
+    agent_profiles: dict[str, ProjectAgentProfile] | None = None
+    execution_policy: dict[str, Any] | None = None
+    github_app_credentials: ProjectGitHubAppCredentials | None = None
+
+    @model_validator(mode="after")
+    def require_changes(self) -> "ProjectConfigurationPatch":
+        if not self.model_fields_set - {"github_app_credentials"}:
+            raise ValueError("at least one project setting must be provided")
+        if self.display_name is not None and not self.display_name.strip():
+            raise ValueError("display_name must not be empty")
+        if self.base_branch is not None and not self.base_branch.strip():
+            raise ValueError("base_branch must not be empty")
+        for connection in (self.provider_connections or {}).values():
+            if connection.secret_reference and not self.github_app_credentials:
+                raise ValueError("secret references are server-owned and cannot be supplied by operators")
+            if connection.auth_mode == "project_app" and not (
+                connection.secret_reference or self.github_app_credentials
+            ):
+                raise ValueError("project_app connections require credentials or an existing reference")
+        return self
 
 
 class ProjectBinding(BaseModel):

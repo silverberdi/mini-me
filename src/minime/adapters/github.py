@@ -61,6 +61,7 @@ class GitHubAppAuth:
         app_id: str | int | None = None,
         installation_id: str | int | None = None,
         private_key_path: str | Path | None = None,
+        private_key_material: str | None = None,
         *,
         client: httpx.Client | None = None,
         now: Callable[[], float] = time.time,
@@ -79,6 +80,7 @@ class GitHubAppAuth:
             if private_key_path is not None
             else os.environ.get("MINIME_GITHUB_PRIVATE_KEY_PATH", "")
         )
+        self.private_key_material = private_key_material
         self.client = client or httpx.Client(base_url=api_base_url, timeout=15.0)
         self._now = now
         self._cached: _CachedInstallationToken | None = None
@@ -88,12 +90,17 @@ class GitHubAppAuth:
         return "github_app_installation"
 
     def _credentials(self) -> tuple[str, str, str]:
-        if not self.app_id or not self.installation_id or not self.private_key_path:
+        if not self.app_id or not self.installation_id or not (
+            self.private_key_material or self.private_key_path
+        ):
             raise GitHubAuthorizationError("GitHub App credentials are not configured.")
-        try:
-            key = Path(self.private_key_path).read_text(encoding="utf-8")
-        except (OSError, UnicodeError):
-            raise GitHubAuthorizationError("GitHub App private key is inaccessible.") from None
+        if self.private_key_material is not None:
+            key = self.private_key_material
+        else:
+            try:
+                key = Path(self.private_key_path).read_text(encoding="utf-8")
+            except (OSError, UnicodeError):
+                raise GitHubAuthorizationError("GitHub App private key is inaccessible.") from None
         if not key.strip():
             raise GitHubAuthorizationError("GitHub App private key is empty.")
         return self.app_id, self.installation_id, key
@@ -155,6 +162,30 @@ class GitHubAdapter(GitHubAdapterInterface):
     def __init__(self, token: str | None = None, *, auth: GitHubAppAuth | None = None):
         # ``token`` is accepted for old test construction but is never runtime authority.
         self.auth = auth or GitHubAppAuth()
+
+    @classmethod
+    def for_project_connection(
+        cls, project_id: str, connection: dict[str, Any], credential_store=None
+    ) -> "GitHubAdapter":
+        """Bind an adapter instance to one project connection and isolated token cache."""
+        auth_mode = connection.get("auth_mode")
+        if auth_mode == "environment_app":
+            return cls()
+        if auth_mode != "project_app":
+            raise GitHubAuthorizationError("Project GitHub connection has an unsupported auth mode.")
+        secret_reference = connection.get("secret_reference")
+        if not isinstance(secret_reference, str) or credential_store is None:
+            raise GitHubAuthorizationError("Project GitHub App credentials are unavailable.")
+        try:
+            credentials = credential_store.load_github_app(project_id, secret_reference)
+        except (OSError, ValueError):
+            raise GitHubAuthorizationError("Project GitHub App credentials are unavailable.") from None
+        auth = GitHubAppAuth(
+            app_id=credentials["app_id"],
+            installation_id=credentials["installation_id"],
+            private_key_material=credentials["private_key"],
+        )
+        return cls(auth=auth)
 
     def _token(self) -> str:
         return self.auth.get_installation_token()

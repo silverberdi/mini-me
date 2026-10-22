@@ -11,6 +11,7 @@ import uvicorn
 from minime.config import discover_and_load_env_file
 from minime.db.repository import PostgresPersistenceUnitOfWork
 from minime.db.session import db_manager
+from minime.domain.models import ProjectConfigurationInput
 from minime.logging import configure_logging
 from minime.services.budget_service import BudgetService
 from minime.services.legacy_unavailable import unavailable_payload
@@ -87,32 +88,76 @@ def list_projects(json_output: bool = typer.Option(False, "--json")) -> None:
         typer.echo(f"{project.project_id} {project.repository} [{project.status.value}]")
 
 
-@project_app.command("register")
-def register_project(
-    project_id: str = typer.Argument(...),
-    display_name: str = typer.Argument(...),
-    repository: str = typer.Argument(...),
-    base_branch: str = typer.Option("main", "--base-branch"),
-    openspec_path: str = typer.Option("openspec", "--openspec-path"),
-    implementer: str = typer.Option("codex", "--implementer"),
-    reviewer: str = typer.Option("antigravity", "--reviewer"),
-) -> None:
-    """Register configuration required for later F2/F3 work."""
+@project_app.command("create")
+def create_project(config_path: str = typer.Argument(..., exists=True, readable=True)) -> None:
+    """Create a Brownfield project from a non-secret JSON configuration file."""
     try:
+        with open(config_path, encoding="utf-8") as stream:
+            raw = json.load(stream)
+        if "github_app_credentials" in raw:
+            raise ValueError(
+                "Do not put GitHub App credentials in the configuration file; enter them only at the hidden prompt"
+            )
+        if any(
+            isinstance(value, dict) and value.get("auth_mode") == "project_app"
+            for value in raw.get("provider_connections", {}).values()
+        ):
+            raw["github_app_credentials"] = {
+                "app_id": typer.prompt("GitHub App ID"),
+                "installation_id": typer.prompt("GitHub installation ID"),
+                "private_key": typer.prompt("GitHub App private key", hide_input=True),
+            }
+        configuration = ProjectConfigurationInput.model_validate(raw)
         with db_manager.session() as session:
-            project = ProjectService(PostgresPersistenceUnitOfWork(session)).register_project(
-                project_id=project_id,
-                display_name=display_name,
-                repository=repository,
-                base_branch=base_branch,
-                openspec_path=openspec_path,
-                implementer=implementer,
-                reviewer=reviewer,
+            project = ProjectService(PostgresPersistenceUnitOfWork(session)).create_configured_project(
+                configuration
             )
     except Exception as exc:
-        typer.echo(f"project registration failed: {exc}", err=True)
+        typer.echo(f"project creation failed: {exc}", err=True)
         raise typer.Exit(code=1) from exc
-    typer.echo(f"registered {project.project_id}")
+    typer.echo(f"created {project.project_id} [{project.onboarding_status.value}]")
+
+
+@project_app.command("show")
+def show_project(project_id: str = typer.Argument(...), json_output: bool = typer.Option(False, "--json")) -> None:
+    try:
+        with db_manager.session() as session:
+            project = ProjectService(PostgresPersistenceUnitOfWork(session)).get_project(project_id)
+    except Exception as exc:
+        typer.echo(f"project lookup unavailable: {exc}", err=True)
+        raise typer.Exit(code=1) from exc
+    if project is None:
+        typer.echo(f"project not found: {project_id}", err=True)
+        raise typer.Exit(code=1)
+    if json_output:
+        typer.echo(project.model_dump_json(indent=2))
+    else:
+        typer.echo(
+            f"{project.project_id} {project.repository} "
+            f"[{project.status.value}/{project.onboarding_status.value}]"
+        )
+
+
+def _set_project_lifecycle(project_id: str, active: bool) -> None:
+    try:
+        with db_manager.session() as session:
+            project = ProjectService(PostgresPersistenceUnitOfWork(session)).set_lifecycle(
+                project_id, active=active
+            )
+    except Exception as exc:
+        typer.echo(f"project lifecycle update failed: {exc}", err=True)
+        raise typer.Exit(code=1) from exc
+    typer.echo(f"{project.project_id} [{project.status.value}]")
+
+
+@project_app.command("pause")
+def pause_project(project_id: str = typer.Argument(...)) -> None:
+    _set_project_lifecycle(project_id, active=False)
+
+
+@project_app.command("activate")
+def activate_project(project_id: str = typer.Argument(...)) -> None:
+    _set_project_lifecycle(project_id, active=True)
 
 
 @app.command("serve")

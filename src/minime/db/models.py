@@ -39,6 +39,21 @@ class ProjectModel(Base):
     id: Mapped[str] = mapped_column(String(64), primary_key=True)
     display_name: Mapped[str] = mapped_column(String(255), nullable=False)
     repository: Mapped[str] = mapped_column(String(255), nullable=False)
+    project_type: Mapped[str] = mapped_column(
+        String(16), default="BROWNFIELD", server_default="BROWNFIELD", nullable=False
+    )
+    provider_connections: Mapped[dict[str, Any]] = mapped_column(
+        JSON, default=dict, server_default="{}", nullable=False
+    )
+    agent_profiles: Mapped[dict[str, Any]] = mapped_column(
+        JSON, default=dict, server_default="{}", nullable=False
+    )
+    execution_policy: Mapped[dict[str, Any]] = mapped_column(
+        JSON, default=dict, server_default="{}", nullable=False
+    )
+    onboarding_checkpoint: Mapped[dict[str, Any]] = mapped_column(
+        JSON, default=dict, server_default="{}", nullable=False
+    )
     base_branch: Mapped[str] = mapped_column(String(128), default="main", nullable=False)
     openspec_path: Mapped[str] = mapped_column(String(255), default="openspec", nullable=False)
     implementer: Mapped[str] = mapped_column(String(64), default="codex", nullable=False)
@@ -79,7 +94,7 @@ class ProjectModel(Base):
     github_project_number: Mapped[int | None] = mapped_column(Integer, nullable=True)
     github_project_owner: Mapped[str | None] = mapped_column(String(128), nullable=True)
     onboarding_status: Mapped[str] = mapped_column(
-        String(32), default="READY_FOR_WORK", nullable=False
+        String(32), default="CONFIGURED", server_default="CONFIGURED", nullable=False
     )
     onboarding_reasons: Mapped[list[str]] = mapped_column(JSON, default=list, nullable=False)
     auto_prepare: Mapped[bool] = mapped_column(

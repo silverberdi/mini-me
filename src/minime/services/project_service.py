@@ -3,14 +3,22 @@
 from __future__ import annotations
 
 import os
+import shutil
 from typing import Any
 
-from minime.domain.enums import EventType, ProjectStatus
+from minime.domain.enums import EventType, ProjectOnboardingStatus, ProjectStatus, ProjectType
 from minime.domain.interfaces import (
     PersistenceUnitOfWork,
 )
-from minime.domain.models import Event, Project, utc_now
+from minime.domain.models import (
+    Event,
+    Project,
+    ProjectConfigurationInput,
+    ProjectConfigurationPatch,
+    utc_now,
+)
 from minime.logging import get_logger, set_correlation_context
+from minime.services.project_credential_store import ProjectCredentialStore
 from minime.services.repository_identity import (
     normalize_repository_identity as _normalize_repository_identity,
 )
@@ -76,8 +84,225 @@ def validate_project_policy(data: dict[str, Any]) -> list[str]:
 class ProjectService:
     """Service for managing project registrations, updates, and repository binding."""
 
-    def __init__(self, uow: PersistenceUnitOfWork):
+    def __init__(
+        self,
+        uow: PersistenceUnitOfWork,
+        credential_store: ProjectCredentialStore | None = None,
+    ):
         self.uow = uow
+        self.credential_store = credential_store or ProjectCredentialStore()
+
+    def create_configured_project(self, configuration: ProjectConfigurationInput) -> Project:
+        """Persist a validated project configuration without claiming bootstrap readiness.
+
+        Greenfield creation is deliberately refused here: it must be paired with a
+        validated context package and the durable bootstrap coordinator.
+        """
+        if configuration.project_type == ProjectType.GREENFIELD:
+            raise ValueError("GREENFIELD requires a validated ZIP bootstrap operation")
+        project_id = configuration.project_id.strip()
+        repository = normalize_repository_identity(configuration.repository)
+        self._validate_agent_profiles(configuration.agent_profiles)
+        normalized_connections: dict[str, dict[str, Any]] = {}
+        for key, value in configuration.provider_connections.items():
+            connection_repository = normalize_repository_identity(value.repository_url)
+            if not connection_repository or connection_repository.startswith(("/", "file:")):
+                raise ValueError(f"Provider connection '{key}' requires a GitHub repository identity")
+            if "://" in value.repository_url and "github.com/" not in value.repository_url.lower():
+                raise ValueError(f"Provider connection '{key}' must use a GitHub repository URL")
+            normalized_connections[key] = value.model_dump(mode="json")
+            normalized_connections[key]["repository_url"] = connection_repository
+        if self.uow.projects.get_by_id(project_id):
+            raise ValueError(f"Project with ID '{project_id}' is already registered")
+        for existing in self.uow.projects.list_all():
+            if normalize_repository_identity(existing.repository) == repository:
+                raise ValueError(
+                    f"Repository '{repository}' is already bound to project '{existing.project_id}'"
+                )
+
+        credential_ref: str | None = None
+        try:
+            if configuration.github_app_credentials:
+                credentials = configuration.github_app_credentials
+                credential_ref = self.credential_store.store_github_app(
+                    project_id,
+                    credentials.app_id,
+                    credentials.installation_id,
+                    credentials.private_key.get_secret_value(),
+                )
+            connections = normalized_connections
+            for key, value in configuration.provider_connections.items():
+                connection = connections[key]
+                if value.auth_mode == "project_app" and credential_ref:
+                    connection["secret_reference"] = credential_ref
+                connections[key] = connection
+
+            now = utc_now()
+            project = Project(
+                project_id=project_id,
+                display_name=configuration.display_name.strip(),
+                repository=repository,
+                project_type=configuration.project_type,
+                base_branch=configuration.base_branch.strip() or "main",
+                provider_connections=connections,
+                agent_profiles={
+                    key: value.model_dump(mode="json")
+                    for key, value in configuration.agent_profiles.items()
+                },
+                execution_policy=configuration.execution_policy,
+                onboarding_status=ProjectOnboardingStatus.CONFIGURED,
+                onboarding_reasons=[
+                    "Brownfield adaptation is deferred; project is configuration-only."
+                ],
+                status=ProjectStatus.ACTIVE,
+                created_at=now,
+                updated_at=now,
+            )
+            self.uow.projects.save(project)
+            self.uow.events.save(
+                Event(
+                    project_id=project.project_id,
+                    event_type=EventType.PROJECT_REGISTERED,
+                    payload={
+                        "project_type": project.project_type.value,
+                        "repository": project.repository,
+                        "onboarding_status": project.onboarding_status.value,
+                    },
+                    timestamp=now,
+                )
+            )
+            self.uow.commit()
+            return project
+        except Exception:
+            if credential_ref:
+                self.credential_store.remove_github_app(project_id, credential_ref)
+            self.uow.rollback()
+            raise
+
+    def set_lifecycle(self, project_id: str, *, active: bool) -> Project:
+        project = self.uow.projects.get_by_id(project_id)
+        if project is None:
+            raise ValueError(f"Project '{project_id}' not found")
+        project.status = ProjectStatus.ACTIVE if active else ProjectStatus.PAUSED
+        project.updated_at = utc_now()
+        self.uow.projects.save(project)
+        self.uow.commit()
+        return project
+
+    def update_configuration(
+        self, project_id: str, patch: ProjectConfigurationPatch
+    ) -> Project:
+        project = self.uow.projects.get_by_id(project_id)
+        if project is None:
+            raise ValueError(f"Project '{project_id}' not found")
+        if patch.github_app_credentials and patch.provider_connections is None:
+            raise ValueError("updating GitHub App credentials requires an explicit provider connection update")
+        if patch.agent_profiles is not None:
+            self._validate_agent_profiles(patch.agent_profiles)
+
+        credential_ref: str | None = None
+        try:
+            if patch.github_app_credentials:
+                credentials = patch.github_app_credentials
+                credential_ref = self.credential_store.store_github_app(
+                    project_id,
+                    credentials.app_id,
+                    credentials.installation_id,
+                    credentials.private_key.get_secret_value(),
+                )
+            if patch.display_name is not None:
+                project.display_name = patch.display_name.strip()
+            if patch.base_branch is not None:
+                project.base_branch = patch.base_branch.strip()
+            if patch.provider_connections is not None:
+                connections: dict[str, dict[str, Any]] = {}
+                for key, value in patch.provider_connections.items():
+                    connection_repository = normalize_repository_identity(value.repository_url)
+                    if not connection_repository or connection_repository.startswith(("/", "file:")):
+                        raise ValueError(
+                            f"Provider connection '{key}' requires a GitHub repository identity"
+                        )
+                    if "://" in value.repository_url and "github.com/" not in value.repository_url.lower():
+                        raise ValueError(f"Provider connection '{key}' must use a GitHub repository URL")
+                    connection = value.model_dump(mode="json")
+                    connection["repository_url"] = connection_repository
+                    if value.auth_mode == "project_app":
+                        reference = credential_ref or connection.get("secret_reference")
+                        if not reference:
+                            existing = project.provider_connections.get(key, {})
+                            reference = existing.get("secret_reference")
+                        if not reference:
+                            raise ValueError("project_app connection has no protected credential")
+                        connection["secret_reference"] = reference
+                    connections[key] = connection
+                project.provider_connections = connections
+            if patch.agent_profiles is not None:
+                expected = {"thinking", "execution", "independent_review", "fallback"}
+                missing = expected - set(patch.agent_profiles)
+                if missing:
+                    raise ValueError("Missing agent profiles: " + ", ".join(sorted(missing)))
+                project.agent_profiles = {
+                    key: value.model_dump(mode="json")
+                    for key, value in patch.agent_profiles.items()
+                }
+            if patch.execution_policy is not None:
+                project.execution_policy = patch.execution_policy
+            project.updated_at = utc_now()
+            self.uow.projects.save(project)
+            self.uow.commit()
+            return project
+        except Exception:
+            if credential_ref:
+                self.credential_store.remove_github_app(project_id, credential_ref)
+            self.uow.rollback()
+            raise
+
+    @staticmethod
+    def _validate_agent_profiles(profiles) -> None:
+        """Resolve chosen profiles against configured, installed file-capable CLIs."""
+        from minime.config import (
+            SUPPORTED_PROVIDER_EFFORTS,
+            SUPPORTED_PROVIDER_MODELS,
+            load_config,
+            resolve_cli_invocation,
+        )
+
+        role_names = {
+            "thinking": "implementer",
+            "execution": "implementer",
+            "independent_review": "reviewer",
+            "fallback": "implementer",
+        }
+        config = load_config()
+        normalized_ids: dict[str, str] = {}
+        for role, profile in profiles.items():
+            agent_id = profile.agent_id.strip().lower()
+            provider_id = "antigravity" if agent_id == "agy" else agent_id
+            provider = config.providers.get(provider_id)
+            if provider is None or provider.type != "cli" or not provider.enabled:
+                raise ValueError(f"Agent '{agent_id}' is not an enabled native CLI provider")
+            executable = (provider.command or "").strip().split(maxsplit=1)
+            if not executable or shutil.which(executable[0]) is None:
+                raise ValueError(f"Agent '{agent_id}' executable is not installed")
+            provider_models = SUPPORTED_PROVIDER_MODELS.get(provider_id, {})
+            if profile.model_id.strip().lower() not in provider_models:
+                raise ValueError(f"Model '{profile.model_id}' is not in the verified {agent_id} catalog")
+            supported_efforts = SUPPORTED_PROVIDER_EFFORTS.get(provider_id, set())
+            if profile.effort.strip().lower() not in supported_efforts:
+                raise ValueError(f"Effort '{profile.effort}' is not supported by {agent_id}")
+            try:
+                resolve_cli_invocation(
+                    provider_id,
+                    role_names[role],
+                    config,
+                    model=profile.model_id,
+                    effort=profile.effort,
+                )
+            except ValueError as exc:
+                raise ValueError(f"Agent profile '{role}' cannot be invoked: {exc}") from exc
+            normalized_ids[role] = provider_id
+        if normalized_ids.get("execution") == normalized_ids.get("independent_review"):
+            raise ValueError("Independent review must use an agent distinct from the execution author")
 
     def register_project(
         self,

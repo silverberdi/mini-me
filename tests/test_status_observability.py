@@ -203,9 +203,17 @@ def test_fastapi_endpoints(in_memory_uow, tmp_path):
         "reviewer": "antigravity",
     }
     res = client.post("/projects", json=payload)
-    assert res.status_code == 201
-    assert res.json()["project_id"] == "test-api-proj"
-    assert res.json()["repository"] == "org/api-test"
+    assert res.status_code == 410
+    assert res.json()["detail"]["code"] == "operation_unavailable"
+    assert in_memory_uow.projects.get_by_id("test-api-proj") is None
+
+    in_memory_uow.projects.save(
+        Project(
+            project_id="test-api-proj",
+            display_name="API Test Project",
+            repository="org/api-test",
+        )
+    )
 
     # List projects
     res = client.get("/projects")
@@ -219,7 +227,8 @@ def test_fastapi_endpoints(in_memory_uow, tmp_path):
 
     # Discover changes
     res = client.post(f"/projects/test-api-proj/discover?project_root={tmp_path}")
-    assert res.status_code == 200
+    assert res.status_code == 410
+    assert res.json()["code"] == "operation_unavailable"
 
     # Clean up dependency override
     app.dependency_overrides.clear()
@@ -250,17 +259,16 @@ def test_fastapi_job_observability_endpoints(in_memory_uow):
     )
 
     res = client.get("/projects/mini-me/jobs")
-    assert res.status_code == 200
-    assert res.json()[0]["job_id"] == "job-1"
-    assert res.json()[0]["checks"][0]["check_name"] == "pytest"
+    assert res.status_code == 410
+    assert res.json()["code"] == "operation_unavailable"
 
     res = client.get("/jobs/job-1")
-    assert res.status_code == 200
-    assert res.json()["candidate_sha"] == "abc123"
+    assert res.status_code == 410
+    assert res.json()["code"] == "operation_unavailable"
 
     res = client.get("/jobs/job-1/logs")
-    assert res.status_code == 200
-    assert res.json()[0]["message"] == "ok"
+    assert res.status_code == 410
+    assert res.json()["code"] == "operation_unavailable"
 
     app.dependency_overrides.clear()
 
@@ -369,32 +377,8 @@ def test_job_projection_separates_current_check_batch_from_history(in_memory_uow
     in_memory_uow.orchestration_external_actions.reserve(dispatch)
 
     response = client.get(f"/jobs/{job.job_id}")
-    assert response.status_code == 200
-    payload = response.json()
-    assert [item["exit_code"] for item in payload["checks"]] == [1, 0]
-    assert payload["current_check_batch"] == {
-        "status": "PASSED",
-        "candidate_sha": job.candidate_sha,
-        "generation": 2,
-        "check_result_ids": [latest_passed.result_id],
-        "reason": None,
-    }
-    assert payload["code_review_checkpoint"] == {
-        "review_id": review_id,
-        "status": "REVIEW_COMPLETED",
-        "verdict": "READY_TO_MERGE",
-        "candidate_sha": job.candidate_sha,
-        "base_sha": run.base_sha,
-        "generation": 2,
-        "manifest_id": "manifest-id",
-        "manifest_hash": "manifest-hash",
-        "authorization_id": authorization_id,
-        "authorization_status": "COMPLETED",
-        "dispatch_status": "COMPLETED",
-        "dispatch_intent_present": True,
-        "dispatch_attempt_count": 0,
-        "gate_code": "CODE_REVIEW_COMPLETED_REQUIRES_SEPARATE_AUTHORIZED_CONTINUATION",
-    }
+    assert response.status_code == 410
+    assert response.json()["code"] == "operation_unavailable"
     app.dependency_overrides.clear()
 
 
@@ -404,7 +388,4 @@ def test_cli_help():
     assert "mini me" in result.stdout
     assert "status" in result.stdout
     assert "project" in result.stdout
-    assert "discover" in result.stdout
-    assert "readiness" in result.stdout
-    assert "run" in result.stdout
-    assert "jobs" in result.stdout
+    assert "serve" in result.stdout
