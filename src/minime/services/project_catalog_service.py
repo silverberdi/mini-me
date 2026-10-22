@@ -140,11 +140,26 @@ class ProjectCatalogService:
                 "native_openspec_setup": False,
             }
             if provider_id in {"codex", "antigravity"}:
-                cli = self.openspec.inspect_cli()
-                entry["native_openspec_setup"] = bool(
-                    cli.get("available") and cli.get("init_tools_supported")
-                )
-                entry["openspec_version"] = cli.get("version")
+                official: dict[str, Any] = {}
+                try:
+                    official = self.openspec.discover_official_integrations([provider_id])
+                except (OSError, RuntimeError, TimeoutError, ValueError):
+                    official = {}
+                entry["native_openspec_setup"] = bool(official)
+                entry["openspec_version"] = official.get("version")
+                operations = official.get("integrations", {}).get(provider_id, [])
+                if provider_id == "codex":
+                    entry["native_workflows"] = [
+                        {"operation": name, "command": f"$openspec-{name}"}
+                        for name in operations
+                    ]
+                    entry["available_skills"] = [f"openspec-{name}" for name in operations]
+                else:
+                    entry["native_workflows"] = [
+                        {"operation": name, "command": f"/opsx-{name}"}
+                        for name in operations
+                    ]
+                    entry["available_skills"] = []
                 if project_root is not None:
                     entry["installed_integrations"] = self.openspec.inspect_integrations(
                         project_root, [provider_id]
@@ -193,6 +208,21 @@ class ProjectCatalogService:
             if provider_id in {"codex", "antigravity"} and not agent["native_openspec_setup"]:
                 raise ValueError(
                     f"Selected agent '{provider_id}' has no verified official OpenSpec setup"
+                )
+            workflow_commands = {
+                item["command"] for item in agent.get("native_workflows", [])
+            }
+            unsupported_workflows = set(profile.workflows) - workflow_commands
+            if unsupported_workflows:
+                raise ValueError(
+                    f"Profile '{profile_name}' requests unverified native workflows: "
+                    + ", ".join(sorted(unsupported_workflows))
+                )
+            unsupported_skills = set(profile.skills) - set(agent.get("available_skills", []))
+            if unsupported_skills:
+                raise ValueError(
+                    f"Profile '{profile_name}' requests unverified skills: "
+                    + ", ".join(sorted(unsupported_skills))
                 )
         reviewer = profiles.get("independent_review")
         if reviewer is not None:

@@ -45,6 +45,14 @@ def test_official_init_fails_closed_for_unselected_or_unsupported_agents(tmp_pat
         OpenSpecAdapter().install_official_integrations(Path(tmp_path), ["openrouter"])
 
 
+def test_official_capability_discovery_uses_only_a_disposable_repository():
+    adapter = OpenSpecAdapter()
+    evidence = adapter.discover_official_integrations(["codex"])
+
+    assert evidence["version"]
+    assert len(evidence["integrations"]["codex"]) >= 12
+
+
 def test_native_integration_inspection_fails_closed_when_extended_lifecycle_is_missing(tmp_path):
     (tmp_path / ".agents/skills/openspec-propose").mkdir(parents=True)
     (tmp_path / ".agents/skills/openspec-propose/SKILL.md").write_text("name: openspec-propose")

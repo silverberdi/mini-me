@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import subprocess
+import tempfile
 from pathlib import Path
 from typing import Any
 
@@ -79,6 +80,13 @@ class OpenSpecAdapter(OpenSpecAdapterInterface):
             "stdout": result.stdout,
             "stderr": result.stderr,
         }
+
+    def discover_official_integrations(self, agents: list[str]) -> dict[str, Any]:
+        """Observe the complete native set by running official setup in a disposable repo."""
+        with tempfile.TemporaryDirectory(prefix="minime-openspec-capability-") as temporary:
+            project_root = Path(temporary) / "project"
+            project_root.mkdir(mode=0o700)
+            return self.install_official_integrations(project_root, agents)
 
     @staticmethod
     def inspect_integrations(project_root: str | Path, agents: list[str]) -> dict[str, Any]:

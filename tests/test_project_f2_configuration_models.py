@@ -126,6 +126,10 @@ async def test_profile_validation_requires_live_model_and_role_evidence(monkeypa
     profiles["independent_review"].agent_id = "antigravity"
     profiles["independent_review"].model_id = "claude-sonnet-5-5-medium"
     await service.validate_project_profiles(profiles)
+    profiles["thinking"].workflows = ["/opsx-propose"]
+    with pytest.raises(ValueError, match="unverified native workflows"):
+        await service.validate_project_profiles(profiles)
+    profiles["thinking"].workflows = []
     profiles["thinking"].model_id = "not-observed"
     with pytest.raises(ValueError, match="live codex catalog"):
         await service.validate_project_profiles(profiles)

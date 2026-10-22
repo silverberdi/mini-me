@@ -11,6 +11,13 @@ class _NativeSetup:
     def inspect_integrations(self, root, agents):
         return {"complete": True, "agents": agents, "root": str(root)}
 
+    def discover_official_integrations(self, agents):
+        integrations = {"codex": ["propose", "verify-change"]}
+        return {
+            "version": "test",
+            "integrations": {agent: integrations[agent] for agent in agents},
+        }
+
 
 class _Capabilities:
     def __init__(self, provider_name, capabilities):
@@ -58,6 +65,11 @@ def test_catalog_exposes_only_read_only_discovered_models(monkeypatch):
     assert agent["file_edit_roles"] == ["implementer"]
     assert agent["read_only_roles"] == ["reviewer"]
     assert agent["native_openspec_setup"] is True
+    assert agent["native_workflows"] == [
+        {"operation": "propose", "command": "$openspec-propose"},
+        {"operation": "verify-change", "command": "$openspec-verify-change"},
+    ]
+    assert agent["available_skills"] == ["openspec-propose", "openspec-verify-change"]
     assert catalog["capability_discovery"].startswith("read-only")
 
 
