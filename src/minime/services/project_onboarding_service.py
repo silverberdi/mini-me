@@ -17,10 +17,7 @@ from minime.domain.models import (
 )
 from minime.logging import get_logger, set_correlation_context
 from minime.services.context_discovery_service import ContextDiscoveryService
-from minime.services.project_service import (
-    normalize_repository_identity,
-    validate_complementary_roles,
-)
+from minime.services.project_service import normalize_repository_identity
 
 logger = get_logger("services.project_onboarding")
 
@@ -134,9 +131,6 @@ class ProjectOnboardingService:
                 raise ValueError(
                     f"Repository '{norm_repo}' is already bound to project '{p.project_id}'."
                 )
-
-        # 3. Validate complementary agent roles
-        validate_complementary_roles(input_data.implementer, input_data.reviewer)
 
         # 4. Probe repository accessibility via GitHub App
         onboarding_status = ProjectOnboardingStatus.READY_FOR_WORK
