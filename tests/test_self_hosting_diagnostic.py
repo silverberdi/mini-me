@@ -11,9 +11,9 @@ def test_get_self_hosting_diagnostic():
     diagnostic = service.get_self_hosting_diagnostic()
 
     assert isinstance(diagnostic, dict)
-    assert diagnostic["runtime_engine"] == "mini-me-runtime"
-    assert diagnostic["status"] == "SELF_HOSTING_READY"
-    assert diagnostic["autonomous_queue"] is True
+    assert diagnostic["runtime_engine"] is None
+    assert diagnostic["status"] == "UNAVAILABLE_IN_F1"
+    assert diagnostic["autonomous_queue"] is False
 
 
 def test_get_system_status_includes_self_hosting():
@@ -25,4 +25,4 @@ def test_get_system_status_includes_self_hosting():
     status = service.get_system_status()
 
     assert "self_hosting" in status
-    assert status["self_hosting"]["status"] == "SELF_HOSTING_READY"
+    assert status["self_hosting"]["status"] == "UNAVAILABLE_IN_F1"

@@ -792,6 +792,7 @@ def discover_project_changes(
     project_root: str,
     uow: UowDep,
 ) -> list[Change]:
+    """Inspect native Change directories without creating local workflow state."""
     service = ProjectService(uow)
     project = service.get_project(project_id)
     if not project:
@@ -801,11 +802,7 @@ def discover_project_changes(
         )
 
     adapter = OpenSpecAdapter()
-    discovered = adapter.discover_changes(project, project_root)
-    for change in discovered:
-        uow.changes.save(change)
-    uow.commit()
-    return discovered
+    return adapter.discover_changes(project, project_root)
 
 
 @app.get("/projects/{project_id}/changes/{change_name}/readiness")
@@ -1194,14 +1191,12 @@ def get_openspec_integrity(
 @app.post("/api/v1/openspec/integrity/audit", tags=["openspec"])
 def run_openspec_integrity_audit(
     project_id: str,
-    uow: Annotated[PersistenceUnitOfWork, Depends(get_uow)],
 ) -> dict[str, Any]:
-    """Trigger a fresh OpenSpec integrity audit for a project."""
-    from minime.services.openspec_integrity import OpenSpecIntegrityService
-
-    service = OpenSpecIntegrityService(uow, project_root=".")
-    audit = service.run_audit(project_id)
-    return audit.model_dump()
+    """F1 retains inspection only; agent-produced native validation belongs to F3."""
+    raise HTTPException(
+        status_code=status.HTTP_410_GONE,
+        detail=unavailable_payload("openspec_integrity_audit", "F3"),
+    )
 
 
 @app.post("/api/v1/orchestration/start", tags=["orchestration"])
@@ -1367,8 +1362,16 @@ class ValidationSubmitRequest(BaseModel):
 @app.post("/api/v1/previews/build", tags=["previews"])
 async def build_preview_image(
     req: PreviewBuildRequest,
-    uow: Annotated[PersistenceUnitOfWork, Depends(get_uow)],
+    uow: object | None = None,
 ) -> dict[str, Any]:
+    """F1 does not build or persist preview artifacts; that UI flow belongs to F5."""
+    raise HTTPException(
+        status_code=status.HTTP_410_GONE,
+        detail=unavailable_payload("container_preview", "F5"),
+    )
+
+    # Retained below as the historical F5 implementation reference.  It is
+    # unreachable through this F1 boundary and must not be reactivated here.
     project = uow.projects.get_by_id(req.project_id)
     if not project:
         raise HTTPException(
@@ -1449,8 +1452,14 @@ async def build_preview_image(
 @app.post("/api/v1/previews/start", tags=["previews"])
 async def start_preview_container(
     req: PreviewStartRequest,
-    uow: Annotated[PersistenceUnitOfWork, Depends(get_uow)],
+    uow: object | None = None,
 ) -> dict[str, Any]:
+    """F1 never launches containers from a compatibility endpoint."""
+    raise HTTPException(
+        status_code=status.HTTP_410_GONE,
+        detail=unavailable_payload("container_preview", "F5"),
+    )
+
     session = uow.preview_sessions.get_by_id(req.preview_id)
     if not session:
         raise HTTPException(
@@ -1590,8 +1599,14 @@ def get_latest_preview_for_change(
 @app.post("/api/v1/previews/{preview_id}/teardown", tags=["previews"])
 async def teardown_preview_session(
     preview_id: str,
-    uow: Annotated[PersistenceUnitOfWork, Depends(get_uow)],
+    uow: object | None = None,
 ) -> dict[str, Any]:
+    """F1 does not operate preview containers."""
+    raise HTTPException(
+        status_code=status.HTTP_410_GONE,
+        detail=unavailable_payload("container_preview", "F5"),
+    )
+
     session = uow.preview_sessions.get_by_id(preview_id)
     if not session:
         raise HTTPException(
@@ -1605,8 +1620,14 @@ async def teardown_preview_session(
 
 @app.post("/api/v1/previews/reconcile", tags=["previews"])
 async def reconcile_orphan_previews(
-    uow: Annotated[PersistenceUnitOfWork, Depends(get_uow)],
+    uow: object | None = None,
 ) -> dict[str, Any]:
+    """F1 must not inspect or mutate Docker state."""
+    raise HTTPException(
+        status_code=status.HTTP_410_GONE,
+        detail=unavailable_payload("container_preview", "F5"),
+    )
+
     preview_svc = ContainerPreviewService(uow)
     cleaned = await preview_svc.reconcile_orphan_previews()
     return {"cleaned_containers": cleaned, "count": len(cleaned)}
@@ -1644,8 +1665,14 @@ def get_validation_scenarios_endpoint(
 def submit_validation(
     req: ValidationSubmitRequest,
     request: Request,
-    uow: Annotated[PersistenceUnitOfWork, Depends(get_uow)],
+    uow: object | None = None,
 ) -> dict[str, Any]:
+    """F1 keeps no candidate-validation writer before the F5 UI exists."""
+    raise HTTPException(
+        status_code=status.HTTP_410_GONE,
+        detail=unavailable_payload("candidate_validation", "F5"),
+    )
+
     verdict = ValidationVerdict.PASS if req.verdict.upper() == "PASS" else ValidationVerdict.FAIL
     authenticated_operator = getattr(request.state, "operator", None)
     # The request body is client-controlled and is never an identity authority.

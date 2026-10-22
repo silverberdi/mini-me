@@ -45,7 +45,6 @@ from minime.domain.interfaces import (
     AuthAuditEventRepositoryInterface,
     AuthorizedOperatorRepositoryInterface,
     AuthSessionRepositoryInterface,
-    BacklogItemRepositoryInterface,
     BlockerClaimRepositoryInterface,
     CandidateAuthorshipRepositoryInterface,
     CandidateManifestRepositoryInterface,
@@ -78,10 +77,8 @@ from minime.domain.interfaces import (
     RecoveryDecisionRepositoryInterface,
     ReviewFindingRepositoryInterface,
     ReviewRepositoryInterface,
-    SchedulerDecisionRepositoryInterface,
     TaskClassificationSnapshotRepositoryInterface,
     ValidationRunRepositoryInterface,
-    WorkQueueRepositoryInterface,
 )
 from minime.domain.models import (
     AUTHORITATIVE_PRICING_SOURCES,
@@ -90,7 +87,6 @@ from minime.domain.models import (
     AuthAuditEvent,
     AuthorizedOperator,
     AuthSession,
-    BacklogItem,
     BlockerClaim,
     BudgetLedgerEntry,
     BudgetReservation,
@@ -131,10 +127,8 @@ from minime.domain.models import (
     RecoveryDecision,
     Review,
     ReviewFinding,
-    SchedulerDecisionRecord,
     TaskClassificationSnapshot,
     ValidationRun,
-    WorkQueueItem,
     utc_now,
 )
 
@@ -1808,82 +1802,6 @@ class InMemoryOperatorActionRepository(OperatorActionRepositoryInterface):
         return matches[:limit]
 
 
-class InMemoryWorkQueueRepository(WorkQueueRepositoryInterface):
-    def __init__(self):
-        self._store: dict[str, WorkQueueItem] = {}
-
-    def save(self, item: WorkQueueItem) -> None:
-        for existing in self._store.values():
-            if existing.project_id == item.project_id and existing.change_name == item.change_name:
-                updated = item.model_copy(deep=True)
-                updated.queue_item_id = existing.queue_item_id
-                updated.discovered_at = existing.discovered_at
-                self._store[existing.queue_item_id] = updated
-                return
-        self._store[item.queue_item_id] = item.model_copy(deep=True)
-
-    def get_by_id(self, queue_item_id: str) -> WorkQueueItem | None:
-        item = self._store.get(queue_item_id)
-        return item.model_copy(deep=True) if item else None
-
-    def get_by_project_and_change(self, project_id: str, change_name: str) -> WorkQueueItem | None:
-        matches = [
-            item
-            for item in self._store.values()
-            if item.project_id == project_id and item.change_name == change_name
-        ]
-        return matches[0].model_copy(deep=True) if matches else None
-
-    def list_all(self, project_id: str | None = None) -> list[WorkQueueItem]:
-        items = list(self._store.values())
-        if project_id:
-            items = [item for item in items if item.project_id == project_id]
-        items.sort(key=lambda i: (-i.priority_score, i.discovered_at))
-        return [i.model_copy(deep=True) for i in items]
-
-    def list_ready(self, project_id: str | None = None) -> list[WorkQueueItem]:
-        items = [item for item in self._store.values() if item.admission_eligible]
-        if project_id:
-            items = [item for item in items if item.project_id == project_id]
-        items.sort(key=lambda i: (-i.priority_score, i.discovered_at))
-        return [i.model_copy(deep=True) for i in items]
-
-    def delete(self, queue_item_id: str) -> None:
-        self._store.pop(queue_item_id, None)
-
-
-class InMemorySchedulerDecisionRepository(SchedulerDecisionRepositoryInterface):
-    def __init__(self):
-        self._store: list[SchedulerDecisionRecord] = []
-
-    def save(self, decision: SchedulerDecisionRecord) -> None:
-        self._store.append(decision.model_copy(deep=True))
-
-    def get_by_id(self, decision_id: str) -> SchedulerDecisionRecord | None:
-        for d in self._store:
-            if d.decision_id == decision_id:
-                return d.model_copy(deep=True)
-        return None
-
-    def list_by_change(
-        self, project_id: str, change_name: str, limit: int = 50
-    ) -> list[SchedulerDecisionRecord]:
-        matches = [
-            d for d in self._store if d.project_id == project_id and d.change_name == change_name
-        ]
-        matches.sort(key=lambda d: d.evaluated_at, reverse=True)
-        return [d.model_copy(deep=True) for d in matches[:limit]]
-
-    def list_recent(
-        self, project_id: str | None = None, limit: int = 100
-    ) -> list[SchedulerDecisionRecord]:
-        items = self._store
-        if project_id:
-            items = [d for d in items if d.project_id == project_id]
-        items.sort(key=lambda d: d.evaluated_at, reverse=True)
-        return [d.model_copy(deep=True) for d in items[:limit]]
-
-
 class InMemoryAuthorizedOperatorRepository(AuthorizedOperatorRepositoryInterface):
     def __init__(self):
         self._store: list[AuthorizedOperator] = []
@@ -1986,62 +1904,6 @@ class InMemoryAuthAuditEventRepository(AuthAuditEventRepositoryInterface):
             ]
         items.sort(key=lambda e: e.timestamp, reverse=True)
         return [e.model_copy(deep=True) for e in items[:limit]]
-
-
-class InMemoryBacklogItemRepository(BacklogItemRepositoryInterface):
-    def __init__(self):
-        self._store: dict[str, BacklogItem] = {}
-
-    def save(self, item: BacklogItem) -> None:
-        existing = self._store.get(item.item_id)
-        if not existing:
-            for ex in self._store.values():
-                if ex.project_id == item.project_id and ex.item_key == item.item_key:
-                    existing = ex
-                    break
-        if existing is not None:
-            if item.status != existing.status:
-                raise LifecycleBypassError(
-                    f"Direct lifecycle status mutation on existing BacklogItem '{item.item_key}' via generic save() is forbidden. "
-                    f"Status change from '{existing.status.value}' to '{item.status.value}' must execute via LifecycleTransitionAuthority."
-                )
-        self._store[item.item_id] = item.model_copy(deep=True)
-
-    def get_by_id(self, item_id: str) -> BacklogItem | None:
-        item = self._store.get(item_id)
-        return item.model_copy(deep=True) if item else None
-
-    def get_by_project_and_key(self, project_id: str, item_key: str) -> BacklogItem | None:
-        for item in self._store.values():
-            if item.project_id == project_id and item.item_key == item_key:
-                return item.model_copy(deep=True)
-        return None
-
-    def get_by_openspec_change_name(self, project_id: str, change_name: str) -> BacklogItem | None:
-        for item in self._store.values():
-            if item.project_id == project_id and (
-                item.openspec_change_name == change_name or item.item_key == change_name
-            ):
-                return item.model_copy(deep=True)
-        return None
-
-    def list_by_project(
-        self,
-        project_id: str,
-        status: str | None = None,
-        priority: str | None = None,
-        limit: int = 100,
-    ) -> list[BacklogItem]:
-        items = [i for i in self._store.values() if i.project_id == project_id]
-        if status:
-            items = [i for i in items if i.status.value == status or i.status == status]
-        if priority:
-            items = [i for i in items if i.priority.value == priority or i.priority == priority]
-        items.sort(key=lambda i: i.created_at, reverse=True)
-        return [i.model_copy(deep=True) for i in items[:limit]]
-
-    def delete(self, item_id: str) -> None:
-        self._store.pop(item_id, None)
 
 
 class InMemoryIntegrityFindingRepository(IntegrityFindingRepositoryInterface):
@@ -2633,12 +2495,9 @@ class InMemoryPersistenceUnitOfWork(PersistenceUnitOfWork):
         self.preview_sessions = InMemoryPreviewSessionRepository()
         self.validation_runs = InMemoryValidationRunRepository()
         self.operator_actions = InMemoryOperatorActionRepository()
-        self.work_queue = InMemoryWorkQueueRepository()
-        self.scheduler_decisions = InMemorySchedulerDecisionRepository()
         self.authorized_operators = InMemoryAuthorizedOperatorRepository()
         self.auth_sessions = InMemoryAuthSessionRepository()
         self.auth_audit_events = InMemoryAuthAuditEventRepository()
-        self.backlog_items = InMemoryBacklogItemRepository()
         self.integrity_findings = InMemoryIntegrityFindingRepository()
         self.classification_snapshots = InMemoryTaskClassificationSnapshotRepository()
         self.project_managed_repository_bindings = (
@@ -2958,61 +2817,6 @@ def publish_local_intake_ref(root: Path, change_name: str) -> str:
         capture_output=True,
     )
     return sha
-
-
-def publish_verified_intake_workspace(
-    uow: Any,
-    project: Project,
-    project_root: Path,
-    change_name: str,
-) -> IntakeWorkspaceOwnership:
-    """Create, commit, and publish an intake tree through the canonical service path.
-
-    Scheduler-admission tests use this helper when they exercise the real tick.
-    It deliberately avoids synthetic ownerships, SHAs, or local-only refs.
-    """
-    from minime.services.intake_service import IntakeService
-
-    from minime.domain.enums import ReadinessState, SagaType, WorkItemSource, WorkItemStatus
-    from minime.domain.models import BacklogItem
-    from minime.services.saga_engine import SagaEngine
-
-    item = uow.backlog_items.get_by_project_and_key(project.project_id, change_name)
-    if item is None:
-        item = BacklogItem(
-            project_id=project.project_id,
-            item_key=change_name,
-            title=change_name,
-            description="Canonical scheduler-admission fixture artifact.",
-            acceptance_criteria=["Published intake artifacts are valid."],
-            openspec_change_name=change_name,
-            source=WorkItemSource.LOCAL_BACKLOG,
-            status=WorkItemStatus.READY,
-            readiness_state=ReadinessState.READY,
-        )
-        uow.backlog_items.save(item)
-
-    saga_engine = SagaEngine(uow)
-    saga = saga_engine.start_saga(
-        SagaType.INTAKE,
-        project.project_id,
-        item.item_key,
-        change_name=change_name,
-    )
-    intake = IntakeService(uow, project_root=project_root)
-    ownership = intake._reserve_intake_workspace(project, item, saga)
-    intake._activate_intake_workspace(ownership, project)
-    generated = intake.openspec_generator.generate_from_backlog_item(item, project.display_name)
-    intake.openspec_generator.write_change_to_disk(
-        project.openspec_path,
-        generated,
-        project_id=project.project_id,
-        target_workspace_path=ownership.canonical_workspace_path,
-    )
-    intake._commit_intake_artifacts(ownership, generated, project)
-    intake._publish_intake_artifacts_cas(ownership, project)
-    saga_engine.complete_saga(saga, evidence_references={"published_sha": ownership.published_sha})
-    return ownership
 
 
 def create_test_worktree_ownership(

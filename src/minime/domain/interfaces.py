@@ -23,7 +23,6 @@ from minime.domain.models import (
     AuthAuditEvent,
     AuthorizedOperator,
     AuthSession,
-    BacklogItem,
     BlockerClaim,
     BudgetLedgerEntry,
     BudgetReservation,
@@ -65,39 +64,9 @@ from minime.domain.models import (
     RecoveryDecision,
     Review,
     ReviewFinding,
-    SchedulerDecisionRecord,
     TaskClassificationSnapshot,
     ValidationRun,
-    WorkQueueItem,
 )
-
-
-class BacklogItemRepositoryInterface(ABC):
-    @abstractmethod
-    def save(self, item: BacklogItem) -> None: ...
-
-    @abstractmethod
-    def get_by_id(self, item_id: str) -> BacklogItem | None: ...
-
-    @abstractmethod
-    def get_by_project_and_key(self, project_id: str, item_key: str) -> BacklogItem | None: ...
-
-    @abstractmethod
-    def get_by_openspec_change_name(
-        self, project_id: str, change_name: str
-    ) -> BacklogItem | None: ...
-
-    @abstractmethod
-    def list_by_project(
-        self,
-        project_id: str,
-        status: str | None = None,
-        priority: str | None = None,
-        limit: int = 100,
-    ) -> list[BacklogItem]: ...
-
-    @abstractmethod
-    def delete(self, item_id: str) -> None: ...
 
 
 class ProjectRepositoryInterface(ABC):
@@ -904,46 +873,6 @@ class ProviderEfficiencyMetricsRepositoryInterface(ABC):
     def list_by_project(
         self, project_id: str, limit: int | None = None
     ) -> list[ProviderEfficiencyMetrics]: ...
-
-
-class WorkQueueRepositoryInterface(ABC):
-    @abstractmethod
-    def save(self, item: WorkQueueItem) -> None: ...
-
-    @abstractmethod
-    def get_by_id(self, queue_item_id: str) -> WorkQueueItem | None: ...
-
-    @abstractmethod
-    def get_by_project_and_change(
-        self, project_id: str, change_name: str
-    ) -> WorkQueueItem | None: ...
-
-    @abstractmethod
-    def list_all(self, project_id: str | None = None) -> list[WorkQueueItem]: ...
-
-    @abstractmethod
-    def list_ready(self, project_id: str | None = None) -> list[WorkQueueItem]: ...
-
-    @abstractmethod
-    def delete(self, queue_item_id: str) -> None: ...
-
-
-class SchedulerDecisionRepositoryInterface(ABC):
-    @abstractmethod
-    def save(self, decision: SchedulerDecisionRecord) -> None: ...
-
-    @abstractmethod
-    def get_by_id(self, decision_id: str) -> SchedulerDecisionRecord | None: ...
-
-    @abstractmethod
-    def list_by_change(
-        self, project_id: str, change_name: str, limit: int = 50
-    ) -> list[SchedulerDecisionRecord]: ...
-
-    @abstractmethod
-    def list_recent(
-        self, project_id: str | None = None, limit: int = 100
-    ) -> list[SchedulerDecisionRecord]: ...
 
 
 class OpenSpecAdapterInterface(ABC):

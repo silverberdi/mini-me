@@ -24,10 +24,10 @@ class StatusService:
         self.uow = uow
 
     def get_self_hosting_diagnostic(self) -> dict[str, Any]:
-        """Return static runtime capability facts for the self-hosting pilot."""
+        """Return the truthful F1 capability boundary for autonomous execution."""
         return {
-            "runtime_engine": "mini-me-runtime",
-            "status": "SELF_HOSTING_READY",
+            "runtime_engine": None,
+            "status": "UNAVAILABLE_IN_F1",
             "autonomous_queue": False,
         }
 
