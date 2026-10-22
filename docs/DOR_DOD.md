@@ -1,53 +1,21 @@
-# Definition of Ready and Done
+# Definition of Ready / Done — mini me v1.2
 
-## Definition of Ready
-A change may enter READY only when code-verifiable checks confirm:
-- registered project and immutable `project_id`;
-- valid repository identity/access;
-- GitHub Issue in that repository;
-- valid binding to exactly one OpenSpec change;
-- explicit value/purpose;
-- observable acceptance criteria;
-- no unresolved ambiguity that materially changes behavior, architecture, scope, security or cost;
-- dependencies identified;
-- engineering inventory of existing capabilities and explicit reuse/replace/retire decisions using `docs/ENGINEERING_DISCIPLINE.md`;
-- seeded agent skills/hooks/harness contracts inventoried; compatibilities/changes recorded rather than reinvented;
-- base branch defined;
-- implementer + complementary reviewer configured;
-- deterministic project checks configured and a testable **E2E scenario for the promised value** plus postdeploy proof plan linked to specs;
-- provider/privacy/fallback policy configured;
-- roadmap/stage allows the work now;
-- OpenSpec artifacts produced or revised by the authorized **agent-side** OpenSpec workflow and structurally valid; if the change is still at intake/propose, DoR applies to the next safe stage, not a fabricated READY implementation;
-- repository/workspace preflight passes;
-- actual stage preflight for admission verifies provider authentication, compatible installed native OpenSpec workflow and a safe bounded capacity window; if provider is unavailable or quota unknown, backlog can remain prepared but dispatch MUST wait;
-- for UI changes requiring human validation: scenarios and a valid preview deployment contract exist.
+**Autoridad:** [CONTRATO_RECTOR.md](CONTRATO_RECTOR.md). DoR/DoD deben aportar evidencia, no multiplicar gates propios.
 
-DeepSeek/OpenRouter/Qwen availability at that instant does not by itself block READY unless a project policy explicitly requires it before starting.
+## Ready para ejecutar un Change
+- Es UNA de las seis fases en el orden acordado, con issue asociado y Change OpenSpec oficial correspondiente, sin microchanges.
+- Requerimiento observable, propuesta/artefactos del esquema por agente cuando aplique, scope no ambiguo.
+- Repositorio y rama confiables, credenciales seguras, agente/skill real compatible y presupuesto autorizado.
+- No existe otro Change activo del mismo proyecto; el operador ha autorizado iniciar la fase bajo condiciones de cuota seguras.
+- Definir pruebas pertinentes, código/DB a reutilizar o eliminar y preservación de datos si corresponde.
 
-## Definition of Done
-DONE requires all applicable conditions:
-- implementation complete;
-- applicable Removal Ledger completed: old writers/entrypoints migrated/retired, no active duplicate behavior, consumers/config/docs/tests reconciled, justified historical assets retained; exceptions require explicit human authorization;
-- E2E and regression repeated **after retirement**, not only before migration;
-- final deterministic checks pass;
-- real stage-level E2E and end-to-end delivery tests pass using real agent/CLI, OpenSpec, Git and GitHub as required; no fake-runner evidence is accepted as a product gate;
-- complementary authoritative review complete;
-- correction loop resolved;
-- optional authorized independent fallback audit complete **only when** a policy/human decision explicitly requires it; routine mandatory quality gate is distinct primary-agent independent review;
-- required UI human validation completed on the bound candidate, or human evidence review completed for non-UI changes;
-- blocking findings resolved or explicitly overridden by authorized human decision with reason;
-- human approval recorded;
-- candidate pushed and PR exists;
-- human merge confirmed;
-- production deployment completed when required;
-- production verification passed **at the changed functionality level** (not only HTTP health), with evidence bound to deployed SHA/digest, or explicitly marked awaiting deployment before DONE;
-- OpenSpec synchronized/archived using supported native workflows with diff/semantic checks, respecting protected Git branches and human merge authority;
-- GitHub Issue/Project synchronized and closed/done;
-- final metrics/evidence persisted, including agent identity/model, actual OpenSpec workflows invoked, skill/hook versions, candidate/PR, stage E2E, postdeploy E2E and authorized cost;
-- temporary worktree cleaned;
-- no pending post-merge operation remains.
+## Done de un Change
+- Comportamiento solicitado demostrado; pruebas enfocadas/integración/E2E reales conforme a la capacidad afirmada.
+- Sin implementación propia que emule OpenSpec, sin nuevos estados/servicios superfluos; código muerto retirado dentro del alcance.
+- Agentes verdaderamente invocados; propuesta revisada independientemente y código revisado si la política lo exige; preguntas humanas resueltas.
+- PR implementación en Git con merge humano para SHA revisado; sync/archive nativos en rama nueva, PR documental autorizado y merge confirmado; ticket remoto cerrado.
+- F5 y F6: **evidencia verificable de ejecución por mini me** (no mensajes manuales).
+- No exigir despliegue productivo por mini me; pertenece a CI/CD externo.
+- Para migraciones de DB: Alembic seguro, conservación/backup/rollback y verificación de lo retenido.
 
-`APPROVED != DONE`, `MERGED != DONE`, `DEPLOYED != DONE`.
-
-## Reopen rule
-A defect found after DONE creates a new related Issue/OpenSpec change; do not resurrect a completed execution job and corrupt historical metrics.
+Ni tests mock PASS, ni health 200, ni un PR solamente creado prueban DONE.

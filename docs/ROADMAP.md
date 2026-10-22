@@ -1,33 +1,16 @@
-# mini me — roadmap por capacidades demostradas
+# Roadmap vigente — seis fases, seis Changes
 
-## Autoridad y criterio
+**Contrato rector:** [CONTRATO_RECTOR.md](CONTRATO_RECTOR.md). La secuencia 001–022, los MM-R01–R10 y N01–N05 son **historia**, no fases adicionales.
 
-El roadmap anterior (stages 001–022) queda como **historial de trabajo técnico**, consultable en Git, PR, specs archivadas y evidencias previas. Los rótulos históricos `DELIVERED` no garantizan por sí solos un ciclo E2E productivo. La referencia vigente de **trabajo por entregar** es [BACKLOG](BACKLOG.md), cuyas fichas trazan valor, escenarios y pruebas.
+1. **F1 [#169](https://github.com/silverberdi/mini-me/issues/169)** — limpiar emulaciones de OpenSpec, lógica y DB obsoletas; preservar núcleo útil y migrar datos de forma segura. Change: gacela-01-depuracion-inicial.
+2. **F2 [#170](https://github.com/silverberdi/mini-me/issues/170)** — proyecto configurable: ticket GitHub inicial, adapter strategy extensible, Git aparte, cuatro roles/modelos, contexto, skills seleccionadas. Change: gacela-02-proyectos.
+3. **F3 [#171](https://github.com/silverberdi/mini-me/issues/171)** — ciclo nativo real y revisión independiente, atención humana, merge humano, sync/archive y cierre. Change: gacela-03-openspec-y-revision.
+4. **F4 [#172](https://github.com/silverberdi/mini-me/issues/172)** — skills base preexistentes o complementadas donde falten. Change: gacela-04-skills-base.
+5. **F5 [#173](https://github.com/silverberdi/mini-me/issues/173)** — UI responsive española; **mini me debe ejecutar autónomamente su propio Change**. Change: gacela-05-ui-self-hosted.
+6. **F6 [#174](https://github.com/silverberdi/mini-me/issues/174)** — segunda depuración de lógica/DB, también **ejecutada por mini me**. Change: gacela-06-depuracion-final.
 
-Un stage/Change avanza solamente cuando produce utilidad observable, cumple los E2E correspondientes (incluida verificación post-despliegue) y satisface [CHANGE_DELIVERY_CONTRACT](CHANGE_DELIVERY_CONTRACT.md). No medir avance por número de commits, clases, pruebas unitarias o Changes archivados.
+**Reglas:** exactamente un Change por fase (una o varias specs). No crear ni iniciar Changes desde este documento. Cada fase se cierra antes de iniciar la siguiente. Cada entrega tiene pruebas reales apropiadas, PR de implementación con merge humano, y cierre OpenSpec con PR documental según la fase posible. Sin microchanges, sin ejecución adelantada de fases, sin despliegue por mini me.
 
-## Secuencia vigente
+La aprobación del roadmap/contexto NO inicia scheduler ni permisos de gasto y NO declara resuelta la brecha entre el código actual y el contrato.
 
-| Hito | Cambios | Capacidad demostrable |
-|---|---|---|
-| A — Primer software real | R01 | Agente real + OpenSpec + agente revisor + PR sin mini me programando |
-| B — Del Issue al PR | R02, R03 | Preparación inteligente y cola autónoma hasta revisión |
-| C — Entrega y continuidad | R04, R05 | Cierre real nativo y recuperación segura ante interrupciones/cuotas |
-| D — Calidad y control operativo | R06, R07 | Capabilities contextuales efectivas y UI de atención humana |
-| E — Autonomía transferible | R08, R09 | Segundo repositorio y evolución gobernada de capacidades |
-| F — Autodesarrollo | R10 | mini me desarrolla mini me con human merge y post-deploy E2E |
-
-**Solo R01 es elegible para ser el siguiente Change activo.** Los restantes son backlog; no crear directorios de OpenSpec para ellos antes de autorizar `propose` del Change correspondiente.
-
-## Restricciones de cada hito
-
-- **A:** contiene adaptador real, selección de agente y reviewer, aislamiento, preflight de cuota, checks, E2E con cambios verdaderos y PR. No bloquear A por una futura plataforma de plugins.
-- **B:** GitHub y generación de contratos dependen de agent-led OpenSpec; no generar specs determinísticas para “pasar el gate”.
-- **C:** operaciones GitHub/DB/Git son determinísticas/durables; el contenido semántico de OpenSpec se delega a workflows nativos.
-- **D:** reutilizar PR #140 y superficie PWA cuando cumplan contrato; no construir una biblioteca genérica sin consumo probado.
-- **E:** segundo repositorio real prueba ausencia de supuestos hardcoded; expandir capacidades solo por necesidad demostrada.
-- **F:** autonomía significa crear PRs bajo políticas, no auto-merge ni auto-authorize cuotas, secrets o despliegues peligrosos.
-
-## Regla para cualquier cambio de orden
-
-Exigir actualización de su ficha de backlog mediante `update`/propuesta gobernada, análisis de dependencia y prueba de que el nuevo orden entrega **más valor usable** sin saltarse seguridad/E2E. No volver a numerar el historial ni simular que los nuevos R01–R10 ya fueron implementados.
+Véase [BACKLOG.md](BACKLOG.md) para Issues y [RECONCILIACION_LEGADO.md](RECONCILIACION_LEGADO.md) para tratamiento del historial.

@@ -1,19 +1,11 @@
-# Business Intent
+# Intención de negocio — mini me
 
-## Why mini me exists
-Manual use of multiple coding agents creates coordination work: selecting capacity, moving context, controlling scope, tracking retries and quota limits, reviewing changes, validating UI, preparing PRs, deploying candidates and remembering what remains safe to close.
+mini me existe para quitarle al operador la tarea de pasar requerimientos y contexto entre diferentes agentes de programación. Debe ser pequeño y útil (**una gacela, no un paquidermo**): toma tickets de su fuente externa, coordina agentes mediante workflows oficiales de OpenSpec y obtiene cambios reales listos para revisión/merge y cerrados documentalmente.
 
-mini me should turn that coordination burden into a small **human decision inbox**. It must not reimplement OpenSpec or produce project code/specs itself; those are the jobs of **agents operating via OpenSpec**.
+El operador no programa ni actúa como mensajero de prompts: autoriza decisiones reservadas, especialmente merge del código; el agente de pensamiento resuelve dudas contextuales cuando puede, y la UI presenta opciones reales cuando hace falta.
 
-## Job to be done
-> From a GitHub need **or** an implementation-ready OpenSpec change, coordinate authorized AI coding agents that use native OpenSpec workflows to propose, apply, verify, independently review and deliver real software through a human-approved PR/merge; preserve work through failures and quota exhaustion, provide verifiable postdeployment results, and surface only decisions requiring human judgment.
+Una instalación personal con FastAPI, PostgreSQL mínimo y GitHub inicial. Agentes por rol y modelo configurables; independencia de revisión; POO/SOLID/DRY/KISS/YAGNI; no emular OpenSpec ni guardar otra cola de tickets; CI/CD del proyecto despliega, mini me no.
 
-## Product posture
-- Personal internal system; not a commercial product.
-- One controlled Linux installation.
-- Multi-project by domain model from day one.
-- Optimize for reliability, traceability, low unnecessary spend and reduced human coordination.
-- Do not build multitenancy, generic installer ecosystems, arbitrary deployment backends or enterprise portability unless a later real need appears.
+**Éxito:** ticket remoto → propose → revisión independiente de propuesta → apply → verify → revisión condicional de código → PR → merge humano → sync/archive nativos → PR documental autorizado → ticket cerrado → siguiente. Fases de reconstrucción EXACTAMENTE 6 (issues #169–#174); desde fase 5 mini me debe ejecutar su propio desarrollo.
 
-## Success
-mini me is successful when a well-defined need reaches a real, independently reviewed PR without manual agent handoffs, and after the human merge the actual deployed behavior is verified and OpenSpec is natively closed. Every Change must deliver a usable vertical capability with stage-level and end-to-end tests. Preserved evidence must prove which agent executed each native OpenSpec workflow and what code, review, audit (if authorized), UI candidate and production behavior resulted. Longer term mini me repeats this on **its own repository** without assuming authority to merge or buy quota.
+Contrato detallado: [CONTRATO_RECTOR.md](CONTRATO_RECTOR.md).

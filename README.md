@@ -1,32 +1,28 @@
-# mini me — canonical implementation context
+# mini me — la gacela
 
-`mini me` is a personal, single-installation **control plane for AI agents using native OpenSpec workflows** across software repositories. It coordinates GitHub needs, agent-led OpenSpec proposals and changes, assigns Codex/Antigravity by stage with independent review, enforces deterministic and real E2E checks, survives interruptions/quotas, and automates PR/deployment/closure mechanics around human merge. It **never programs or semantically generates/merges/archives OpenSpec artifacts instead of the agents**. DeepSeek/OpenRouter are opt-in compatible fallback only after both primary agents cannot serve a stage.
+mini me es una aplicación **personal y de instalación única** que coordina agentes usando los workflows **nativos de OpenSpec** para convertir tickets remotos en cambios implementados, verificados, fusionados y archivados. No programa ni recrea OpenSpec.
 
-## Canonical reading order
-1. `docs/BUSINESS_INTENT.md`
-2. `docs/CANONICAL_DECISIONS.md`
-3. `docs/PRODUCT.md`
-4. `docs/ENGINEERING_DISCIPLINE.md`
-5. `docs/CHANGE_DELIVERY_CONTRACT.md`
-6. `docs/agent-capabilities/V1_MANIFEST.md` (and linked hook/harness/retirement contracts)
-7. `docs/ARCHITECTURE.md`
-6. `docs/PROVIDER_POLICY.md`
-7. `docs/DOR_DOD.md`
-8. `docs/ROADMAP.md` and `docs/BACKLOG.md`
-9. `docs/backlog/MM-Rxx.md` for the one authorized value increment
-10. `docs/AGENT_CONTRACTS.md` and `openspec/config.yaml`
-11. single active change under `openspec/changes/`
+**Contrato rector:** [docs/CONTRATO_RECTOR.md](docs/CONTRATO_RECTOR.md) (versión 1.2).
+**Backlog de reconstrucción:** [docs/BACKLOG.md](docs/BACKLOG.md).
+**Reconciliación del legado:** [docs/RECONCILIACION_LEGADO.md](docs/RECONCILIACION_LEGADO.md).
+**Contexto de OpenSpec:** [openspec/config.yaml](openspec/config.yaml).
+**Instrucciones para agentes:** [AGENTS.md](AGENTS.md).
 
-## Source-of-truth boundaries
-- **GitHub Projects / Issues:** work portfolio, visible planning and progress.
-- **OpenSpec:** behavior contract, design intent and implementation tasks for a change.
-- **PostgreSQL:** durable operational state, attempts, events, evidence, provider state, decisions and metrics.
-- **Git:** code, branches, commits, worktrees, diffs and PR candidate identity.
-- **Project config:** execution/deployment/provider policy.
-- **Host secret files/environment:** credentials; never the repository.
+## Dirección vigente
+GitHub Issues (inicial) → ticket más antiguo elegible → propose y revisión independiente de propuesta → apply → verify + correcciones → review de código condicional → PR → merge humano → sync/archive nativos desde rama documental nueva → PR documental autorizado → ticket cerrado → siguiente.
 
-## Primary path
-`GitHub need / READY OpenSpec → agent-side propose/update (when needed) → safe preflight → native agent apply → checks/native verify → complementary independent review → real E2E → draft PR → human merge → native OpenSpec sync/archive with Git authority → authorized deployment + functional postdeploy E2E → GitHub closure → DONE`
+Los roles pensamiento, ejecución, revisión independiente y respaldo y sus modelos son configurables. La DB mantiene solo configuración y checkpoints necesarios, no la cartera de tickets. Las preguntas de OpenSpec se presentan con opciones originales o se intentan resolver con contexto sin usurpar autoridad humana.
 
-## Important constraint
-Only **one explicitly authorized OpenSpec change** is active at a time. The ten MM-R01–MM-R10 backlog dossiers are planning contracts, **not** ten active `openspec/changes/` directories. Do not start change apply by copying their text into prompts; use the actual agent-side OpenSpec workflow.
+**Una API FastAPI, arquitectura modular pequeña, POO/SOLID/DRY, KISS/YAGNI.** mini me no despliega: despliegue pertenece al CI/CD del proyecto.
+
+## Reconstrucción: exactamente seis Changes
+1. [#169](https://github.com/silverberdi/mini-me/issues/169) — depuración inicial (lógica/DB, emulación OpenSpec).
+2. [#170](https://github.com/silverberdi/mini-me/issues/170) — proyectos y roles configurables.
+3. [#171](https://github.com/silverberdi/mini-me/issues/171) — OpenSpec nativo, revisión y E2E real.
+4. [#172](https://github.com/silverberdi/mini-me/issues/172) — skills base reutilizables.
+5. [#173](https://github.com/silverberdi/mini-me/issues/173) — UI; **mini me debe ejecutar su propio Change**.
+6. [#174](https://github.com/silverberdi/mini-me/issues/174) — segunda depuración; **mini me debe ejecutar su propio Change**.
+
+Un Change por fase, con una o más especificaciones. Las specs y MM-R01–R10 anteriores son historia que se debe conciliar, no un backlog paralelo. Esta actualización de documentos NO ejecuta ninguno de los Changes.
+
+**mini me debe ser una gacela, no un paquidermo.** El valor es un recorrido real completo, no la cantidad de código o checks.

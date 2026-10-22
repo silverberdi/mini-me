@@ -1,59 +1,54 @@
 schema: spec-driven
 
 context: |
-  Product: mini me.
-  Purpose: personal single-installation Linux orchestrator for spec-driven software development across multiple repositories.
-  Source-of-truth boundaries: GitHub Projects/Issues = portfolio/work visibility; OpenSpec = behavior/design/tasks; PostgreSQL = runtime state/events/evidence/metrics; Git = code/candidate evidence; host secret files = credentials.
-  Stack direction: Python 3.12+, FastAPI, Pydantic v2, PostgreSQL, SQLAlchemy 2.x, Alembic, asyncio subprocesses, pytest, Ruff; Textual TUI later; containerized previews/deployments.
-  Primary agents: Codex and Antigravity execute installed native OpenSpec agent workflows as proposer/implementer/verifier/reviewer/closer by stage, with independently assigned reviewer identity. mini me only orchestrates; it must NOT generate planning artifacts via own Python templates, author code, or emulate native spec sync/archive. DeepSeek Direct is the independent read-only reviewer for contract and frozen-candidate code review under verified account, capacity, compatibility, and owner spending policy; it is not a planning or implementation agent. OpenRouter is exceptional quota-rescue for already-started work only when both primary agents are blocked by quota; it is not a reviewer. Same model may not implement and authoritatively review its own candidate. Qwen is advisory only.
-  Human authority: final product judgment, UI validation, merge, material ambiguity, policy/budget override and rollback.
-  Repository identity: execution derives only from validated durable project binding; never infer repo from titles/labels/Project fields.
-  Deployment: container-first. Human validation is for UI and must be guided by explicit scenarios. Validation is bound to candidate head SHA + base SHA and immutable image digest where applicable.
-  Engineering rule: docs/ENGINEERING_DISCIPLINE.md (founding discipline plus same-change code retirement) is mandatory. Capability seed: docs/agent-capabilities/V1_MANIFEST.md, HOOK_CONTRACTS.md, HARNESS_CONTRACT.md, RETIREMENT_MAP.md and skills in .agent/.agents are prebuilt inputs, not instructions to infer from scratch. PR #140 hooks are pending, not assumed installed.
-  Delivery rule: only the active OpenSpec change may be implemented; docs/BACKLOG.md MM-R01..R10 and docs/backlog/MM-Rxx.md define backlog value increments, not active changes. Each Change must include *all* functional specs necessary for real deployed value, stage E2E, full E2E, and functional postdeploy verification. docs/CHANGE_DELIVERY_CONTRACT.md is mandatory. Historical milestone DELIVERED labels do not prove product readiness.
-  Verification guidance: verify observable specs, deterministic checks, denial/failure scenarios, scope, canonical architecture, and post-retirement E2E evidence. Distinguish TECHNICAL_PASS, real E2E evidence, and DEPLOYED_VERIFIED; missing evidence is BLOCKED, never inferred PASS. Do not accept self-review, paid fallback without authorization, secret exposure, repository mismatch, or stale human validation.
+  MINI ME — CONTRATO RECTOR V1.2 (docs/CONTRATO_RECTOR.md). Esta referencia prevalece sobre planes heredados incompatibles.
+  Objetivo: una gacela, no un paquidermo. Aplicación personal única, pequeña, FastAPI modular + PostgreSQL mínimo, que coordina agentes con workflows NATIVOS OpenSpec; mini me NO programa ni emula propose/update/apply/verify/sync/archive.
+  Proveedores: agente/modelo de pensamiento, ejecución, revisión independiente y respaldo configurables por proyecto; medium por defecto en propose/apply/verify/review, esfuerzo mínimo compatible en sync/archive; no hardcodear Codex/AGY/DeepSeek/OpenRouter como roles permanentes.
+  Fuente de tickets remota y autoritativa: GitHub inicialmente. Contratos distintos para tickets y Git/PR; sin cola duplicada DB. Selección del ticket elegible más antiguo por fecha + ID; un cambio activo por proyecto; no scoring ni scheduler complejo.
+  Ciclo: propose → revisión independiente de propuesta → apply → verify/correcciones → revisión independiente de código condicional a política → PR → merge HUMANO de implementación → rama fresca desde main → sync/archive nativos por agente → PR documental de merge autorizado → ticket cerrado → siguiente.
+  Human-in-the-loop: capturar texto/opciones originales de OpenSpec; si hay opciones mostrarlas; sin opciones, pensamiento resuelve desde ticket/contexto si tiene información y autoridad; de otro modo consulta al humano con opciones etiquetadas y reanuda sin perder progreso. Jamás autoautorizar decisiones humanas, costos excepcionales, seguridad o merge de implementación.
+  Fuentes: tickets/comentarios en GitHub; código en Git; specs en OpenSpec; PR/merges en proveedor Git; PostgreSQL solo configuración, checkpoint, gasto y decisiones mínimas; secretos fuera de repo.
+  Fuera de alcance: despliegue productivo; pertenece al CI/CD del proyecto. Pruebas relevantes y E2E real antes de merge sí obligatorios.
+  Ingeniería: POO real, SOLID, DRY, KISS, YAGNI; no clases gigantes, duplicación, motores ni estados no necesarios; retirar código/DB obsoleto en la fase asignada con migraciones seguras.
+  PLAN DE RECONSTRUCCIÓN EXACTO 6 CHANGES (cada fase un Change con una o varias specs):
+  F1 gacela-01-depuracion-inicial, issue #169, elimina emulaciones y lógica/DB obsoleta.
+  F2 gacela-02-proyectos, issue #170, configuración y fuente tickets Github.
+  F3 gacela-03-openspec-y-revision, issue #171, flujo real completo y revisión.
+  F4 gacela-04-skills-base, issue #172, catálogo mínimo de skills reutilizables.
+  F5 gacela-05-ui-self-hosted, issue #173, UI y ejecución del Change POR MINI ME.
+  F6 gacela-06-depuracion-final, issue #174, segunda depuración POR MINI ME.
+  F1-F4 se ejecutan externamente; F5-F6 mini me debe ejecutar sus propios Changes con agentes reales. Orden estricto; no dividir fases en microchanges; no anticipar fases futuras.
+  Leer docs/CONTRATO_RECTOR.md, docs/BACKLOG.md, docs/RECONCILIACION_LEGADO.md y AGENTS.md ANTES de proponer.
+  La antigua dirección R01-R10, N01-N05 y postdeploy obligatorio ha sido sustituida. Los archivos históricos pueden contener requisitos contradictorios NO vigentes; no reinterpretarlos como autoridad actual.
+  Aprobar contexto NO autoriza ejecutar agentes, migraciones, despliegues, cerrar issues heredados, iniciar scheduler ni fusionar PR.
 
 rules:
   proposal:
-    - State the independently verifiable user/operator value and why this stage is now.
-    - Load corresponding docs/backlog/MM-Rxx.md, docs/ENGINEERING_DISCIPLINE.md and docs/agent-capabilities/V1_MANIFEST.md. For MM-R01 load docs/agent-capabilities/R01_IMPLEMENTATION_STARTER.md and verify its preliminary code census against actual repository. Trace every Sxx/E0x to proposal/design/specs/tasks; stop for material ambiguity, don't invent scope.
-    - Declare the smallest usable vertical slice, not technical sub-stages; include backend/DB/UI/hooks/harness and E2E in the **same Change** when required for value.
-    - Declare dependencies and explicitly identify non-goals/future stages to prevent scope creep.
-    - Identify whether the change affects UI and therefore requires human validation scenarios.
-    - Identify security, provider-cost, repository-binding and deployment impact where applicable.
+    - Usar únicamente el Change de la fase autorizada de las seis; un Change puede incluir múltiples specs; no crear microchanges.
+    - Analizar código, consumidores, documentación y DB reales antes de definir diseño; rastrear responsabilidades existentes para REUSAR o RETIRAR.
+    - No inventar funcionalidades, proveedores ni workflows; demostrar valor y alcance de la fase y criterios E2E correspondientes.
+    - Reconciliar contradicciones con docs/CONTRATO_RECTOR.md y documentar las heredadas; no derivar autoridad de los dossiers R01-R10.
   specs:
-    - Write observable SHALL/SHALL NOT requirements with concrete scenarios for critical paths and denial/failure behavior.
-    - Include real agent/official OpenSpec workflow evidence scenarios where relevant, plus adversarial stage E2E, outcome E2E and postdeployment functional E2E.
-    - Never encode runtime retry/quota/process state into OpenSpec as mutable operational data.
-    - For UI human validation, specify what the human tests, prerequisites, steps and expected visible outcomes.
-    - Include explicit safety requirements for repository identity, secrets, paid fallback, candidate identity or production data when affected.
+    - Requisitos observables SHALL/SHALL NOT y escenarios reales de éxito/fallo, cuota, permisos e intervención humana si aplican.
+    - Especificar exclusivamente la fase actual; preservar tests E2E de agentes reales y CI/UX cuando correspondan; despliegue productivo NO es responsabilidad de mini me.
+    - No introducir estados/entidades operativas superfluas en OpenSpec.
   design:
-    - Resolve implementation-shaping architecture decisions; do not leave the executor to invent them.
-    - Reuse the pre-seeded .agent/.agents skills/workflow wrappers and docs/agent-capabilities/ contracts, checking actual installed versions; complement them only where the active Change demonstrates a gap. Prefer official OpenSpec CLI/agent workflows; never emulate their semantics.
-    - Include an explicit Removal Ledger of replaced writers/entrypoints/callers, migration of consumers/docs/tests, preservation of historical data, rollback and re-proving all E2E after retiring obsolete code in the same Change.
-    - Preserve daemon/core ownership of orchestration; clients do not invoke providers/Git/deployment directly.
-    - PostgreSQL is the only operational DB and schema changes use Alembic migrations.
-    - Prefer idempotent/reconcilable external side effects and durable evidence before/after them.
-    - Explain rollback/recovery implications for deployment or migration changes.
+    - Reutilizar skills oficiales instaladas; mini me no reimplementa semántica OpenSpec ni crea prompts sustitutos.
+    - POO, SOLID, DRY, KISS, YAGNI; una sola API; contratos pequeños para adaptadores y dependencias explícitas.
+    - Identificar escrituras/consumidores antiguos, migraciones DB seguras, retención de datos y retirada de código muerto dentro de la fase.
+    - Conservar seguridad de repositorio, decisiones humanas, identidad de candidato, gasto autorizado e idempotencia mínima; no capas nuevas sin justificación.
   tasks:
-    - Keep tasks small, ordered, testable and attributable to this change only.
-    - Every task must have a verifiable completion signal; include acceptance/failure-injection tasks.
-    - Explicit tasks required for stage E2E, real end-to-end value proof, postdeploy E2E and regression of earlier delivered capabilities; no mock-only acceptance.
-    - "Include same-Change code retirement tasks when replacing behavior: census, parity proof, consumer migration, removal, post-removal E2E and deployment verification; RETAIN-WITH-REASON needs explicit human approval."
-    - Do not add tasks from future roadmap stages merely because they are convenient.
-
+    - Todas las tareas de la fase en UN Change, ordenadas y con señales verificables; no arrastrar fases futuras.
+    - Incluir integración y E2E reales pertinentes, además de eliminación de consumidores/código/DB obsoletos del alcance.
+    - Fase 5 y 6 requieren evidencia de que mini me orquestó en realidad su propio Change.
 operations:
   apply:
     guidance:
-      - Read AGENTS.md, docs/ENGINEERING_DISCIPLINE.md, docs/agent-capabilities/ contracts, seeded project agent skills, canonical docs and the MM-Rxx dossier before editing.
-      - Execute native installed agent-side OpenSpec workflows, never free-form code implementation prompts or deterministic mini me-authored proposals/sync/archive.
-      - Work only in the assigned repository/worktree and active change; stop on material ambiguity rather than inventing behavior, architecture, cost policy or repo identity.
-      - Run focused tests/checks as work progresses and preserve evidence; never merge, weaken policy, expose secrets or bypass mandatory human validation.
-      - Use the active change tasks as execution order but specs as behavioral authority.
-      - Keep changes focused and reversible.
+      - Leer AGENTS.md y contrato rector; ejecutar skill OpenSpec nativa del agente, no emulación Python.
+      - Mantener rama/worktree del Change, priorizar integración real y eliminar código viejo sustituido.
+      - Preservar cuotas, secretos, permiso humano para merge de implementación y continuidad.
   archive:
     guidance:
-      - Archive only after mini me Definition of Done conditions applicable to the stage are satisfied and closure evidence exists.
-
+      - Confirmar merge de implementación autorizado y cierre nativo; seguir la ruta PR documental y cierre del ticket descrita en el contrato, sin auto-merge general.
 githubCopilot:
   cloudAgent: false
