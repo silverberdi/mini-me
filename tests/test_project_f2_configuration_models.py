@@ -158,6 +158,24 @@ def test_project_github_app_adapters_keep_credentials_and_token_caches_isolated(
     assert adapter_a.auth._cached is None and adapter_b.auth._cached is None
 
 
+def test_public_project_payload_hides_host_reference_without_mutating_durable_project(
+    in_memory_uow,
+):
+    project = ProjectService(in_memory_uow).create_configured_project(_configuration())
+    project.provider_connections["git_pr"]["secret_reference"] = "host-only-reference"
+    in_memory_uow.projects.save(project)
+
+    payload = ProjectService.public_project_payload(project)
+
+    assert payload["provider_connections"]["git_pr"]["credential_configured"] is True
+    assert "secret_reference" not in payload["provider_connections"]["git_pr"]
+    assert (
+        in_memory_uow.projects.get_by_id("demo")
+        .provider_connections["git_pr"]["secret_reference"]
+        == "host-only-reference"
+    )
+
+
 def test_project_update_preserves_identity_and_can_change_settings(in_memory_uow):
     service = ProjectService(in_memory_uow)
     original = service.create_configured_project(_configuration())
