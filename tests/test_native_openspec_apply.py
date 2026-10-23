@@ -257,3 +257,31 @@ def test_codex_runner_retains_only_jsonl_error_summaries_on_failure():
     assert errors == ["codex error: model unavailable", "codex error: network failed"]
     assert "private tool output" not in str(errors)
     assert "/secret/file" not in str(errors)
+
+
+def test_codex_runner_usage_summary_requires_actual_completed_turn():
+    observed = [
+        json.dumps({"type": "thread.started", "thread_id": "x"}),
+        json.dumps(
+            {
+                "type": "turn.completed",
+                "usage": {
+                    "input_tokens": 31,
+                    "cached_input_tokens": 4,
+                    "output_tokens": 9,
+                    "secret": "must not persist",
+                },
+            }
+        ),
+    ]
+    assert CliImplementerRunner._codex_usage_summary(observed) == {
+        "input_tokens": 31,
+        "cached_input_tokens": 4,
+        "output_tokens": 9,
+    }
+    assert CliImplementerRunner._codex_usage_summary(
+        [json.dumps({"type": "turn.failed", "error": {"message": "quota failed"}})]
+    ) is None
+    assert CliImplementerRunner._codex_usage_summary(
+        [json.dumps({"type": "turn.completed", "usage": {"input_tokens": True, "output_tokens": 9}})]
+    ) is None
