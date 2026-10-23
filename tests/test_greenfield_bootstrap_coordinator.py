@@ -1,3 +1,4 @@
+import subprocess
 from decimal import Decimal
 from pathlib import Path
 from types import SimpleNamespace
@@ -124,6 +125,28 @@ def test_candidate_validation_rejects_repository_escape_or_missing_links(tmp_pat
     )
 
     with pytest.raises(GreenfieldBootstrapError, match="reference"):
+        GreenfieldBootstrapCoordinator._validate_candidate(worktree, incoming)
+
+
+def test_candidate_validation_rejects_unrelated_backlog_changes(tmp_path: Path):
+    worktree = tmp_path / "worktree"
+    incoming = worktree / "context" / "incoming" / "sha"
+    incoming.mkdir(parents=True)
+    (incoming / "facts.md").write_text("source", encoding="utf-8")
+    (worktree / "AGENTS.md").write_text("context/INDEX.md", encoding="utf-8")
+    (worktree / "openspec").mkdir()
+    (worktree / "openspec" / "config.yaml").write_text(
+        "context: context/INDEX.md\n", encoding="utf-8"
+    )
+    (worktree / "context" / "INDEX.md").write_text("facts.md", encoding="utf-8")
+    subprocess.run(["git", "init"], cwd=worktree, check=True, capture_output=True)
+    subprocess.run(["git", "config", "user.name", "test"], cwd=worktree, check=True)
+    subprocess.run(["git", "config", "user.email", "test@example.com"], cwd=worktree, check=True)
+    subprocess.run(["git", "add", "."], cwd=worktree, check=True)
+    subprocess.run(["git", "commit", "-m", "baseline"], cwd=worktree, check=True, capture_output=True)
+    (worktree / "ROADMAP.md").write_text("unsupported backlog", encoding="utf-8")
+
+    with pytest.raises(GreenfieldBootstrapError, match="unrelated"):
         GreenfieldBootstrapCoordinator._validate_candidate(worktree, incoming)
 
 

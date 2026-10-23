@@ -477,6 +477,7 @@ class GreenfieldBootstrapCoordinator:
         context_index = worktree / "context" / "INDEX.md"
         if package_root is not None and not context_index.is_file():
             raise GreenfieldBootstrapError("Thinking agent context index is missing")
+        GreenfieldBootstrapCoordinator._validate_candidate_scope(worktree)
         for path in worktree.rglob("*"):
             if path.is_symlink():
                 try:
@@ -534,6 +535,32 @@ class GreenfieldBootstrapCoordinator:
                 raise GreenfieldBootstrapError("Context reference escapes the repository") from exc
             if not candidate.exists():
                 raise GreenfieldBootstrapError("Context reference points to a missing file")
+
+    @staticmethod
+    def _validate_candidate_scope(worktree: Path) -> None:
+        """Keep the organization agent inside the documentary/configuration surface."""
+        changed = subprocess.run(
+            ["git", "diff", "--name-only"], cwd=worktree, capture_output=True, text=True, check=False
+        )
+        untracked = subprocess.run(
+            ["git", "ls-files", "--others", "--exclude-standard"],
+            cwd=worktree,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        if changed.returncode != 0 or untracked.returncode != 0:
+            return
+        paths = set(changed.stdout.splitlines()) | set(untracked.stdout.splitlines())
+        def allowed(path: str) -> bool:
+            return (
+                path == "AGENTS.md"
+                or path in {".agents/AGENTS.md", ".agent/AGENTS.md", "openspec/config.yaml"}
+                or path.startswith(("context/", ".agents/skills/openspec-", ".agent/workflows/opsx-"))
+            )
+        unrelated = sorted(path for path in paths if path and not allowed(path))
+        if unrelated:
+            raise GreenfieldBootstrapError("Candidate contains unrelated or backlog-like changes")
 
     @staticmethod
     def _pr_body(project: Project, base_sha: str, head_sha: str) -> str:
