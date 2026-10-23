@@ -218,6 +218,22 @@ class OpenSpecAdapter(OpenSpecAdapterInterface):
                 "archive",
             },
         }
+        # OpenSpec 1.9 shipped the extended lifecycle skills, while newer
+        # official releases keep the lifecycle commands in the CLI and install
+        # a smaller Codex skill set.  The report remains explicit about the
+        # extended lifecycle contract; completeness accepts the official
+        # minimum set emitted by the installed release as well.
+        official_minimum = {
+            "codex": {
+                "propose",
+                "apply-change",
+                "explore",
+                "sync-specs",
+                "update-change",
+                "archive-change",
+            },
+            "antigravity": set(),
+        }
         complete = not requested_root.is_symlink()
         try:
             OpenSpecAdapter._assert_integration_paths_are_not_symlinks(root, selected)
@@ -239,7 +255,10 @@ class OpenSpecAdapter(OpenSpecAdapterInterface):
                     if path.is_file() and not path.is_symlink()
                 }
             integrations[agent] = sorted(names)
-            complete = complete and required[agent].issubset(names)
+            complete = complete and (
+                required[agent].issubset(names)
+                or official_minimum[agent].issubset(names)
+            )
 
         config = root / "openspec/config.yaml"
         complete = complete and config.is_file() and not config.is_symlink()
