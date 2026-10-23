@@ -418,7 +418,11 @@ class GreenfieldBootstrapCoordinator:
                 )
             )
         if result.exit_code != 0 or result.timed_out:
-            raise GreenfieldBootstrapError("Thinking agent did not complete successfully")
+            detail = result.preflight_error or (result.stderr[-1] if result.stderr else "no diagnostic")
+            raise GreenfieldBootstrapError(
+                f"Thinking agent did not complete successfully (exit={result.exit_code}, "
+                f"timed_out={result.timed_out}): {detail}"
+            )
         return result
 
     def _validate_official_capabilities(
