@@ -31,8 +31,8 @@
 - [x] 4.3 Verify the actual OpenSpec CLI version/capabilities and install/check dependencies; use supported official setup/configuration to install or verify the complete compatible commands, skills, and workflows for every selected agent, including extended operations available in that version; never guess old names/options or generate wrappers/artifacts as substitutes.
 - [ ] 4.4 Run the configured real file-capable thinking agent on the exact Greenfield context package, with bounded source-faithful instructions and project-bound workspace identity; retain invocation/workflow/usage evidence and avoid duplicate paid invocation on uncertain result.
 - [ ] 4.5 Validate provenance, index links, canonical instruction references, official OpenSpec config, secret scan and bounded expected diff; preserve compatible instructions and include un-replaced documentary contradictions with both sources in the review PR without blocking publication solely for that contradiction; block real safety/integrity failures or destructive instruction overwrites.
-- [ ] 4.6 Commit and push only the bootstrap branch and create one first PR against the configured base; persist exact repository/base/head/PR identity and never write or auto-merge main.
-- [ ] 4.7 Expose PR/merge status; observe exact remote merge before setting `PREPARED`, block stale/rejected/unobservable candidates, and prove activation does not begin F3 or start scheduler.
+- [x] 4.6 Commit and push only the bootstrap branch and create one first PR against the configured base; persist exact repository/base/head/PR identity and never write or auto-merge main.
+- [x] 4.7 Expose PR/merge status; observe exact remote merge before setting `PREPARED`, block stale/rejected/unobservable candidates, and prove activation does not begin F3 or start scheduler.
 
 ## 5. Secure context ZIP receipt and faithful organization
 
