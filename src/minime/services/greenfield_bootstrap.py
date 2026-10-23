@@ -159,6 +159,11 @@ class GreenfieldBootstrapCoordinator:
         if project.onboarding_status is not ProjectOnboardingStatus.PREPARED:
             raise GreenfieldBootstrapError("Incremental context requires a prepared project")
         package_sha = hashlib.sha256(archive).hexdigest() if archive else ""
+        retained = project.onboarding_checkpoint.get("candidate_recovery")
+        if isinstance(retained, dict) and retained.get("status") == "QUARANTINED_REVIEW_REQUIRED":
+            raise GreenfieldBootstrapError(
+                "A previous candidate is quarantined for review; no new model invocation is allowed"
+            )
         pending = project.onboarding_checkpoint.get("pending_context", {})
         if pending.get("source_zip_sha256") == package_sha and pending.get("pull_request_url"):
             return {"project_id": project_id, "pending_context": pending, "reused": True}
@@ -191,6 +196,8 @@ class GreenfieldBootstrapCoordinator:
             worktree = Path(self._worktree_path(binding, branch))
             self._prepare_local_branch(binding.managed_repository_root, branch, base_sha)
             self._git(str(workspace), "worktree", "add", "--detach", str(worktree), base_sha)
+            agent_started = False
+            preserve_candidate = False
             try:
                 self._git(str(worktree), "checkout", "-b", branch)
                 self.openspec.install_official_integrations(
@@ -205,6 +212,7 @@ class GreenfieldBootstrapCoordinator:
                     shutil.copyfile(source, target)
                     target.chmod(0o600)
                 context_delta = self._context_delta(worktree, extracted.files, package_dir)
+                agent_started = True
                 result = self._run_thinking_agent(project, worktree, profile, timeout_seconds)
                 self._validate_candidate(worktree, incoming, extracted.files, Path(package_dir))
                 self._validate_official_workspace(worktree)
@@ -244,8 +252,14 @@ class GreenfieldBootstrapCoordinator:
                 self.uow.projects.save(project)
                 self.uow.commit()
                 return {"project_id": project_id, "pending_context": pending, "reused": False}
+            except Exception as exc:
+                if agent_started:
+                    preserve_candidate = True
+                    self._retain_candidate_for_recovery(project, worktree, branch, base_sha, exc)
+                raise
             finally:
-                self._git(str(workspace), "worktree", "remove", "--force", str(worktree), check=False)
+                if not preserve_candidate:
+                    self._git(str(workspace), "worktree", "remove", "--force", str(worktree), check=False)
 
     def _run_after_project_creation(
         self,
@@ -298,6 +312,8 @@ class GreenfieldBootstrapCoordinator:
         self._prepare_local_branch(binding.managed_repository_root, branch, base_sha)
         self._git(binding.managed_repository_root, "worktree", "add", "--detach", self._worktree_path(binding, branch), base_sha)
         worktree = Path(self._worktree_path(binding, branch))
+        agent_started = False
+        preserve_candidate = False
         try:
             self._git(str(worktree), "checkout", "-b", branch)
             self.openspec.install_official_integrations(
@@ -311,6 +327,7 @@ class GreenfieldBootstrapCoordinator:
                 target.parent.mkdir(parents=True, exist_ok=True)
                 shutil.copyfile(source, target)
                 target.chmod(0o600)
+            agent_started = True
             result = self._run_thinking_agent(project, worktree, profile, timeout_seconds)
             self._validate_candidate(worktree, incoming, source_files, package_root)
             self._validate_official_workspace(worktree)
@@ -348,8 +365,17 @@ class GreenfieldBootstrapCoordinator:
             self.uow.projects.save(project)
             self.uow.commit()
             return {"project_id": project.project_id, "onboarding_status": project.onboarding_status.value, "checkpoint": ProjectService.public_onboarding_state(project)["checkpoint"]}
+        except Exception as exc:
+            if agent_started:
+                # A completed paid inference must never be destroyed by a
+                # deterministic validation failure. Keep its worktree private;
+                # the blocked project must be reconciled before any replay.
+                preserve_candidate = True
+                self._retain_candidate_for_recovery(project, worktree, branch, base_sha, exc)
+            raise
         finally:
-            self._git(binding.managed_repository_root, "worktree", "remove", "--force", str(worktree), check=False)
+            if not preserve_candidate:
+                self._git(binding.managed_repository_root, "worktree", "remove", "--force", str(worktree), check=False)
 
     def _preflight_workspace_identity(self, project: Project) -> None:
         """Prove workspace topology before any branch or filesystem mutation."""
@@ -427,6 +453,14 @@ class GreenfieldBootstrapCoordinator:
             }
 
         checkpoint = project.onboarding_checkpoint or {}
+        retained = checkpoint.get("candidate_recovery")
+        if isinstance(retained, dict) and retained.get("status") == "QUARANTINED_REVIEW_REQUIRED":
+            return {
+                "project_id": project_id,
+                "onboarding_status": project.onboarding_status.value,
+                "safe_to_resume": False,
+                "reason": "CANDIDATE_QUARANTINED_REVIEW_REQUIRED",
+            }
         attempt = checkpoint.get("thinking_agent_attempt")
         if not isinstance(attempt, dict):
             attempt = {}
@@ -674,6 +708,41 @@ class GreenfieldBootstrapCoordinator:
             except Exception as exc:
                 self._block(project, f"GREENFIELD_BOOTSTRAP_FAILED:{type(exc).__name__}")
                 raise
+
+    def _retain_candidate_for_recovery(
+        self, project: Project, worktree: Path, branch: str, base_sha: str, error: Exception
+    ) -> None:
+        """Seal a failed post-dispatch candidate in the existing managed worktree.
+
+        No automatic replay or GitHub effect is authorized by this marker.
+        Content stays private to the managed worktree; only bounded metadata
+        reaches PostgreSQL. Do not copy the candidate to a public artifact.
+        """
+        if self.trusted_managed_root is None or worktree.is_symlink():
+            raise GreenfieldBootstrapError(
+                "Cannot retain candidate without verified managed-worktree ownership"
+            )
+        try:
+            worktree.resolve(strict=True).relative_to(self.trusted_managed_root.resolve(strict=True))
+        except (OSError, ValueError) as exc:
+            raise GreenfieldBootstrapError(
+                "Failed candidate worktree lies outside trusted managed root"
+            ) from exc
+        current = self.uow.projects.get_by_id(project.project_id) or project
+        current.onboarding_checkpoint = {
+            **(current.onboarding_checkpoint or {}),
+            "candidate_recovery": {
+                "status": "QUARANTINED_REVIEW_REQUIRED",
+                "worktree": str(worktree),
+                "branch": branch,
+                "base_sha": base_sha,
+                "failure_type": type(error).__name__,
+                "preserved_at": utc_now().isoformat(),
+            },
+        }
+        current.updated_at = utc_now()
+        self.uow.projects.save(current)
+        self.uow.commit()
 
     def _persist_thinking_attempt(self, project: Project, evidence: dict[str, Any]) -> None:
         """Durably retain bounded agent evidence before the worktree is cleaned up.
@@ -998,18 +1067,29 @@ class GreenfieldBootstrapCoordinator:
     def _validate_candidate_scope(worktree: Path) -> None:
         """Keep the organization agent inside the documentary/configuration surface."""
         changed = subprocess.run(
-            ["git", "diff", "--name-only"], cwd=worktree, capture_output=True, text=True, check=False
-        )
-        untracked = subprocess.run(
-            ["git", "ls-files", "--others", "--exclude-standard"],
+            ["git", "diff", "HEAD", "--name-only", "-z"],
             cwd=worktree,
             capture_output=True,
-            text=True,
+            check=False,
+        )
+        untracked = subprocess.run(
+            ["git", "ls-files", "--others", "--exclude-standard", "-z"],
+            cwd=worktree,
+            capture_output=True,
             check=False,
         )
         if changed.returncode != 0 or untracked.returncode != 0:
-            return
-        paths = set(changed.stdout.splitlines()) | set(untracked.stdout.splitlines())
+            raise GreenfieldBootstrapError(
+                "Candidate scope could not be inspected; refusing unverified changes"
+            )
+        # -z handles filenames with spaces/newlines, while 'git diff HEAD'
+        # includes both staged and unstaged changes (unlike plain git diff).
+        paths = {
+            raw.decode("utf-8", errors="surrogateescape")
+            for output in (changed.stdout, untracked.stdout)
+            for raw in output.split(b"\\0")
+            if raw
+        }
         def allowed(path: str) -> bool:
             return (
                 path == "AGENTS.md"
@@ -1018,7 +1098,18 @@ class GreenfieldBootstrapCoordinator:
             )
         unrelated = sorted(path for path in paths if path and not allowed(path))
         if unrelated:
-            raise GreenfieldBootstrapError("Candidate contains unrelated or backlog-like changes")
+            # Do not surface potentially sensitive filenames through the API.
+            # The full candidate remains in its bound, private worktree for
+            # authorized offline inspection and deterministic repair.
+            fingerprints = [
+                hashlib.sha256(name.encode("utf-8", errors="surrogateescape"))
+                .hexdigest()[:12]
+                for name in unrelated[:5]
+            ]
+            raise GreenfieldBootstrapError(
+                f"Candidate contains unrelated or backlog-like changes "
+                f"(count={len(unrelated)}, path_fingerprints={','.join(fingerprints)})"
+            )
 
     @staticmethod
     def _context_delta(worktree: Path, source_files: tuple[str, ...], package_root: Path) -> dict[str, list[str]]:
