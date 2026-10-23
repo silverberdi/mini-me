@@ -19,6 +19,7 @@ from minime.services.greenfield_bootstrap import (
     GreenfieldBootstrapError,
 )
 from minime.services.implementer_runner import ImplementerResult
+from minime.services.project_service import ProjectService
 
 
 def _configuration() -> ProjectConfigurationInput:
@@ -297,6 +298,10 @@ def test_real_agent_failure_is_persisted_before_cleanup_and_never_auto_retried(
     latest = in_memory_uow.projects.get_by_id(project.project_id)
     assert latest.onboarding_status is ProjectOnboardingStatus.BLOCKED
     assert latest.onboarding_checkpoint["thinking_agent_attempt"] == evidence
+    public = ProjectService.public_onboarding_state(latest)["checkpoint"]["thinking_agent_attempt"]
+    assert public["status"] == "FAILED_USAGE_UNKNOWN"
+    assert public["exit_code"] == exit_code
+    assert "stderr_tail" not in public
     with pytest.raises(GreenfieldBootstrapError, match="without a safely resumable"):
         coordinator.bootstrap(config, b"same-package-do-not-replay")
     assert agent.calls == 1
