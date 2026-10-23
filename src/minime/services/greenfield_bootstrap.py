@@ -447,9 +447,27 @@ class GreenfieldBootstrapCoordinator:
                 )
             )
         failed = result.exit_code != 0 or result.timed_out
+        reported_usage = (
+            result.native_workflow_evidence.get("usage")
+            if isinstance(result.native_workflow_evidence, dict)
+            else None
+        )
+        usage_observed = (
+            isinstance(reported_usage, dict)
+            and all(
+                type(reported_usage.get(key)) is int and reported_usage[key] >= 0
+                for key in ("input_tokens", "output_tokens")
+            )
+        )
         diagnostic = {
             **attempt,
-            "status": "FAILED_USAGE_UNKNOWN" if failed else "SUCCEEDED_USAGE_UNOBSERVED",
+            "status": (
+                "FAILED" if failed and usage_observed
+                else "FAILED_USAGE_UNKNOWN" if failed
+                else "SUCCEEDED"
+            ),
+            "usage_status": "OBSERVED" if usage_observed else "UNKNOWN",
+            "usage": reported_usage if usage_observed else None,
             "exit_code": result.exit_code,
             "timed_out": result.timed_out,
             "duration_ms": result.duration_ms,
