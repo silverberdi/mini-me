@@ -207,9 +207,9 @@ class CliImplementerRunner(ImplementerRunnerInterface):
             sha_match = NATIVE_APPLY_SKILL_SHA_RE.search(prompt_context)
             expected_change = change_match.group(1) if change_match else ""
             expected_sha = sha_match.group(1) if sha_match else ""
-            raw_jsonl_lines = process_result.stdout.decode(errors="replace").splitlines()[
-                : self.MAX_OUTPUT_LINES
-            ]
+            all_jsonl_lines = process_result.stdout.decode(errors="replace").splitlines()
+            raw_jsonl_lines = all_jsonl_lines[: self.MAX_OUTPUT_LINES]
+            diagnostic_lines = all_jsonl_lines[-self.MAX_OUTPUT_LINES :]
             extracted_messages, workflow_evidence = parse_codex_apply_jsonl(
                 raw_jsonl_lines,
                 change_name=expected_change,
@@ -217,11 +217,14 @@ class CliImplementerRunner(ImplementerRunnerInterface):
                 workflow_sha256=expected_sha,
             )
             stdout_lines = self._sanitize_output("\n".join(extracted_messages).encode())
+            usage_summary = self._codex_usage_summary(diagnostic_lines)
+            if usage_summary is not None and workflow_evidence is not None:
+                workflow_evidence["usage"] = usage_summary
             # Codex may report a failed turn only through JSONL stdout. The
             # workflow parser intentionally discards non-message events, so
             # retain only bounded/redacted error summaries in stderr on failure.
             if process_result.returncode != 0 or process_result.timed_out:
-                stderr_errors = self._codex_failure_events(raw_jsonl_lines)
+                stderr_errors = self._codex_failure_events(diagnostic_lines)
             else:
                 stderr_errors = []
         elif (
@@ -266,6 +269,30 @@ class CliImplementerRunner(ImplementerRunnerInterface):
             environment_error=rotation_error,
             native_workflow_evidence=workflow_evidence,
         )
+
+    @staticmethod
+    def _codex_usage_summary(jsonl_lines: list[str]) -> dict[str, int] | None:
+        """Read only actual Codex token counters, never infer missing usage."""
+        for line in reversed(jsonl_lines):
+            try:
+                event = json.loads(line)
+            except (TypeError, json.JSONDecodeError):
+                continue
+            if not isinstance(event, dict) or event.get("type") != "turn.completed":
+                continue
+            usage = event.get("usage")
+            if not isinstance(usage, dict):
+                continue
+            mandatory = ("input_tokens", "output_tokens")
+            if not all(type(usage.get(key)) is int and usage[key] >= 0 for key in mandatory):
+                continue
+            allowed = ("input_tokens", "cached_input_tokens", "output_tokens")
+            return {
+                key: usage[key]
+                for key in allowed
+                if type(usage.get(key)) is int and usage[key] >= 0
+            }
+        return None
 
     @staticmethod
     def _codex_failure_events(jsonl_lines: list[str]) -> list[str]:
