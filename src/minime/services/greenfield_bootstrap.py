@@ -79,11 +79,25 @@ class GreenfieldBootstrapCoordinator:
         """Perform a resumable Greenfield bootstrap and return sanitized evidence."""
         if configuration.project_type is not ProjectType.GREENFIELD:
             raise GreenfieldBootstrapError("Greenfield bootstrap requires project_type GREENFIELD")
-        if self.uow.projects.get_by_id(configuration.project_id) is not None:
-            raise GreenfieldBootstrapError("Project already exists; use its pending onboarding checkpoint")
-
         # Validate the complete ZIP before creating a row, credential, workspace or branch.
         package_sha = hashlib.sha256(archive).hexdigest() if archive else ""
+        existing = self.uow.projects.get_by_id(configuration.project_id)
+        if existing is not None:
+            checkpoint = existing.onboarding_checkpoint or {}
+            if (
+                checkpoint.get("source_zip_sha256") == package_sha
+                and checkpoint.get("pull_request_url")
+                and existing.onboarding_status is ProjectOnboardingStatus.PR_PENDING
+            ):
+                return {
+                    "project_id": existing.project_id,
+                    "onboarding_status": existing.onboarding_status.value,
+                    "checkpoint": ProjectService.public_onboarding_state(existing)["checkpoint"],
+                    "reused": True,
+                }
+            raise GreenfieldBootstrapError(
+                "Project already exists without a safely resumable bootstrap checkpoint"
+            )
         with tempfile.TemporaryDirectory(prefix="minime-context-", dir=tempfile.gettempdir()) as package_dir:
             package_root = Path(package_dir)
             extracted = self.extractor.extract(archive, package_root)
@@ -125,12 +139,12 @@ class GreenfieldBootstrapCoordinator:
             raise GreenfieldBootstrapError("Project not found")
         if project.onboarding_status is not ProjectOnboardingStatus.PREPARED:
             raise GreenfieldBootstrapError("Incremental context requires a prepared project")
-        if project.onboarding_checkpoint.get("pending_context"):
-            raise GreenfieldBootstrapError("An unmerged incremental context PR is already pending")
         package_sha = hashlib.sha256(archive).hexdigest() if archive else ""
         pending = project.onboarding_checkpoint.get("pending_context", {})
         if pending.get("source_zip_sha256") == package_sha and pending.get("pull_request_url"):
             return {"project_id": project_id, "pending_context": pending, "reused": True}
+        if pending:
+            raise GreenfieldBootstrapError("An unmerged incremental context PR is already pending")
         with tempfile.TemporaryDirectory(prefix="minime-context-incremental-", dir=tempfile.gettempdir()) as package_dir:
             extracted = self.extractor.extract(archive, package_dir)
             profile = self._thinking_profile(project)
@@ -156,8 +170,8 @@ class GreenfieldBootstrapCoordinator:
                     target.parent.mkdir(parents=True, exist_ok=True)
                     shutil.copyfile(source, target)
                     target.chmod(0o600)
-                self._run_thinking_agent(project, worktree, profile, timeout_seconds)
-                self._validate_candidate(worktree, incoming)
+                result = self._run_thinking_agent(project, worktree, profile, timeout_seconds)
+                self._validate_candidate(worktree, incoming, extracted.files, Path(package_dir))
                 self._git(str(worktree), "add", "--all")
                 self._git(str(worktree), "commit", "-m", "docs: add project context")
                 head_sha = self._git(str(worktree), "rev-parse", "HEAD")
@@ -181,6 +195,9 @@ class GreenfieldBootstrapCoordinator:
                     "head_sha": head_sha,
                     "pull_request_number": pr.data.get("number"),
                     "pull_request_url": pr.data.get("url"),
+                    "agent_exit_code": result.exit_code,
+                    "agent_duration_ms": result.duration_ms,
+                    "agent_workflow_evidence": result.native_workflow_evidence or {},
                 }
                 project.onboarding_checkpoint = {
                     **project.onboarding_checkpoint,
@@ -249,8 +266,8 @@ class GreenfieldBootstrapCoordinator:
                 target.parent.mkdir(parents=True, exist_ok=True)
                 shutil.copyfile(source, target)
                 target.chmod(0o600)
-            self._run_thinking_agent(project, worktree, profile, timeout_seconds)
-            self._validate_candidate(worktree, incoming)
+            result = self._run_thinking_agent(project, worktree, profile, timeout_seconds)
+            self._validate_candidate(worktree, incoming, source_files, package_root)
             self._git(str(worktree), "add", "--all")
             self._git(str(worktree), "commit", "-m", "docs: bootstrap project context")
             head_sha = self._git(str(worktree), "rev-parse", "HEAD")
@@ -274,6 +291,9 @@ class GreenfieldBootstrapCoordinator:
                 "pull_request_url": pr.data.get("url"),
                 "agent": profile.agent_id,
                 "agent_model": profile.model_id,
+                "agent_exit_code": result.exit_code,
+                "agent_duration_ms": result.duration_ms,
+                "agent_workflow_evidence": result.native_workflow_evidence or {},
             }
             project.onboarding_checkpoint = checkpoint
             project.onboarding_status = ProjectOnboardingStatus.PR_PENDING
@@ -285,7 +305,9 @@ class GreenfieldBootstrapCoordinator:
         finally:
             self._git(binding.managed_repository_root, "worktree", "remove", "--force", str(worktree), check=False)
 
-    def _run_thinking_agent(self, project: Project, worktree: Path, profile: Any, timeout_seconds: int) -> None:
+    def _run_thinking_agent(
+        self, project: Project, worktree: Path, profile: Any, timeout_seconds: int
+    ) -> ImplementerResult:
         instruction = (
             "Organize only the supplied context files under the repository. Preserve source provenance, "
             "create navigable context documentation and links from AGENTS.md and openspec/config.yaml, "
@@ -299,6 +321,7 @@ class GreenfieldBootstrapCoordinator:
             result = asyncio.run(CliImplementerRunner(invocation).run(worktree, instruction, timeout_seconds))
         if result.exit_code != 0 or result.timed_out:
             raise GreenfieldBootstrapError("Thinking agent did not complete successfully")
+        return result
 
     def _validate_official_capabilities(self, project: Project) -> None:
         try:
@@ -364,11 +387,60 @@ class GreenfieldBootstrapCoordinator:
         return result.stdout.strip()
 
     @staticmethod
-    def _validate_candidate(worktree: Path, incoming: Path) -> None:
+    def _validate_candidate(
+        worktree: Path,
+        incoming: Path,
+        source_files: tuple[str, ...] = (),
+        package_root: Path | None = None,
+    ) -> None:
         if not incoming.is_dir() or not any(incoming.rglob("*")):
             raise GreenfieldBootstrapError("Validated context package produced no candidate source")
-        if (worktree / ".env").exists() or any(path.suffix in {".pem", ".key"} for path in worktree.rglob("*")):
-            raise GreenfieldBootstrapError("Candidate contains a secret-bearing file")
+        if package_root is not None:
+            for relative in source_files:
+                source = package_root / relative
+                copied = incoming / relative
+                if not source.is_file() or not copied.is_file():
+                    raise GreenfieldBootstrapError("Context provenance is incomplete")
+                if GreenfieldBootstrapCoordinator._sha256(source) != GreenfieldBootstrapCoordinator._sha256(copied):
+                    raise GreenfieldBootstrapError("Context source fidelity check failed")
+
+        secret_names = {".env", ".env.local", ".env.production", "id_rsa", "id_ed25519"}
+        secret_suffixes = {".pem", ".key", ".p12", ".pfx"}
+        for path in worktree.rglob("*"):
+            if path.is_symlink():
+                try:
+                    path.resolve().relative_to(worktree.resolve())
+                except ValueError as exc:
+                    raise GreenfieldBootstrapError("Candidate contains an out-of-root link") from exc
+            if not path.is_file():
+                continue
+            if path.name in secret_names or path.suffix.lower() in secret_suffixes:
+                raise GreenfieldBootstrapError("Candidate contains a secret-bearing file")
+            if path.name == "AGENTS.md" or path.name == "config.yaml":
+                try:
+                    text = path.read_text(encoding="utf-8")
+                except UnicodeDecodeError:
+                    continue
+                if "context/" not in text and path.name in {"AGENTS.md", "config.yaml"}:
+                    raise GreenfieldBootstrapError("Canonical context reference is missing")
+
+        for path in worktree.rglob("*"):
+            if not path.is_file() or path.is_symlink() or path.stat().st_size > 1_000_000:
+                continue
+            try:
+                text = path.read_text(encoding="utf-8")
+            except (UnicodeDecodeError, OSError):
+                continue
+            if any(marker in text for marker in ("BEGIN PRIVATE KEY", "AWS_SECRET_ACCESS_KEY", "ghp_")):
+                raise GreenfieldBootstrapError("Candidate contains a secret marker")
+
+    @staticmethod
+    def _sha256(path: Path) -> str:
+        digest = hashlib.sha256()
+        with path.open("rb") as handle:
+            for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+                digest.update(chunk)
+        return digest.hexdigest()
 
     @staticmethod
     def _pr_body(project: Project, base_sha: str, head_sha: str) -> str:
