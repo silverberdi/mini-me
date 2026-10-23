@@ -406,6 +406,10 @@ class GreenfieldBootstrapCoordinator:
 
         secret_names = {".env", ".env.local", ".env.production", "id_rsa", "id_ed25519"}
         secret_suffixes = {".pem", ".key", ".p12", ".pfx"}
+        canonical_agents = worktree / "AGENTS.md"
+        canonical_config = worktree / "openspec" / "config.yaml"
+        if not canonical_agents.is_file() or not canonical_config.is_file():
+            raise GreenfieldBootstrapError("Official OpenSpec context anchors are missing")
         for path in worktree.rglob("*"):
             if path.is_symlink():
                 try:
@@ -416,12 +420,12 @@ class GreenfieldBootstrapCoordinator:
                 continue
             if path.name in secret_names or path.suffix.lower() in secret_suffixes:
                 raise GreenfieldBootstrapError("Candidate contains a secret-bearing file")
-            if path.name == "AGENTS.md" or path.name == "config.yaml":
+            if path.name == "AGENTS.md" or path == canonical_config:
                 try:
                     text = path.read_text(encoding="utf-8")
                 except UnicodeDecodeError:
                     continue
-                if "context/" not in text and path.name in {"AGENTS.md", "config.yaml"}:
+                if "context/" not in text and (path.name == "AGENTS.md" or path == canonical_config):
                     raise GreenfieldBootstrapError("Canonical context reference is missing")
 
         for path in worktree.rglob("*"):

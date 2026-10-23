@@ -1,4 +1,5 @@
 from decimal import Decimal
+from pathlib import Path
 
 import pytest
 
@@ -10,7 +11,10 @@ from minime.domain.models import (
     ProjectProviderConnection,
 )
 from minime.services.context_archive import UnsafeContextArchive
-from minime.services.greenfield_bootstrap import GreenfieldBootstrapCoordinator
+from minime.services.greenfield_bootstrap import (
+    GreenfieldBootstrapCoordinator,
+    GreenfieldBootstrapError,
+)
 
 
 def _configuration() -> ProjectConfigurationInput:
@@ -55,3 +59,44 @@ def test_invalid_zip_is_rejected_before_project_persistence(in_memory_uow, tmp_p
         coordinator.bootstrap(_configuration(), b"not-a-zip")
 
     assert in_memory_uow.projects.get_by_id("greenfield") is None
+
+
+def test_candidate_validation_requires_canonical_anchors_and_preserves_source(tmp_path: Path):
+    package = tmp_path / "package"
+    incoming = tmp_path / "worktree" / "context" / "incoming" / "sha"
+    package.mkdir()
+    incoming.mkdir(parents=True)
+    (package / "facts.md").write_text("source", encoding="utf-8")
+    (incoming / "facts.md").write_text("source", encoding="utf-8")
+    worktree = incoming.parents[3]
+    (worktree / "AGENTS.md").write_text("See context/incoming/sha/facts.md", encoding="utf-8")
+    (worktree / "openspec").mkdir()
+    (worktree / "openspec" / "config.yaml").write_text(
+        "context: context/incoming/sha/facts.md\n", encoding="utf-8"
+    )
+
+    GreenfieldBootstrapCoordinator._validate_candidate(
+        worktree, incoming, ("facts.md",), package
+    )
+
+    (incoming / "facts.md").write_text("changed", encoding="utf-8")
+    with pytest.raises(GreenfieldBootstrapError, match="fidelity"):
+        GreenfieldBootstrapCoordinator._validate_candidate(
+            worktree, incoming, ("facts.md",), package
+        )
+
+
+def test_candidate_validation_rejects_secret_markers(tmp_path: Path):
+    worktree = tmp_path / "worktree"
+    incoming = worktree / "context" / "incoming" / "sha"
+    incoming.mkdir(parents=True)
+    (incoming / "facts.md").write_text("source", encoding="utf-8")
+    (worktree / "AGENTS.md").write_text("context/incoming/sha/facts.md", encoding="utf-8")
+    (worktree / "openspec").mkdir()
+    (worktree / "openspec" / "config.yaml").write_text(
+        "context: context/incoming/sha/facts.md\n", encoding="utf-8"
+    )
+    (worktree / "notes.txt").write_text("BEGIN PRIVATE KEY", encoding="utf-8")
+
+    with pytest.raises(GreenfieldBootstrapError, match="secret"):
+        GreenfieldBootstrapCoordinator._validate_candidate(worktree, incoming)
