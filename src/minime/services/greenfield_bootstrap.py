@@ -179,7 +179,9 @@ class GreenfieldBootstrapCoordinator:
             self._git(str(workspace), "worktree", "add", "--detach", str(worktree), base_sha)
             try:
                 self._git(str(worktree), "checkout", "-b", branch)
-                self.openspec.install_official_integrations(worktree, self._selected_agents(project))
+                self.openspec.install_official_integrations(
+                    worktree, self._selected_agents(project, roles=("thinking",))
+                )
                 incoming = worktree / "context" / "incoming" / extracted.sha256
                 incoming.mkdir(parents=True, mode=0o700)
                 for relative in extracted.files:
@@ -242,7 +244,10 @@ class GreenfieldBootstrapCoordinator:
     ) -> dict[str, Any]:
         profile = self._thinking_profile(project)
         self._validate_thinking_profile(profile)
-        self._validate_official_capabilities(project)
+        # Greenfield executes only the configured thinking role. Other roles
+        # remain durable configuration for later stages and must not be invoked
+        # or require an authenticated account during bootstrap.
+        self._validate_official_capabilities(project, roles=("thinking",))
         git_adapter = self.connections.require_git_pr_write(project)
         self._preflight_workspace_identity(project)
         # Prove the Git/PR grant and materialize a missing requested base branch
@@ -272,7 +277,9 @@ class GreenfieldBootstrapCoordinator:
         worktree = Path(self._worktree_path(binding, branch))
         try:
             self._git(str(worktree), "checkout", "-b", branch)
-            self.openspec.install_official_integrations(worktree, self._selected_agents(project))
+            self.openspec.install_official_integrations(
+                worktree, self._selected_agents(project, roles=("thinking",))
+            )
             incoming = worktree / "context" / "incoming" / project.onboarding_checkpoint["source_zip_sha256"]
             incoming.mkdir(parents=True, mode=0o700)
             for relative in source_files:
@@ -399,9 +406,14 @@ class GreenfieldBootstrapCoordinator:
             raise GreenfieldBootstrapError("Thinking agent did not complete successfully")
         return result
 
-    def _validate_official_capabilities(self, project: Project) -> None:
+    def _validate_official_capabilities(
+        self, project: Project, *, roles: tuple[str, ...] | None = None
+    ) -> None:
         try:
-            asyncio.run(ProjectCatalogService().validate_project_profiles(project.agent_profiles))
+            profiles = project.agent_profiles
+            if roles is not None:
+                profiles = {role: project.agent_profiles[role] for role in roles}
+            asyncio.run(ProjectCatalogService().validate_project_profiles(profiles))
         except (OSError, RuntimeError, TimeoutError, ValueError) as exc:
             raise GreenfieldBootstrapError(
                 "Selected agent capabilities or official OpenSpec integration are unavailable"
@@ -444,8 +456,11 @@ class GreenfieldBootstrapCoordinator:
             raise GreenfieldBootstrapError("Greenfield thinking requires a supported file-capable CLI agent")
 
     @staticmethod
-    def _selected_agents(project: Project) -> list[str]:
-        return sorted({str(value.get("agent_id", "")).lower() for value in project.agent_profiles.values() if isinstance(value, dict) and value.get("agent_id")})
+    def _selected_agents(project: Project, *, roles: tuple[str, ...] | None = None) -> list[str]:
+        profiles = project.agent_profiles
+        if roles is not None:
+            profiles = {role: profiles[role] for role in roles}
+        return sorted({str(value.get("agent_id", "")).lower() for value in profiles.values() if isinstance(value, dict) and value.get("agent_id")})
 
     def _configured_root(self, project: Project) -> str | None:
         if self.trusted_managed_root is None:
