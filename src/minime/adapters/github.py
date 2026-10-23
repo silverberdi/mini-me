@@ -1321,6 +1321,10 @@ class GitHubAdapter(GitHubAdapterInterface):
             env=auth_env,
         )
 
+    def git_auth_environment(self, remote_url: str) -> dict[str, str]:
+        """Return ephemeral Git config for clone/fetch under this App identity."""
+        return dict(self._git_auth_bundle(remote_url).env)
+
     @staticmethod
     def _run_git(
         args: list[str],

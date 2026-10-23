@@ -249,6 +249,8 @@ class GreenfieldBootstrapCoordinator:
         # or require an authenticated account during bootstrap.
         self._validate_official_capabilities(project, roles=("thinking",))
         git_adapter = self.connections.require_git_pr_write(project)
+        if hasattr(self.onboarding, "github_adapter"):
+            self.onboarding.github_adapter = git_adapter
         self._preflight_workspace_identity(project)
         # Prove the Git/PR grant and materialize a missing requested base branch
         # before the guarded local clone attempts to check it out.

@@ -59,6 +59,12 @@ class ProjectOnboardingService:
             return cleaned
         return f"https://github.com/{norm_repo}.git"
 
+    def _git_auth_environment(self, remote_source: str) -> dict[str, str] | None:
+        provider = getattr(self.github_adapter, "git_auth_environment", None)
+        if not callable(provider):
+            return None
+        return {**os.environ, **provider(remote_source)}
+
     def onboard_project(
         self,
         project: Project,
@@ -342,12 +348,13 @@ class ProjectOnboardingService:
                         f"Guard denied Git clone mutation for '{managed_root}': {dec_clone.provider_detail}"
                     )
 
+                auth_env = self._git_auth_environment(remote_source)
                 clone_cmd = ["git", "clone", "--branch", base_br, remote_source, managed_root]
-                cp = subprocess.run(clone_cmd, capture_output=True, text=True)
+                cp = subprocess.run(clone_cmd, capture_output=True, text=True, env=auth_env)
                 if cp.returncode != 0:
                     # Retry without --branch if branch checkout failed during clone
                     clone_fallback = ["git", "clone", remote_source, managed_root]
-                    cp_fb = subprocess.run(clone_fallback, capture_output=True, text=True)
+                    cp_fb = subprocess.run(clone_fallback, capture_output=True, text=True, env=auth_env)
                     if cp_fb.returncode != 0:
                         raise ValueError(
                             f"Failed to clone remote repository from '{remote_source}' (branch '{base_br}'): "
@@ -408,15 +415,21 @@ class ProjectOnboardingService:
                         f"Guard denied Git fetch mutation for '{managed_root}': {dec_fetch.provider_detail}"
                     )
 
+                auth_env = self._git_auth_environment(remote_source)
                 cp_fetch = subprocess.run(
                     ["git", "fetch", "origin", base_br],
                     cwd=managed_root,
                     capture_output=True,
                     text=True,
+                    env=auth_env,
                 )
                 if cp_fetch.returncode != 0:
                     cp_fetch_fallback = subprocess.run(
-                        ["git", "fetch", "origin"], cwd=managed_root, capture_output=True, text=True
+                        ["git", "fetch", "origin"],
+                        cwd=managed_root,
+                        capture_output=True,
+                        text=True,
+                        env=auth_env,
                     )
                     if cp_fetch_fallback.returncode != 0:
                         fetch_err = (
