@@ -164,10 +164,16 @@ class GreenfieldBootstrapCoordinator:
             workspace = self.projects.verified_managed_workspace_root(project_id)
             if binding is None or workspace is None:
                 raise GreenfieldBootstrapError("Prepared project workspace identity is unavailable")
+            adapter = self.connections.require_git_pr_write(project)
             self._git(str(workspace), "fetch", "origin", project.base_branch)
             base_sha = self._git(str(workspace), "rev-parse", f"origin/{project.base_branch}")
             branch = f"minime/context/{project_id}-{extracted.sha256[:12]}"
             self._assert_not_main(branch, project.base_branch)
+            reconciled = self._reconcile_incremental_pr(
+                project, adapter, branch, base_sha, extracted.sha256
+            )
+            if reconciled is not None:
+                return reconciled
             worktree = Path(self._worktree_path(binding, branch))
             self._git(str(workspace), "worktree", "add", "--detach", str(worktree), base_sha)
             try:
@@ -186,7 +192,6 @@ class GreenfieldBootstrapCoordinator:
                 self._git(str(worktree), "add", "--all")
                 self._git(str(worktree), "commit", "-m", "docs: add project context")
                 head_sha = self._git(str(worktree), "rev-parse", "HEAD")
-                adapter = self.connections.require_git_pr_write(project)
                 pushed = adapter.push_branch(str(worktree), "origin", branch, head_sha)
                 if pushed.outcome != ExternalOutcome.SUCCESS:
                     raise GreenfieldBootstrapError("Incremental context push was not proven successful")
@@ -233,9 +238,11 @@ class GreenfieldBootstrapCoordinator:
     ) -> dict[str, Any]:
         profile = self._thinking_profile(project)
         self._validate_thinking_profile(profile)
+        self._validate_official_capabilities(project)
+        git_adapter = self.connections.require_git_pr_write(project)
         # Prove the Git/PR grant and materialize a missing requested base branch
         # before the guarded local clone attempts to check it out.
-        self._ensure_base_branch(project, self.connections.require_git_pr_write(project))
+        self._ensure_base_branch(project, git_adapter)
         # Reuse the existing guarded repository establishment and managed binding.
         self.onboarding.onboard_project(
             ProjectOnboardingInput(
@@ -257,8 +264,6 @@ class GreenfieldBootstrapCoordinator:
         if binding is None:
             raise GreenfieldBootstrapError("Managed repository binding was not persisted")
 
-        git_adapter = self.connections.require_git_pr_write(project)
-        self._validate_official_capabilities(project)
         branch = f"minime/bootstrap/{project.project_id}-{project.onboarding_checkpoint['source_zip_sha256'][:12]}"
         self._assert_not_main(branch, project.base_branch)
         self._git(binding.managed_repository_root, "fetch", "origin", project.base_branch)
@@ -316,6 +321,44 @@ class GreenfieldBootstrapCoordinator:
             return {"project_id": project.project_id, "onboarding_status": project.onboarding_status.value, "checkpoint": ProjectService.public_onboarding_state(project)["checkpoint"]}
         finally:
             self._git(binding.managed_repository_root, "worktree", "remove", "--force", str(worktree), check=False)
+
+    def _reconcile_incremental_pr(
+        self, project: Project, adapter: Any, branch: str, base_sha: str, source_zip_sha256: str
+    ) -> dict[str, Any] | None:
+        """Reuse an already published PR before any repeated agent invocation."""
+        lookup = getattr(adapter, "get_pull_request", None)
+        if lookup is None:
+            raise GreenfieldBootstrapError("Git/PR adapter cannot reconcile incremental PRs")
+        result = lookup(project.provider_connections["git_pr"]["repository_url"], branch, project.base_branch)
+        if result.outcome in {ExternalOutcome.UNKNOWN, ExternalOutcome.AMBIGUOUS}:
+            raise GreenfieldBootstrapError("Incremental PR identity is unobservable; retry is blocked")
+        if result.outcome != ExternalOutcome.SUCCESS or not isinstance(result.data, dict):
+            return None
+        data = result.data
+        head_sha = data.get("head_sha")
+        if not head_sha:
+            raise GreenfieldBootstrapError("Existing incremental PR has no observable head SHA")
+        pending = {
+            "source_zip_sha256": source_zip_sha256,
+            "context_branch": branch,
+            "bootstrap_branch": branch,
+            "base_sha": base_sha,
+            "head_sha": head_sha,
+            "base_branch": project.base_branch,
+            "pull_request_number": data.get("number"),
+            "pull_request_url": data.get("url"),
+            "reconciled": True,
+        }
+        if not pending["pull_request_number"] or not pending["pull_request_url"]:
+            raise GreenfieldBootstrapError("Existing incremental PR identity is incomplete")
+        project.onboarding_checkpoint = {
+            **project.onboarding_checkpoint,
+            "pending_context": pending,
+        }
+        project.updated_at = utc_now()
+        self.uow.projects.save(project)
+        self.uow.commit()
+        return {"project_id": project.project_id, "pending_context": pending, "reused": True}
 
     def _run_thinking_agent(
         self, project: Project, worktree: Path, profile: Any, timeout_seconds: int
