@@ -18,7 +18,7 @@ from typing import Any, Protocol
 from minime.adapters.openspec import OpenSpecAdapter
 from minime.config import resolve_cli_invocation
 from minime.domain.enums import ExternalOutcome, ProjectOnboardingStatus, ProjectType
-from minime.domain.models import Project, ProjectConfigurationInput, ProjectOnboardingInput, utc_now
+from minime.domain.models import Project, ProjectConfigurationInput, utc_now
 from minime.services.agent_confinement import AgentProcessConfinement
 from minime.services.context_archive import ContextArchiveExtractor
 from minime.services.implementer_runner import CliImplementerRunner, ImplementerResult
@@ -250,18 +250,10 @@ class GreenfieldBootstrapCoordinator:
         self._ensure_base_branch(project, git_adapter)
         # Reuse the existing guarded repository establishment and managed binding.
         self.onboarding.onboard_project(
-            ProjectOnboardingInput(
-                project_id=project.project_id,
-                display_name=project.display_name,
-                repository=project.repository,
-                base_branch=project.base_branch,
-                openspec_path=project.openspec_path,
-                implementer=project.implementer,
-                reviewer=project.reviewer,
-                managed_repository_root=self._configured_root(project),
-            ),
+            project,
             operator_email=operator_email,
             discover_context=False,
+            managed_repository_root=self._configured_root(project),
         )
         project = self.uow.projects.get_by_id(project.project_id)
         if project is None:

@@ -82,17 +82,6 @@ class ProjectModel(Base):
     deployment_production: Mapped[dict[str, Any]] = mapped_column(
         JSON, default=dict, nullable=False
     )
-    context_sources: Mapped[list[str]] = mapped_column(
-        JSON, default=lambda: ["README.md", "docs/", "ROADMAP.md"], nullable=False
-    )
-    roadmap_path: Mapped[str] = mapped_column(
-        String(255), default="docs/ROADMAP.md", nullable=False
-    )
-    backlog_path: Mapped[str] = mapped_column(
-        String(255), default="docs/ROADMAP.md", nullable=False
-    )
-    github_project_number: Mapped[int | None] = mapped_column(Integer, nullable=True)
-    github_project_owner: Mapped[str | None] = mapped_column(String(128), nullable=True)
     onboarding_status: Mapped[str] = mapped_column(
         String(32), default="CONFIGURED", server_default="CONFIGURED", nullable=False
     )

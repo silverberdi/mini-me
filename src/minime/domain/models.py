@@ -137,11 +137,6 @@ class Project(BaseModel):
     archive_gate_required: bool = True
     deployment_preview: dict[str, Any] = Field(default_factory=dict)
     deployment_production: dict[str, Any] = Field(default_factory=dict)
-    context_sources: list[str] = Field(default_factory=lambda: ["README.md", "docs/", "ROADMAP.md"])
-    roadmap_path: str = "docs/ROADMAP.md"
-    backlog_path: str = "docs/ROADMAP.md"
-    github_project_number: int | None = None
-    github_project_owner: str | None = None
     onboarding_status: ProjectOnboardingStatus = ProjectOnboardingStatus.CONFIGURED
     onboarding_reasons: list[str] = Field(default_factory=list)
     provider_connections: dict[str, Any] = Field(default_factory=dict)
@@ -1495,26 +1490,6 @@ class ContextDiscoveryReport(BaseModel):
     missing_required_context: list[str] = Field(default_factory=list)
     discovered_items_count: int = 0
     discovered_at: datetime = Field(default_factory=utc_now)
-
-
-class ProjectOnboardingInput(BaseModel):
-    """Input payload for onboarding an external project."""
-
-    project_id: str
-    display_name: str
-    repository: str
-    base_branch: str = "main"
-    openspec_path: str = "openspec"
-    context_sources: list[str] = Field(default_factory=lambda: ["README.md", "docs/", "ROADMAP.md"])
-    roadmap_path: str = "docs/ROADMAP.md"
-    backlog_path: str = "docs/ROADMAP.md"
-    github_project_number: int | None = None
-    github_project_owner: str | None = None
-    implementer: str = "codex"
-    reviewer: str = "antigravity"
-    checks: list[dict[str, Any]] = Field(default_factory=list)
-    managed_repository_root: str | None = None
-    worktree_parent_dir: str | None = None
 
 
 class ProjectOnboardingResult(BaseModel):

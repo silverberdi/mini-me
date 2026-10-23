@@ -247,11 +247,6 @@ def project_model_to_domain(model: ProjectModel) -> Project:
         archive_gate_required=getattr(model, "archive_gate_required", True),
         deployment_preview=model.deployment_preview or {},
         deployment_production=model.deployment_production or {},
-        context_sources=model.context_sources or ["README.md", "docs/", "ROADMAP.md"],
-        roadmap_path=model.roadmap_path or "docs/ROADMAP.md",
-        backlog_path=model.backlog_path or "docs/ROADMAP.md",
-        github_project_number=model.github_project_number,
-        github_project_owner=model.github_project_owner,
         onboarding_status=ProjectOnboardingStatus(model.onboarding_status)
         if model.onboarding_status
         else ProjectOnboardingStatus.CONFIGURED,
@@ -948,11 +943,6 @@ class PostgresProjectRepository(ProjectRepositoryInterface):
             existing.archive_gate_required = project.archive_gate_required
             existing.deployment_preview = project.deployment_preview
             existing.deployment_production = project.deployment_production
-            existing.context_sources = project.context_sources
-            existing.roadmap_path = project.roadmap_path
-            existing.backlog_path = project.backlog_path
-            existing.github_project_number = project.github_project_number
-            existing.github_project_owner = project.github_project_owner
             existing.onboarding_status = project.onboarding_status.value
             existing.onboarding_reasons = project.onboarding_reasons
             existing.status = project.status.value
@@ -981,11 +971,6 @@ class PostgresProjectRepository(ProjectRepositoryInterface):
                 archive_gate_required=project.archive_gate_required,
                 deployment_preview=project.deployment_preview,
                 deployment_production=project.deployment_production,
-                context_sources=project.context_sources,
-                roadmap_path=project.roadmap_path,
-                backlog_path=project.backlog_path,
-                github_project_number=project.github_project_number,
-                github_project_owner=project.github_project_owner,
                 onboarding_status=project.onboarding_status.value,
                 onboarding_reasons=project.onboarding_reasons,
                 status=project.status.value,

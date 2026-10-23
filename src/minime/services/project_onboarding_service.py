@@ -10,7 +10,7 @@ from minime.domain.enums import EventType, ProjectOnboardingStatus
 from minime.domain.interfaces import PersistenceUnitOfWork
 from minime.domain.models import (
     Event,
-    ProjectOnboardingInput,
+    Project,
     ProjectOnboardingResult,
     utc_now,
 )
@@ -61,22 +61,24 @@ class ProjectOnboardingService:
 
     def onboard_project(
         self,
-        input_data: ProjectOnboardingInput,
+        project: Project,
         operator_email: str = "operator",
         *,
         discover_context: bool = True,
+        managed_repository_root: str | None = None,
+        worktree_parent_dir: str | None = None,
     ) -> ProjectOnboardingResult:
         """Onboard a new project with auto-discovery, conflict detection, and fail-closed validation."""
         set_correlation_context(
-            project_id=input_data.project_id,
+            project_id=project.project_id,
             operation_id="onboard_project",
         )
 
-        project_id = input_data.project_id.strip()
+        project_id = project.project_id.strip()
         if not project_id:
             raise ValueError("project_id is required and cannot be empty.")
 
-        raw_repo = input_data.repository.strip()
+        raw_repo = project.repository.strip()
         if not raw_repo:
             raise ValueError("repository identifier is required and cannot be empty.")
 
@@ -85,7 +87,7 @@ class ProjectOnboardingService:
             norm_repo = normalize_repository_identity(raw_repo)
         except ValueError as exc:
             raise ValueError(f"Invalid repository identity '{raw_repo}': {exc}") from exc
-        base_br = input_data.base_branch or "main"
+        base_br = project.base_branch or "main"
         marker_filename = ".minime-managed-project.json"
 
         # 2. Existing-project recovery or duplicate detection.  A project id and
@@ -100,21 +102,21 @@ class ProjectOnboardingService:
         existing_repo = normalize_repository_identity(existing_project.repository)
         if existing_repo != norm_repo:
             identity_mismatches.append(f"repository is '{existing_repo}', not '{norm_repo}'")
-        if existing_project.base_branch != input_data.base_branch:
+        if existing_project.base_branch != project.base_branch:
             identity_mismatches.append(
-                f"base_branch is '{existing_project.base_branch}', not '{input_data.base_branch}'"
+                f"base_branch is '{existing_project.base_branch}', not '{project.base_branch}'"
             )
-        if existing_project.openspec_path != input_data.openspec_path:
+        if existing_project.openspec_path != project.openspec_path:
             identity_mismatches.append(
-                f"openspec_path is '{existing_project.openspec_path}', not '{input_data.openspec_path}'"
+                f"openspec_path is '{existing_project.openspec_path}', not '{project.openspec_path}'"
             )
-        if existing_project.implementer != input_data.implementer:
+        if existing_project.implementer != project.implementer:
             identity_mismatches.append(
-                f"implementer is '{existing_project.implementer}', not '{input_data.implementer}'"
+                f"implementer is '{existing_project.implementer}', not '{project.implementer}'"
             )
-        if existing_project.reviewer != input_data.reviewer:
+        if existing_project.reviewer != project.reviewer:
             identity_mismatches.append(
-                f"reviewer is '{existing_project.reviewer}', not '{input_data.reviewer}'"
+                f"reviewer is '{existing_project.reviewer}', not '{project.reviewer}'"
             )
         if identity_mismatches:
             raise ValueError(
@@ -164,9 +166,9 @@ class ProjectOnboardingService:
 
         # 5. Check local context directory presence
         root = self.project_root
-        openspec_dir = root / input_data.openspec_path
+        openspec_dir = root / project.openspec_path
         if not openspec_dir.exists():
-            reasons.append(f"OpenSpec path '{input_data.openspec_path}' does not exist on disk.")
+            reasons.append(f"OpenSpec path '{project.openspec_path}' does not exist on disk.")
             if onboarding_status != ProjectOnboardingStatus.BLOCKED:
                 onboarding_status = ProjectOnboardingStatus.CONTEXT_INCOMPLETE
 
@@ -190,8 +192,8 @@ class ProjectOnboardingService:
             os.environ.get("MINIME_RUNTIME_ROOT", str(self.project_root))
         )
 
-        if getattr(input_data, "managed_repository_root", None):
-            managed_root = os.path.realpath(input_data.managed_repository_root)
+        if managed_repository_root:
+            managed_root = os.path.realpath(managed_repository_root)
             if not self.trusted_managed_root and not os.environ.get("MINIME_MANAGED_ROOT"):
                 trusted_root = os.path.dirname(managed_root)
         elif self.project_root != Path(runtime_root) and (self.project_root / ".git").exists():
@@ -201,8 +203,8 @@ class ProjectOnboardingService:
         else:
             managed_root = os.path.realpath(f"{trusted_root}/{project_id}")
 
-        if getattr(input_data, "worktree_parent_dir", None):
-            worktree_parent_dir = os.path.realpath(input_data.worktree_parent_dir)
+        if worktree_parent_dir:
+            worktree_parent_dir = os.path.realpath(worktree_parent_dir)
         else:
             worktree_parent_dir = os.path.realpath(f"{managed_root}/.minime/worktrees")
 
