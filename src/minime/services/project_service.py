@@ -567,6 +567,12 @@ class ProjectService:
     def public_project_payload(project: Project) -> dict[str, Any]:
         """Serialize project configuration without host-secret references."""
         payload = project.model_dump(mode="json")
+        # Project responses and onboarding-status must share the same safe
+        # checkpoint projection. Never expose bounded private CLI diagnostics,
+        # even to callers of the general project list/get endpoints.
+        payload["onboarding_checkpoint"] = ProjectService.public_onboarding_state(project)[
+            "checkpoint"
+        ]
         for connection in payload.get("provider_connections", {}).values():
             if not isinstance(connection, dict):
                 continue
