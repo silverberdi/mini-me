@@ -19,6 +19,7 @@ from minime.adapters.openspec import OpenSpecAdapter
 from minime.config import resolve_cli_invocation
 from minime.domain.enums import ExternalOutcome, ProjectOnboardingStatus, ProjectType
 from minime.domain.models import Project, ProjectConfigurationInput, ProjectOnboardingInput, utc_now
+from minime.services.agent_confinement import AgentProcessConfinement
 from minime.services.context_archive import ContextArchiveExtractor
 from minime.services.implementer_runner import CliImplementerRunner, ImplementerResult
 from minime.services.project_catalog_service import ProjectCatalogService
@@ -241,6 +242,7 @@ class GreenfieldBootstrapCoordinator:
         self._validate_thinking_profile(profile)
         self._validate_official_capabilities(project)
         git_adapter = self.connections.require_git_pr_write(project)
+        self._preflight_workspace_identity(project)
         # Prove the Git/PR grant and materialize a missing requested base branch
         # before the guarded local clone attempts to check it out.
         self._ensure_base_branch(project, git_adapter)
@@ -323,6 +325,28 @@ class GreenfieldBootstrapCoordinator:
             return {"project_id": project.project_id, "onboarding_status": project.onboarding_status.value, "checkpoint": ProjectService.public_onboarding_state(project)["checkpoint"]}
         finally:
             self._git(binding.managed_repository_root, "worktree", "remove", "--force", str(worktree), check=False)
+
+    def _preflight_workspace_identity(self, project: Project) -> None:
+        """Prove workspace topology before any branch or filesystem mutation."""
+        if self.trusted_managed_root is None:
+            raise GreenfieldBootstrapError("A trusted managed repository root is required for Greenfield bootstrap")
+        managed_root = (self.trusted_managed_root / project.project_id).resolve()
+        worktree_parent = managed_root / ".minime" / "worktrees"
+        runtime_root = Path(AgentProcessConfinement.resolve_runtime_root()).resolve()
+
+        def inside(path: Path, parent: Path) -> bool:
+            try:
+                path.relative_to(parent)
+                return True
+            except ValueError:
+                return False
+
+        if inside(managed_root, runtime_root) or inside(runtime_root, managed_root):
+            raise GreenfieldBootstrapError("Managed workspace overlaps the runtime root")
+        if not inside(managed_root, self.trusted_managed_root) or not inside(
+            worktree_parent, self.trusted_managed_root
+        ):
+            raise GreenfieldBootstrapError("Managed workspace lies outside the trusted repository root")
 
     def _reconcile_incremental_pr(
         self, project: Project, adapter: Any, branch: str, base_sha: str, source_zip_sha256: str

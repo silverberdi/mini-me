@@ -150,6 +150,28 @@ def test_candidate_validation_rejects_unrelated_backlog_changes(tmp_path: Path):
         GreenfieldBootstrapCoordinator._validate_candidate(worktree, incoming)
 
 
+def test_candidate_validation_allows_documentary_contradictions_with_provenance(tmp_path: Path):
+    worktree = tmp_path / "worktree"
+    incoming = worktree / "context" / "incoming" / "sha"
+    incoming.mkdir(parents=True)
+    (incoming / "facts.md").write_text("old decision", encoding="utf-8")
+    (incoming / "new-facts.md").write_text("conflicting proposal", encoding="utf-8")
+    (worktree / "AGENTS.md").write_text("See context/INDEX.md", encoding="utf-8")
+    (worktree / "openspec").mkdir()
+    (worktree / "openspec" / "config.yaml").write_text(
+        "context: context/INDEX.md\n", encoding="utf-8"
+    )
+    (worktree / "context" / "INDEX.md").write_text(
+        "# Context\n\n- facts.md: old decision\n- new-facts.md: conflicting proposal\n"
+        "\n## Contradictions\nBoth sources remain authoritative for review.\n",
+        encoding="utf-8",
+    )
+
+    GreenfieldBootstrapCoordinator._validate_candidate(
+        worktree, incoming, ("facts.md", "new-facts.md"), worktree / "context" / "incoming" / "sha"
+    )
+
+
 def test_incremental_retry_reconciles_existing_pr_before_agent(in_memory_uow, tmp_path):
     project = Project(
         project_id="prepared",
