@@ -302,6 +302,8 @@ def test_real_agent_failure_is_persisted_before_cleanup_and_never_auto_retried(
     assert public["status"] == "FAILED_USAGE_UNKNOWN"
     assert public["exit_code"] == exit_code
     assert "stderr_tail" not in public
+    listed = ProjectService.public_project_payload(latest)
+    assert "stderr_tail" not in listed["onboarding_checkpoint"]["thinking_agent_attempt"]
     with pytest.raises(GreenfieldBootstrapError, match="without a safely resumable"):
         coordinator.bootstrap(config, b"same-package-do-not-replay")
     assert agent.calls == 1
