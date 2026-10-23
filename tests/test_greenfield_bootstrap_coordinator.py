@@ -1,10 +1,12 @@
 from decimal import Decimal
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
-from minime.domain.enums import ProjectType
+from minime.domain.enums import ExternalOutcome, ProjectOnboardingStatus, ProjectType
 from minime.domain.models import (
+    Project,
     ProjectAgentProfile,
     ProjectConfigurationInput,
     ProjectExecutionPolicy,
@@ -103,3 +105,54 @@ def test_candidate_validation_rejects_secret_markers(tmp_path: Path):
 
     with pytest.raises(GreenfieldBootstrapError, match="secret"):
         GreenfieldBootstrapCoordinator._validate_candidate(worktree, incoming)
+
+
+def test_incremental_retry_reconciles_existing_pr_before_agent(in_memory_uow, tmp_path):
+    project = Project(
+        project_id="prepared",
+        display_name="Prepared",
+        repository="example/prepared",
+        project_type=ProjectType.BROWNFIELD,
+        base_branch="main",
+        provider_connections={
+            "git_pr": {
+                "provider_id": "github",
+                "repository_url": "example/prepared",
+                "auth_mode": "environment_app",
+            }
+        },
+        onboarding_status=ProjectOnboardingStatus.PREPARED,
+    )
+    in_memory_uow.projects.save(project)
+    coordinator = GreenfieldBootstrapCoordinator(
+        in_memory_uow, trusted_managed_root=tmp_path / "managed"
+    )
+
+    class Adapter:
+        def get_pull_request(self, repository, branch, base):
+            assert (repository, branch, base) == (
+                "example/prepared",
+                "minime/context/prepared-abc123",
+                "main",
+            )
+            return SimpleNamespace(
+                outcome=ExternalOutcome.SUCCESS,
+                data={
+                    "number": 7,
+                    "url": "https://github.com/example/prepared/pull/7",
+                    "head_sha": "candidate-sha",
+                },
+            )
+
+    result = coordinator._reconcile_incremental_pr(
+        project,
+        Adapter(),
+        "minime/context/prepared-abc123",
+        "base-sha",
+        "a" * 64,
+    )
+
+    assert result["reused"] is True
+    assert in_memory_uow.projects.get_by_id("prepared").onboarding_checkpoint[
+        "pending_context"
+    ]["head_sha"] == "candidate-sha"

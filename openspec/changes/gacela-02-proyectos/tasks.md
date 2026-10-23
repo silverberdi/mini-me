@@ -48,7 +48,7 @@
 - [x] 6.1 Accept a new ZIP only for an actually prepared project; bind it to current approved main/base SHA and configured thinking profile; reject project reset or pending unmerged context as a base.
 - [ ] 6.2 Reuse safe extraction and thinking-agent fidelity checks to compare new material with approved context, distinguish additions and explicit replacements, preserve prior provenance/decisions, and include un-replaced contradictions with both sources in the PR without blocking on contradiction alone.
 - [x] 6.3 Create a new branch from current main, validate the documentary/config diff, commit/push and publish one new PR; keep approved context pointer unchanged until exact merge observation.
-- [ ] 6.4 Reconcile retries by package hash/revision/base/head/PR identity before agent invocation or external mutation; retain unknown effects and avoid duplicate agent charges/PRs.
+- [x] 6.4 Reconcile retries by package hash/revision/base/head/PR identity before agent invocation or external mutation; retain unknown effects and avoid duplicate agent charges/PRs. Evidence: incremental branch identity is deterministic from the package hash; an existing exact PR is reconciled and persisted before workspace/agent work, while unknown/ambiguous lookup blocks retry. Regression `test_incremental_retry_reconciles_existing_pr_before_agent` proves no agent invocation is needed for a known publication.
 - [ ] 6.5 Add integration tests for complementary, duplicate, explicit replacement, PR publication with un-replaced contradiction while approved context remains authoritative, invalid/empty package, open PR main invariance, merge advancement and lost-response recovery.
 
 ## 7. PostgreSQL migration, legacy retirement, and recovery
