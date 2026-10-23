@@ -490,6 +490,90 @@ def test_explicit_retry_authorization_allows_only_reconciled_unknown_attempt(
     )
 
 
+def test_new_explicit_grant_replaces_used_prior_grant_without_erasing_history(
+    in_memory_uow, tmp_path: Path
+):
+    config = _configuration()
+    base_sha = "b" * 40
+    project = Project(
+        project_id=config.project_id,
+        display_name=config.display_name,
+        repository=config.repository,
+        project_type=ProjectType.GREENFIELD,
+        base_branch="main",
+        provider_connections={
+            key: value.model_dump(mode="json")
+            for key, value in config.provider_connections.items()
+        },
+        onboarding_status=ProjectOnboardingStatus.BLOCKED,
+        onboarding_checkpoint={
+            "source_zip_sha256": "a" * 64,
+            "thinking_agent_attempt": {
+                "status": "FAILED_USAGE_UNKNOWN",
+                "usage_status": "UNKNOWN",
+            },
+            "thinking_agent_retry_authorization": {
+                "authorization_reference": "github-comment:6372352972",
+                "used": True,
+            },
+            "bootstrap_recovery": {"safe_to_resume": False},
+        },
+    )
+    in_memory_uow.projects.save(project)
+
+    class ReadOnlyAdapter:
+        @staticmethod
+        def _not_found():
+            return SimpleNamespace(
+                outcome=ExternalOutcome.FAILURE,
+                reason_code=ExternalReasonCode.NOT_FOUND,
+                data=None,
+            )
+
+        def get_remote_branch_head(self, repository, branch):
+            if branch == "main":
+                return SimpleNamespace(
+                    outcome=ExternalOutcome.SUCCESS,
+                    reason_code=ExternalReasonCode.EXECUTION_SUCCESS,
+                    data=base_sha,
+                )
+            return self._not_found()
+
+        def get_pull_request(self, repository, branch, base_branch):
+            return self._not_found()
+
+    class Connections:
+        def require_git_pr_write(self, project):
+            return ReadOnlyAdapter()
+
+    coordinator = GreenfieldBootstrapCoordinator(
+        in_memory_uow,
+        connection_service=Connections(),
+        trusted_managed_root=tmp_path / "managed",
+    )
+    subprocess.run(["git", "init", "-q", str(tmp_path)], check=True)
+    coordinator.projects.verified_managed_workspace_root = lambda project_id: tmp_path
+    authorization = {
+        "authorization_reference": "github-comment:6373419891",
+        "project_id": config.project_id,
+        "source_zip_sha256": "a" * 64,
+        "repository": config.repository,
+        "base_branch": "main",
+        "base_sha": base_sha,
+        "purpose": "PRIOR_USAGE_UNRECOVERABLE",
+        "max_new_invocations": 1,
+        "single_use": True,
+    }
+
+    report = coordinator.reconcile_blocked_bootstrap(config.project_id, authorization)
+
+    assert report["safe_to_resume"] is True
+    assert report["reason"] == "NO_REMOTE_EFFECT_OBSERVED_EXPLICIT_AUTHORIZATION_REQUIRED"
+    saved = in_memory_uow.projects.get_by_id(config.project_id)
+    assert saved.onboarding_checkpoint["thinking_agent_retry_authorization"]["used"] is True
+    assert saved.onboarding_checkpoint["thinking_agent_attempt"]["usage_status"] == "UNKNOWN"
+
+
 def test_stale_local_bootstrap_branch_is_reconciled_only_at_exact_base(tmp_path: Path):
     subprocess.run(["git", "init", "-q", str(tmp_path)], check=True)
     (tmp_path / "README.md").write_text("base\n", encoding="utf-8")

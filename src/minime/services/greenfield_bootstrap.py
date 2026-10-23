@@ -596,6 +596,16 @@ class GreenfieldBootstrapCoordinator:
             return "RETRY_AUTHORIZATION_SCOPE_INVALID"
         prior = checkpoint.get("thinking_agent_retry_authorization")
         if isinstance(prior, dict) and prior.get("used") is True:
+            same_grant = (
+                str(prior.get("authorization_reference", "")).strip()
+                == str(authorization.get("authorization_reference", "")).strip()
+            )
+            # A distinct, explicitly supplied human authorization is a new
+            # single-use grant.  Only replay of the exact prior grant is
+            # forbidden; an earlier UNKNOWN attempt must remain preserved.
+            if not same_grant:
+                prior = None
+        if isinstance(prior, dict) and prior.get("used") is True:
             recovery = checkpoint.get("bootstrap_recovery")
             # 6871e3d reserved the grant before branch checkout. If that
             # reservation has no persisted agent attempt and the preceding
