@@ -65,3 +65,25 @@ evidencia de bloqueo E2E, no evidencia de aceptación.
   proyecto permanece `BLOCKED` con identidad, binding y checkpoint preservados.
 - Regresión posterior al cambio: `731 passed, 13 skipped, 2 warnings`; Ruff de
   archivos afectados, OpenSpec strict y diff check pasan.
+
+## Diagnóstico de autenticación Codex sin inferencia
+
+- Verificación realizada en el host del servicio con el usuario efectivo
+  `silverman` (UID `1000`), `HOME=/home/silverman` y `CODEX_HOME` no definido.
+- `AgentProcessConfinement.codex_auth_source()` resolvió exactamente
+  `/home/silverman/.codex/auth.json`; el archivo es regular, propiedad del
+  usuario de servicio y modo `600`. No se copiaron sus contenidos a la
+  evidencia.
+- `codex login status` devolvió `Logged in using ChatGPT`. Esto confirma la
+  sesión almacenada, pero no contradice el `401` de renovación observado en la
+  invocación: el refresh remoto rechazó el token y el CLI indicó volver a
+  iniciar sesión.
+- La prueba no ejecutora de `runtime_session` proyectó esa misma fuente en un
+  `CODEX_HOME` privado bajo `/run/minime-agent/codex`; el archivo proyectado fue
+  regular, propiedad del UID de servicio y modo `600`. La observación inicial
+  no detectó rotación perdida. El proyecto E2E permanece `BLOCKED` y no se
+  modificó PostgreSQL operativo, GitHub, `main` ni ningún PR.
+- Se inició el mecanismo oficial `codex login --device-auth`, pero requiere
+  aprobación OAuth humana en `https://auth.openai.com/codex/device`. La sesión
+  interactiva se detuvo sin aceptar credenciales; no se ejecutó `codex exec`, no
+  se consumió una invocación y no se publicaron códigos ni secretos.
