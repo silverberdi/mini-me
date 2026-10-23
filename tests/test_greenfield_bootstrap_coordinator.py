@@ -172,6 +172,26 @@ def test_candidate_validation_allows_documentary_contradictions_with_provenance(
     )
 
 
+def test_incremental_context_delta_preserves_approved_context_and_marks_replacements(tmp_path: Path):
+    worktree = tmp_path / "worktree"
+    package = tmp_path / "package"
+    (worktree / "context").mkdir(parents=True)
+    package.mkdir()
+    (worktree / "context" / "existing.md").write_text("approved", encoding="utf-8")
+    (package / "existing.md").write_text("proposed replacement", encoding="utf-8")
+    (package / "new.md").write_text("addition", encoding="utf-8")
+
+    delta = GreenfieldBootstrapCoordinator._context_delta(
+        worktree, ("existing.md", "new.md"), package
+    )
+
+    assert delta == {
+        "additions": ["new.md"],
+        "replacement_candidates": ["existing.md"],
+    }
+    assert (worktree / "context" / "existing.md").read_text(encoding="utf-8") == "approved"
+
+
 def test_incremental_retry_reconciles_existing_pr_before_agent(in_memory_uow, tmp_path):
     project = Project(
         project_id="prepared",

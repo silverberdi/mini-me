@@ -188,6 +188,7 @@ class GreenfieldBootstrapCoordinator:
                     target.parent.mkdir(parents=True, exist_ok=True)
                     shutil.copyfile(source, target)
                     target.chmod(0o600)
+                context_delta = self._context_delta(worktree, extracted.files, package_dir)
                 result = self._run_thinking_agent(project, worktree, profile, timeout_seconds)
                 self._validate_candidate(worktree, incoming, extracted.files, Path(package_dir))
                 self._validate_official_workspace(worktree)
@@ -217,6 +218,7 @@ class GreenfieldBootstrapCoordinator:
                     "agent_exit_code": result.exit_code,
                     "agent_duration_ms": result.duration_ms,
                     "agent_workflow_evidence": result.native_workflow_evidence or {},
+                    "context_delta": context_delta,
                 }
                 project.onboarding_checkpoint = {
                     **project.onboarding_checkpoint,
@@ -586,6 +588,20 @@ class GreenfieldBootstrapCoordinator:
         unrelated = sorted(path for path in paths if path and not allowed(path))
         if unrelated:
             raise GreenfieldBootstrapError("Candidate contains unrelated or backlog-like changes")
+
+    @staticmethod
+    def _context_delta(worktree: Path, source_files: tuple[str, ...], package_root: Path) -> dict[str, list[str]]:
+        """Classify incoming paths without overwriting approved context."""
+        additions: list[str] = []
+        replacements: list[str] = []
+        for relative in source_files:
+            incoming = package_root / relative
+            approved = worktree / "context" / relative
+            if approved.is_file() and GreenfieldBootstrapCoordinator._sha256(approved) != GreenfieldBootstrapCoordinator._sha256(incoming):
+                replacements.append(relative)
+            else:
+                additions.append(relative)
+        return {"additions": additions, "replacement_candidates": replacements}
 
     @staticmethod
     def _pr_body(project: Project, base_sha: str, head_sha: str) -> str:
