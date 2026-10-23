@@ -573,6 +573,21 @@ async def add_project_context(
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
 
 
+@app.post("/api/v1/projects/{project_id}/context/observe-merge", tags=["projects"])
+def observe_project_context_merge(
+    project_id: str,
+    _operator: AuthenticatedOperatorDep,
+    uow: UowDep,
+) -> dict[str, Any]:
+    """Advance effective context only after exact incremental PR merge proof."""
+    try:
+        return ProjectService(uow).observe_context_merge(project_id)
+    except ValueError as exc:
+        message = str(exc)
+        code = status.HTTP_404_NOT_FOUND if message.endswith("not found") else status.HTTP_409_CONFLICT
+        raise HTTPException(status_code=code, detail=message) from exc
+
+
 @app.post("/api/v1/projects/{project_id}/pause", tags=["projects"])
 def pause_project(project_id: str, _operator: AuthenticatedOperatorDep, uow: UowDep) -> dict[str, Any]:
     try:

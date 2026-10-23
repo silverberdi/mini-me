@@ -263,6 +263,22 @@ def add_project_context(
     typer.echo(json.dumps(result, indent=2, default=str))
 
 
+@project_app.command("observe-context-merge")
+def observe_context_merge(project_id: str = typer.Argument(...)) -> None:
+    """Read the incremental context PR and advance approved context only on exact merge proof."""
+    try:
+        with db_manager.session() as session:
+            result = ProjectService(
+                PostgresPersistenceUnitOfWork(session)
+            ).observe_context_merge(project_id)
+    except Exception as exc:
+        typer.echo(f"context merge observation unavailable: {exc}", err=True)
+        raise typer.Exit(code=1) from exc
+    typer.echo(json.dumps(result, indent=2, default=str))
+    if result.get("observed") is False:
+        raise typer.Exit(code=2)
+
+
 @project_app.command("observe-bootstrap-merge")
 def observe_bootstrap_merge(project_id: str = typer.Argument(...)) -> None:
     """Read the recorded Greenfield PR and update status only on exact merge proof."""

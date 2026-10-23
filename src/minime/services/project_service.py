@@ -268,6 +268,108 @@ class ProjectService:
             "merge_commit_sha": details["merge_commit_sha"],
         }
 
+    def observe_context_merge(self, project_id: str) -> dict[str, Any]:
+        """Advance approved context only after exact incremental PR merge proof."""
+        from minime.domain.enums import ExternalOutcome
+        from minime.services.project_connection_service import ProjectConnectionService
+
+        project = self.uow.projects.get_by_id(project_id)
+        if project is None:
+            raise ValueError(f"Project '{project_id}' not found")
+        pending = project.onboarding_checkpoint.get("pending_context")
+        if project.onboarding_status != ProjectOnboardingStatus.PREPARED or not isinstance(pending, dict):
+            return {
+                "project_id": project_id,
+                "observed": False,
+                "reason": "project_has_no_pending_context_pr",
+            }
+        required = (
+            "pull_request_number",
+            "pull_request_url",
+            "head_sha",
+            "base_sha",
+            "base_branch",
+        )
+        if any(not pending.get(field) for field in required):
+            return self._block_context_observation(project, "CONTEXT_PR_IDENTITY_INCOMPLETE")
+        try:
+            pr_number = int(pending["pull_request_number"])
+        except (TypeError, ValueError):
+            pr_number = 0
+        if pr_number <= 0:
+            return self._block_context_observation(project, "CONTEXT_PR_IDENTITY_INCOMPLETE")
+        try:
+            adapter = ProjectConnectionService(self.credential_store).adapter_for(project, "git_pr")
+            result = adapter.get_pull_request_details(
+                project.provider_connections["git_pr"]["repository_url"], pr_number
+            )
+        except Exception:
+            return self._block_context_observation(project, "CONTEXT_PR_UNOBSERVABLE")
+        if result.outcome != ExternalOutcome.SUCCESS or not isinstance(result.data, dict):
+            return self._block_context_observation(project, "CONTEXT_PR_UNOBSERVABLE")
+        details = result.data
+        try:
+            repository_ok = normalize_repository_identity(str(details.get("repository", ""))) == normalize_repository_identity(
+                project.provider_connections["git_pr"]["repository_url"]
+            )
+        except (KeyError, TypeError, ValueError):
+            repository_ok = False
+        branch = pending.get("context_branch") or pending.get("bootstrap_branch")
+        exact_identity = repository_ok and (
+            details.get("number") == pr_number
+            and details.get("url") == pending["pull_request_url"]
+            and details.get("head_branch") == branch
+            and details.get("head_sha") == pending["head_sha"]
+            and details.get("base_branch") == pending["base_branch"] == project.base_branch
+        )
+        if not exact_identity:
+            return self._block_context_observation(project, "CONTEXT_PR_IDENTITY_MISMATCH")
+        if not details.get("is_merged"):
+            if details.get("state") == "closed":
+                return self._block_context_observation(project, "CONTEXT_PR_CLOSED_UNMERGED")
+            return {
+                "project_id": project_id,
+                "observed": True,
+                "merged": False,
+                "pending_context": pending,
+            }
+        merge_sha = details.get("merge_commit_sha")
+        if not merge_sha or not details.get("merged_at"):
+            return self._block_context_observation(project, "CONTEXT_MERGE_POSTCONDITION_INCOMPLETE")
+        checkpoint = {key: value for key, value in project.onboarding_checkpoint.items() if key != "pending_context"}
+        checkpoint.update(
+            {
+                "approved_context_sha": merge_sha,
+                "approved_context_source_zip_sha256": pending.get("source_zip_sha256"),
+                "context_merge_commit_sha": merge_sha,
+                "context_merge_observed_at": utc_now().isoformat(),
+            }
+        )
+        project.onboarding_checkpoint = checkpoint
+        project.onboarding_reasons = []
+        project.updated_at = utc_now()
+        self.uow.projects.save(project)
+        self.uow.commit()
+        return {
+            "project_id": project_id,
+            "observed": True,
+            "merged": True,
+            "approved_context_sha": merge_sha,
+        }
+
+    def _block_context_observation(self, project: Project, reason: str) -> dict[str, Any]:
+        project.onboarding_status = ProjectOnboardingStatus.BLOCKED
+        project.onboarding_reasons = [reason]
+        project.updated_at = utc_now()
+        self.uow.projects.save(project)
+        self.uow.commit()
+        return {
+            "project_id": project.project_id,
+            "onboarding_status": project.onboarding_status.value,
+            "observed": False,
+            "reason": reason.lower(),
+        }
+
     def _block_bootstrap_observation(self, project: Project, reason: str) -> dict[str, Any]:
         """Persist a bounded bootstrap observation blocker without exposing provider detail."""
         project.onboarding_status = ProjectOnboardingStatus.BLOCKED
@@ -488,12 +590,30 @@ class ProjectService:
             "expected_base_sha",
             "merge_commit_sha",
             "merge_observed_at",
+            "approved_context_sha",
+            "approved_context_source_zip_sha256",
+            "context_merge_commit_sha",
+            "context_merge_observed_at",
         }
         checkpoint = {
             key: value
             for key, value in project.onboarding_checkpoint.items()
             if key in checkpoint_fields
         }
+        pending = project.onboarding_checkpoint.get("pending_context")
+        if isinstance(pending, dict):
+            checkpoint["pending_context"] = {
+                key: pending.get(key)
+                for key in (
+                    "source_zip_sha256",
+                    "context_branch",
+                    "base_sha",
+                    "head_sha",
+                    "pull_request_number",
+                    "pull_request_url",
+                )
+                if pending.get(key) is not None
+            }
         return {
             "project_id": project.project_id,
             "project_type": project.project_type.value,

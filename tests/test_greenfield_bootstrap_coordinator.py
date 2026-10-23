@@ -68,11 +68,14 @@ def test_candidate_validation_requires_canonical_anchors_and_preserves_source(tm
     incoming.mkdir(parents=True)
     (package / "facts.md").write_text("source", encoding="utf-8")
     (incoming / "facts.md").write_text("source", encoding="utf-8")
-    worktree = incoming.parents[3]
+    worktree = incoming.parents[2]
     (worktree / "AGENTS.md").write_text("See context/incoming/sha/facts.md", encoding="utf-8")
     (worktree / "openspec").mkdir()
     (worktree / "openspec" / "config.yaml").write_text(
         "context: context/incoming/sha/facts.md\n", encoding="utf-8"
+    )
+    (worktree / "context" / "INDEX.md").write_text(
+        "# Context\n\n- facts.md: context/incoming/sha/facts.md\n", encoding="utf-8"
     )
 
     GreenfieldBootstrapCoordinator._validate_candidate(

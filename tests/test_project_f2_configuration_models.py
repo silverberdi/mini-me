@@ -703,6 +703,74 @@ def test_public_onboarding_state_allows_only_known_checkpoint_fields(in_memory_u
     assert "should-not-escape" not in str(state)
 
 
+def test_incremental_context_merge_observation_advances_only_exact_pending_pr(
+    in_memory_uow, monkeypatch
+):
+    from types import SimpleNamespace
+
+    from minime.domain.enums import ExternalOutcome, ProjectOnboardingStatus
+    from minime.domain.models import Project
+    from minime.services.project_connection_service import ProjectConnectionService
+
+    project = Project(
+        project_id="demo",
+        display_name="Demo",
+        repository="example/demo",
+        project_type=ProjectType.BROWNFIELD,
+        base_branch="main",
+        provider_connections={
+            "git_pr": {
+                "provider_id": "github",
+                "repository_url": "example/demo",
+                "auth_mode": "environment_app",
+            }
+        },
+        onboarding_status=ProjectOnboardingStatus.PREPARED,
+        onboarding_checkpoint={
+            "approved_context_sha": "old-main",
+            "pending_context": {
+                "source_zip_sha256": "zip-sha",
+                "context_branch": "minime/context/demo-zip",
+                "base_sha": "old-main",
+                "head_sha": "candidate-sha",
+                "base_branch": "main",
+                "pull_request_number": 19,
+                "pull_request_url": "https://github.com/example/demo/pull/19",
+            },
+        },
+    )
+    in_memory_uow.projects.save(project)
+    details = {
+        "repository": "example/demo",
+        "number": 19,
+        "url": "https://github.com/example/demo/pull/19",
+        "head_branch": "minime/context/demo-zip",
+        "head_sha": "candidate-sha",
+        "base_branch": "main",
+        "is_merged": True,
+        "merged_at": "2026-10-23T10:00:00Z",
+        "merge_commit_sha": "merged-context-sha",
+    }
+
+    class Adapter:
+        def get_pull_request_details(self, repository, number):
+            assert repository == "example/demo" and number == 19
+            return SimpleNamespace(outcome=ExternalOutcome.SUCCESS, data=details)
+
+    monkeypatch.setattr(ProjectConnectionService, "adapter_for", lambda *_args: Adapter())
+    result = ProjectService(in_memory_uow).observe_context_merge("demo")
+
+    assert result == {
+        "project_id": "demo",
+        "observed": True,
+        "merged": True,
+        "approved_context_sha": "merged-context-sha",
+    }
+    saved = in_memory_uow.projects.get_by_id("demo")
+    assert saved.onboarding_checkpoint["approved_context_sha"] == "merged-context-sha"
+    assert "pending_context" not in saved.onboarding_checkpoint
+
+
 def test_project_update_preserves_identity_and_can_change_settings(in_memory_uow):
     service = ProjectService(in_memory_uow)
     original = service.create_configured_project(_configuration())

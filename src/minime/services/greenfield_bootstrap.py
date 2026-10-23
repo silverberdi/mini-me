@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import re
 import shutil
 import subprocess
 import tempfile
@@ -40,6 +41,16 @@ class GreenfieldBootstrapCoordinator:
     All effectful dependencies are injectable so the ordering and fail-closed
     behavior can be tested without pretending that a fake agent is production E2E.
     """
+
+    THINKING_AGENT_INSTRUCTION = (
+        "Organize only the supplied context files under the repository. Preserve source provenance, "
+        "create context/INDEX.md as a concise navigation map, classify only evidenced product facts, "
+        "requirements, decisions, restrictions, architecture, references, diagrams and assets, and "
+        "record source paths in the index. Preserve prior decisions unless a source explicitly marks a "
+        "replacement; record unresolved contradictions with both source paths. Link canonical context "
+        "from AGENTS.md and openspec/config.yaml. Never invent requirements, decisions, OpenSpec "
+        "artifacts or product claims. Use the installed official OpenSpec setup."
+    )
 
     def __init__(
         self,
@@ -190,6 +201,7 @@ class GreenfieldBootstrapCoordinator:
                     raise GreenfieldBootstrapError("Incremental context PR was not proven successful")
                 pending = {
                     "source_zip_sha256": extracted.sha256,
+                    "context_branch": branch,
                     "bootstrap_branch": branch,
                     "base_sha": base_sha,
                     "head_sha": head_sha,
@@ -308,17 +320,17 @@ class GreenfieldBootstrapCoordinator:
     def _run_thinking_agent(
         self, project: Project, worktree: Path, profile: Any, timeout_seconds: int
     ) -> ImplementerResult:
-        instruction = (
-            "Organize only the supplied context files under the repository. Preserve source provenance, "
-            "create navigable context documentation and links from AGENTS.md and openspec/config.yaml, "
-            "record unresolved contradictions with both source paths, and never invent requirements, "
-            "decisions, OpenSpec artifacts or product claims. Use the installed official OpenSpec setup."
-        )
         if self.thinking_agent is not None:
-            result = asyncio.run(self.thinking_agent.run(worktree, instruction, timeout_seconds))
+            result = asyncio.run(
+                self.thinking_agent.run(worktree, self.THINKING_AGENT_INSTRUCTION, timeout_seconds)
+            )
         else:
             invocation = resolve_cli_invocation(profile.agent_id, "implementer", model=profile.model_id, effort=profile.effort)
-            result = asyncio.run(CliImplementerRunner(invocation).run(worktree, instruction, timeout_seconds))
+            result = asyncio.run(
+                CliImplementerRunner(invocation).run(
+                    worktree, self.THINKING_AGENT_INSTRUCTION, timeout_seconds
+                )
+            )
         if result.exit_code != 0 or result.timed_out:
             raise GreenfieldBootstrapError("Thinking agent did not complete successfully")
         return result
@@ -410,6 +422,9 @@ class GreenfieldBootstrapCoordinator:
         canonical_config = worktree / "openspec" / "config.yaml"
         if not canonical_agents.is_file() or not canonical_config.is_file():
             raise GreenfieldBootstrapError("Official OpenSpec context anchors are missing")
+        context_index = worktree / "context" / "INDEX.md"
+        if package_root is not None and not context_index.is_file():
+            raise GreenfieldBootstrapError("Thinking agent context index is missing")
         for path in worktree.rglob("*"):
             if path.is_symlink():
                 try:
@@ -427,6 +442,14 @@ class GreenfieldBootstrapCoordinator:
                     continue
                 if "context/" not in text and (path.name == "AGENTS.md" or path == canonical_config):
                     raise GreenfieldBootstrapError("Canonical context reference is missing")
+            if path.suffix.lower() in {".md", ".yaml", ".yml"}:
+                GreenfieldBootstrapCoordinator._validate_repository_links(path, worktree)
+
+        if package_root is not None:
+            index_text = context_index.read_text(encoding="utf-8")
+            missing_sources = [relative for relative in source_files if relative not in index_text]
+            if missing_sources:
+                raise GreenfieldBootstrapError("Context index omits source provenance")
 
         for path in worktree.rglob("*"):
             if not path.is_file() or path.is_symlink() or path.stat().st_size > 1_000_000:
@@ -445,6 +468,20 @@ class GreenfieldBootstrapCoordinator:
             for chunk in iter(lambda: handle.read(1024 * 1024), b""):
                 digest.update(chunk)
         return digest.hexdigest()
+
+    @staticmethod
+    def _validate_repository_links(path: Path, worktree: Path) -> None:
+        for raw_target in re.findall(r"\[[^\]]*\]\(([^)]+)\)", path.read_text(encoding="utf-8")):
+            target = raw_target.strip().split("#", 1)[0].split("?", 1)[0].strip("<>")
+            if not target or target.startswith(("http://", "https://", "mailto:", "#")):
+                continue
+            candidate = (path.parent / target).resolve()
+            try:
+                candidate.relative_to(worktree.resolve())
+            except ValueError as exc:
+                raise GreenfieldBootstrapError("Context reference escapes the repository") from exc
+            if not candidate.exists():
+                raise GreenfieldBootstrapError("Context reference points to a missing file")
 
     @staticmethod
     def _pr_body(project: Project, base_sha: str, head_sha: str) -> str:
