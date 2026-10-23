@@ -42,13 +42,19 @@ class ProjectService:
         self.uow = uow
         self.credential_store = credential_store or ProjectCredentialStore()
 
-    def create_configured_project(self, configuration: ProjectConfigurationInput) -> Project:
+    def create_configured_project(
+        self,
+        configuration: ProjectConfigurationInput,
+        *,
+        allow_greenfield: bool = False,
+        onboarding_checkpoint: dict[str, Any] | None = None,
+    ) -> Project:
         """Persist a validated project configuration without claiming bootstrap readiness.
 
         Greenfield creation is deliberately refused here: it must be paired with a
         validated context package and the durable bootstrap coordinator.
         """
-        if configuration.project_type == ProjectType.GREENFIELD:
+        if configuration.project_type == ProjectType.GREENFIELD and not allow_greenfield:
             raise ValueError("GREENFIELD requires a validated ZIP bootstrap operation")
         project_id = configuration.project_id.strip()
         repository = normalize_repository_identity(configuration.repository)
@@ -103,10 +109,17 @@ class ProjectService:
                     for key, value in configuration.agent_profiles.items()
                 },
                 execution_policy=configuration.execution_policy.model_dump(mode="json"),
-                onboarding_status=ProjectOnboardingStatus.CONFIGURED,
+                onboarding_status=(
+                    ProjectOnboardingStatus.BOOTSTRAPPING
+                    if configuration.project_type == ProjectType.GREENFIELD
+                    else ProjectOnboardingStatus.CONFIGURED
+                ),
                 onboarding_reasons=[
-                    "Brownfield adaptation is deferred; project is configuration-only."
+                    "Greenfield bootstrap is pending."
+                    if configuration.project_type == ProjectType.GREENFIELD
+                    else "Brownfield adaptation is deferred; project is configuration-only."
                 ],
+                onboarding_checkpoint=onboarding_checkpoint or {},
                 status=ProjectStatus.ACTIVE,
                 created_at=now,
                 updated_at=now,

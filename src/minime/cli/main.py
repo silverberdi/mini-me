@@ -9,13 +9,14 @@ from typing import NoReturn
 import typer
 import uvicorn
 
-from minime.config import discover_and_load_env_file
+from minime.config import discover_and_load_env_file, load_config
 from minime.db.repository import PostgresPersistenceUnitOfWork
 from minime.db.session import db_manager
 from minime.domain.models import ProjectConfigurationInput, ProjectConfigurationPatch
 from minime.logging import configure_logging
 from minime.services.budget_service import BudgetService
 from minime.services.context_discovery_service import ContextDiscoveryService
+from minime.services.greenfield_bootstrap import GreenfieldBootstrapCoordinator
 from minime.services.legacy_unavailable import unavailable_payload
 from minime.services.project_catalog_service import ProjectCatalogService
 from minime.services.project_connection_service import ProjectConnectionService
@@ -164,6 +165,34 @@ def create_project(config_path: str = typer.Argument(..., exists=True, readable=
     typer.echo(f"created {project.project_id} [{project.onboarding_status.value}]")
 
 
+@project_app.command("bootstrap")
+def bootstrap_greenfield(
+    config_path: str = typer.Argument(..., exists=True, readable=True),
+    zip_path: str = typer.Argument(..., exists=True, readable=True),
+) -> None:
+    """Bootstrap a Greenfield project from a ZIP through its first PR."""
+    try:
+        with open(config_path, encoding="utf-8") as stream:
+            raw = json.load(stream)
+        if "github_app_credentials" in raw:
+            raise ValueError("Do not put GitHub App credentials in the configuration file")
+        configuration = ProjectConfigurationInput.model_validate(raw)
+        if configuration.project_type.value != "GREENFIELD":
+            raise ValueError("project_type must be GREENFIELD")
+        asyncio.run(ProjectCatalogService().validate_project_profiles(configuration.agent_profiles))
+        with open(zip_path, "rb") as stream:
+            archive = stream.read()
+        with db_manager.session() as session:
+            result = GreenfieldBootstrapCoordinator(
+                PostgresPersistenceUnitOfWork(session),
+                trusted_managed_root=load_config().paths.repos_root,
+            ).bootstrap(configuration, archive)
+    except Exception as exc:
+        typer.echo(f"project bootstrap failed: {exc}", err=True)
+        raise typer.Exit(code=1) from exc
+    typer.echo(json.dumps(result, indent=2, default=str))
+
+
 @project_app.command("show")
 def show_project(project_id: str = typer.Argument(...), json_output: bool = typer.Option(False, "--json")) -> None:
     try:
@@ -212,6 +241,26 @@ def onboarding_status(project_id: str = typer.Argument(...)) -> None:
         typer.echo(f"project onboarding status unavailable: {exc}", err=True)
         raise typer.Exit(code=1) from exc
     typer.echo(json.dumps(state, indent=2, default=str))
+
+
+@project_app.command("add-context")
+def add_project_context(
+    project_id: str = typer.Argument(...),
+    zip_path: str = typer.Argument(..., exists=True, readable=True),
+) -> None:
+    """Publish incremental project context on a separate PR."""
+    try:
+        with open(zip_path, "rb") as stream:
+            archive = stream.read()
+        with db_manager.session() as session:
+            result = GreenfieldBootstrapCoordinator(
+                PostgresPersistenceUnitOfWork(session),
+                trusted_managed_root=load_config().paths.repos_root,
+            ).add_context(project_id, archive)
+    except Exception as exc:
+        typer.echo(f"project context update failed: {exc}", err=True)
+        raise typer.Exit(code=1) from exc
+    typer.echo(json.dumps(result, indent=2, default=str))
 
 
 @project_app.command("observe-bootstrap-merge")

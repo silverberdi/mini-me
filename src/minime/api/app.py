@@ -60,6 +60,10 @@ from minime.services.budget_service import BudgetService
 from minime.services.capacity_lifecycle_service import CapacityLifecycleService
 from minime.services.context_discovery_service import ContextDiscoveryService
 from minime.services.current_check_batch import validate_current_checks_batch
+from minime.services.greenfield_bootstrap import (
+    GreenfieldBootstrapCoordinator,
+    GreenfieldBootstrapError,
+)
 from minime.services.legacy_unavailable import unavailable_payload
 from minime.services.project_catalog_service import ProjectCatalogService
 from minime.services.project_connection_service import ProjectConnectionService
@@ -428,6 +432,43 @@ async def create_project_configuration(
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
 
 
+@app.post("/api/v1/projects/greenfield/bootstrap", status_code=status.HTTP_202_ACCEPTED, tags=["projects"])
+async def bootstrap_greenfield_project(
+    operator: AuthenticatedOperatorDep,
+    uow: UowDep,
+    payload: dict[str, Any],
+) -> dict[str, Any]:
+    """Bootstrap a Greenfield project through its first human-reviewed PR.
+
+    The archive is supplied as base64 in ``context_zip_base64`` so the API keeps
+    its existing JSON-only dependency surface; the ZIP is still validated before
+    any project or repository mutation.
+    """
+
+    import base64
+
+    try:
+        configuration = ProjectConfigurationInput.model_validate(payload.get("configuration"))
+        if configuration.project_type.value != "GREENFIELD":
+            raise ValueError("project_type must be GREENFIELD")
+        encoded_archive = payload.get("context_zip_base64")
+        if not isinstance(encoded_archive, str):
+            raise ValueError("context_zip_base64 is required")
+        archive = base64.b64decode(encoded_archive, validate=True)
+        await ProjectCatalogService().validate_project_profiles(configuration.agent_profiles)
+        result = GreenfieldBootstrapCoordinator(
+            uow,
+            trusted_managed_root=load_config().paths.repos_root,
+        ).bootstrap(
+            configuration,
+            archive,
+            operator_email=operator.email if operator else "operator",
+        )
+        return result
+    except (ValueError, GreenfieldBootstrapError) as exc:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
+
+
 @app.patch("/api/v1/projects/{project_id}", tags=["projects"])
 async def update_project_configuration(
     project_id: str,
@@ -481,6 +522,28 @@ def observe_project_bootstrap_merge(
         message = str(exc)
         code = status.HTTP_404_NOT_FOUND if message.endswith("not found") else status.HTTP_409_CONFLICT
         raise HTTPException(status_code=code, detail=message) from exc
+
+
+@app.post("/api/v1/projects/{project_id}/context", status_code=status.HTTP_202_ACCEPTED, tags=["projects"])
+async def add_project_context(
+    project_id: str,
+    payload: dict[str, Any],
+    _operator: AuthenticatedOperatorDep,
+    uow: UowDep,
+) -> dict[str, Any]:
+    """Publish incremental context on a new PR; approved main remains authoritative."""
+    import base64
+
+    try:
+        encoded_archive = payload.get("context_zip_base64")
+        if not isinstance(encoded_archive, str):
+            raise ValueError("context_zip_base64 is required")
+        archive = base64.b64decode(encoded_archive, validate=True)
+        return GreenfieldBootstrapCoordinator(
+            uow, trusted_managed_root=load_config().paths.repos_root
+        ).add_context(project_id, archive)
+    except (ValueError, GreenfieldBootstrapError) as exc:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
 
 
 @app.post("/api/v1/projects/{project_id}/pause", tags=["projects"])

@@ -1,7 +1,7 @@
 ## 1. Inventory, contracts, and unified project configuration
 
 - [x] 1.1 Trace every API/CLI/DI, domain, repository, YAML, static-client, test, and database consumer of `Project`, onboarding DTOs, fixed roles, context/backlog/admission fields; record live readers/writers and exact retirement choices in `design.md` Removal Ledger.
-- [ ] 1.2 Define validated project create/update/read schemas for type, immutable id/repository identity, optional main branch defaulting to `main`, separate provider connections, four profiles, budgets/review limits, lifecycle, and truthful onboarding status; reject GREENFIELD before persistence unless a ZIP is present and valid.
+- [x] 1.2 Define validated project create/update/read schemas for type, immutable id/repository identity, optional main branch defaulting to `main`, separate provider connections, four profiles, budgets/review limits, lifecycle, and truthful onboarding status; reject GREENFIELD before persistence unless a ZIP is present and valid.
 - [ ] 1.3 Refactor `ProjectService` and `ProjectOnboardingService` into one project creation/configuration authority; keep repository identity immutable while validating authorized changes to branch, providers and role profiles.
 - [ ] 1.4 Implement one authenticated API semantic for project list/get/create/update/activate/pause, catalog, onboarding state and context operations; reconcile old routes to one handler or explicit deprecation without silent legacy execution.
 - [ ] 1.5 Implement corresponding `minime project` CLI operations through the same service/contracts, with explicit arguments, sanitized errors and non-zero failure; do not add ticket start or scheduler commands.
@@ -37,7 +37,7 @@
 ## 5. Secure context ZIP receipt and faithful organization
 
 - [x] 5.1 Define finite ZIP limits and safe-entry policy from supported host/runtime capabilities; reject traversal, absolute paths, collisions, links/special files, disallowed nesting/executables, oversized archives and secret-bearing inputs before extraction or project creation. Evidence: `ContextArchiveExtractor` enforces byte/count/depth/ratio limits; validates the entire manifest and contents before writing; rejects absolute/traversal/case-collision paths, symlinks/special/executable entries, over-limit expansion and recognized secret markers; destination must be a new, private, non-symlink directory. `tests/test_context_archive.py` covers valid ZIP (including the operator-provided sorter package), traversal/link/special/collision/secret/invalid input denials. No archive content is executed.
-- [ ] 5.2 Extract in a temporary guarded managed workspace without following links or executing archive content; preserve package hash, source filenames and provenance without storing a duplicate archive in PostgreSQL.
+- [x] 5.2 Extract in a temporary guarded managed workspace without following links or executing archive content; preserve package hash, source filenames and provenance without storing a duplicate archive in PostgreSQL.
 - [ ] 5.3 Define and test the thinking-agent organization contract for product facts, requirements/decisions/restrictions/architecture/references/diagrams/assets, source fidelity, canonical index, contradiction register that preserves prior decisions absent explicit replacement, and prohibition on invented content.
 - [ ] 5.4 Add bounded references to canonical context in `AGENTS.md`, relevant existing agent instruction equivalents and `openspec/config.yaml` while preserving compatible content; use official OpenSpec validation.
 - [ ] 5.5 Verify no secrets, unsupported claims, provenance gaps, broken/out-of-root links, unrelated overwrites, or context masquerading as backlog reaches commit/agent/GitHub.
@@ -45,9 +45,9 @@
 
 ## 6. Incremental context package and approval PR
 
-- [ ] 6.1 Accept a new ZIP only for an actually prepared project; bind it to current approved main/base SHA and configured thinking profile; reject project reset or pending unmerged context as a base.
+- [x] 6.1 Accept a new ZIP only for an actually prepared project; bind it to current approved main/base SHA and configured thinking profile; reject project reset or pending unmerged context as a base.
 - [ ] 6.2 Reuse safe extraction and thinking-agent fidelity checks to compare new material with approved context, distinguish additions and explicit replacements, preserve prior provenance/decisions, and include un-replaced contradictions with both sources in the PR without blocking on contradiction alone.
-- [ ] 6.3 Create a new branch from current main, validate the documentary/config diff, commit/push and publish one new PR; keep approved context pointer unchanged until exact merge observation.
+- [x] 6.3 Create a new branch from current main, validate the documentary/config diff, commit/push and publish one new PR; keep approved context pointer unchanged until exact merge observation.
 - [ ] 6.4 Reconcile retries by package hash/revision/base/head/PR identity before agent invocation or external mutation; retain unknown effects and avoid duplicate agent charges/PRs.
 - [ ] 6.5 Add integration tests for complementary, duplicate, explicit replacement, PR publication with un-replaced contradiction while approved context remains authoritative, invalid/empty package, open PR main invariance, merge advancement and lost-response recovery.
 
