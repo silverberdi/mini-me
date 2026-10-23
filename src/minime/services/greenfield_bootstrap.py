@@ -189,6 +189,7 @@ class GreenfieldBootstrapCoordinator:
             if reconciled is not None:
                 return reconciled
             worktree = Path(self._worktree_path(binding, branch))
+            self._prepare_local_branch(binding.managed_repository_root, branch, base_sha)
             self._git(str(workspace), "worktree", "add", "--detach", str(worktree), base_sha)
             try:
                 self._git(str(worktree), "checkout", "-b", branch)
@@ -294,6 +295,7 @@ class GreenfieldBootstrapCoordinator:
         base_sha = self._git(
             binding.managed_repository_root, "rev-parse", f"origin/{project.base_branch}"
         )
+        self._prepare_local_branch(binding.managed_repository_root, branch, base_sha)
         self._git(binding.managed_repository_root, "worktree", "add", "--detach", self._worktree_path(binding, branch), base_sha)
         worktree = Path(self._worktree_path(binding, branch))
         try:
@@ -594,7 +596,18 @@ class GreenfieldBootstrapCoordinator:
             return "RETRY_AUTHORIZATION_SCOPE_INVALID"
         prior = checkpoint.get("thinking_agent_retry_authorization")
         if isinstance(prior, dict) and prior.get("used") is True:
-            return "RETRY_AUTHORIZATION_ALREADY_USED"
+            recovery = checkpoint.get("bootstrap_recovery")
+            # 6871e3d reserved the grant before branch checkout. If that
+            # reservation has no persisted agent attempt and the preceding
+            # reconciliation proved no remote effect, it was pre-dispatch and
+            # can be reconciled once without treating it as model usage.
+            pre_dispatch = (
+                not isinstance(checkpoint.get("thinking_agent_attempt"), dict)
+                and isinstance(recovery, dict)
+                and recovery.get("safe_to_resume") is True
+            )
+            if not pre_dispatch:
+                return "RETRY_AUTHORIZATION_ALREADY_USED"
         if not str(authorization.get("authorization_reference", "")).strip():
             return "RETRY_AUTHORIZATION_REFERENCE_MISSING"
         return None
@@ -631,11 +644,7 @@ class GreenfieldBootstrapCoordinator:
                 "previous_thinking_agent_attempt": project.onboarding_checkpoint.get(
                     "thinking_agent_attempt"
                 ),
-                "thinking_agent_retry_authorization": {
-                    **authorization,
-                    "used": True,
-                    "used_at": utc_now().isoformat(),
-                },
+                "pending_thinking_agent_retry_authorization": authorization,
             }
             project.onboarding_status = ProjectOnboardingStatus.BOOTSTRAPPING
             project.onboarding_reasons = [
@@ -663,10 +672,20 @@ class GreenfieldBootstrapCoordinator:
         spend again after the first invocation may have reached the provider.
         """
         current = self.uow.projects.get_by_id(project.project_id) or project
+        pending_authorization = current.onboarding_checkpoint.get(
+            "pending_thinking_agent_retry_authorization"
+        )
         current.onboarding_checkpoint = {
             **(current.onboarding_checkpoint or {}),
             "thinking_agent_attempt": evidence,
         }
+        if isinstance(pending_authorization, dict):
+            current.onboarding_checkpoint.pop("pending_thinking_agent_retry_authorization", None)
+            current.onboarding_checkpoint["thinking_agent_retry_authorization"] = {
+                **pending_authorization,
+                "used": True,
+                "used_at": utc_now().isoformat(),
+            }
         current.updated_at = utc_now()
         self.uow.projects.save(current)
         self.uow.commit()
@@ -835,6 +854,39 @@ class GreenfieldBootstrapCoordinator:
         if check and result.returncode:
             raise GreenfieldBootstrapError("Git bootstrap operation failed")
         return result.stdout.strip()
+
+    @classmethod
+    def _prepare_local_branch(cls, repository_root: str, branch: str, base_sha: str) -> None:
+        """Reconcile only an unbound stale local branch at the exact base SHA."""
+        ref = subprocess.run(
+            ["git", "rev-parse", "--verify", f"refs/heads/{branch}"],
+            cwd=repository_root,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        if ref.returncode != 0:
+            return
+        if ref.stdout.strip() != base_sha:
+            raise GreenfieldBootstrapError("Existing local bootstrap branch has a different head")
+        worktrees = subprocess.run(
+            ["git", "worktree", "list", "--porcelain"],
+            cwd=repository_root,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        if worktrees.returncode != 0 or f"branch refs/heads/{branch}" in worktrees.stdout:
+            raise GreenfieldBootstrapError("Existing bootstrap branch is bound to a worktree")
+        deleted = subprocess.run(
+            ["git", "branch", "-d", branch],
+            cwd=repository_root,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        if deleted.returncode != 0:
+            raise GreenfieldBootstrapError("Stale local bootstrap branch could not be reconciled")
 
     @staticmethod
     def _git_auth_environment(adapter: Any, project: Project) -> dict[str, str] | None:
