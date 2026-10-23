@@ -244,12 +244,13 @@ class GreenfieldBootstrapCoordinator:
                     "agent_workflow_evidence": result.native_workflow_evidence or {},
                     "context_delta": context_delta,
                 }
-                project.onboarding_checkpoint = {
-                    **project.onboarding_checkpoint,
+                current = self.uow.projects.get_by_id(project.project_id) or project
+                current.onboarding_checkpoint = {
+                    **(current.onboarding_checkpoint or {}),
                     "pending_context": pending,
                 }
-                project.updated_at = utc_now()
-                self.uow.projects.save(project)
+                current.updated_at = utc_now()
+                self.uow.projects.save(current)
                 self.uow.commit()
                 return {"project_id": project_id, "pending_context": pending, "reused": False}
             except Exception as exc:
@@ -343,8 +344,9 @@ class GreenfieldBootstrapCoordinator:
             )
             if pr.outcome != ExternalOutcome.SUCCESS or not isinstance(pr.data, dict):
                 raise GreenfieldBootstrapError("Bootstrap pull request was not proven successful")
+            current = self.uow.projects.get_by_id(project.project_id) or project
             checkpoint = {
-                **project.onboarding_checkpoint,
+                **(current.onboarding_checkpoint or {}),
                 "bootstrap_branch": branch,
                 "base_branch": project.base_branch,
                 "base_sha": base_sha,
@@ -358,13 +360,17 @@ class GreenfieldBootstrapCoordinator:
                 "agent_duration_ms": result.duration_ms,
                 "agent_workflow_evidence": result.native_workflow_evidence or {},
             }
-            project.onboarding_checkpoint = checkpoint
-            project.onboarding_status = ProjectOnboardingStatus.PR_PENDING
-            project.onboarding_reasons = ["Bootstrap PR awaits human review and merge."]
-            project.updated_at = utc_now()
-            self.uow.projects.save(project)
+            current.onboarding_checkpoint = checkpoint
+            current.onboarding_status = ProjectOnboardingStatus.PR_PENDING
+            current.onboarding_reasons = ["Bootstrap PR awaits human review and merge."]
+            current.updated_at = utc_now()
+            self.uow.projects.save(current)
             self.uow.commit()
-            return {"project_id": project.project_id, "onboarding_status": project.onboarding_status.value, "checkpoint": ProjectService.public_onboarding_state(project)["checkpoint"]}
+            return {
+                "project_id": current.project_id,
+                "onboarding_status": current.onboarding_status.value,
+                "checkpoint": ProjectService.public_onboarding_state(current)["checkpoint"],
+            }
         except Exception as exc:
             if agent_started:
                 # A completed paid inference must never be destroyed by a
