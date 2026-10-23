@@ -212,6 +212,7 @@ class GreenfieldBootstrapCoordinator:
                     shutil.copyfile(source, target)
                     target.chmod(0o600)
                 context_delta = self._context_delta(worktree, extracted.files, package_dir)
+                self._validate_candidate_scope(worktree)
                 agent_started = True
                 result = self._run_thinking_agent(project, worktree, profile, timeout_seconds)
                 self._validate_candidate(worktree, incoming, extracted.files, Path(package_dir))
@@ -328,6 +329,10 @@ class GreenfieldBootstrapCoordinator:
                 target.parent.mkdir(parents=True, exist_ok=True)
                 shutil.copyfile(source, target)
                 target.chmod(0o600)
+            # The official initializer and source import must satisfy scope
+            # BEFORE any quota-bearing invocation. Never discover a predictable
+            # setup artifact conflict after the agent has already consumed tokens.
+            self._validate_candidate_scope(worktree)
             agent_started = True
             result = self._run_thinking_agent(project, worktree, profile, timeout_seconds)
             self._validate_candidate(worktree, incoming, source_files, package_root)
@@ -729,7 +734,9 @@ class GreenfieldBootstrapCoordinator:
                 "Cannot retain candidate without verified managed-worktree ownership"
             )
         try:
-            worktree.resolve(strict=True).relative_to(self.trusted_managed_root.resolve(strict=True))
+            worktree.resolve(strict=True).relative_to(
+                self.trusted_managed_root.resolve(strict=True)
+            )
         except (OSError, ValueError) as exc:
             raise GreenfieldBootstrapError(
                 "Failed candidate worktree lies outside trusted managed root"
@@ -1096,6 +1103,7 @@ class GreenfieldBootstrapCoordinator:
             for raw in output.split(b"\0")
             if raw
         }
+
         def allowed(path: str) -> bool:
             return (
                 path == "AGENTS.md"
