@@ -628,6 +628,20 @@ class ProjectService:
                 )
                 if key in attempt
             }
+        recovery = project.onboarding_checkpoint.get("bootstrap_recovery")
+        if isinstance(recovery, dict):
+            checkpoint["bootstrap_recovery"] = {
+                key: recovery[key]
+                for key in (
+                    "status",
+                    "reason",
+                    "checked_at",
+                    "safe_to_resume",
+                    "bootstrap_branch",
+                    "remote_branch_sha",
+                )
+                if key in recovery
+            }
         pending = project.onboarding_checkpoint.get("pending_context")
         if isinstance(pending, dict):
             checkpoint["pending_context"] = {

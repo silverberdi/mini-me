@@ -404,6 +404,158 @@ class GreenfieldBootstrapCoordinator:
         self.uow.commit()
         return {"project_id": project.project_id, "pending_context": pending, "reused": True}
 
+    def reconcile_blocked_bootstrap(self, project_id: str) -> dict[str, Any]:
+        """Inspect a blocked bootstrap without dispatching an agent or mutating GitHub."""
+        project = self.uow.projects.get_by_id(project_id)
+        if project is None:
+            raise GreenfieldBootstrapError("Project not found")
+        if project.onboarding_status is not ProjectOnboardingStatus.BLOCKED:
+            return {
+                "project_id": project_id,
+                "onboarding_status": project.onboarding_status.value,
+                "safe_to_resume": False,
+                "reason": "project_is_not_blocked",
+            }
+
+        checkpoint = project.onboarding_checkpoint or {}
+        attempt = checkpoint.get("thinking_agent_attempt")
+        if not isinstance(attempt, dict):
+            reason = "THINKING_AGENT_ATTEMPT_EVIDENCE_UNAVAILABLE"
+        elif (
+            attempt.get("status") != "FAILED"
+            or attempt.get("usage_status") != "OBSERVED"
+        ):
+            reason = "THINKING_AGENT_CONSUMPTION_UNKNOWN"
+        else:
+            reason = "THINKING_AGENT_RETRY_REQUIRES_EXPLICIT_AUTHORIZATION"
+
+        branch = None
+        source_sha = checkpoint.get("source_zip_sha256")
+        if isinstance(source_sha, str) and len(source_sha) == 64:
+            branch = f"minime/bootstrap/{project_id}-{source_sha[:12]}"
+        evidence: dict[str, Any] = {
+            "status": "RECONCILIATION_REQUIRED",
+            "reason": reason,
+            "checked_at": utc_now().isoformat(),
+            "safe_to_resume": False,
+        }
+        if branch:
+            evidence["bootstrap_branch"] = branch
+        try:
+            adapter = self.connections.require_git_pr_write(project)
+            repository = project.provider_connections["git_pr"]["repository_url"]
+            branch_result = adapter.get_remote_branch_head(repository, branch) if branch else None
+            if branch_result is not None and branch_result.outcome in {
+                ExternalOutcome.UNKNOWN,
+                ExternalOutcome.AMBIGUOUS,
+            }:
+                evidence["reason"] = "BOOTSTRAP_BRANCH_UNOBSERVABLE"
+            elif branch_result is not None and branch_result.outcome is ExternalOutcome.SUCCESS:
+                evidence.update(
+                    {
+                        "remote_branch_sha": branch_result.data,
+                        "reason": "BOOTSTRAP_BRANCH_ALREADY_EXISTS",
+                    }
+                )
+            elif branch:
+                pr_result = adapter.get_pull_request(repository, branch, project.base_branch)
+                if pr_result.outcome in {ExternalOutcome.UNKNOWN, ExternalOutcome.AMBIGUOUS}:
+                    evidence["reason"] = "BOOTSTRAP_PR_UNOBSERVABLE"
+                elif pr_result.outcome is ExternalOutcome.SUCCESS:
+                    evidence.update(
+                        {
+                            "pull_request": pr_result.data or {},
+                            "reason": "BOOTSTRAP_PR_ALREADY_EXISTS",
+                        }
+                    )
+                elif reason == "THINKING_AGENT_RETRY_REQUIRES_EXPLICIT_AUTHORIZATION":
+                    workspace = self.projects.verified_managed_workspace_root(project_id)
+                    if workspace is None:
+                        evidence["reason"] = "MANAGED_WORKSPACE_UNAVAILABLE"
+                    else:
+                        status = subprocess.run(
+                            ["git", "status", "--porcelain"],
+                            cwd=str(workspace),
+                            capture_output=True,
+                            text=True,
+                            check=False,
+                        )
+                        dirty = [
+                            line
+                            for line in status.stdout.splitlines()
+                            if line.strip() and ".minime-managed-project.json" not in line
+                        ]
+                        if status.returncode != 0:
+                            evidence["reason"] = "MANAGED_WORKSPACE_STATUS_UNOBSERVABLE"
+                        elif dirty:
+                            evidence["reason"] = "MANAGED_WORKSPACE_HAS_UNRECONCILED_CHANGES"
+                        else:
+                            evidence["safe_to_resume"] = True
+                            evidence["reason"] = "NO_REMOTE_EFFECT_OBSERVED_EXPLICIT_AUTHORIZATION_REQUIRED"
+        except Exception:
+            evidence["reason"] = "BOOTSTRAP_RECONCILIATION_UNOBSERVABLE"
+
+        current = self.uow.projects.get_by_id(project_id) or project
+        current.onboarding_checkpoint = {
+            **(current.onboarding_checkpoint or {}),
+            "bootstrap_recovery": evidence,
+        }
+        current.updated_at = utc_now()
+        self.uow.projects.save(current)
+        self.uow.commit()
+        return {"project_id": project_id, **evidence}
+
+    def resume_blocked_bootstrap(
+        self,
+        project_id: str,
+        archive: bytes,
+        *,
+        authorize_agent_retry: bool = False,
+        operator_email: str = "operator",
+        timeout_seconds: int = 1_800,
+    ) -> dict[str, Any]:
+        """Resume a reconciled failed attempt only after explicit authorization."""
+        project = self.uow.projects.get_by_id(project_id)
+        if project is None:
+            raise GreenfieldBootstrapError("Project not found")
+        reconciliation = self.reconcile_blocked_bootstrap(project_id)
+        if not reconciliation.get("safe_to_resume"):
+            raise GreenfieldBootstrapError(
+                f"Blocked bootstrap cannot resume safely: {reconciliation.get('reason')}"
+            )
+        if not authorize_agent_retry:
+            raise GreenfieldBootstrapError("Explicit authorization is required before agent retry")
+        with tempfile.TemporaryDirectory(
+            prefix="minime-context-resume-", dir=tempfile.gettempdir()
+        ) as package_dir:
+            extracted = self.extractor.extract(archive, package_dir)
+            if extracted.sha256 != project.onboarding_checkpoint.get("source_zip_sha256"):
+                raise GreenfieldBootstrapError("Recovery ZIP does not match the blocked bootstrap revision")
+            project.onboarding_checkpoint = {
+                **project.onboarding_checkpoint,
+                "previous_thinking_agent_attempt": project.onboarding_checkpoint.get(
+                    "thinking_agent_attempt"
+                ),
+            }
+            project.onboarding_status = ProjectOnboardingStatus.BOOTSTRAPPING
+            project.onboarding_reasons = [
+                "Bootstrap retry explicitly authorized after reconciliation."
+            ]
+            project.updated_at = utc_now()
+            self.uow.projects.save(project)
+            self.uow.commit()
+            try:
+                return self._run_after_project_creation(
+                    project,
+                    Path(package_dir),
+                    extracted.files,
+                    operator_email=operator_email,
+                    timeout_seconds=timeout_seconds,
+                )
+            except Exception as exc:
+                self._block(project, f"GREENFIELD_BOOTSTRAP_FAILED:{type(exc).__name__}")
+                raise
+
     def _persist_thinking_attempt(self, project: Project, evidence: dict[str, Any]) -> None:
         """Durably retain bounded agent evidence before the worktree is cleaned up.
 

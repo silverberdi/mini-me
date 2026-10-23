@@ -332,3 +332,64 @@ def test_thinking_agent_uncaught_exception_retains_unknown_attempt(in_memory_uow
     ]
     assert attempt["status"] == "EXECUTION_UNKNOWN"
     assert attempt["usage_status"] == "UNKNOWN"
+
+
+def test_blocked_bootstrap_reconciliation_preserves_unknown_attempt_and_refuses_replay(
+    in_memory_uow, tmp_path: Path
+):
+    config = _configuration()
+    project = Project(
+        project_id=config.project_id,
+        display_name=config.display_name,
+        repository=config.repository,
+        project_type=ProjectType.GREENFIELD,
+        base_branch="main",
+        provider_connections={
+            key: value.model_dump(mode="json")
+            for key, value in config.provider_connections.items()
+        },
+        agent_profiles={
+            key: value.model_dump(mode="json")
+            for key, value in config.agent_profiles.items()
+        },
+        onboarding_status=ProjectOnboardingStatus.BLOCKED,
+        onboarding_checkpoint={
+            "source_zip_sha256": "a" * 64,
+            "thinking_agent_attempt": {
+                "status": "FAILED_USAGE_UNKNOWN",
+                "usage_status": "UNKNOWN",
+            },
+        },
+    )
+    in_memory_uow.projects.save(project)
+
+    class ReadOnlyAdapter:
+        def get_remote_branch_head(self, repository, branch):
+            return SimpleNamespace(outcome=ExternalOutcome.FAILURE, data=None)
+
+        def get_pull_request(self, repository, branch, base_branch):
+            return SimpleNamespace(outcome=ExternalOutcome.FAILURE, data=None)
+
+    class Connections:
+        def require_git_pr_write(self, project):
+            return ReadOnlyAdapter()
+
+    coordinator = GreenfieldBootstrapCoordinator(
+        in_memory_uow,
+        connection_service=Connections(),
+        trusted_managed_root=tmp_path / "managed",
+    )
+    report = coordinator.reconcile_blocked_bootstrap(config.project_id)
+
+    assert report["safe_to_resume"] is False
+    assert report["reason"] == "THINKING_AGENT_CONSUMPTION_UNKNOWN"
+    saved = in_memory_uow.projects.get_by_id(config.project_id)
+    assert saved.onboarding_status is ProjectOnboardingStatus.BLOCKED
+    assert saved.onboarding_checkpoint["thinking_agent_attempt"]["status"] == (
+        "FAILED_USAGE_UNKNOWN"
+    )
+    assert saved.onboarding_checkpoint["bootstrap_recovery"]["reason"] == (
+        "THINKING_AGENT_CONSUMPTION_UNKNOWN"
+    )
+    with pytest.raises(GreenfieldBootstrapError, match="cannot resume safely"):
+        coordinator.resume_blocked_bootstrap(config.project_id, b"not-a-zip", authorize_agent_retry=True)
