@@ -595,3 +595,63 @@ def test_stale_local_bootstrap_branch_is_reconciled_only_at_exact_base(tmp_path:
         capture_output=True,
         check=False,
     ).returncode != 0
+
+
+def test_candidate_scope_rejects_staged_unrelated_file_not_just_untracked(tmp_path: Path):
+    worktree = tmp_path / "repo"
+    worktree.mkdir()
+    subprocess.run(["git", "init"], cwd=worktree, check=True, capture_output=True)
+    subprocess.run(["git", "config", "user.name", "test"], cwd=worktree, check=True)
+    subprocess.run(["git", "config", "user.email", "test@example.com"], cwd=worktree, check=True)
+    (worktree / "README.md").write_text("baseline", encoding="utf-8")
+    subprocess.run(["git", "add", "."], cwd=worktree, check=True)
+    subprocess.run(
+        ["git", "commit", "-m", "base"], cwd=worktree, check=True, capture_output=True
+    )
+    (worktree / "ROADMAP.md").write_text("out of scope", encoding="utf-8")
+    subprocess.run(["git", "add", "ROADMAP.md"], cwd=worktree, check=True)
+    with pytest.raises(GreenfieldBootstrapError, match="count=1"):
+        GreenfieldBootstrapCoordinator._validate_candidate_scope(worktree)
+
+
+def test_candidate_scope_fails_closed_when_git_inventory_unavailable(tmp_path: Path):
+    with pytest.raises(GreenfieldBootstrapError, match="scope could not be inspected"):
+        GreenfieldBootstrapCoordinator._validate_candidate_scope(tmp_path)
+
+
+def test_failed_post_agent_candidate_is_quarantined_and_not_replayed(
+    in_memory_uow, tmp_path: Path
+):
+    managed = tmp_path / "managed"
+    worktree = managed / "project" / ".minime" / "worktrees" / "candidate"
+    worktree.mkdir(parents=True)
+    (worktree / "context.md").write_text("private candidate", encoding="utf-8")
+    project = Project(
+        project_id="project",
+        display_name="Project",
+        repository="example/project",
+        project_type=ProjectType.GREENFIELD,
+        base_branch="main",
+        onboarding_status=ProjectOnboardingStatus.BLOCKED,
+        onboarding_checkpoint={"source_zip_sha256": "a" * 64},
+    )
+    in_memory_uow.projects.save(project)
+    coordinator = GreenfieldBootstrapCoordinator(
+        in_memory_uow, trusted_managed_root=managed
+    )
+    coordinator._retain_candidate_for_recovery(
+        project, worktree, "minime/bootstrap/project-aaaaaaaaaaaa",
+        "b" * 40, GreenfieldBootstrapError("candidate has out-of-scope paths")
+    )
+    assert worktree.is_dir()
+    assert (worktree / "context.md").read_text(encoding="utf-8") == "private candidate"
+    latest = in_memory_uow.projects.get_by_id("project")
+    recovery = latest.onboarding_checkpoint["candidate_recovery"]
+    assert recovery["status"] == "QUARANTINED_REVIEW_REQUIRED"
+    assert recovery["worktree"] == str(worktree)
+    assert "candidate_recovery" not in ProjectService.public_project_payload(
+        latest
+    )["onboarding_checkpoint"]
+    report = coordinator.reconcile_blocked_bootstrap("project")
+    assert report["safe_to_resume"] is False
+    assert report["reason"] == "CANDIDATE_QUARANTINED_REVIEW_REQUIRED"
