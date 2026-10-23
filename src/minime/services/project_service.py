@@ -600,6 +600,28 @@ class ProjectService:
             for key, value in project.onboarding_checkpoint.items()
             if key in checkpoint_fields
         }
+        attempt = project.onboarding_checkpoint.get("thinking_agent_attempt")
+        if isinstance(attempt, dict):
+            # Authenticated status exposes bounded operational metadata only.
+            # Raw stderr/stdout and secret-bearing provider diagnostics stay in
+            # the durable checkpoint, never in the public onboarding payload.
+            checkpoint["thinking_agent_attempt"] = {
+                key: attempt[key]
+                for key in (
+                    "status",
+                    "agent",
+                    "model",
+                    "effort",
+                    "usage_status",
+                    "exit_code",
+                    "timed_out",
+                    "duration_ms",
+                    "environment_error",
+                    "started_at",
+                    "finished_at",
+                )
+                if key in attempt
+            }
         pending = project.onboarding_checkpoint.get("pending_context")
         if isinstance(pending, dict):
             checkpoint["pending_context"] = {
