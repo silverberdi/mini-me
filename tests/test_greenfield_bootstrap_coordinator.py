@@ -107,6 +107,26 @@ def test_candidate_validation_rejects_secret_markers(tmp_path: Path):
         GreenfieldBootstrapCoordinator._validate_candidate(worktree, incoming)
 
 
+def test_candidate_validation_rejects_repository_escape_or_missing_links(tmp_path: Path):
+    worktree = tmp_path / "worktree"
+    incoming = worktree / "context" / "incoming" / "sha"
+    incoming.mkdir(parents=True)
+    (incoming / "facts.md").write_text("source", encoding="utf-8")
+    (worktree / "AGENTS.md").write_text(
+        "[context](context/INDEX.md)", encoding="utf-8"
+    )
+    (worktree / "openspec").mkdir()
+    (worktree / "openspec" / "config.yaml").write_text(
+        "context: context/INDEX.md\n", encoding="utf-8"
+    )
+    (worktree / "context" / "INDEX.md").write_text(
+        "[escape](../../outside.md)", encoding="utf-8"
+    )
+
+    with pytest.raises(GreenfieldBootstrapError, match="reference"):
+        GreenfieldBootstrapCoordinator._validate_candidate(worktree, incoming)
+
+
 def test_incremental_retry_reconciles_existing_pr_before_agent(in_memory_uow, tmp_path):
     project = Project(
         project_id="prepared",
