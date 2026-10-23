@@ -1102,6 +1102,67 @@ def test_greenfield_service_rejects_without_zip_before_persistence(in_memory_uow
     assert in_memory_uow.projects.get_by_id("demo") is None
 
 
+def test_greenfield_and_incremental_endpoints_run_blocking_coordinator_off_event_loop(
+    in_memory_uow, monkeypatch
+):
+    import asyncio
+
+    from fastapi.testclient import TestClient
+
+    import minime.api.app as api_module
+    from minime.api.app import app, get_current_operator, get_uow
+
+    async def profiles_available(self, profiles):
+        assert profiles
+
+    def bootstrap_worker(configuration, archive, operator_email):
+        with pytest.raises(RuntimeError):
+            asyncio.get_running_loop()
+        assert configuration.project_type is ProjectType.GREENFIELD
+        assert archive == b"bootstrap-zip"
+        assert operator_email == "operator@example.com"
+        return {"onboarding_status": "PR_PENDING"}
+
+    def context_worker(project_id, archive):
+        with pytest.raises(RuntimeError):
+            asyncio.get_running_loop()
+        assert project_id == "demo"
+        assert archive == b"incremental-zip"
+        return {"pending_context": {"source_zip_sha256": "sha"}}
+
+    monkeypatch.setattr(
+        "minime.api.app.ProjectCatalogService.validate_project_profiles", profiles_available
+    )
+    monkeypatch.setattr(api_module, "_run_greenfield_bootstrap_in_session", bootstrap_worker)
+    monkeypatch.setattr(api_module, "_run_incremental_context_in_session", context_worker)
+    monkeypatch.setenv("MINIME_AUTH_ENABLED", "false")
+    app.dependency_overrides[get_uow] = lambda: in_memory_uow
+    app.dependency_overrides[get_current_operator] = lambda: type(
+        "Operator", (), {"email": "operator@example.com"}
+    )()
+    import base64
+
+    configuration = _configuration(project_type=ProjectType.GREENFIELD)
+    try:
+        client = TestClient(app)
+        bootstrap = client.post(
+            "/api/v1/projects/greenfield/bootstrap",
+            json={
+                "configuration": configuration.model_dump(mode="json"),
+                "context_zip_base64": base64.b64encode(b"bootstrap-zip").decode(),
+            },
+        )
+        incremental = client.post(
+            "/api/v1/projects/demo/context",
+            json={"context_zip_base64": base64.b64encode(b"incremental-zip").decode()},
+        )
+    finally:
+        app.dependency_overrides.clear()
+
+    assert bootstrap.status_code == 202, bootstrap.text
+    assert incremental.status_code == 202, incremental.text
+
+
 def test_versioned_project_api_requires_authenticated_operator(in_memory_uow):
     from fastapi.testclient import TestClient
 

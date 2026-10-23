@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import Annotated, Any, Generator
 
 from fastapi import Depends, FastAPI, HTTPException, Query, Request, status
+from fastapi.concurrency import run_in_threadpool
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import (
     FileResponse,
@@ -191,6 +192,36 @@ def get_uow() -> Generator[PostgresPersistenceUnitOfWork, None, None]:
 
 
 UowDep = Annotated[PostgresPersistenceUnitOfWork, Depends(get_uow)]
+
+
+def _run_greenfield_bootstrap_in_session(
+    configuration: ProjectConfigurationInput,
+    archive: bytes,
+    operator_email: str,
+) -> dict[str, Any]:
+    """Run blocking bootstrap work with a session owned by the worker thread."""
+    session = db_manager.sessionmaker()
+    try:
+        uow = PostgresPersistenceUnitOfWork(session)
+        return GreenfieldBootstrapCoordinator(
+            uow,
+            trusted_managed_root=load_config().paths.repos_root,
+        ).bootstrap(configuration, archive, operator_email=operator_email)
+    finally:
+        session.close()
+
+
+def _run_incremental_context_in_session(project_id: str, archive: bytes) -> dict[str, Any]:
+    """Run blocking context publication with a session owned by the worker thread."""
+    session = db_manager.sessionmaker()
+    try:
+        uow = PostgresPersistenceUnitOfWork(session)
+        return GreenfieldBootstrapCoordinator(
+            uow,
+            trusted_managed_root=load_config().paths.repos_root,
+        ).add_context(project_id, archive)
+    finally:
+        session.close()
 
 
 def get_context_service(uow: UowDep) -> ContextDiscoveryService:
@@ -456,13 +487,11 @@ async def bootstrap_greenfield_project(
             raise ValueError("context_zip_base64 is required")
         archive = base64.b64decode(encoded_archive, validate=True)
         await ProjectCatalogService().validate_project_profiles(configuration.agent_profiles)
-        result = GreenfieldBootstrapCoordinator(
-            uow,
-            trusted_managed_root=load_config().paths.repos_root,
-        ).bootstrap(
+        result = await run_in_threadpool(
+            _run_greenfield_bootstrap_in_session,
             configuration,
             archive,
-            operator_email=operator.email if operator else "operator",
+            operator.email if operator else "operator",
         )
         return result
     except (ValueError, GreenfieldBootstrapError) as exc:
@@ -539,9 +568,7 @@ async def add_project_context(
         if not isinstance(encoded_archive, str):
             raise ValueError("context_zip_base64 is required")
         archive = base64.b64decode(encoded_archive, validate=True)
-        return GreenfieldBootstrapCoordinator(
-            uow, trusted_managed_root=load_config().paths.repos_root
-        ).add_context(project_id, archive)
+        return await run_in_threadpool(_run_incremental_context_in_session, project_id, archive)
     except (ValueError, GreenfieldBootstrapError) as exc:
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
 

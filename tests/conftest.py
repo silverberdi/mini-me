@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import hashlib
 import os
+import shutil
+import tempfile
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any
@@ -131,6 +133,18 @@ from minime.domain.models import (
     ValidationRun,
     utc_now,
 )
+
+
+@pytest.fixture(autouse=True)
+def isolated_runtime_root(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    """Give process-runner tests a private host root without weakening production."""
+    runtime_root = Path(tempfile.mkdtemp(prefix="minime-runtime-", dir=tmp_path.parent))
+    runtime_root.chmod(0o700)
+    monkeypatch.setenv("MINIME_RUNTIME_ROOT", str(runtime_root))
+    try:
+        yield runtime_root
+    finally:
+        shutil.rmtree(runtime_root, ignore_errors=True)
 
 
 class ReadinessGitHubStub:
