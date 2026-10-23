@@ -20,6 +20,7 @@ from minime.adapters.openspec import OpenSpecAdapter
 from minime.config import resolve_cli_invocation
 from minime.domain.enums import ExternalOutcome, ProjectOnboardingStatus, ProjectType
 from minime.domain.models import Project, ProjectConfigurationInput, utc_now
+from minime.logging import redact_secrets
 from minime.services.agent_confinement import AgentProcessConfinement
 from minime.services.context_archive import ContextArchiveExtractor
 from minime.services.implementer_runner import CliImplementerRunner, ImplementerResult
@@ -403,22 +404,71 @@ class GreenfieldBootstrapCoordinator:
         self.uow.commit()
         return {"project_id": project.project_id, "pending_context": pending, "reused": True}
 
+    def _persist_thinking_attempt(self, project: Project, evidence: dict[str, Any]) -> None:
+        """Durably retain bounded agent evidence before the worktree is cleaned up.
+
+        Missing usage is UNKNOWN, never zero; a repeated bootstrap cannot silently
+        spend again after the first invocation may have reached the provider.
+        """
+        current = self.uow.projects.get_by_id(project.project_id) or project
+        current.onboarding_checkpoint = {
+            **(current.onboarding_checkpoint or {}),
+            "thinking_agent_attempt": evidence,
+        }
+        current.updated_at = utc_now()
+        self.uow.projects.save(current)
+        self.uow.commit()
+
     def _run_thinking_agent(
         self, project: Project, worktree: Path, profile: Any, timeout_seconds: int
     ) -> ImplementerResult:
+        attempt: dict[str, Any] = {
+            "status": "EXECUTION_UNKNOWN",
+            "agent": profile.agent_id,
+            "model": profile.model_id,
+            "effort": profile.effort,
+            "started_at": utc_now().isoformat(),
+            "usage_status": "UNKNOWN",
+        }
+        # Commit the admission marker before any process launch. An exception,
+        # cancellation or process loss must never be interpreted as zero spend.
+        self._persist_thinking_attempt(project, attempt)
         if self.thinking_agent is not None:
             result = asyncio.run(
                 self.thinking_agent.run(worktree, self.THINKING_AGENT_INSTRUCTION, timeout_seconds)
             )
         else:
-            invocation = resolve_cli_invocation(profile.agent_id, "implementer", model=profile.model_id, effort=profile.effort)
+            invocation = resolve_cli_invocation(
+                profile.agent_id, "implementer", model=profile.model_id, effort=profile.effort
+            )
             result = asyncio.run(
                 CliImplementerRunner(invocation).run(
                     worktree, self.THINKING_AGENT_INSTRUCTION, timeout_seconds
                 )
             )
-        if result.exit_code != 0 or result.timed_out:
-            detail = result.preflight_error or (result.stderr[-1] if result.stderr else "no diagnostic")
+        failed = result.exit_code != 0 or result.timed_out
+        diagnostic = {
+            **attempt,
+            "status": "FAILED_USAGE_UNKNOWN" if failed else "SUCCEEDED_USAGE_UNOBSERVED",
+            "exit_code": result.exit_code,
+            "timed_out": result.timed_out,
+            "duration_ms": result.duration_ms,
+            "preflight_error": (
+                redact_secrets(str(result.preflight_error))[:256]
+                if result.preflight_error else None
+            ),
+            "environment_error": result.environment_error,
+            "stderr_tail": [
+                redact_secrets(str(line))[:512] for line in result.stderr[-5:]
+            ],
+            "stdout_line_count": len(result.stdout),
+            "finished_at": utc_now().isoformat(),
+        }
+        self._persist_thinking_attempt(project, diagnostic)
+        if failed:
+            detail = diagnostic["preflight_error"] or (
+                diagnostic["stderr_tail"][-1] if diagnostic["stderr_tail"] else "no diagnostic"
+            )
             raise GreenfieldBootstrapError(
                 f"Thinking agent did not complete successfully (exit={result.exit_code}, "
                 f"timed_out={result.timed_out}): {detail}"
@@ -657,8 +707,11 @@ class GreenfieldBootstrapCoordinator:
         return f"Greenfield context bootstrap for `{project.project_id}`.\n\nBase SHA: `{base_sha}`\nHead SHA: `{head_sha}`\nHuman merge required; F3 ticket execution is not started."
 
     def _block(self, project: Project, reason: str) -> None:
-        project.onboarding_status = ProjectOnboardingStatus.BLOCKED
-        project.onboarding_reasons = [reason]
-        project.updated_at = utc_now()
-        self.uow.projects.save(project)
+        # A workspace/agent may have committed a newer checkpoint since the
+        # bootstrap caller loaded its Project. Never overwrite its diagnostics.
+        current = self.uow.projects.get_by_id(project.project_id) or project
+        current.onboarding_status = ProjectOnboardingStatus.BLOCKED
+        current.onboarding_reasons = [reason]
+        current.updated_at = utc_now()
+        self.uow.projects.save(current)
         self.uow.commit()
