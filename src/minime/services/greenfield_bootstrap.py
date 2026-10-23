@@ -1087,7 +1087,7 @@ class GreenfieldBootstrapCoordinator:
         paths = {
             raw.decode("utf-8", errors="surrogateescape")
             for output in (changed.stdout, untracked.stdout)
-            for raw in output.split(b"\\0")
+            for raw in output.split(b"\0")
             if raw
         }
         def allowed(path: str) -> bool:
