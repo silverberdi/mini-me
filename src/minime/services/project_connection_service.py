@@ -96,6 +96,12 @@ class ProjectConnectionService:
         repository = project.provider_connections["git_pr"]["repository_url"]
         return adapter.get_repository_branch_head(repository, branch)
 
+    def get_repository_default_branch(self, project: Project) -> ExternalActionResult[str]:
+        """Observe the provider-declared default branch for base-branch recovery."""
+        adapter = self.adapter_for(project, "git_pr")
+        repository = project.provider_connections["git_pr"]["repository_url"]
+        return adapter.get_repository_default_branch(repository)
+
     def create_pull_request(
         self,
         project: Project,

@@ -20,6 +20,7 @@ from minime.domain.enums import ExternalOutcome, ProjectOnboardingStatus, Projec
 from minime.domain.models import Project, ProjectConfigurationInput, ProjectOnboardingInput, utc_now
 from minime.services.context_archive import ContextArchiveExtractor
 from minime.services.implementer_runner import CliImplementerRunner, ImplementerResult
+from minime.services.project_catalog_service import ProjectCatalogService
 from minime.services.project_connection_service import ProjectConnectionService
 from minime.services.project_onboarding_service import ProjectOnboardingService
 from minime.services.project_service import ProjectService
@@ -203,6 +204,9 @@ class GreenfieldBootstrapCoordinator:
     ) -> dict[str, Any]:
         profile = self._thinking_profile(project)
         self._validate_thinking_profile(profile)
+        # Prove the Git/PR grant and materialize a missing requested base branch
+        # before the guarded local clone attempts to check it out.
+        self._ensure_base_branch(project, self.connections.require_git_pr_write(project))
         # Reuse the existing guarded repository establishment and managed binding.
         self.onboarding.onboard_project(
             ProjectOnboardingInput(
@@ -225,6 +229,7 @@ class GreenfieldBootstrapCoordinator:
             raise GreenfieldBootstrapError("Managed repository binding was not persisted")
 
         git_adapter = self.connections.require_git_pr_write(project)
+        self._validate_official_capabilities(project)
         branch = f"minime/bootstrap/{project.project_id}-{project.onboarding_checkpoint['source_zip_sha256'][:12]}"
         self._assert_not_main(branch, project.base_branch)
         self._git(binding.managed_repository_root, "fetch", "origin", project.base_branch)
@@ -294,6 +299,29 @@ class GreenfieldBootstrapCoordinator:
             result = asyncio.run(CliImplementerRunner(invocation).run(worktree, instruction, timeout_seconds))
         if result.exit_code != 0 or result.timed_out:
             raise GreenfieldBootstrapError("Thinking agent did not complete successfully")
+
+    def _validate_official_capabilities(self, project: Project) -> None:
+        try:
+            asyncio.run(ProjectCatalogService().validate_project_profiles(project.agent_profiles))
+        except (OSError, RuntimeError, TimeoutError, ValueError) as exc:
+            raise GreenfieldBootstrapError(
+                "Selected agent capabilities or official OpenSpec integration are unavailable"
+            ) from exc
+
+    def _ensure_base_branch(self, project: Project, adapter: Any) -> None:
+        repository = project.provider_connections["git_pr"]["repository_url"]
+        current = adapter.get_repository_branch_head(repository, project.base_branch)
+        if current.outcome is ExternalOutcome.SUCCESS and current.data:
+            return
+        default = adapter.get_repository_default_branch(repository)
+        if default.outcome is not ExternalOutcome.SUCCESS or not default.data:
+            raise GreenfieldBootstrapError("Configured base branch is absent and remote default is unobservable")
+        default_head = adapter.get_repository_branch_head(repository, str(default.data))
+        if default_head.outcome is not ExternalOutcome.SUCCESS or not default_head.data:
+            raise GreenfieldBootstrapError("Remote default branch has no provable base commit")
+        created = adapter.create_remote_branch(repository, project.base_branch, str(default_head.data))
+        if created.outcome is not ExternalOutcome.SUCCESS or created.data != default_head.data:
+            raise GreenfieldBootstrapError("Requested base branch could not be created from the remote default")
 
     @staticmethod
     def _thinking_profile(project: Project) -> Any:
