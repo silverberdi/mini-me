@@ -18,7 +18,12 @@ from typing import Any, Protocol
 
 from minime.adapters.openspec import OpenSpecAdapter
 from minime.config import resolve_cli_invocation
-from minime.domain.enums import ExternalOutcome, ProjectOnboardingStatus, ProjectType
+from minime.domain.enums import (
+    ExternalOutcome,
+    ExternalReasonCode,
+    ProjectOnboardingStatus,
+    ProjectType,
+)
 from minime.domain.models import Project, ProjectConfigurationInput, utc_now
 from minime.logging import redact_secrets
 from minime.services.agent_confinement import AgentProcessConfinement
@@ -404,7 +409,9 @@ class GreenfieldBootstrapCoordinator:
         self.uow.commit()
         return {"project_id": project.project_id, "pending_context": pending, "reused": True}
 
-    def reconcile_blocked_bootstrap(self, project_id: str) -> dict[str, Any]:
+    def reconcile_blocked_bootstrap(
+        self, project_id: str, authorization: dict[str, Any] | None = None
+    ) -> dict[str, Any]:
         """Inspect a blocked bootstrap without dispatching an agent or mutating GitHub."""
         project = self.uow.projects.get_by_id(project_id)
         if project is None:
@@ -420,14 +427,20 @@ class GreenfieldBootstrapCoordinator:
         checkpoint = project.onboarding_checkpoint or {}
         attempt = checkpoint.get("thinking_agent_attempt")
         if not isinstance(attempt, dict):
+            attempt = {}
+        authorization_error = self._retry_authorization_error(project, authorization)
+        authorized_unknown = authorization is not None and authorization_error is None
+        if not isinstance(attempt, dict) and not authorized_unknown:
             reason = "THINKING_AGENT_ATTEMPT_EVIDENCE_UNAVAILABLE"
         elif (
             attempt.get("status") != "FAILED"
             or attempt.get("usage_status") != "OBSERVED"
-        ):
+        ) and not authorized_unknown:
             reason = "THINKING_AGENT_CONSUMPTION_UNKNOWN"
         else:
             reason = "THINKING_AGENT_RETRY_REQUIRES_EXPLICIT_AUTHORIZATION"
+        if authorization is not None and authorization_error is not None:
+            reason = authorization_error
 
         branch = None
         source_sha = checkpoint.get("source_zip_sha256")
@@ -444,19 +457,54 @@ class GreenfieldBootstrapCoordinator:
         try:
             adapter = self.connections.require_git_pr_write(project)
             repository = project.provider_connections["git_pr"]["repository_url"]
+            base_result = adapter.get_remote_branch_head(repository, project.base_branch)
+            if base_result.outcome in {ExternalOutcome.UNKNOWN, ExternalOutcome.AMBIGUOUS}:
+                evidence["reason"] = "BOOTSTRAP_BASE_UNOBSERVABLE"
+            elif base_result.outcome is not ExternalOutcome.SUCCESS or not base_result.data:
+                evidence["reason"] = "BOOTSTRAP_BASE_UNAVAILABLE"
+            else:
+                evidence["base_sha"] = base_result.data
+                if authorized_unknown:
+                    expected_base = authorization.get("base_sha") if authorization else None
+                    if expected_base != base_result.data:
+                        evidence["reason"] = "BOOTSTRAP_BASE_SHA_MISMATCH"
             branch_result = adapter.get_remote_branch_head(repository, branch) if branch else None
-            if branch_result is not None and branch_result.outcome in {
+            if evidence["reason"] not in {
+                "BOOTSTRAP_BASE_UNOBSERVABLE",
+                "BOOTSTRAP_BASE_UNAVAILABLE",
+                "BOOTSTRAP_BASE_SHA_MISMATCH",
+            } and branch_result is not None and branch_result.outcome in {
                 ExternalOutcome.UNKNOWN,
                 ExternalOutcome.AMBIGUOUS,
             }:
                 evidence["reason"] = "BOOTSTRAP_BRANCH_UNOBSERVABLE"
-            elif branch_result is not None and branch_result.outcome is ExternalOutcome.SUCCESS:
+            elif (
+                evidence["reason"] not in {
+                    "BOOTSTRAP_BASE_UNOBSERVABLE",
+                    "BOOTSTRAP_BASE_UNAVAILABLE",
+                    "BOOTSTRAP_BASE_SHA_MISMATCH",
+                }
+                and branch_result is not None
+                and branch_result.outcome is ExternalOutcome.SUCCESS
+                and branch_result.data
+            ):
                 evidence.update(
                     {
                         "remote_branch_sha": branch_result.data,
                         "reason": "BOOTSTRAP_BRANCH_ALREADY_EXISTS",
                     }
                 )
+            elif (
+                evidence["reason"] not in {
+                    "BOOTSTRAP_BASE_UNOBSERVABLE",
+                    "BOOTSTRAP_BASE_UNAVAILABLE",
+                    "BOOTSTRAP_BASE_SHA_MISMATCH",
+                }
+                and branch_result is not None
+                and branch_result.outcome is not ExternalOutcome.SUCCESS
+                and getattr(branch_result, "reason_code", None) is not ExternalReasonCode.NOT_FOUND
+            ):
+                evidence["reason"] = "BOOTSTRAP_BRANCH_EFFECT_UNCERTAIN"
             elif branch:
                 pr_result = adapter.get_pull_request(repository, branch, project.base_branch)
                 if pr_result.outcome in {ExternalOutcome.UNKNOWN, ExternalOutcome.AMBIGUOUS}:
@@ -468,7 +516,12 @@ class GreenfieldBootstrapCoordinator:
                             "reason": "BOOTSTRAP_PR_ALREADY_EXISTS",
                         }
                     )
-                elif reason == "THINKING_AGENT_RETRY_REQUIRES_EXPLICIT_AUTHORIZATION":
+                elif getattr(pr_result, "reason_code", None) is not ExternalReasonCode.NOT_FOUND:
+                    evidence["reason"] = "BOOTSTRAP_PR_EFFECT_UNCERTAIN"
+                elif (
+                    evidence["reason"] == "THINKING_AGENT_RETRY_REQUIRES_EXPLICIT_AUTHORIZATION"
+                    or authorized_unknown
+                ):
                     workspace = self.projects.verified_managed_workspace_root(project_id)
                     if workspace is None:
                         evidence["reason"] = "MANAGED_WORKSPACE_UNAVAILABLE"
@@ -491,7 +544,9 @@ class GreenfieldBootstrapCoordinator:
                             evidence["reason"] = "MANAGED_WORKSPACE_HAS_UNRECONCILED_CHANGES"
                         else:
                             evidence["safe_to_resume"] = True
-                            evidence["reason"] = "NO_REMOTE_EFFECT_OBSERVED_EXPLICIT_AUTHORIZATION_REQUIRED"
+                            evidence["reason"] = (
+                                "NO_REMOTE_EFFECT_OBSERVED_EXPLICIT_AUTHORIZATION_REQUIRED"
+                            )
         except Exception:
             evidence["reason"] = "BOOTSTRAP_RECONCILIATION_UNOBSERVABLE"
 
@@ -505,12 +560,51 @@ class GreenfieldBootstrapCoordinator:
         self.uow.commit()
         return {"project_id": project_id, **evidence}
 
+    @staticmethod
+    def _retry_authorization_error(
+        project: Project, authorization: dict[str, Any] | None
+    ) -> str | None:
+        if authorization is None:
+            return "THINKING_AGENT_RETRY_REQUIRES_EXPLICIT_AUTHORIZATION"
+        required = {
+            "authorization_reference",
+            "project_id",
+            "source_zip_sha256",
+            "repository",
+            "base_branch",
+            "base_sha",
+            "purpose",
+            "max_new_invocations",
+            "single_use",
+        }
+        if not required.issubset(authorization):
+            return "RETRY_AUTHORIZATION_INCOMPLETE"
+        if authorization.get("project_id") != project.project_id:
+            return "RETRY_AUTHORIZATION_PROJECT_MISMATCH"
+        if authorization.get("repository") != project.repository:
+            return "RETRY_AUTHORIZATION_REPOSITORY_MISMATCH"
+        checkpoint = project.onboarding_checkpoint or {}
+        if authorization.get("source_zip_sha256") != checkpoint.get("source_zip_sha256"):
+            return "RETRY_AUTHORIZATION_ZIP_MISMATCH"
+        if authorization.get("base_branch") != project.base_branch:
+            return "RETRY_AUTHORIZATION_BRANCH_MISMATCH"
+        if authorization.get("purpose") != "PRIOR_USAGE_UNRECOVERABLE":
+            return "RETRY_AUTHORIZATION_PURPOSE_INVALID"
+        if authorization.get("max_new_invocations") != 1 or authorization.get("single_use") is not True:
+            return "RETRY_AUTHORIZATION_SCOPE_INVALID"
+        prior = checkpoint.get("thinking_agent_retry_authorization")
+        if isinstance(prior, dict) and prior.get("used") is True:
+            return "RETRY_AUTHORIZATION_ALREADY_USED"
+        if not str(authorization.get("authorization_reference", "")).strip():
+            return "RETRY_AUTHORIZATION_REFERENCE_MISSING"
+        return None
+
     def resume_blocked_bootstrap(
         self,
         project_id: str,
         archive: bytes,
         *,
-        authorize_agent_retry: bool = False,
+        authorization: dict[str, Any] | None = None,
         operator_email: str = "operator",
         timeout_seconds: int = 1_800,
     ) -> dict[str, Any]:
@@ -518,13 +612,14 @@ class GreenfieldBootstrapCoordinator:
         project = self.uow.projects.get_by_id(project_id)
         if project is None:
             raise GreenfieldBootstrapError("Project not found")
-        reconciliation = self.reconcile_blocked_bootstrap(project_id)
+        authorization_error = self._retry_authorization_error(project, authorization)
+        if authorization_error is not None:
+            raise GreenfieldBootstrapError(authorization_error)
+        reconciliation = self.reconcile_blocked_bootstrap(project_id, authorization)
         if not reconciliation.get("safe_to_resume"):
             raise GreenfieldBootstrapError(
                 f"Blocked bootstrap cannot resume safely: {reconciliation.get('reason')}"
             )
-        if not authorize_agent_retry:
-            raise GreenfieldBootstrapError("Explicit authorization is required before agent retry")
         with tempfile.TemporaryDirectory(
             prefix="minime-context-resume-", dir=tempfile.gettempdir()
         ) as package_dir:
@@ -536,6 +631,11 @@ class GreenfieldBootstrapCoordinator:
                 "previous_thinking_agent_attempt": project.onboarding_checkpoint.get(
                     "thinking_agent_attempt"
                 ),
+                "thinking_agent_retry_authorization": {
+                    **authorization,
+                    "used": True,
+                    "used_at": utc_now().isoformat(),
+                },
             }
             project.onboarding_status = ProjectOnboardingStatus.BOOTSTRAPPING
             project.onboarding_reasons = [

@@ -642,6 +642,25 @@ class ProjectService:
                 )
                 if key in recovery
             }
+        grant = project.onboarding_checkpoint.get("thinking_agent_retry_authorization")
+        if isinstance(grant, dict):
+            checkpoint["thinking_agent_retry_authorization"] = {
+                key: grant[key]
+                for key in (
+                    "authorization_reference",
+                    "project_id",
+                    "source_zip_sha256",
+                    "repository",
+                    "base_branch",
+                    "base_sha",
+                    "purpose",
+                    "max_new_invocations",
+                    "single_use",
+                    "used",
+                    "used_at",
+                )
+                if key in grant
+            }
         pending = project.onboarding_checkpoint.get("pending_context")
         if isinstance(pending, dict):
             checkpoint["pending_context"] = {
