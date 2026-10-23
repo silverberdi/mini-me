@@ -87,3 +87,28 @@ evidencia de bloqueo E2E, no evidencia de aceptación.
   aprobación OAuth humana en `https://auth.openai.com/codex/device`. La sesión
   interactiva se detuvo sin aceptar credenciales; no se ejecutó `codex exec`, no
   se consumió una invocación y no se publicaron códigos ni secretos.
+
+## Autenticación renovada y concesión Greenfield posterior
+
+- La autorización `https://github.com/silverberdi/mini-me/pull/178#issuecomment-6373419891`
+  fue vinculada al mismo proyecto, repositorio, ZIP y SHA base. La concesión
+  anterior permanece registrada como usada y no fue reutilizada.
+- Tras completar `codex login --device-auth`, `codex login status` volvió a
+  devolver `Logged in using ChatGPT` bajo `silverman`. La fuente y la proyección
+  Bubblewrap fueron verificadas de nuevo sin exponer credenciales.
+- La primera pasada posterior a la renovación no lanzó Codex: el catálogo del
+  host E2E no tenía declaradas las capacidades de edición de archivos. Se
+  corrigió la configuración del entorno E2E para reflejar las capacidades ya
+  publicadas, sin consumir inferencia. El PostgreSQL usado para E2E se migró al
+  head F2; la base operativa no fue tocada.
+- Invocación Greenfield única ejecutada con `gpt-5.6-luna`, esfuerzo `medium`:
+  terminó con `exit_code=0`, `timed_out=false`, duración `60433 ms`, uso
+  observado (`input_tokens=163590`, `cached_input_tokens=146048`,
+  `output_tokens=3348`). No hubo error de autenticación ni segunda invocación.
+- El agente produjo una salida, pero la validación determinista rechazó el
+  candidato con `Candidate contains unrelated or backlog-like changes` antes
+  de commit/push. No se publicó branch ni PR; `main` permanece en
+  `fa4eb55699b2169e5ff88059504872f17df617ce` y el proyecto sigue `BLOCKED`.
+- Conforme a la autorización, no se reintentará esta invocación ni se usará la
+  concesión incremental como sustituto. Las tareas 4.4, 7.1b, 8.4 y 8.5 siguen
+  pendientes por falta del PR Greenfield real.
