@@ -46,3 +46,22 @@ evidencia de bloqueo E2E, no evidencia de aceptación.
   registros de proceso ni un intento Codex recuperable. La fila histórica solo
   contiene el motivo genérico `GREENFIELD_BOOTSTRAP_FAILED:GreenfieldBootstrapError`.
 - La recuperación no reintentó Codex, no creó ramas/PR y no modificó `main`.
+
+## Primera invocación nueva autorizada
+
+- La concesión del comentario `6372352972` fue validada contra el proyecto,
+  ZIP, repositorio privado y `main` exactos. La reserva pre-dispatch creada por
+  la versión anterior se reconcilió sin contarla como consumo de modelo.
+- Invocación única ejecutada: Codex `gpt-5.6-luna`, esfuerzo `medium`,
+  duración `25116 ms`, exit code `1`, timeout `false`, confinamiento/preflight
+  aprobados.
+- Diagnóstico JSONL/CLI conservado y redactado: `Failed to refresh token: Your
+  access token could not be refreshed` y
+  `workspace routing discovery unauthorized (401)` durante la reconexión.
+- No apareció evento `turn.completed.usage`; consumo: `UNKNOWN`. La concesión
+  quedó marcada `used=true` y no se hará reintento.
+- Resultado remoto: solo `main` en
+  `fa4eb55699b2169e5ff88059504872f17df617ce`, sin branch bootstrap ni PR; el
+  proyecto permanece `BLOCKED` con identidad, binding y checkpoint preservados.
+- Regresión posterior al cambio: `731 passed, 13 skipped, 2 warnings`; Ruff de
+  archivos afectados, OpenSpec strict y diff check pasan.
