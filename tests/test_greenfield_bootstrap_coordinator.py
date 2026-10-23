@@ -18,6 +18,7 @@ from minime.services.greenfield_bootstrap import (
     GreenfieldBootstrapCoordinator,
     GreenfieldBootstrapError,
 )
+from minime.services.implementer_runner import ImplementerResult
 
 
 def _configuration() -> ProjectConfigurationInput:
@@ -241,3 +242,86 @@ def test_incremental_retry_reconciles_existing_pr_before_agent(in_memory_uow, tm
     assert in_memory_uow.projects.get_by_id("prepared").onboarding_checkpoint[
         "pending_context"
     ]["head_sha"] == "candidate-sha"
+
+
+@pytest.mark.parametrize("exit_code,timed_out", [(1, False), (-1, True)])
+def test_real_agent_failure_is_persisted_before_cleanup_and_never_auto_retried(
+    in_memory_uow, tmp_path: Path, exit_code: int, timed_out: bool
+):
+    config = _configuration()
+    project = Project(
+        project_id=config.project_id,
+        display_name=config.display_name,
+        repository=config.repository,
+        project_type=ProjectType.GREENFIELD,
+        base_branch="main",
+        onboarding_checkpoint={"source_zip_sha256": "a" * 64},
+    )
+    in_memory_uow.projects.save(project)
+
+    class FailingThinkingAgent:
+        calls = 0
+
+        async def run(self, worktree, instruction, timeout_seconds):
+            self.calls += 1
+            assert worktree == tmp_path
+            assert "source" in instruction
+            assert timeout_seconds == 15
+            return ImplementerResult(
+                exit_code=exit_code,
+                timed_out=timed_out,
+                stdout=["diagnostic event"],
+                stderr=["confined CLI failed before producing context"],
+                duration_ms=123,
+            )
+
+    agent = FailingThinkingAgent()
+    coordinator = GreenfieldBootstrapCoordinator(
+        in_memory_uow, thinking_agent=agent, trusted_managed_root=tmp_path / "managed"
+    )
+    with pytest.raises(GreenfieldBootstrapError, match="Thinking agent did not complete"):
+        coordinator._run_thinking_agent(project, tmp_path, config.agent_profiles["thinking"], 15)
+    checkpoint = in_memory_uow.projects.get_by_id(project.project_id).onboarding_checkpoint
+    assert checkpoint["source_zip_sha256"] == "a" * 64
+    evidence = checkpoint["thinking_agent_attempt"]
+    assert evidence["status"] == "FAILED_USAGE_UNKNOWN"
+    assert evidence["usage_status"] == "UNKNOWN"
+    assert evidence["exit_code"] == exit_code
+    assert evidence["timed_out"] is timed_out
+    assert evidence["duration_ms"] == 123
+    assert evidence["stderr_tail"] == ["confined CLI failed before producing context"]
+    assert evidence["stdout_line_count"] == 1
+    assert agent.calls == 1
+
+    coordinator._block(project, "GREENFIELD_BOOTSTRAP_FAILED:GreenfieldBootstrapError")
+    latest = in_memory_uow.projects.get_by_id(project.project_id)
+    assert latest.onboarding_status is ProjectOnboardingStatus.BLOCKED
+    assert latest.onboarding_checkpoint["thinking_agent_attempt"] == evidence
+    with pytest.raises(GreenfieldBootstrapError, match="without a safely resumable"):
+        coordinator.bootstrap(config, b"same-package-do-not-replay")
+    assert agent.calls == 1
+
+
+def test_thinking_agent_uncaught_exception_retains_unknown_attempt(in_memory_uow, tmp_path):
+    config = _configuration()
+    project = Project(
+        project_id=config.project_id,
+        display_name=config.display_name,
+        repository=config.repository,
+        project_type=ProjectType.GREENFIELD,
+        base_branch="main",
+    )
+    in_memory_uow.projects.save(project)
+
+    class CrashedAgent:
+        async def run(self, worktree, instruction, timeout_seconds):
+            raise RuntimeError("agent process disappeared")
+
+    coordinator = GreenfieldBootstrapCoordinator(in_memory_uow, thinking_agent=CrashedAgent())
+    with pytest.raises(RuntimeError, match="process disappeared"):
+        coordinator._run_thinking_agent(project, tmp_path, config.agent_profiles["thinking"], 5)
+    attempt = in_memory_uow.projects.get_by_id(project.project_id).onboarding_checkpoint[
+        "thinking_agent_attempt"
+    ]
+    assert attempt["status"] == "EXECUTION_UNKNOWN"
+    assert attempt["usage_status"] == "UNKNOWN"
