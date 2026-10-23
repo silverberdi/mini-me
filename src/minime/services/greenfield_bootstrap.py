@@ -259,6 +259,7 @@ class GreenfieldBootstrapCoordinator:
                 managed_repository_root=self._configured_root(project),
             ),
             operator_email=operator_email,
+            discover_context=False,
         )
         project = self.uow.projects.get_by_id(project.project_id)
         if project is None:

@@ -6,11 +6,10 @@ import os
 from pathlib import Path
 
 from minime.adapters.github import GitHubAdapter, GitHubAuthorizationError, GitHubRemoteError
-from minime.domain.enums import EventType, ProjectOnboardingStatus, ProjectStatus
+from minime.domain.enums import EventType, ProjectOnboardingStatus
 from minime.domain.interfaces import PersistenceUnitOfWork
 from minime.domain.models import (
     Event,
-    Project,
     ProjectOnboardingInput,
     ProjectOnboardingResult,
     utc_now,
@@ -64,6 +63,8 @@ class ProjectOnboardingService:
         self,
         input_data: ProjectOnboardingInput,
         operator_email: str = "operator",
+        *,
+        discover_context: bool = True,
     ) -> ProjectOnboardingResult:
         """Onboard a new project with auto-discovery, conflict detection, and fail-closed validation."""
         set_correlation_context(
@@ -75,7 +76,6 @@ class ProjectOnboardingService:
         if not project_id:
             raise ValueError("project_id is required and cannot be empty.")
 
-        display_name = input_data.display_name.strip() or project_id
         raw_repo = input_data.repository.strip()
         if not raw_repo:
             raise ValueError("repository identifier is required and cannot be empty.")
@@ -92,35 +92,34 @@ class ProjectOnboardingService:
         # its durable identity are immutable, but an interrupted Stage C
         # workspace bootstrap may be resumed when that identity matches exactly.
         existing_project = self.uow.projects.get_by_id(project_id)
-        resuming_existing_project = existing_project is not None
-        if existing_project:
-            identity_mismatches: list[str] = []
-            existing_repo = normalize_repository_identity(existing_project.repository)
-            if existing_repo != norm_repo:
-                identity_mismatches.append(
-                    f"repository is '{existing_repo}', not '{norm_repo}'"
-                )
-            if existing_project.base_branch != input_data.base_branch:
-                identity_mismatches.append(
-                    f"base_branch is '{existing_project.base_branch}', not '{input_data.base_branch}'"
-                )
-            if existing_project.openspec_path != input_data.openspec_path:
-                identity_mismatches.append(
-                    f"openspec_path is '{existing_project.openspec_path}', not '{input_data.openspec_path}'"
-                )
-            if existing_project.implementer != input_data.implementer:
-                identity_mismatches.append(
-                    f"implementer is '{existing_project.implementer}', not '{input_data.implementer}'"
-                )
-            if existing_project.reviewer != input_data.reviewer:
-                identity_mismatches.append(
-                    f"reviewer is '{existing_project.reviewer}', not '{input_data.reviewer}'"
-                )
-            if identity_mismatches:
-                raise ValueError(
-                    "Existing project immutable identity mismatch: "
-                    + "; ".join(identity_mismatches)
-                )
+        if existing_project is None:
+            raise ValueError(
+                "Project configuration must be created by ProjectService before workspace onboarding"
+            )
+        identity_mismatches: list[str] = []
+        existing_repo = normalize_repository_identity(existing_project.repository)
+        if existing_repo != norm_repo:
+            identity_mismatches.append(f"repository is '{existing_repo}', not '{norm_repo}'")
+        if existing_project.base_branch != input_data.base_branch:
+            identity_mismatches.append(
+                f"base_branch is '{existing_project.base_branch}', not '{input_data.base_branch}'"
+            )
+        if existing_project.openspec_path != input_data.openspec_path:
+            identity_mismatches.append(
+                f"openspec_path is '{existing_project.openspec_path}', not '{input_data.openspec_path}'"
+            )
+        if existing_project.implementer != input_data.implementer:
+            identity_mismatches.append(
+                f"implementer is '{existing_project.implementer}', not '{input_data.implementer}'"
+            )
+        if existing_project.reviewer != input_data.reviewer:
+            identity_mismatches.append(
+                f"reviewer is '{existing_project.reviewer}', not '{input_data.reviewer}'"
+            )
+        if identity_mismatches:
+            raise ValueError(
+                "Existing project immutable identity mismatch: " + "; ".join(identity_mismatches)
+            )
 
         # Check for existing repository binding conflict
         all_projects = self.uow.projects.list_all()
@@ -681,36 +680,14 @@ class ProjectOnboardingService:
         )
         self.uow.project_managed_repository_bindings.save(managed_binding)
 
-        if resuming_existing_project:
-            assert existing_project is not None
-            project = existing_project.model_copy(
-                update={
-                    "onboarding_status": onboarding_status,
-                    "onboarding_reasons": reasons,
-                    "updated_at": now,
-                }
-            )
-        else:
-            project = Project(
-                project_id=project_id,
-                display_name=display_name,
-                repository=norm_repo,
-                base_branch=input_data.base_branch,
-                openspec_path=input_data.openspec_path,
-                implementer=input_data.implementer,
-                reviewer=input_data.reviewer,
-                checks=input_data.checks,
-                context_sources=input_data.context_sources,
-                roadmap_path=input_data.roadmap_path,
-                backlog_path=input_data.backlog_path,
-                github_project_number=input_data.github_project_number,
-                github_project_owner=input_data.github_project_owner,
-                onboarding_status=onboarding_status,
-                onboarding_reasons=reasons,
-                status=ProjectStatus.ACTIVE,
-                created_at=now,
-                updated_at=now,
-            )
+        assert existing_project is not None
+        project = existing_project.model_copy(
+            update={
+                "onboarding_status": onboarding_status,
+                "onboarding_reasons": reasons,
+                "updated_at": now,
+            }
+        )
 
         # 6. Save project entity and audit event
         self.uow.projects.save(project)
@@ -731,14 +708,16 @@ class ProjectOnboardingService:
         self.uow.events.save(event)
         self.uow.commit()
 
-        # 7. Trigger initial context and backlog discovery
+        # 7. Legacy callers may request discovery, but Greenfield uses the
+        # coordinator's agent-organized package and must not duplicate it.
         discovery_report = None
-        try:
-            discovery_report = self.context_discovery_service.discover_context(project_id)
-        except Exception as exc:
-            logger.warning(
-                f"Initial context discovery encountered an error for '{project_id}': {exc}"
-            )
+        if discover_context:
+            try:
+                discovery_report = self.context_discovery_service.discover_context(project_id)
+            except Exception as exc:
+                logger.warning(
+                    f"Initial context discovery encountered an error for '{project_id}': {exc}"
+                )
 
         return ProjectOnboardingResult(
             project=project,
