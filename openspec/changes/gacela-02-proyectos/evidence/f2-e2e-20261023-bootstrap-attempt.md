@@ -30,3 +30,19 @@ tareas como completas cuando el candidato no fue publicado.
 
 Las tareas 4.4, 7.1b, 8.4 y 8.5 permanecen pendientes; este documento es
 evidencia de bloqueo E2E, no evidencia de aceptación.
+
+## Validación posterior de recuperación
+
+- La revisión publicada en `2b319b52ba2c744170e97a9a3707f74b3860c89b` fue
+  verificada localmente y el cambio posterior quedó publicado en
+  `ed69ce76afc9c66c7aeebc4e76e1160dd21d8141`.
+- Regresión completa posterior: `729 passed, 13 skipped, 2 warnings`; Ruff de
+  archivos afectados, OpenSpec strict y `git diff --check` pasan.
+- La reconciliación read-only ejecutada contra PostgreSQL desechable preservó el
+  proyecto `f2-e2e-gacela-20261023e` en `BLOCKED`, la identidad y el hash del
+  ZIP, y añadió `bootstrap_recovery` con
+  `THINKING_AGENT_ATTEMPT_EVIDENCE_UNAVAILABLE` y `safe_to_resume=false`.
+- La búsqueda segura de artefactos existentes no encontró JSONL, stderr,
+  registros de proceso ni un intento Codex recuperable. La fila histórica solo
+  contiene el motivo genérico `GREENFIELD_BOOTSTRAP_FAILED:GreenfieldBootstrapError`.
+- La recuperación no reintentó Codex, no creó ramas/PR y no modificó `main`.
