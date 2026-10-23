@@ -282,6 +282,25 @@ invocation, historical operational-row verification, human-approved disposable
 PR merges, and final bound E2E acceptance. Local API/CLI/security/OpenSpec,
 source-census, migration, recovery, and full-regression evidence is complete.
 
+### Authorized external verification — 2026-10-23
+
+Using the configured service environment on the authorized host, the GitHub App
+installation token exchange succeeded. The token reported effective grants
+`contents=write`, `issues=write`, `pull_requests=write`, and `metadata=read`, and
+the installation listed only `silverberdi/mini-me` and the historical
+`silverberdi/mini-me-r01-e2e-20261014`. The installation does not provide a
+repository-creation capability; no PAT or alternate account was substituted.
+
+The operational database was queried in a read-only transaction. Both
+`mini-me` and `mini-me-fixture` retain exact repository/base-branch identity and
+valid managed bindings, but both remain `READY_FOR_WORK` on the pre-F2 schema;
+none of `project_type`, `provider_connections`, `agent_profiles`,
+`execution_policy`, or `onboarding_checkpoint` exists there. Both managed
+workspaces contain `AGENTS.md` and `openspec/config.yaml`, but neither has a
+canonical `context/` directory; the fixture remains untouched. This is evidence
+of preserved historical identity, not F2 readiness, and no production migration
+was executed.
+
 Apply continuation evidence on 2026-10-22: project configuration API/CLI read responses now sanitize persisted host credential references to a boolean `credential_configured`; focused API tests cover create/list/get without secret path, reference, or key leakage. Stale preview/scheduler/job tests were reconciled to the already-implemented 410 boundary rather than importing removed models or expecting retired runtime behavior. The F1 queue-triggered expensive-probe test was removed because the retained service explicitly has no actionable local queue. The full suite is green (656 passed, 13 skipped). The operator supplied `tests/fixtures/gacela-02-proyectos/console-sorter-context.md`; its ZIP fixture was extracted by `ContextArchiveExtractor` in the focused test, with SHA-256 `3eed0aacf1f3cbe4361805b914d4fe659dbca69266f55279cdc55c10eef12e81`. This is archive-ingestion evidence only, not a thinking-agent/bootstrap/PR E2E. Bootstrap, incremental-context, historical-project reconciliation, and real-provider E2E criteria remain open.
 
 Continuation after commit `bf3f227` (2026-10-22): removed the unused singleton `github.global_project_number` from runtime config and both supplied YAML configs, with a catalog regression proving no central-board configuration remains. Confirmed existing GitHub provider catalog/connection records expose per-repository Issues and Git/PR capabilities only. Focused connection/catalog security suite passed **44 tests**; after the config removal, full suite passed **678 passed, 13 skipped, 2 warnings** and strict OpenSpec plus targeted Ruff passed. Repository-wide Ruff still reports only the known import-sort issue in the immutable, previously applied F1 migration; it was not changed. A subsequent caller census showed no construction/caller of the dead GitHub Projects reconciliation helper, so board-list/add/edit adapter operations and their interface/fake/legacy success tests were removed. Their absence regression plus adjacent GitHub safety suite passes **18 tests**; the complete suite after this deletion is **677 passed, 13 skipped, 2 warnings**. The old per-project board number/owner columns remain until their legacy onboarding writer and live values are fully reconciled. The later PWA retirement reduced `index.html` to authentication plus the read-only transition, removed every unreferenced interactive JavaScript module, and removed its layout-only test; PWA shell tests pass **3** and the full repository suite now passes **675 passed, 13 skipped, 2 warnings**. Strict OpenSpec and targeted Ruff pass. |
