@@ -189,6 +189,7 @@ class GreenfieldBootstrapCoordinator:
                     target.chmod(0o600)
                 result = self._run_thinking_agent(project, worktree, profile, timeout_seconds)
                 self._validate_candidate(worktree, incoming, extracted.files, Path(package_dir))
+                self._validate_official_workspace(worktree)
                 self._git(str(worktree), "add", "--all")
                 self._git(str(worktree), "commit", "-m", "docs: add project context")
                 head_sha = self._git(str(worktree), "rev-parse", "HEAD")
@@ -285,6 +286,7 @@ class GreenfieldBootstrapCoordinator:
                 target.chmod(0o600)
             result = self._run_thinking_agent(project, worktree, profile, timeout_seconds)
             self._validate_candidate(worktree, incoming, source_files, package_root)
+            self._validate_official_workspace(worktree)
             self._git(str(worktree), "add", "--all")
             self._git(str(worktree), "commit", "-m", "docs: bootstrap project context")
             head_sha = self._git(str(worktree), "rev-parse", "HEAD")
@@ -385,6 +387,13 @@ class GreenfieldBootstrapCoordinator:
             raise GreenfieldBootstrapError(
                 "Selected agent capabilities or official OpenSpec integration are unavailable"
             ) from exc
+
+    def _validate_official_workspace(self, worktree: Path) -> None:
+        evidence = self.openspec.validate_workspace(worktree)
+        if evidence.get("status") != "PASS":
+            raise GreenfieldBootstrapError(
+                "Official OpenSpec workspace validation was not proven"
+            )
 
     def _ensure_base_branch(self, project: Project, adapter: Any) -> None:
         repository = project.provider_connections["git_pr"]["repository_url"]

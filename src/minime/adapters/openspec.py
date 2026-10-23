@@ -267,6 +267,16 @@ class OpenSpecAdapter(OpenSpecAdapterInterface):
             logger.debug(f"OpenSpec CLI execution error: {e}")
         return None
 
+    def validate_workspace(self, project_root: str | Path) -> dict[str, Any]:
+        """Run an official read-only workspace check without inventing artifacts."""
+        root = Path(project_root).resolve()
+        if not (root / "openspec" / "config.yaml").is_file():
+            return {"status": "FAIL", "reason": "official OpenSpec config is missing"}
+        listing = self._run_cli(["list"], root)
+        if listing is None:
+            return {"status": "UNKNOWN", "reason": "official OpenSpec list was unobservable"}
+        return {"status": "PASS", "changes": listing.get("changes", [])}
+
     def validate_change_strict(self, change_name: str, project_root: str | Path) -> dict[str, Any]:
         """Return raw, truthful evidence for canonical strict change validation."""
         try:
