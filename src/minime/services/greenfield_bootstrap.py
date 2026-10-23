@@ -518,6 +518,8 @@ class GreenfieldBootstrapCoordinator:
         if not callable(provider):
             return None
         remote = project.provider_connections["git_pr"]["repository_url"]
+        if not remote.startswith(("http://", "https://", "ssh://", "git@")):
+            remote = f"https://github.com/{remote}.git"
         return {**os.environ, **provider(remote)}
 
     @staticmethod
