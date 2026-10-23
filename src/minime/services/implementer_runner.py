@@ -190,6 +190,7 @@ class CliImplementerRunner(ImplementerRunnerInterface):
             and not process_result.credential_access_refresh_only
         )
         stdout_lines: list[str]
+        stderr_errors: list[str] = []
         workflow_evidence: dict[str, object] | None = None
         if (
             self.profile is not None
