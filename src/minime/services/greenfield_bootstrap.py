@@ -413,6 +413,12 @@ class GreenfieldBootstrapCoordinator:
             profiles = project.agent_profiles
             if roles is not None:
                 profiles = {role: project.agent_profiles[role] for role in roles}
+            from minime.domain.models import ProjectAgentProfile
+
+            profiles = {
+                role: ProjectAgentProfile.model_validate(profile)
+                for role, profile in profiles.items()
+            }
             asyncio.run(ProjectCatalogService().validate_project_profiles(profiles))
         except (OSError, RuntimeError, TimeoutError, ValueError) as exc:
             raise GreenfieldBootstrapError(
