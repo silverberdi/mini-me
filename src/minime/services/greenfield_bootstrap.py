@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import os
 import re
 import shutil
 import subprocess
@@ -166,7 +167,13 @@ class GreenfieldBootstrapCoordinator:
             if binding is None or workspace is None:
                 raise GreenfieldBootstrapError("Prepared project workspace identity is unavailable")
             adapter = self.connections.require_git_pr_write(project)
-            self._git(str(workspace), "fetch", "origin", project.base_branch)
+            self._git(
+                str(workspace),
+                "fetch",
+                "origin",
+                project.base_branch,
+                env=self._git_auth_environment(adapter, project),
+            )
             base_sha = self._git(str(workspace), "rev-parse", f"origin/{project.base_branch}")
             branch = f"minime/context/{project_id}-{extracted.sha256[:12]}"
             self._assert_not_main(branch, project.base_branch)
@@ -271,7 +278,13 @@ class GreenfieldBootstrapCoordinator:
 
         branch = f"minime/bootstrap/{project.project_id}-{project.onboarding_checkpoint['source_zip_sha256'][:12]}"
         self._assert_not_main(branch, project.base_branch)
-        self._git(binding.managed_repository_root, "fetch", "origin", project.base_branch)
+        self._git(
+            binding.managed_repository_root,
+            "fetch",
+            "origin",
+            project.base_branch,
+            env=self._git_auth_environment(git_adapter, project),
+        )
         base_sha = self._git(
             binding.managed_repository_root, "rev-parse", f"origin/{project.base_branch}"
         )
@@ -486,11 +499,26 @@ class GreenfieldBootstrapCoordinator:
             raise GreenfieldBootstrapError("Bootstrap writes to the configured base branch are forbidden")
 
     @staticmethod
-    def _git(cwd: str, *args: str, check: bool = True) -> str:
-        result = subprocess.run(["git", *args], cwd=cwd, capture_output=True, text=True, check=False)
+    def _git(
+        cwd: str,
+        *args: str,
+        check: bool = True,
+        env: dict[str, str] | None = None,
+    ) -> str:
+        result = subprocess.run(
+            ["git", *args], cwd=cwd, capture_output=True, text=True, check=False, env=env
+        )
         if check and result.returncode:
             raise GreenfieldBootstrapError("Git bootstrap operation failed")
         return result.stdout.strip()
+
+    @staticmethod
+    def _git_auth_environment(adapter: Any, project: Project) -> dict[str, str] | None:
+        provider = getattr(adapter, "git_auth_environment", None)
+        if not callable(provider):
+            return None
+        remote = project.provider_connections["git_pr"]["repository_url"]
+        return {**os.environ, **provider(remote)}
 
     @staticmethod
     def _validate_candidate(
