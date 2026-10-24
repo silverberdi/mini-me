@@ -282,6 +282,18 @@ invocation, historical operational-row verification, human-approved disposable
 PR merges, and final bound E2E acceptance. Local API/CLI/security/OpenSpec,
 source-census, migration, recovery, and full-regression evidence is complete.
 
+Historical closure update (2026-10-24): the read-only production census was
+copied without secrets to two disposable PostgreSQL databases. The authentic
+rows survived `upgrade head`, downgrade to `r02_contract_review_budget_identity`,
+and re-upgrade: the exact two projects, 34 bindings, two managed bindings,
+auth/evidence rows and budget evidence remained readable. `mini-me` and the
+fixture remain `BROWNFIELD/CONFIGURED`, not `PREPARED`, until their real F2
+profiles and capabilities are verified. Codex `gpt-5.6-luna/medium` is
+observable; Antigravity and `gemini-3.8-flash-medium` are not observable in the
+current runtime. Therefore 7.1b and 8.5 remain open under the fail-closed
+contract; no profile or credential was fabricated and no production migration
+was run.
+
 ### Authorized external verification — 2026-10-23
 
 Using the configured service environment on the authorized host, the GitHub App

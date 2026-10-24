@@ -137,6 +137,95 @@ configuración histórica ausente y E2E real no ejecutado. Gate GitHub 2.5:
 branches adicionales ni PR y el intento consumido permanece `BLOCKED`; no se
 repitió inferencia ni se consumió la concesión incremental.
 
+## Continuación autenticada de 7.1b (2026-10-24)
+
+La verificación se repitió con el runtime F2 aislado y con una copia auténtica
+de los registros históricos. La base operativa solo se leyó; no se ejecutó
+DDL, DML, migración ni escritura en ninguno de los workspaces productivos.
+
+La copia desechable `minime_history_authentic` conserva, después de alcanzar
+`f2_retire_project_legacy_context`, los siguientes conteos observados:
+
+```text
+projects                                  2
+project_bindings                          34
+project_managed_repository_bindings        2
+events                                39513
+jobs                                      79
+auth_sessions                             16
+auth_audit_events                         11
+authorized_operators                       2
+```
+
+Las filas siguen siendo exactamente `mini-me` → `silverberdi/mini-me` y
+`mini-me-fixture` → `silverberdi/mini-me-r01-e2e-20261014`, ambas en `main`,
+`BROWNFIELD/CONFIGURED`, con el checkpoint que conserva el `READY_FOR_WORK`
+histórico y su razón. No se duplicaron proyectos, bindings, worktrees ni
+managed bindings. Los perfiles, conexiones y credenciales no se rellenaron
+con defaults inventados.
+
+Se restauró el dump auténtico en la segunda base desechable
+`minime_history_authentic_restore_20261024` y se ejecutó la secuencia
+`upgrade head → downgrade r02_contract_review_budget_identity → upgrade
+head`. La base terminó en `f2_retire_project_legacy_context` con los mismos
+2/34/2 y las dos identidades intactas. La dependencia global de presupuesto
+`openrouter_pricing_snapshots` se incorporó desde producción mediante lectura
+aislada (3 filas, sin mostrar valores sensibles), por lo que también se
+restableció la FK de `budget_reservations` en la copia. La reserva histórica y
+las filas de autenticación permanecieron conservadas.
+
+El catálogo F2 del runtime actualizado observó:
+
+- Codex: `OBSERVED_READ_ONLY`, `gpt-5.6-luna` con `medium`, roles de
+  implementación/revisión, OpenSpec oficial y workflows nativos observables.
+- Antigravity: `UNAVAILABLE`, sin modelo observable, sin workflow nativo
+  verificable en este entorno.
+
+La selección histórica autorizada exige Antigravity como revisor independiente
+con `gemini-3.8-flash-medium`; por el contrato de validación fail-closed no es
+válido persistir esa selección como si estuviera disponible ni conferir
+`PREPARED` desde el sentinel legacy. Por ello 7.1b permanece correctamente
+pendiente: la preservación y migración están demostradas, pero la elegibilidad
+histórica completa requiere una capacidad Antigravity observable y su
+configuración real. El fixture sigue aislado y no hereda credenciales del
+proyecto principal.
+
+## Clasificación de aceptación 8.5
+
+La E2E Greenfield/incremental y su evidencia de merges ya están completas en
+`f2-disposable-greenfield-merge-20261024.md`; no se repitieron agentes ni
+merges. La regresión focalizada F2 de 98 pruebas, Ruff afectado, OpenSpec
+strict y `git diff --check` continúan pasando. La regresión completa del
+runtime actualizado terminó con 744 pasadas, 10 omitidas y 8 fallos. La
+clasificación reproducida es:
+
+1. El test de fallback de `MINIME_RUNTIME_ROOT` conserva el contrato antiguo
+   `.minime`; F2 usa correctamente `/opt/minime/runtime` y fail-closed.
+2–3. Dos tests de instalación/catálogo esperan 12 integraciones, pero OpenSpec
+   oficial 1.13.1 expone 6 workflows nativos actuales; F2 no inventa los seis
+   restantes.
+4–5. Dos tests de limpieza de grupos de procesos no convergen en este host
+   Ubuntu/Python 3.14 durante watchdog/cancelación; no fallan los tests de
+   persistencia, recuperación ni confinamiento F2.
+6. El fixture remoto contenía dos AppleDouble `._*.js`; fueron retirados solo
+   del runtime desechable y `tests/test_pwa_assets.py` pasó 2/2. El checkout
+   publicado no contiene esos archivos.
+7. Un test de perfiles F1 exige DeepSeek Direct para code review; no es una
+   capacidad ni una selección del contrato F2.
+8. El preflight Antigravity falla porque la CLI no expone catálogo de modelos;
+   coincide con el estado F2 `UNAVAILABLE` y debe seguir bloqueando fail-closed.
+
+No se ocultan estos fallos como PASS. No queda un defecto de preservación
+atribuible a la migración F2 en la copia auténtica.
+
+8.5 no se marca completa porque su matriz exige reconciliar también la
+elegibilidad histórica con capacidades realmente observadas y cerrar el gate
+de revisión independiente. La única dependencia externa concreta es hacer
+observable/configurar Antigravity con el modelo y workflow oficial autorizados,
+o tomar una decisión explícita del propietario sobre una alternativa que el
+catálogo actual verifique; no se inventa una selección ni se modifica
+producción para sortearla.
+
 Corrección de interpretación: el propietario confirmó que la GitHub App ya
 estaba configurada con `Contents: Read and write` y `Pull requests: Read and
 write`. NO solicitar reinstalación ni nuevos cambios de permisos sobre la
