@@ -171,14 +171,30 @@ class CliAgentRunner:
                 "archive": "opsx-archive.md",
             }
             workflow_file = op_to_file.get(op, f"opsx-{op}.md")
-            rel_path = Path(".agent/workflows") / workflow_file
             dispatch_cmd = f"/opsx-{op} {change_name}"
-            check_parts = (".agent", ".agent/workflows")
+            workflow_candidates = (
+                Path(".agent/workflows") / workflow_file,
+                Path(".agents/workflows") / workflow_file,
+            )
+            for candidate in workflow_candidates:
+                if candidate.is_symlink():
+                    raise NativeOpenSpecWorkflowUnavailable(
+                        f"Installed OpenSpec workflow path contains a symlink: {candidate}"
+                    )
+            rel_path = next(
+                (candidate for candidate in workflow_candidates if (root / candidate).is_file()),
+                None,
+            )
+            check_parts = (".agent", ".agent/workflows", ".agents", ".agents/workflows")
         else:
             raise NativeOpenSpecWorkflowUnavailable(
                 f"Dynamic OpenSpec resolution is not supported for provider '{provider}'."
             )
 
+        if rel_path is None:
+            raise NativeOpenSpecWorkflowUnavailable(
+                f"Installed {prov} OpenSpec workflow '{op}' is missing or not a regular file."
+            )
         full_path = root / rel_path
         # Verify no symlinks in check_parts
         for part in check_parts:

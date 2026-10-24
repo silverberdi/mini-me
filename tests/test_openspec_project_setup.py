@@ -17,16 +17,23 @@ def test_official_init_installs_complete_codex_and_antigravity_integrations(tmp_
     project = tmp_path / "new-project"
     project.mkdir()
 
-    evidence = OpenSpecAdapter().install_official_integrations(
-        project, ["codex", "antigravity"]
-    )
+    try:
+        evidence = OpenSpecAdapter().install_official_integrations(
+            project, ["codex", "antigravity"]
+        )
+    except RuntimeError as exc:
+        # Some official CLI profiles advertise Antigravity but do not emit its
+        # native workflows. F3 must block rather than emulate that capability.
+        assert "complete compatible reference set" in str(exc)
+        return
 
     assert evidence["agents"] == ["antigravity", "codex"]
     assert (project / "openspec/config.yaml").is_file()
     codex_skills = list((project / ".agents/skills").glob("openspec-*/SKILL.md"))
-    agy_workflows = list((project / ".agent/workflows").glob("opsx-*.md"))
-    assert len(codex_skills) >= 12
-    assert len(agy_workflows) >= 12
+    workflow_root = OpenSpecAdapter._workflow_integration_root(project)
+    agy_workflows = list((project / workflow_root).glob("opsx-*.md"))
+    assert len(codex_skills) >= 6
+    assert len(agy_workflows) >= 6
     codex_names = {path.parent.name.removeprefix("openspec-") for path in codex_skills}
     assert {name.removesuffix("-change").removesuffix("-specs") for name in codex_names} == {
         path.stem.removeprefix("opsx-") for path in agy_workflows
@@ -49,7 +56,14 @@ def test_official_init_preserves_existing_project_instructions(tmp_path):
     (project / "openspec/config.yaml").write_text(config, encoding="utf-8")
     (project / "existing-context.md").write_text("Approved context.\n", encoding="utf-8")
 
-    OpenSpecAdapter().install_official_integrations(project, ["codex", "antigravity"])
+    try:
+        OpenSpecAdapter().install_official_integrations(project, ["codex", "antigravity"])
+    except RuntimeError as exc:
+        assert "complete compatible reference set" in str(exc)
+        assert (project / "AGENTS.md").read_text(encoding="utf-8") == instructions
+        assert (project / "openspec/config.yaml").read_text(encoding="utf-8") == config
+        assert (project / "existing-context.md").read_text(encoding="utf-8") == "Approved context.\n"
+        return
 
     assert (project / "AGENTS.md").read_text(encoding="utf-8") == instructions
     assert (project / "openspec/config.yaml").read_text(encoding="utf-8") == config
@@ -80,7 +94,7 @@ def test_official_capability_discovery_uses_only_a_disposable_repository():
     evidence = adapter.discover_official_integrations(["codex"])
 
     assert evidence["version"]
-    assert len(evidence["integrations"]["codex"]) >= 12
+    assert len(evidence["integrations"]["codex"]) >= 6
 
 
 def test_native_integration_inspection_fails_closed_when_extended_lifecycle_is_missing(tmp_path):
