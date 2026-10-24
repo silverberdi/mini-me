@@ -30,6 +30,12 @@ from minime.services.agent_confinement import AgentProcessConfinement
 from minime.services.context_archive import ContextArchiveExtractor
 from minime.services.implementer_runner import CliImplementerRunner, ImplementerResult
 from minime.services.project_catalog_service import ProjectCatalogService
+from minime.services.project_context_catalog import (
+    CONTEXT_DOCUMENT_PATHS,
+    catalog_instruction,
+    generated_context_path_allowed,
+    populated_catalog_documents,
+)
 from minime.services.project_connection_service import ProjectConnectionService
 from minime.services.project_onboarding_service import ProjectOnboardingService
 from minime.services.project_service import ProjectService
@@ -51,13 +57,34 @@ class GreenfieldBootstrapCoordinator:
     """
 
     THINKING_AGENT_INSTRUCTION = (
-        "Organize only the supplied context files under the repository. Preserve source provenance, "
-        "create context/INDEX.md as a concise navigation map, classify only evidenced product facts, "
-        "requirements, decisions, restrictions, architecture, references, diagrams and assets, and "
-        "record source paths in the index. Preserve prior decisions unless a source explicitly marks a "
-        "replacement; record unresolved contradictions with both source paths. Link canonical context "
-        "from AGENTS.md and openspec/config.yaml. Never invent requirements, decisions, OpenSpec "
-        "artifacts or product claims. Use the installed official OpenSpec setup."
+        "F2 CONTEXT ORGANIZER ONLY. Read ALL original files at context/incoming/<zip-sha>/, "
+        "including documents, diagrams and admitted assets. Build the project's documentary "
+        "context by extracting and writing source-supported information into the predefined "
+        "canonical Markdown files below. This catalog is FIXED: do not invent new section "
+        "folders, generated document filenames, code, OpenSpec proposals/specs/tasks, or "
+        "an operational backlog. Every generated document must contain useful substance "
+        "drawn from supplied sources; omit documents for which evidence is absent (empty "
+        "files are acceptable but must never be linked in indexes). Summarize, synthesize, "
+        "reword and organize faithfully, without adding requirements, product decisions, "
+        "dates or implementation approaches. A fact may appear in MULTIPLE applicable "
+        "documents when needed for each to stand alone; avoid artificial de-duplication. "
+        "Business intent described by sources is the main organizing reference; do not "
+        "reinterpret the product's direction. A roadmap or historical backlog in the ZIP "
+        "is DOCUMENTARY INPUT only. If sufficiently documented, place roadmap information "
+        "in 12-planificacion/roadmap-documentado.md or historical planning in "
+        "12-planificacion/antecedentes-de-planificacion.md; never convert backlog items "
+        "into actionable work, task lists or GitHub Issues. Keep the input files unchanged "
+        "at context/incoming/<zip-sha>/. Create context/INDEX.md as a navigable map of "
+        "ONLY substantively populated canonical files, using Markdown links relative "
+        "to context/ (e.g. 01-negocio/intencion-de-negocio.md); do not link empty or "
+        "placeholder documents. Also index EVERY source path under context/incoming/ "
+        "(directly or via populated fuentes/INDEX.md). Each derived file should cite "
+        "its original source paths and may merge information from multiple sources. "
+        "Keep OpenSpec's official installed integrations unchanged. Link context/INDEX.md "
+        "from AGENTS.md and openspec/config.yaml without overwriting compatible content. "
+        "Do NOT audit business quality, validate requirements, resolve contradictions, "
+        "infer missing details or initiate development.\n\n"
+        + catalog_instruction()
     )
 
     def __init__(
@@ -1042,7 +1069,32 @@ class GreenfieldBootstrapCoordinator:
             index_text = context_index.read_text(encoding="utf-8")
             missing_sources = [relative for relative in source_files if relative not in index_text]
             if missing_sources:
-                raise GreenfieldBootstrapError("Context index omits source provenance")
+                source_index = worktree / "context" / "fuentes" / "INDEX.md"
+                if not source_index.is_file() or not source_index.read_text(encoding="utf-8").strip():
+                    raise GreenfieldBootstrapError("Context index omits source provenance")
+                source_text = source_index.read_text(encoding="utf-8")
+                if not all(relative in source_text for relative in missing_sources):
+                    raise GreenfieldBootstrapError("Source index omits source provenance")
+                if "fuentes/INDEX.md" not in index_text:
+                    raise GreenfieldBootstrapError("Source index is not reachable from main index")
+
+            # Structural index integrity only; F2 does not judge semantics,
+            # factual accuracy or authority of the uploaded documentation.
+            for relative in populated_catalog_documents(worktree):
+                if relative.removeprefix("context/") not in index_text:
+                    raise GreenfieldBootstrapError(
+                        "A populated canonical document is absent from the main index"
+                    )
+            for relative in CONTEXT_DOCUMENT_PATHS:
+                doc = worktree / relative
+                if (
+                    doc.is_file()
+                    and not doc.read_text(encoding="utf-8").strip()
+                    and relative.removeprefix("context/") in index_text
+                ):
+                    raise GreenfieldBootstrapError(
+                        "Main index refers to an empty canonical document"
+                    )
 
         for path in worktree.rglob("*"):
             if not path.is_file() or path.is_symlink() or path.stat().st_size > 1_000_000:
@@ -1100,7 +1152,7 @@ class GreenfieldBootstrapCoordinator:
         paths = {
             raw.decode("utf-8", errors="surrogateescape")
             for output in (changed.stdout, untracked.stdout)
-            for raw in output.split(b"\0")
+            for raw in output.split(b"\\0")
             if raw
         }
 
@@ -1108,7 +1160,8 @@ class GreenfieldBootstrapCoordinator:
             return (
                 path == "AGENTS.md"
                 or path in {".agents/AGENTS.md", ".agent/AGENTS.md", "openspec/config.yaml"}
-                or path.startswith(("context/", ".agents/skills/openspec-", ".agent/workflows/opsx-"))
+                or generated_context_path_allowed(path)
+                or path.startswith((".agents/skills/openspec-", ".agent/workflows/opsx-"))
             )
         unrelated = sorted(path for path in paths if path and not allowed(path))
         if unrelated:
