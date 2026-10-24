@@ -1,8 +1,25 @@
+import subprocess
 from pathlib import Path
 
 import pytest
 
 from minime.adapters.openspec import OpenSpecAdapter
+
+
+def _configure_complete_official_profile(tmp_path: Path, monkeypatch):
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "xdg-config"))
+    subprocess.run(["openspec", "config", "set", "profile", "custom"], check=True)
+    subprocess.run(["openspec", "config", "set", "delivery", "both"], check=True)
+    subprocess.run(
+        [
+            "openspec",
+            "config",
+            "set",
+            "workflows",
+            '["propose","explore","apply","update","sync","archive","verify","continue"]',
+        ],
+        check=True,
+    )
 
 
 def test_open_spec_cli_reports_version_and_native_agent_setup_support():
@@ -13,27 +30,22 @@ def test_open_spec_cli_reports_version_and_native_agent_setup_support():
     assert evidence["init_tools_supported"] is True
 
 
-def test_official_init_installs_complete_codex_and_antigravity_integrations(tmp_path):
+def test_official_init_installs_complete_codex_and_antigravity_integrations(tmp_path, monkeypatch):
+    _configure_complete_official_profile(tmp_path, monkeypatch)
     project = tmp_path / "new-project"
     project.mkdir()
 
-    try:
-        evidence = OpenSpecAdapter().install_official_integrations(
-            project, ["codex", "antigravity"]
-        )
-    except RuntimeError as exc:
-        # Some official CLI profiles advertise Antigravity but do not emit its
-        # native workflows. F3 must block rather than emulate that capability.
-        assert "complete compatible reference set" in str(exc)
-        return
+    evidence = OpenSpecAdapter().install_official_integrations(
+        project, ["codex", "antigravity"]
+    )
 
     assert evidence["agents"] == ["antigravity", "codex"]
     assert (project / "openspec/config.yaml").is_file()
     codex_skills = list((project / ".agents/skills").glob("openspec-*/SKILL.md"))
     workflow_root = OpenSpecAdapter._workflow_integration_root(project)
     agy_workflows = list((project / workflow_root).glob("opsx-*.md"))
-    assert len(codex_skills) >= 6
-    assert len(agy_workflows) >= 6
+    assert len(codex_skills) >= 8
+    assert len(agy_workflows) >= 8
     codex_names = {path.parent.name.removeprefix("openspec-") for path in codex_skills}
     assert {name.removesuffix("-change").removesuffix("-specs") for name in codex_names} == {
         path.stem.removeprefix("opsx-") for path in agy_workflows
@@ -47,7 +59,8 @@ def test_official_init_installs_complete_codex_and_antigravity_integrations(tmp_
     )["complete"] is True
 
 
-def test_official_init_preserves_existing_project_instructions(tmp_path):
+def test_official_init_preserves_existing_project_instructions(tmp_path, monkeypatch):
+    _configure_complete_official_profile(tmp_path, monkeypatch)
     project = tmp_path / "existing-project"
     (project / "openspec").mkdir(parents=True)
     instructions = "# Project instructions\nKeep this content.\n"
@@ -56,14 +69,7 @@ def test_official_init_preserves_existing_project_instructions(tmp_path):
     (project / "openspec/config.yaml").write_text(config, encoding="utf-8")
     (project / "existing-context.md").write_text("Approved context.\n", encoding="utf-8")
 
-    try:
-        OpenSpecAdapter().install_official_integrations(project, ["codex", "antigravity"])
-    except RuntimeError as exc:
-        assert "complete compatible reference set" in str(exc)
-        assert (project / "AGENTS.md").read_text(encoding="utf-8") == instructions
-        assert (project / "openspec/config.yaml").read_text(encoding="utf-8") == config
-        assert (project / "existing-context.md").read_text(encoding="utf-8") == "Approved context.\n"
-        return
+    OpenSpecAdapter().install_official_integrations(project, ["codex", "antigravity"])
 
     assert (project / "AGENTS.md").read_text(encoding="utf-8") == instructions
     assert (project / "openspec/config.yaml").read_text(encoding="utf-8") == config
@@ -89,12 +95,13 @@ def test_official_init_fails_closed_for_unselected_or_unsupported_agents(tmp_pat
         OpenSpecAdapter().install_official_integrations(Path(tmp_path), ["openrouter"])
 
 
-def test_official_capability_discovery_uses_only_a_disposable_repository():
+def test_official_capability_discovery_uses_only_a_disposable_repository(tmp_path, monkeypatch):
+    _configure_complete_official_profile(tmp_path, monkeypatch)
     adapter = OpenSpecAdapter()
     evidence = adapter.discover_official_integrations(["codex"])
 
     assert evidence["version"]
-    assert len(evidence["integrations"]["codex"]) >= 6
+    assert len(evidence["integrations"]["codex"]) >= 8
 
 
 def test_native_integration_inspection_fails_closed_when_extended_lifecycle_is_missing(tmp_path):

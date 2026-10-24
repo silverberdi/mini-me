@@ -85,3 +85,23 @@ After the native-path correction, the combined confinement/OpenSpec/workflow-foc
 `54 passed, 1 warning`. The Ubuntu regression excluding the two environment-assumption tests
 completed `775 passed, 12 skipped, 5 warnings`; Ruff on all affected files passed with
 `--no-cache`, and `openspec validate ... --strict` plus `git diff --check` passed.
+
+## OpenSpec configuration correction
+
+The previous `minime` configuration was explicitly incomplete: `profile=custom`,
+`delivery=skills`, and workflows omitted `verify` and `continue`. In an isolated XDG
+configuration, the official CLI was configured as `profile=custom`, `delivery=both`, with
+`propose`, `explore`, `apply`, `update`, `sync`, `archive`, `verify`, and `continue`.
+
+Running only `openspec init --tools antigravity,codex --no-animation` then produced eight Codex
+skills and eight native Antigravity commands under `.agents/`, including `opsx-verify.md` and
+`opsx-continue.md`. No files were generated manually. The adapter/tests now require this
+configuration for a successful dual-provider setup and fail closed for incomplete delivery or
+workflow selections. `ProjectCatalogService` now reports `CONFIGURATION_INCOMPLETE` separately
+from definitive provider unavailability. Ubuntu focused installation/resolution/catalog tests
+passed `19 passed, 1 warning`.
+
+The fixture was re-read without mutation. Historical PRs #2 and #4 remain open and unchanged;
+Issues #6 and #7 are now open and have no associated PR, so they are eligible candidates for the
+two requested runs. No run, comment, branch, PR, merge, or closure was performed. Authorization
+is still required before consuming #6 and #7 as E2E work items.

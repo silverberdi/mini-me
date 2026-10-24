@@ -16,6 +16,10 @@ from minime.logging import get_logger
 logger = get_logger("adapters.openspec")
 
 
+class OpenSpecConfigurationIncomplete(RuntimeError):
+    """Official CLI is present, but its configured delivery is insufficient."""
+
+
 class OpenSpecAdapter(OpenSpecAdapterInterface):
     """Adapter for interacting with OpenSpec CLI and structured files."""
 
@@ -69,8 +73,9 @@ class OpenSpecAdapter(OpenSpecAdapterInterface):
             self._initialize_official_integrations(reference_root, selected, capabilities)
             reference = self.inspect_integrations(reference_root, selected)
             if not reference["complete"]:
-                raise RuntimeError(
-                    "Official OpenSpec setup did not produce a complete compatible reference set"
+                raise OpenSpecConfigurationIncomplete(
+                    "Official OpenSpec setup is incomplete for the selected agents; configure "
+                    "delivery=both and workflows including Verify and Continue before retrying."
                 )
             self._assert_no_incompatible_official_files(root, reference_root, reference, selected)
             self._initialize_official_integrations(root, selected, capabilities)
