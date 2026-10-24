@@ -163,7 +163,10 @@ def test_project_connection_permission_check_requires_exact_repo_and_grants():
 
     def handler(request):
         assert request.method == "GET"
-        return httpx.Response(200, json={"full_name": "owner/repo"})
+        return httpx.Response(
+            200,
+            json={"full_name": "owner/repo", "permissions": {"push": False, "pull": False}},
+        )
 
     auth = _StaticAuth(handler)
     auth._cached = _CachedInstallationToken(
@@ -176,6 +179,28 @@ def test_project_connection_permission_check_requires_exact_repo_and_grants():
     assert result.outcome == ExternalOutcome.SUCCESS
     assert result.data["repository"] == "owner/repo"
     assert result.data["permissions"] == {"contents": "write", "pull_requests": "write"}
+
+
+def test_repository_push_flag_cannot_override_installation_token_grants():
+    """Repository-shaped user permissions must not substitute App token grants."""
+    from minime.adapters.github import _CachedInstallationToken
+
+    auth = _StaticAuth(
+        lambda _: httpx.Response(
+            200,
+            json={"full_name": "owner/repo", "permissions": {"push": True, "pull": True}},
+        )
+    )
+    auth._cached = _CachedInstallationToken(
+        "test-token",
+        datetime.now(UTC) + timedelta(hours=1),
+        {"contents": "read", "pull_requests": "read"},
+    )
+
+    result = GitHubAdapter(auth=auth).verify_connection_permissions("owner/repo", "git_pr")
+
+    assert result.outcome == ExternalOutcome.FAILURE
+    assert "contents, pull_requests" in result.error_message
 
 
 def test_project_connection_permission_check_fails_closed_when_grants_missing():
