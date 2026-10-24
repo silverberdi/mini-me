@@ -747,35 +747,53 @@ class GitHubAdapter(GitHubAdapterInterface):
             )
 
     def list_issues(
-        self, repository: str, state: str = "open", limit: int = 50
+        self, repository: str, state: str = "open", limit: int | None = None
     ) -> ExternalActionResult[list[dict[str, Any]]]:
-        """List issues for a repository."""
+        """List issues for a repository with exhaustive pagination support."""
         try:
             repo = self._repo(repository)
-            response = self._request(
-                "GET",
-                f"/repos/{repo}/issues",
-                params={"state": state, "per_page": limit},
-            )
-            if response.status_code == 200:
-                payload = response.json()
-                if isinstance(payload, list):
-                    items = [item for item in payload if not item.get("pull_request")]
+            all_items: list[dict[str, Any]] = []
+            page = 1
+            per_page = 100 if (limit is None or limit > 100) else max(1, limit)
+
+            while True:
+                response = self._request(
+                    "GET",
+                    f"/repos/{repo}/issues",
+                    params={"state": state, "per_page": per_page, "page": page},
+                )
+                if response.status_code == 200:
+                    payload = response.json()
+                    if isinstance(payload, list):
+                        items = [item for item in payload if not item.get("pull_request")]
+                        all_items.extend(items)
+                        if limit is not None and len(all_items) >= limit:
+                            all_items = all_items[:limit]
+                            break
+                        if len(payload) < per_page:
+                            break
+                        page += 1
+                        continue
+                    break
+                if response.status_code in (401, 403):
                     return ExternalActionResult(
-                        outcome=ExternalOutcome.SUCCESS,
+                        outcome=ExternalOutcome.FAILURE,
                         source_adapter="github_rest",
-                        reason_code=ExternalReasonCode.EXECUTION_SUCCESS,
+                        reason_code=ExternalReasonCode.AUTH_REQUIRED,
                         retry_safety=RetrySafety.SAFE,
-                        data=items,
+                        data=[],
+                        provider_detail=f"HTTP {response.status_code}",
+                        error_message="GitHub App is unauthorized to list issues.",
                     )
-            if response.status_code in (401, 403):
+                break
+
+            if all_items or page > 1:
                 return ExternalActionResult(
-                    outcome=ExternalOutcome.FAILURE,
+                    outcome=ExternalOutcome.SUCCESS,
                     source_adapter="github_rest",
-                    reason_code=ExternalReasonCode.AUTH_REQUIRED,
+                    reason_code=ExternalReasonCode.EXECUTION_SUCCESS,
                     retry_safety=RetrySafety.SAFE,
-                    data=[],
-                    provider_detail=f"HTTP {response.status_code}",
+                    data=all_items,
                 )
         except GitHubAuthorizationError as exc:
             return ExternalActionResult(
@@ -785,6 +803,7 @@ class GitHubAdapter(GitHubAdapterInterface):
                 retry_safety=RetrySafety.SAFE,
                 data=[],
                 provider_detail=str(exc),
+                error_message=str(exc),
             )
         except Exception as exc:
             logger.debug(f"Failed to list issues via GitHub API: {exc}")
@@ -792,6 +811,7 @@ class GitHubAdapter(GitHubAdapterInterface):
         # Fallback to gh CLI if available
         try:
             repo = self._repo(repository)
+            cli_limit = str(limit) if limit is not None else "1000"
             result = subprocess.run(
                 [
                     "gh",
@@ -802,9 +822,9 @@ class GitHubAdapter(GitHubAdapterInterface):
                     "--state",
                     state,
                     "--limit",
-                    str(limit),
+                    cli_limit,
                     "--json",
-                    "number,title,body,labels,state",
+                    "number,title,body,labels,state,createdAt,updatedAt",
                 ],
                 capture_output=True,
                 text=True,
@@ -813,12 +833,22 @@ class GitHubAdapter(GitHubAdapterInterface):
             if result.returncode == 0 and result.stdout.strip():
                 items = json.loads(result.stdout)
                 if isinstance(items, list):
+                    normalized_items = []
+                    for item in items:
+                        normalized = dict(item)
+                        if "createdAt" in normalized and "created_at" not in normalized:
+                            normalized["created_at"] = normalized["createdAt"]
+                        if "updatedAt" in normalized and "updated_at" not in normalized:
+                            normalized["updated_at"] = normalized["updatedAt"]
+                        normalized_items.append(normalized)
+                    if limit is not None:
+                        normalized_items = normalized_items[:limit]
                     return ExternalActionResult(
                         outcome=ExternalOutcome.SUCCESS,
                         source_adapter="github_cli",
                         reason_code=ExternalReasonCode.EXECUTION_SUCCESS,
                         retry_safety=RetrySafety.SAFE,
-                        data=items,
+                        data=normalized_items,
                     )
         except Exception as exc:
             logger.debug(f"Failed to list issues via gh CLI: {exc}")
@@ -1623,6 +1653,99 @@ class GitHubAdapter(GitHubAdapterInterface):
                 retry_safety=RetrySafety.SAFE,
                 data=pr_details,
                 external_id=str(data.get("number")),
+            )
+        except GitHubAuthorizationError as exc:
+            return ExternalActionResult(
+                outcome=ExternalOutcome.FAILURE,
+                source_adapter="github_rest",
+                reason_code=ExternalReasonCode.AUTH_REQUIRED,
+                retry_safety=RetrySafety.SAFE,
+                provider_detail=str(exc),
+                error_message=str(exc),
+            )
+        except Exception as exc:
+            return ExternalActionResult(
+                outcome=ExternalOutcome.UNKNOWN,
+                source_adapter="github_rest",
+                reason_code=ExternalReasonCode.UNOBSERVABLE,
+                retry_safety=RetrySafety.SAFE,
+                provider_detail=str(exc),
+                error_message=str(exc),
+            )
+
+    def merge_pull_request(
+        self,
+        repository: str,
+        pr_number: int,
+        candidate_sha: str | None = None,
+        commit_title: str | None = None,
+        commit_message: str | None = None,
+        merge_method: str = "merge",
+    ) -> ExternalActionResult[dict[str, Any]]:
+        """Merge a pull request via GitHub REST API with candidate SHA verification."""
+        repo = self._repo(repository)
+        payload: dict[str, Any] = {"merge_method": merge_method}
+        if candidate_sha:
+            payload["sha"] = candidate_sha
+        if commit_title:
+            payload["commit_title"] = commit_title
+        if commit_message:
+            payload["commit_message"] = commit_message
+
+        try:
+            response = self._request("PUT", f"/repos/{repo}/pulls/{pr_number}/merge", json=payload)
+            if response.status_code == 200:
+                data = response.json()
+                return ExternalActionResult(
+                    outcome=ExternalOutcome.SUCCESS,
+                    source_adapter="github_rest",
+                    reason_code=ExternalReasonCode.EXECUTION_SUCCESS,
+                    retry_safety=RetrySafety.SAFE,
+                    data=data,
+                    external_id=str(pr_number),
+                )
+            if response.status_code in (401, 403):
+                return ExternalActionResult(
+                    outcome=ExternalOutcome.FAILURE,
+                    source_adapter="github_rest",
+                    reason_code=ExternalReasonCode.AUTH_REQUIRED,
+                    retry_safety=RetrySafety.SAFE,
+                    provider_detail=f"HTTP {response.status_code}: {response.text}",
+                    error_message=f"GitHub App is unauthorized to merge pull request #{pr_number}.",
+                )
+            if response.status_code == 405:
+                return ExternalActionResult(
+                    outcome=ExternalOutcome.FAILURE,
+                    source_adapter="github_rest",
+                    reason_code=ExternalReasonCode.POLICY_DENIED,
+                    retry_safety=RetrySafety.SAFE,
+                    provider_detail=f"HTTP 405: {response.text}",
+                    error_message=f"Pull request #{pr_number} cannot be merged (branch protections or merge conflict).",
+                )
+            if response.status_code == 409:
+                return ExternalActionResult(
+                    outcome=ExternalOutcome.FAILURE,
+                    source_adapter="github_rest",
+                    reason_code=ExternalReasonCode.CONFLICT,
+                    retry_safety=RetrySafety.SAFE,
+                    provider_detail=f"HTTP 409: {response.text}",
+                    error_message=f"Pull request #{pr_number} head SHA conflict or modified on remote.",
+                )
+            if response.status_code == 404:
+                return ExternalActionResult(
+                    outcome=ExternalOutcome.FAILURE,
+                    source_adapter="github_rest",
+                    reason_code=ExternalReasonCode.NOT_FOUND,
+                    retry_safety=RetrySafety.SAFE,
+                    error_message=f"Pull request #{pr_number} not found in '{repo}'.",
+                )
+            return ExternalActionResult(
+                outcome=ExternalOutcome.UNKNOWN,
+                source_adapter="github_rest",
+                reason_code=ExternalReasonCode.UNOBSERVABLE,
+                retry_safety=RetrySafety.SAFE,
+                provider_detail=f"HTTP {response.status_code}: {response.text}",
+                error_message=f"Merge failed for PR #{pr_number} (HTTP {response.status_code}).",
             )
         except GitHubAuthorizationError as exc:
             return ExternalActionResult(

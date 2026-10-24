@@ -7,9 +7,9 @@
 - F1 eliminar emulación OpenSpec y DB/lógica obsoleta; F2 proyectos; F3 flujo OpenSpec y revisión independiente; F4 skills base; **F5 y F6 ejecutadas por mini me**.
 - mini me coordina; los agentes ejecutan los workflows oficiales propose/update/continue/apply/verify/sync/archive. NO crear Python generators, custom Markdown mergers, archive shutil, prompt substitutes ni verificadores semánticos paralelos.
 - Ticket más antiguo elegible desde GitHub; no cola paralela DB, no scoring, un cambio activo por proyecto hasta sync/archive + cierre. GitHub inicial; ADO no implementado.
-- Roles configurables pensamiento/ejecución/revisión independiente/respaldo; review de propuesta obligatorio, review de código condicional conforme a política. Revisor de solo lectura, no certifica su propia autoría.
+- Roles configurables pensamiento/ejecución/revisión independiente/respaldo; review de propuesta y código obligatorios solo para alta complejidad. Revisor de solo lectura, no certifica su propia autoría.
 - Capturar preguntas originales y opciones de OpenSpec; si no hay opciones, pensamiento intenta respuesta fundamentada en contexto sin usurpar autorizaciones humanas; luego operador responde y el trabajo continúa.
-- PR de implementación requiere merge humano vinculado a SHA. PR de sync/archive documental puede fusionarse automáticamente SOLO si permiso y protecciones lo permiten. Despliegue fuera de mini me, por CI/CD del proyecto.
+- Primer PR de implementación con merge automático para baja/moderada complejidad y acuse informativo humano («Estoy enterado») para alta complejidad. PR de sync/archive documental se fusiona automáticamente. Cierre remoto de ticket únicamente tras el segundo merge. Despliegue fuera de mini me, por CI/CD del proyecto.
 - POO, SOLID, DRY, KISS, YAGNI, clases pequeñas, interfaces mínimas, eliminar código/DB muerto pertinente mediante migraciones conservadoras; evidencia real E2E.
 - No ejecutar acciones pagas, reiniciar scheduler, migrar/desplegar ni cerrar tickets históricos por el mero hecho de aprobar documentos.
 
