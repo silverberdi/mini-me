@@ -33,6 +33,7 @@ from minime.services.project_catalog_service import ProjectCatalogService
 from minime.services.project_context_catalog import (
     CONTEXT_DOCUMENT_PATHS,
     catalog_instruction,
+    has_substantive_content,
     generated_context_path_allowed,
     populated_catalog_documents,
 )
@@ -77,7 +78,9 @@ class GreenfieldBootstrapCoordinator:
         "at context/incoming/<zip-sha>/. Create context/INDEX.md as a navigable map of "
         "ONLY substantively populated canonical files, using Markdown links relative "
         "to context/ (e.g. 01-negocio/intencion-de-negocio.md); do not link empty or "
-        "placeholder documents. Also index EVERY source path under context/incoming/ "
+        "placeholder documents. Link original sources relative to the current index "
+        "(incoming/<sha>/file from context/INDEX.md, ../incoming/<sha>/file from "
+        "context/fuentes/INDEX.md). Also index EVERY source path under context/incoming/ "
         "(directly or via populated fuentes/INDEX.md). Each derived file should cite "
         "its original source paths and may merge information from multiple sources. "
         "Keep OpenSpec's official installed integrations unchanged. Link context/INDEX.md "
@@ -1027,6 +1030,16 @@ class GreenfieldBootstrapCoordinator:
         if not incoming.is_dir() or not any(incoming.rglob("*")):
             raise GreenfieldBootstrapError("Validated context package produced no candidate source")
         if package_root is not None:
+            expected_sources = set(source_files)
+            present_sources = {
+                file.relative_to(incoming).as_posix()
+                for file in incoming.rglob("*")
+                if file.is_file()
+            }
+            if present_sources != expected_sources:
+                raise GreenfieldBootstrapError(
+                    "Context source inventory differs from supplied ZIP"
+                )
             for relative in source_files:
                 source = package_root / relative
                 copied = incoming / relative
@@ -1089,7 +1102,7 @@ class GreenfieldBootstrapCoordinator:
                 doc = worktree / relative
                 if (
                     doc.is_file()
-                    and not doc.read_text(encoding="utf-8").strip()
+                    and not has_substantive_content(doc.read_text(encoding="utf-8"))
                     and relative.removeprefix("context/") in index_text
                 ):
                     raise GreenfieldBootstrapError(
