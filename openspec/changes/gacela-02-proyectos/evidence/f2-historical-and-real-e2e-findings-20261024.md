@@ -140,3 +140,32 @@ commit que contiene el gate F2 antes de volver a verificar. Además, deben
 configurarse explícitamente los cuatro perfiles/conexiones de cada proyecto
 histórico, sin defaults. Ninguna autorización de gasto se reutiliza ni se
 solicita implícitamente en esta evidencia.
+
+## Runtime F2 aislado y límite administrativo (2026-10-24)
+
+- Se creó un entorno virtual temporal desde el checkout del HEAD
+  `0d691988e97b9efbd01c02b417b6f13d01363187`; el paquete `minime` importó
+  correctamente y OpenSpec, pytest y Ruff se ejecutaron desde ese entorno.
+- En PostgreSQL desechable `minime-f2-runtime-pg-20261024`, Alembic alcanzó
+  `f2_retire_project_legacy_context`; la comprobación directa observó el
+  esquema migrado y la tabla `projects`. No se usó la base operativa.
+- Pruebas del runtime aislado: catálogo `10 passed`, coordinador Greenfield
+  `18 passed`, instalación OpenSpec `10 passed`; Ruff afectado PASS, OpenSpec
+  strict PASS y `git diff --check` PASS. El warning restante es únicamente
+  `asyncio_mode` no reconocido por el entorno temporal, sin fallo de prueba.
+- La sesión `gh` del operador está autenticada como `silverberdi`, pero no
+  tiene autorización para administrar la instalación GitHub App `154974444`:
+  `GET /user/installations/154974444/repositories` respondió HTTP 403
+  (requiere un token autorizado a una GitHub App/PAT), y el endpoint de la
+  instalación no es accesible con esa sesión. No se intentó cambiar permisos
+  mediante PAT ni otra identidad.
+
+Estado: el código y el runtime desechable están preparados; 4.4, 7.1b, 8.4 y
+8.5 siguen sin evidencia suficiente. El siguiente actor debe ser el propietario
+de la GitHub App en GitHub: abrir la configuración de la App cuya instalación
+es `154974444`, cambiar Repository permissions a `Contents: Read and write` y
+`Pull requests: Read and write`, conservar seleccionados los tres repositorios
+F2, y actualizar/reinstalar la instalación. Después debe desplegarse el HEAD
+F2 en el runtime del servicio y configurarse explícitamente la selección de
+perfiles/conexiones históricos. Hasta entonces no puede verificarse publicación
+real ni iniciarse ninguna invocación Codex.
