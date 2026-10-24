@@ -30,14 +30,14 @@ from minime.services.agent_confinement import AgentProcessConfinement
 from minime.services.context_archive import ContextArchiveExtractor
 from minime.services.implementer_runner import CliImplementerRunner, ImplementerResult
 from minime.services.project_catalog_service import ProjectCatalogService
+from minime.services.project_connection_service import ProjectConnectionService
 from minime.services.project_context_catalog import (
     CONTEXT_DOCUMENT_PATHS,
     catalog_instruction,
-    has_substantive_content,
     generated_context_path_allowed,
+    has_substantive_content,
     populated_catalog_documents,
 )
-from minime.services.project_connection_service import ProjectConnectionService
 from minime.services.project_onboarding_service import ProjectOnboardingService
 from minime.services.project_service import ProjectService
 
@@ -1172,7 +1172,13 @@ class GreenfieldBootstrapCoordinator:
         def allowed(path: str) -> bool:
             return (
                 path == "AGENTS.md"
-                or path in {".agents/AGENTS.md", ".agent/AGENTS.md", "openspec/config.yaml"}
+                or path
+                in {
+                    ".agents/AGENTS.md",
+                    ".agents/skills/.openspec-target",
+                    ".agent/AGENTS.md",
+                    "openspec/config.yaml",
+                }
                 or generated_context_path_allowed(path)
                 or path.startswith((".agents/skills/openspec-", ".agent/workflows/opsx-"))
             )

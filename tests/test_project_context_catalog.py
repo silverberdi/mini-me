@@ -1,10 +1,16 @@
 """Deterministic F2 taxonomy and document-index tests; no model calls."""
 
+import io
 import subprocess
+import zipfile
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
+from minime.adapters.openspec import OpenSpecAdapter
+from minime.domain.enums import ExternalOutcome
+from minime.services.context_archive import ContextArchiveExtractor
 from minime.services.greenfield_bootstrap import (
     GreenfieldBootstrapCoordinator,
     GreenfieldBootstrapError,
@@ -202,3 +208,160 @@ def test_thinking_agent_must_not_add_files_to_original_zip_revision(tmp_path):
         GreenfieldBootstrapCoordinator._validate_candidate(
             root, incoming, ("business.md", "planning.md"), package
         )
+
+
+def test_deterministic_greenfield_and_incremental_documentary_journeys(tmp_path: Path):
+    """Exercise ZIP/OpenSpec/document/PR boundaries with doubles, never a model."""
+
+    def git(*args: str, cwd: Path) -> str:
+        result = subprocess.run(
+            ["git", *args], cwd=cwd, check=True, capture_output=True, text=True
+        )
+        return result.stdout.strip()
+
+    def make_archive(files: dict[str, str]) -> bytes:
+        stream = io.BytesIO()
+        with zipfile.ZipFile(stream, "w") as package:
+            for name, value in files.items():
+                package.writestr(name, value)
+        return stream.getvalue()
+
+    def populate(worktree: Path, source_sha: str, source_files: tuple[str, ...], *, incremental: bool):
+        source_lines = "\n".join(
+            f"- {relative}: context/incoming/{source_sha}/{relative}"
+            for relative in source_files
+        )
+        (worktree / "AGENTS.md").write_text(
+            "Existing instructions preserved.\nContext: context/INDEX.md\n",
+            encoding="utf-8",
+        )
+        config = worktree / "openspec" / "config.yaml"
+        config.write_text(
+            config.read_text(encoding="utf-8") + "\ncontext: context/INDEX.md\n",
+            encoding="utf-8",
+        )
+        if incremental:
+            document = worktree / "context/12-planificacion/roadmap-documentado.md"
+            document.parent.mkdir(parents=True, exist_ok=True)
+            document.write_text(
+                document.read_text(encoding="utf-8") if document.exists() else "# Roadmap recibido\n",
+                encoding="utf-8",
+            )
+            with document.open("a", encoding="utf-8") as stream:
+                stream.write("\nNueva fuente documental; no es una instrucción operativa.\n")
+            index = worktree / "context/INDEX.md"
+            with index.open("a", encoding="utf-8") as stream:
+                stream.write(
+                    "\n- [12-planificacion/roadmap-documentado.md]"
+                    "(12-planificacion/roadmap-documentado.md)\n"
+                    f"\n{source_lines}\n"
+                )
+        else:
+            document = worktree / "context/01-negocio/intencion-de-negocio.md"
+            document.parent.mkdir(parents=True, exist_ok=True)
+            document.write_text(
+                "# Intención de negocio\nEquipos entienden sus archivos.\n"
+                f"Source: context/incoming/{source_sha}/{source_files[0]}\n",
+                encoding="utf-8",
+            )
+            index = worktree / "context/INDEX.md"
+            index.parent.mkdir(parents=True, exist_ok=True)
+            index.write_text(
+                "# Contexto\n\n"
+                "- [01-negocio/intencion-de-negocio.md]"
+                "(01-negocio/intencion-de-negocio.md)\n\n"
+                f"{source_lines}\n",
+                encoding="utf-8",
+            )
+
+    class RecordingPrAdapter:
+        def __init__(self):
+            self.prs: list[dict[str, str]] = []
+
+        def push_branch(self, worktree: Path, remote: str, branch: str, head_sha: str):
+            subprocess.run(
+                ["git", "push", remote, branch], cwd=worktree, check=True, capture_output=True
+            )
+            return SimpleNamespace(outcome=ExternalOutcome.SUCCESS, data=head_sha)
+
+        def create_pr(self, branch: str, base: str, head_sha: str):
+            self.prs.append({"branch": branch, "base": base, "head_sha": head_sha})
+
+    remote = tmp_path / "remote.git"
+    repo = tmp_path / "repo"
+    subprocess.run(["git", "init", "--bare", str(remote)], check=True, capture_output=True)
+    repo.mkdir()
+    git("init", "-b", "main", cwd=repo)
+    git("config", "user.email", "test@example.com", cwd=repo)
+    git("config", "user.name", "Test", cwd=repo)
+    (repo / "README.md").write_text("# fixture\n", encoding="utf-8")
+    git("add", ".", cwd=repo)
+    git("commit", "-m", "base", cwd=repo)
+    git("remote", "add", "origin", str(remote), cwd=repo)
+    git("push", "-u", "origin", "main", cwd=repo)
+    base_sha = git("rev-parse", "HEAD", cwd=repo)
+
+    extractor = ContextArchiveExtractor()
+    first_dir = tmp_path / "first-package"
+    first_dir.mkdir()
+    first_dir.chmod(0o700)
+    first = extractor.extract(
+        make_archive({"facts.md": "Teams understand files."}), first_dir
+    )
+    branch = "minime/bootstrap/deterministic"
+    git("checkout", "-b", branch, cwd=repo)
+    openspec = OpenSpecAdapter()
+    openspec.install_official_integrations(repo, ["codex"])
+    incoming = repo / "context/incoming" / first.sha256
+    incoming.mkdir(parents=True)
+    for relative in first.files:
+        target = incoming / relative
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_bytes((first_dir / relative).read_bytes())
+    populate(repo, first.sha256, first.files, incremental=False)
+    GreenfieldBootstrapCoordinator._validate_candidate(repo, incoming, first.files, first_dir)
+    git("add", ".", cwd=repo)
+    git("commit", "-m", "docs: deterministic bootstrap context", cwd=repo)
+    first_head = git("rev-parse", "HEAD", cwd=repo)
+    adapter = RecordingPrAdapter()
+    adapter.push_branch(repo, "origin", branch, first_head)
+    adapter.create_pr(branch, "main", first_head)
+    assert git("rev-parse", "refs/heads/main", cwd=repo) == base_sha
+
+    # Human-approved first merge is simulated locally before incremental work.
+    git("checkout", "main", cwd=repo)
+    git("merge", "--ff-only", branch, cwd=repo)
+    approved_sha = git("rev-parse", "HEAD", cwd=repo)
+
+    second_dir = tmp_path / "second-package"
+    second_dir.mkdir()
+    second_dir.chmod(0o700)
+    second = extractor.extract(
+        make_archive({"planning.md": "Historical roadmap only."}), second_dir
+    )
+    second_branch = "minime/context/deterministic-incremental"
+    git("checkout", "-b", second_branch, cwd=repo)
+    openspec.install_official_integrations(repo, ["codex"])
+    second_incoming = repo / "context/incoming" / second.sha256
+    second_incoming.mkdir(parents=True)
+    for relative in second.files:
+        target = second_incoming / relative
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_bytes((second_dir / relative).read_bytes())
+    populate(repo, second.sha256, second.files, incremental=True)
+    GreenfieldBootstrapCoordinator._validate_candidate(
+        repo, second_incoming, second.files, second_dir
+    )
+    assert git("rev-parse", "refs/heads/main", cwd=repo) == approved_sha
+    git("add", ".", cwd=repo)
+    git("commit", "-m", "docs: deterministic incremental context", cwd=repo)
+    second_head = git("rev-parse", "HEAD", cwd=repo)
+    adapter.push_branch(repo, "origin", second_branch, second_head)
+    adapter.create_pr(second_branch, "main", second_head)
+
+    assert [pr["branch"] for pr in adapter.prs] == [branch, second_branch]
+    assert git("rev-parse", "refs/heads/main", cwd=repo) == approved_sha
+    assert "backlog" not in "\n".join(path.name for path in repo.rglob("*"))
+    assert (repo / "context/incoming" / first.sha256 / "facts.md").read_text() == (
+        "Teams understand files."
+    )
