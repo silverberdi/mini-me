@@ -7,7 +7,6 @@ import hashlib
 import os
 import re
 import shutil
-import signal
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -15,7 +14,7 @@ from typing import Any
 from minime.config import AppConfig, CliInvocationProfile, load_config, resolve_cli_invocation
 from minime.domain.enums import ExternalOutcome
 from minime.logging import get_logger, redact_secrets
-from minime.services.agent_confinement import AgentProcessConfinement
+from minime.services.agent_confinement import AgentConfinementError, AgentProcessConfinement
 
 logger = get_logger("services.agent_runner")
 
@@ -350,19 +349,37 @@ class CliAgentRunner:
         start = asyncio.get_running_loop().time()
         is_stdin = profile.prompt_transport == "stdin"
         stdin_data = prompt_context.encode("utf-8") if is_stdin else None
-
         env = os.environ.copy()
         env["TERM"] = "dumb"
 
         try:
-            proc = await asyncio.create_subprocess_exec(
-                *cmd,
-                stdin=asyncio.subprocess.PIPE if is_stdin else None,
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE,
+            auth_kwargs: dict[str, str] = {}
+            normalized_provider = provider.lower()
+            if normalized_provider == "agy":
+                normalized_provider = "antigravity"
+            if normalized_provider == "codex":
+                auth_kwargs["codex_auth_source"] = confinement.codex_auth_source(env)
+            elif normalized_provider == "antigravity":
+                auth_kwargs["antigravity_auth_source"] = confinement.antigravity_auth_source(env)
+            result = await confinement.run_confined_async_subprocess(
+                cmd,
                 cwd=str(worktree_path),
+                input_bytes=stdin_data,
+                timeout_seconds=timeout_seconds,
                 env=env,
-                start_new_session=True,
+                **auth_kwargs,
+            )
+        except AgentConfinementError as exc:
+            duration_ms = int((asyncio.get_running_loop().time() - start) * 1000)
+            return AgentExecutionResult(
+                exit_code=-2,
+                timed_out=False,
+                stdout=[],
+                stderr=[redact_secrets(str(exc))],
+                duration_ms=duration_ms,
+                preflight_error=str(exc),
+                environment_error=exc.environment_unavailable,
+                workflow=workflow,
             )
         except OSError as exc:
             duration_ms = int((asyncio.get_running_loop().time() - start) * 1000)
@@ -370,47 +387,31 @@ class CliAgentRunner:
                 exit_code=-1,
                 timed_out=False,
                 stdout=[],
-                stderr=[redact_secrets(f"Subprocess start failed: {exc}")],
+                stderr=[redact_secrets(f"Confined subprocess start failed: {exc}")],
                 duration_ms=duration_ms,
                 environment_error=True,
                 workflow=workflow,
             )
 
-        timed_out = False
-        try:
-            stdout_bytes, stderr_bytes = await asyncio.wait_for(
-                proc.communicate(input=stdin_data), timeout=float(timeout_seconds)
-            )
-        except asyncio.TimeoutError:
-            timed_out = True
-            try:
-                os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
-            except (ProcessLookupError, OSError):
-                proc.kill()
-            try:
-                stdout_bytes, stderr_bytes = await proc.communicate()
-            except Exception:
-                stdout_bytes, stderr_bytes = b"", b""
-
-        duration_ms = int((asyncio.get_running_loop().time() - start) * 1000)
-
         stdout_lines = [
             redact_secrets(line[: self.MAX_LINE_CHARS])
-            for line in stdout_bytes.decode("utf-8", errors="replace").splitlines()
+            for line in result.stdout.decode("utf-8", errors="replace").splitlines()
         ][: self.MAX_OUTPUT_LINES]
-
         stderr_lines = [
             redact_secrets(line[: self.MAX_LINE_CHARS])
-            for line in stderr_bytes.decode("utf-8", errors="replace").splitlines()
+            for line in result.stderr.decode("utf-8", errors="replace").splitlines()
         ][: self.MAX_OUTPUT_LINES]
-
-        exit_code = proc.returncode if proc.returncode is not None else (-1 if timed_out else 0)
-
+        rotation_error = (
+            "credential_rotation_not_persisted"
+            if result.credential_rotation_detected and not result.credential_access_refresh_only
+            else None
+        )
         return AgentExecutionResult(
-            exit_code=exit_code,
-            timed_out=timed_out,
+            exit_code=result.returncode,
+            timed_out=result.timed_out,
             stdout=stdout_lines,
             stderr=stderr_lines,
-            duration_ms=duration_ms,
+            duration_ms=int((asyncio.get_running_loop().time() - start) * 1000),
+            preflight_error=rotation_error,
             workflow=workflow,
         )

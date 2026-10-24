@@ -26,3 +26,17 @@ The two former `test_e2e_isolated_fixture.py` scenarios use GitHub and agent dou
 The existing private fixture `silverberdi/mini-me-r01-e2e-20261014` was queried without mutation. `main` was `6c051b87eb9a8f379e9305b62773bf486a7825f5`. Issues #1, #2, #3, #4, and #5 were open. Existing PRs #2 and #4 were open and unmerged, with heads `a9f1599aa6c45eb47a0925fb0f033e01e02f33e0` and `2208e5d683e64bed79bb4110b6fca33e94e517ff`, respectively. No issue, branch, PR, merge, or fixture file was changed by this validation.
 
 The local operator session could read the fixture. No installation-token grant for the F3 service was consumed or exposed here, and no real agent inference was started while the fixture contained unmerged historical candidates. Therefore tasks 6.3, 6.4, and the complete acceptance task remain unverified.
+
+## Confinement correction
+
+`CliAgentRunner.run()` now invokes `AgentProcessConfinement.run_confined_async_subprocess()` for every configured profile. Direct subprocess creation was removed from the runner. The confined result preserves exit code, timeout, credential-rotation status, sanitized stdout/stderr, and fail-closed errors.
+
+Executable regression coverage:
+
+- `tests/test_f3_agent_runner_confinement.py`: authorized Worktree read succeeds, an attempted write outside the Worktree is blocked, and unavailable confinement prevents process start.
+- `tests/test_agent_runtime_confinement.py`: existing credential projection, rotation, cleanup, and secret-suppression tests remain green.
+- Full regression after the fix: `783 passed, 15 skipped, 2 warnings`.
+
+## Integration gate
+
+Read-only capability checks found `MINIME_DATABASE_URL` absent and no host PostgreSQL listener; the historical disposable PostgreSQL container is running but is not bound to the F3 service configuration. `gh auth status` identifies the operator session, not the mini me GitHub App installation token. Codex login and the local Antigravity catalog are available, but those observations do not prove the service identity, project profiles, budget admission, or GitHub App grants. No agent inference or remote mutation was attempted.
