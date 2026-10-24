@@ -1640,7 +1640,8 @@ class NativeOrchestrationCoordinator:
         project_id: str | None = None,
     ) -> bool:
         """Execute independent read-only code review for high-complexity changes."""
-        diff = await self._git_run(worktree_path, ["diff", "HEAD~1..HEAD"])
+        diff_result = await self._git_run(worktree_path, ["diff", "HEAD~1..HEAD"])
+        diff = diff_result.stdout
         prompt = (
             f"You are the independent reviewer agent (read-only). Perform code review on OpenSpec change '{change_name}'.\n\n"
             f"Candidate Diff:\n{diff[:4000]}\n\n"
