@@ -162,3 +162,38 @@ Deterministic tests cover separated diagnostics, contradictory responses,
 incidental JSON, truncation, hash changes, explicit-channel recovery, and
 zero provider calls on invalid re-entry. F3 remains 37/41; tasks 5.8, 6.3,
 6.4, and 6.5 remain incomplete.
+
+## Authorized classification readiness — 2026-10-24
+
+The service identity's installed Codex CLI was checked without invocation:
+`codex exec --help` exposes both `--output-schema <FILE>` and
+`--output-last-message <FILE>`. The F3 runner now uses those native flags for
+classification, with a strict schema requiring exactly `complexity` and
+`evidence`. The response file is created fresh under the authorized worktree
+path for the current attempt, rejects symlink traversal and stale files, is
+read only after the process exits, and is removed together with its schema
+file on success or failure. stderr remains diagnostic; stdout is never used as
+a fallback when the authorized last-message file is absent.
+
+The future retry mechanism uses the existing durable operator-action
+governance. `register_classification_retry_authorization()` binds a single-use
+`RETRY` action to the project, original Run, `VALIDATING` classification
+stage, Issue number, configured provider/model, previous attempt ID, artifact
+hashes, and Issue/Run context hashes. PostgreSQL consumes it under a row lock,
+requiring `ACCEPTED` status, exact action type and exact parameters, then
+marks it `COMPLETED` before dispatch. A second consumer, restart, mismatch or
+provider failure cannot consume it again or trigger an automatic retry. No
+authorization was registered or consumed in this intervention.
+
+Deterministic validation: 19 focused tests pass, including native flag/file
+capture, noise and contradictory output, missing/truncated/stale response,
+symlink path rejection, hash mismatch, invalid re-entry, one-shot consumption,
+and zero-provider recovery. Full regression remains `799 passed, 15 skipped`.
+Ruff on affected files, OpenSpec strict validation, compilation and
+`git diff --check` pass. Native Verify has no standalone subcommand in the
+installed OpenSpec CLI; the verification skill report therefore records the
+four pre-existing E2E tasks as incomplete and does not claim F3 completion.
+
+Readiness result: **READY_FOR_AUTHORIZED_CLASSIFICATION**. This is readiness
+only; F3 remains 37/41 and the next runtime operation still requires one
+explicit authorization for the original Run and exactly one Codex call.

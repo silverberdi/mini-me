@@ -776,6 +776,16 @@ class OperatorActionRepositoryInterface(ABC):
     def get_by_request_id(self, action_request_id: str) -> OperatorActionRecord | None: ...
 
     @abstractmethod
+    def consume_single_use(
+        self,
+        action_request_id: str,
+        *,
+        run_id: str,
+        action_type: Any,
+        expected_parameters: dict[str, Any],
+    ) -> OperatorActionRecord | None: ...
+
+    @abstractmethod
     def list_by_run(self, run_id: str, limit: int = 50) -> list[OperatorActionRecord]: ...
 
     @abstractmethod

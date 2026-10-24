@@ -399,6 +399,70 @@ async def test_invalid_classification_reentry_never_invokes_again(mock_env):
     assert coordinator.agent_runner.run.await_count == 0
 
 
+@pytest.mark.asyncio
+async def test_classification_retry_authorization_is_single_use(mock_env):
+    coordinator, uow, _, repo_dir = mock_env
+    project = uow.projects.get_by_id("proj-1")
+    project.agent_profiles = {"thinking": {"agent_id": "codex", "model_id": "gpt-test"}}
+    uow.projects.save(project)
+    change_name = "req-101-add-caching-layer"
+    change_dir = repo_dir / "openspec" / "changes" / change_name
+    (change_dir / "specs" / "feature").mkdir(parents=True)
+    for name in ("proposal.md", "design.md", "tasks.md"):
+        (change_dir / name).write_text("# existing")
+    (change_dir / "specs" / "feature" / "spec.md").write_text("# existing")
+    (repo_dir / ".agents" / "skills" / "openspec-propose").mkdir(parents=True)
+    (repo_dir / ".agents" / "skills" / "openspec-propose" / "SKILL.md").write_text("native")
+    run = OrchestrationRun(
+        project_id="proj-1",
+        change_name=change_name,
+        base_sha="abc1234",
+        current_stage=OrchestrationStage.VALIDATING,
+        resumable_stage=OrchestrationStage.VALIDATING,
+        stop_details={
+            "issue_number": 101,
+            "issue_title": "title",
+            "issue_body": "body",
+            "complexity_attempts": [{"status": "INVALID_OUTPUT", "attempt_id": "old"}],
+            "complexity_assessment": {"status": "INVALID_OUTPUT"},
+        },
+    )
+    uow.orchestration_runs.save(run)
+    coordinator.openspec_adapter.validate_change_strict = MagicMock(
+        return_value={"status": "PASS", "returncode": 0}
+    )
+    hashes = coordinator._proposal_artifact_hashes(repo_dir, change_name)
+    context_hashes = coordinator._classification_context_hashes(run, 101, "title", "body")
+    assert coordinator.register_classification_retry_authorization(
+        project_id="proj-1",
+        run_id=run.run_id,
+        authorization_reference="retry-once",
+        actor_identity="operator",
+        issue_number=101,
+        provider="codex",
+        model_identity="gpt-test",
+        prior_attempt_id="old",
+        artifact_hashes=hashes,
+        context_hashes=context_hashes,
+    )
+    coordinator.agent_runner.run = AsyncMock(return_value=AgentExecutionResult(
+        exit_code=2, timed_out=False, stdout=[], stderr=["blocked"], duration_ms=1
+    ))
+
+    first = await coordinator.classify_existing_run(
+        "proj-1", run.run_id, repo_dir, thinker_provider="codex", issue_number=101,
+        authorization_reference="retry-once",
+    )
+    second = await coordinator.classify_existing_run(
+        "proj-1", run.run_id, repo_dir, thinker_provider="codex", issue_number=101,
+        authorization_reference="retry-once",
+    )
+
+    assert first.status == "BLOCKED"
+    assert second.status == "BLOCKED"
+    assert coordinator.agent_runner.run.await_count == 1
+
+
 def test_persisted_recovery_requires_explicit_channels_and_accepts_one_valid_message():
     recovered = NativeOrchestrationCoordinator._recover_persisted_complexity({
         "exit_code": 0,

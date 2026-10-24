@@ -14,9 +14,15 @@ from uuid import uuid4
 
 from minime.adapters.github import GitHubAdapter
 from minime.adapters.openspec import OpenSpecAdapter
-from minime.domain.enums import ExternalOutcome, OrchestrationStage, OrchestrationStopOutcome
+from minime.domain.enums import (
+    ExternalOutcome,
+    OperatorActionStatus,
+    OperatorActionType,
+    OrchestrationStage,
+    OrchestrationStopOutcome,
+)
 from minime.domain.interfaces import PersistenceUnitOfWork
-from minime.domain.models import OrchestrationRun, utc_now
+from minime.domain.models import OperatorActionRecord, OrchestrationRun, utc_now
 from minime.logging import get_logger, redact_secrets
 from minime.services.agent_runner import CliAgentRunner, NativeOpenSpecWorkflowUnavailable
 from minime.services.pr_preparer_service import PrPreparationInput, PrPreparerService
@@ -65,6 +71,7 @@ class ComplexityAssessment:
     structured_output: str = ""
     diagnostic_output: str = ""
     output_truncated: bool = False
+    structured_output_missing: bool = False
 
     @property
     def is_valid(self) -> bool:
@@ -113,6 +120,57 @@ class NativeOrchestrationCoordinator:
         self.pr_preparer = pr_preparer or PrPreparerService()
         self.max_correction_attempts = max_correction_attempts
 
+    def register_classification_retry_authorization(
+        self,
+        *,
+        project_id: str,
+        run_id: str,
+        authorization_reference: str,
+        actor_identity: str,
+        issue_number: int,
+        provider: str,
+        model_identity: str,
+        prior_attempt_id: str,
+        artifact_hashes: dict[str, str],
+        context_hashes: dict[str, str],
+    ) -> bool:
+        """Persist a future one-shot classification authorization without dispatching."""
+        uow = self.uow_factory()
+        run = uow.orchestration_runs.get_by_id(run_id)
+        if not run or run.project_id != project_id or not run.is_active:
+            return False
+        actions = getattr(uow, "operator_actions", None)
+        if actions is None or actions.get_by_request_id(authorization_reference) is not None:
+            return False
+        latest = (run.stop_details or {}).get("complexity_attempts") or []
+        if not latest or latest[-1].get("attempt_id") != prior_attempt_id:
+            return False
+        action = OperatorActionRecord(
+            action_request_id=authorization_reference,
+            project_id=project_id,
+            change_name=run.change_name,
+            run_id=run_id,
+            action_type=OperatorActionType.RETRY,
+            actor_identity=actor_identity,
+            source_interface="operator",
+            precondition_stage=OrchestrationStage.VALIDATING.value,
+            status=OperatorActionStatus.ACCEPTED,
+            summary="One-shot authorization for the existing Codex classification attempt.",
+            parameters_json={
+                "single_use": True,
+                "stage": "classification",
+                "issue_number": issue_number,
+                "provider": provider,
+                "model_identity": model_identity,
+                "prior_attempt_id": prior_attempt_id,
+                "artifact_hashes": artifact_hashes,
+                "context_hashes": context_hashes,
+            },
+        )
+        actions.save(action)
+        uow.commit()
+        return True
+
     async def classify_existing_run(
         self,
         project_id: str,
@@ -123,6 +181,7 @@ class NativeOrchestrationCoordinator:
         issue_number: int | None = None,
         issue_title: str | None = None,
         issue_body: str | None = None,
+        authorization_reference: str | None = None,
     ) -> ClassificationCheckpointResult:
         """Run only the pending complexity checkpoint for an existing VALIDATING run.
 
@@ -218,10 +277,39 @@ class NativeOrchestrationCoordinator:
                     "Classification recovered from the original separated response channel.",
                 )
         if (run.stop_details or {}).get("complexity_attempts"):
-            return ClassificationCheckpointResult(
-                "BLOCKED", run_id, None, model_identity, hashes, empty,
-                "A prior classification attempt exists; a new invocation requires explicit authorization.",
+            attempts = (run.stop_details or {}).get("complexity_attempts") or []
+            prior_attempt_id = str(attempts[-1].get("attempt_id") or "")
+            if not authorization_reference:
+                return ClassificationCheckpointResult(
+                    "BLOCKED", run_id, None, model_identity, hashes, empty,
+                    "A prior classification attempt exists; a new invocation requires explicit authorization.",
+                )
+            actions = getattr(uow, "operator_actions", None)
+            if actions is None:
+                return ClassificationCheckpointResult(
+                    "BLOCKED", run_id, None, model_identity, hashes, empty,
+                    "Single-use authorization storage is unavailable.",
+                )
+            consumed = actions.consume_single_use(
+                authorization_reference,
+                run_id=run_id,
+                action_type=OperatorActionType.RETRY,
+                expected_parameters={
+                    "single_use": True,
+                    "stage": "classification",
+                    "issue_number": issue_number,
+                    "provider": thinker_provider,
+                    "model_identity": model_identity,
+                    "prior_attempt_id": prior_attempt_id,
+                    "artifact_hashes": hashes,
+                    "context_hashes": context_hashes,
+                },
             )
+            if consumed is None:
+                return ClassificationCheckpointResult(
+                    "BLOCKED", run_id, None, model_identity, hashes, empty,
+                    "Classification authorization is missing, mismatched, or already consumed.",
+                )
         attempt_id = str(uuid4())
         in_progress = ComplexityAssessment(
             status="IN_PROGRESS", reason="classification invocation started"
@@ -237,7 +325,7 @@ class NativeOrchestrationCoordinator:
         uow.orchestration_runs.save(run)
         uow.commit()
         assessment = await self._assess_complexity(
-            worktree_path, thinker_provider, issue_title, issue_body, project_id
+            worktree_path, thinker_provider, issue_title, issue_body, project_id, attempt_id
         )
         self._persist_complexity_assessment(
             run,
@@ -445,13 +533,27 @@ class NativeOrchestrationCoordinator:
                         current_stage=OrchestrationStage.VALIDATING,
                         message="A previous complexity attempt exists; explicit authorization is required before a new invocation.",
                     )
+                attempt_id = str(uuid4())
+                in_progress = ComplexityAssessment(
+                    status="IN_PROGRESS", reason="classification invocation started"
+                )
+                self._persist_complexity_assessment(
+                    active_run,
+                    in_progress,
+                    attempt_id=attempt_id,
+                    model_identity=self._configured_model(uow, project_id, "thinking"),
+                    artifact_hashes=artifact_hashes,
+                    context_hashes=context_hashes,
+                )
+                uow.orchestration_runs.save(active_run)
+                uow.commit()
                 complexity_result = await self._assess_complexity(
-                    worktree_path, thinker_provider, issue_title, issue_body, project_id
+                    worktree_path, thinker_provider, issue_title, issue_body, project_id, attempt_id
                 )
                 self._persist_complexity_assessment(
                     active_run,
                     complexity_result,
-                    attempt_id=str(uuid4()),
+                    attempt_id=attempt_id,
                     model_identity=self._configured_model(uow, project_id, "thinking"),
                     artifact_hashes=artifact_hashes,
                     context_hashes=context_hashes,
@@ -1011,6 +1113,7 @@ class NativeOrchestrationCoordinator:
             structured_output=payload.get("structured_output", ""),
             diagnostic_output=payload.get("diagnostic_output", ""),
             output_truncated=bool(payload.get("output_truncated")),
+            structured_output_missing=bool(payload.get("structured_output_missing")),
         )
 
     @staticmethod
@@ -1040,6 +1143,7 @@ class NativeOrchestrationCoordinator:
             "structured_output": assessment.structured_output,
             "diagnostic_output": assessment.diagnostic_output,
             "output_truncated": assessment.output_truncated,
+            "structured_output_missing": assessment.structured_output_missing,
         }
         details = dict(run.stop_details or {})
         attempts = list(details.get("complexity_attempts") or [])
@@ -1078,6 +1182,7 @@ class NativeOrchestrationCoordinator:
         if (
             payload.get("exit_code") != 0
             or payload.get("output_truncated")
+            or payload.get("structured_output_missing")
             or not isinstance(payload.get("attempt_id"), str)
             or not payload.get("attempt_id")
             or not isinstance(payload.get("artifact_hashes"), dict)
@@ -1106,10 +1211,21 @@ class NativeOrchestrationCoordinator:
         )
 
     async def _assess_complexity(
-        self, worktree_path: Path, provider: str, title: str, body: str, project_id: str | None
+        self,
+        worktree_path: Path,
+        provider: str,
+        title: str,
+        body: str,
+        project_id: str | None,
+        attempt_id: str | None = None,
     ) -> ComplexityAssessment:
         wf = self.agent_runner.resolve_workflow(
             worktree_path=worktree_path, provider=provider, operation="propose", change_name="complexity-assessment"
+        )
+        response_path = (
+            worktree_path / ".minime" / "classification-attempts" / attempt_id / "last-message.json"
+            if attempt_id
+            else None
         )
         result = await self.agent_runner.run(
             worktree_path=worktree_path,
@@ -1123,6 +1239,16 @@ class NativeOrchestrationCoordinator:
             role="thinker",
             provider=provider,
             workflow=wf,
+            output_schema={
+                "type": "object",
+                "properties": {
+                    "complexity": {"type": "string", "enum": ["low", "moderate", "high"]},
+                    "evidence": {"type": "string", "minLength": 1},
+                },
+                "required": ["complexity", "evidence"],
+                "additionalProperties": False,
+            } if response_path else None,
+            output_last_message_path=response_path,
         )
         output = redact_secrets(getattr(result, "full_output", ""))[:4000]
         structured_output = redact_secrets(getattr(result, "response_output", ""))[:4000]
@@ -1130,6 +1256,7 @@ class NativeOrchestrationCoordinator:
             "\n".join(getattr(result, "diagnostic_output", None) or getattr(result, "stderr", []))
         )[:4000]
         output_truncated = bool(getattr(result, "output_truncated", False))
+        structured_output_missing = bool(getattr(result, "structured_output_missing", False))
         if getattr(result, "preflight_error", None):
             return ComplexityAssessment(
                 status="PREFLIGHT_FAILED",
@@ -1141,6 +1268,7 @@ class NativeOrchestrationCoordinator:
                 structured_output=structured_output,
                 diagnostic_output=diagnostic_output,
                 output_truncated=output_truncated,
+                structured_output_missing=structured_output_missing,
             )
         if not self._execution_is_successful(result):
             return ComplexityAssessment(
@@ -1152,16 +1280,22 @@ class NativeOrchestrationCoordinator:
                 structured_output=structured_output,
                 diagnostic_output=diagnostic_output,
                 output_truncated=output_truncated,
+                structured_output_missing=structured_output_missing,
             )
-        if output_truncated:
+        if output_truncated or structured_output_missing:
             return ComplexityAssessment(
                 status="MISSING_EVIDENCE",
-                reason="provider response or diagnostics were truncated",
+                reason=(
+                    "provider response or diagnostics were truncated"
+                    if output_truncated
+                    else "provider did not produce the authorized last-message file"
+                ),
                 exit_code=result.exit_code,
                 output=output,
                 structured_output=structured_output,
                 diagnostic_output=diagnostic_output,
-                output_truncated=True,
+                output_truncated=output_truncated,
+                structured_output_missing=structured_output_missing,
             )
         payload = self._parse_json_object(structured_output)
         if not payload or payload.get("complexity") not in {"low", "moderate", "high"}:

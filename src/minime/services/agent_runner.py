@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import json
 import os
 import re
 import shutil
@@ -58,6 +59,7 @@ class AgentExecutionResult:
     structured_output: list[str] | None = None
     diagnostic_output: list[str] | None = None
     output_truncated: bool = False
+    structured_output_missing: bool = False
 
     @property
     def full_output(self) -> str:
@@ -335,6 +337,8 @@ class CliAgentRunner:
         role: str = "implementer",
         provider: str = "antigravity",
         workflow: ResolvedWorkflow | None = None,
+        output_schema: dict[str, Any] | None = None,
+        output_last_message_path: Path | None = None,
     ) -> AgentExecutionResult:
         """Execute agent under confinement with capacity preflight."""
         # 1. Capacity preflight
@@ -368,8 +372,36 @@ class CliAgentRunner:
                 workflow=workflow,
             )
 
+        response_path = Path(output_last_message_path).resolve() if output_last_message_path else None
+        schema_path = response_path.with_name("response.schema.json") if response_path else None
+        if response_path:
+            root = Path(worktree_path).resolve(strict=True)
+            try:
+                response_path.relative_to(root)
+            except ValueError as exc:
+                raise ValueError("Structured response path must remain inside the authorized worktree.") from exc
+            relative_parts = response_path.relative_to(root).parts
+            cursor = root
+            for part in relative_parts[:-1]:
+                cursor = cursor / part
+                if cursor.is_symlink():
+                    raise ValueError("Structured response path cannot traverse a symlink.")
+            if response_path.exists() or (schema_path and schema_path.exists()):
+                raise ValueError("Structured response paths must be fresh for the current attempt.")
+            response_path.parent.mkdir(parents=True, exist_ok=True)
+            if output_schema is None:
+                raise ValueError("An output schema is required with --output-last-message.")
+            schema_path.write_text(json.dumps(output_schema, sort_keys=True), encoding="utf-8")
+
+        def cleanup_structured_output() -> None:
+            if response_path:
+                response_path.unlink(missing_ok=True)
+            if schema_path:
+                schema_path.unlink(missing_ok=True)
+
         cmd = self._command_for_prompt(prompt_context, profile)
         if not cmd:
+            cleanup_structured_output()
             return AgentExecutionResult(
                 exit_code=-1,
                 timed_out=False,
@@ -386,6 +418,8 @@ class CliAgentRunner:
         env["TERM"] = "dumb"
 
         try:
+            if response_path and schema_path:
+                cmd.extend(["--output-schema", str(schema_path), "--output-last-message", str(response_path)])
             auth_kwargs: dict[str, str] = {}
             normalized_provider = provider.lower()
             if normalized_provider == "agy":
@@ -403,6 +437,7 @@ class CliAgentRunner:
                 **auth_kwargs,
             )
         except AgentConfinementError as exc:
+            cleanup_structured_output()
             duration_ms = int((asyncio.get_running_loop().time() - start) * 1000)
             return AgentExecutionResult(
                 exit_code=-2,
@@ -415,6 +450,7 @@ class CliAgentRunner:
                 workflow=workflow,
             )
         except OSError as exc:
+            cleanup_structured_output()
             duration_ms = int((asyncio.get_running_loop().time() - start) * 1000)
             return AgentExecutionResult(
                 exit_code=-1,
@@ -441,20 +477,36 @@ class CliAgentRunner:
             redact_secrets(line[: self.MAX_LINE_CHARS])
             for line in raw_stderr_lines
         ][: self.MAX_OUTPUT_LINES]
+        structured_output_missing = bool(response_path and not response_path.is_file())
+        if response_path and response_path.is_file():
+            response_text = response_path.read_text(encoding="utf-8", errors="replace")
+            response_lines = response_text.splitlines()
+            stdout_lines = [redact_secrets(line[: self.MAX_LINE_CHARS]) for line in response_lines][
+                : self.MAX_OUTPUT_LINES
+            ]
+            output_truncated = output_truncated or len(response_lines) > self.MAX_OUTPUT_LINES or any(
+                len(line) > self.MAX_LINE_CHARS for line in response_lines
+            )
+        if structured_output_missing:
+            stdout_lines = []
         rotation_error = (
             "credential_rotation_not_persisted"
             if result.credential_rotation_detected and not result.credential_access_refresh_only
             else None
         )
-        return AgentExecutionResult(
-            exit_code=result.returncode,
-            timed_out=result.timed_out,
-            stdout=stdout_lines,
-            stderr=stderr_lines,
-            duration_ms=int((asyncio.get_running_loop().time() - start) * 1000),
-            preflight_error=rotation_error,
-            workflow=workflow,
-            structured_output=stdout_lines,
-            diagnostic_output=stderr_lines,
-            output_truncated=output_truncated,
-        )
+        try:
+            return AgentExecutionResult(
+                exit_code=result.returncode,
+                timed_out=result.timed_out,
+                stdout=stdout_lines,
+                stderr=stderr_lines,
+                duration_ms=int((asyncio.get_running_loop().time() - start) * 1000),
+                preflight_error=rotation_error,
+                workflow=workflow,
+                structured_output=stdout_lines,
+                diagnostic_output=stderr_lines,
+                output_truncated=output_truncated,
+                structured_output_missing=structured_output_missing,
+            )
+        finally:
+            cleanup_structured_output()

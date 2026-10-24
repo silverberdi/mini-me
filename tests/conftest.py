@@ -1767,6 +1767,26 @@ class InMemoryOperatorActionRepository(OperatorActionRepositoryInterface):
                 return rec.model_copy(deep=True)
         return None
 
+    def consume_single_use(
+        self,
+        action_request_id: str,
+        *,
+        run_id: str,
+        action_type: Any,
+        expected_parameters: dict[str, Any],
+    ) -> OperatorActionRecord | None:
+        for record in self._store.values():
+            if (
+                record.action_request_id == action_request_id
+                and record.run_id == run_id
+                and record.action_type == action_type
+                and record.status.value == "ACCEPTED"
+                and all(record.parameters_json.get(k) == v for k, v in expected_parameters.items())
+            ):
+                record.status = type(record.status)("COMPLETED")
+                return record.model_copy(deep=True)
+        return None
+
     def list_by_run(self, run_id: str, limit: int = 50) -> list[OperatorActionRecord]:
         matches = [r.model_copy(deep=True) for r in self._store.values() if r.run_id == run_id]
         matches.sort(key=lambda r: r.created_at, reverse=True)
