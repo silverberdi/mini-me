@@ -18,6 +18,25 @@ An incremental ZIP SHALL be accepted only for an existing prepared project and S
 - **WHEN** the operator clearly marks a source/decision as replaced
 - **THEN** the candidate records both prior and replacement provenance and makes the replacement effective only after its PR merges
 
+
+### Requirement: Use the same canonical F2 catalog for incremental context
+
+An incremental ZIP SHALL be organized into the same fixed standard context file paths used by initial Greenfield bootstrap. The thinking agent SHALL read the new source files and update the applicable already-approved canonical documents on a **new PR branch**, allowing the same sourced information to appear in multiple relevant documents. Previously approved material and original sources SHALL not be silently removed or replaced, and no new backlog, tickets, roadmap strategy, product requirements or OpenSpec tasks SHALL be invented.
+
+Original new ZIP files SHALL remain intact under their own revision-bound `context/incoming/<sha>/`. The generated index SHALL list only substantively populated canonical documents and provide navigation to all source revisions; absent/empty documents SHALL be omitted. No business or semantic review gate is introduced in F2. Repository, ZIP, source-provenance and secret safety checks remain applicable. Approved context changes only upon observed merge of the exact PR.
+
+#### Scenario: A new ZIP enriches several existing documents
+- **WHEN** the new information concerns several canonical catalog subjects
+- **THEN** the agent adds source-backed content to every relevant document and updates the navigation index without creating new categories
+
+#### Scenario: The new ZIP contains a backlog
+- **WHEN** the incoming material includes a historical backlog or roadmap
+- **THEN** the documents remain contextual source/planning information, not a work queue or OpenSpec task list
+
+#### Scenario: An optional file is empty
+- **WHEN** an optional canonical document has no information after an incremental import
+- **THEN** the file is omitted from the navigation index and the agent does not invent filler
+
 ### Requirement: Publish incremental context through a new branch and PR
 Every valid incremental update SHALL branch from the latest verified main, produce a separate commit/PR, and leave the approved main and effective project context unchanged until that exact PR is observed merged. Unmerged context SHALL NOT be mixed into any future worktree or candidate.
 
