@@ -1178,6 +1178,11 @@ class GreenfieldBootstrapCoordinator:
                     ".agents/skills/.openspec-target",
                     ".agent/AGENTS.md",
                     "openspec/config.yaml",
+                    # Official OpenSpec initialization creates these empty
+                    # scaffolds in a new repository. They are setup artifacts,
+                    # not agent-authored product context or backlog.
+                    "openspec/changes/archive/.gitkeep",
+                    "openspec/specs/.gitkeep",
                 }
                 or generated_context_path_allowed(path)
                 or path.startswith((".agents/skills/openspec-", ".agent/workflows/opsx-"))

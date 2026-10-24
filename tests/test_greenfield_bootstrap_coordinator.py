@@ -174,6 +174,27 @@ def test_candidate_validation_rejects_unrelated_backlog_changes(tmp_path: Path):
         GreenfieldBootstrapCoordinator._validate_candidate(worktree, incoming)
 
 
+def test_candidate_scope_allows_official_openspec_scaffolds(tmp_path: Path):
+    worktree = tmp_path / "worktree"
+    worktree.mkdir()
+    subprocess.run(["git", "init"], cwd=worktree, check=True, capture_output=True)
+    subprocess.run(["git", "config", "user.name", "test"], cwd=worktree, check=True)
+    subprocess.run(["git", "config", "user.email", "test@example.com"], cwd=worktree, check=True)
+    (worktree / "openspec" / "changes" / "archive").mkdir(parents=True)
+    (worktree / "openspec" / "specs").mkdir(parents=True)
+    (worktree / "openspec" / "changes" / "archive" / ".gitkeep").touch()
+    (worktree / "openspec" / "specs" / ".gitkeep").touch()
+    subprocess.run(["git", "add", "."], cwd=worktree, check=True)
+    subprocess.run(
+        ["git", "commit", "-m", "baseline"],
+        cwd=worktree,
+        check=True,
+        capture_output=True,
+    )
+
+    GreenfieldBootstrapCoordinator._validate_candidate_scope(worktree)
+
+
 def test_candidate_validation_allows_documentary_contradictions_with_provenance(tmp_path: Path):
     worktree = tmp_path / "worktree"
     incoming = worktree / "context" / "incoming" / "sha"
