@@ -226,6 +226,18 @@ o tomar una decisión explícita del propietario sobre una alternativa que el
 catálogo actual verifique; no se inventa una selección ni se modifica
 producción para sortearla.
 
+## Revalidación posterior a la confirmación del operador (2026-10-24)
+
+Se volvió a consultar el runtime F2 sin invocar ningún agente. La CLI existe
+en `/usr/local/bin/agy`, pero `ProjectCatalogService` continúa devolviendo
+`capability_status=UNAVAILABLE`, `models={}` y ningún workflow nativo para
+Antigravity. La comprobación directa no inferente `agy models` termina con
+`Please sign in to view available models`; por tanto, la sesión efectiva del
+servicio aún no tiene una autenticación/catálogo observable aunque el binario
+esté instalado. Codex continúa observable. 7.1b y 8.5 permanecen pendientes
+hasta que esa misma identidad de servicio devuelva el modelo y esfuerzo
+autorizados mediante el catálogo oficial.
+
 Corrección de interpretación: el propietario confirmó que la GitHub App ya
 estaba configurada con `Contents: Read and write` y `Pull requests: Read and
 write`. NO solicitar reinstalación ni nuevos cambios de permisos sobre la
