@@ -301,6 +301,5 @@ def generated_context_path_allowed(relative: str) -> bool:
         len(path.parts) >= 4
         and path.parts[0] == "context"
         and path.parts[1] == "incoming"
-        and len(path.parts[2]) == 64
-        and all(char in "0123456789abcdef" for char in path.parts[2])
+        and bool(path.parts[2])
     )
