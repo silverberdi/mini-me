@@ -134,3 +134,31 @@ review, PR, merge, or Issue mutation. Explore and Propose were not repeated;
 Apply and independent review were not invoked. The checkpoint persists an
 `IN_PROGRESS` record before dispatch and the final typed diagnostic afterward,
 then stops before Review/Apply as required.
+
+## Deterministic recovery audit — 2026-10-24
+
+The disposable PostgreSQL read-only inspection of attempt
+`6519f82c-c023-4e3f-8291-490274bfe88e` found `attempt_count=2` (the durable
+`IN_PROGRESS` marker and its final record), `exit_code=0`, `timed_out=false`,
+`consumption=unknown`, four artifact hashes, and a 4,000-character combined
+output. The persisted record has no separate `structured_output` or
+`diagnostic_output` channel and no non-truncation proof. It therefore cannot
+demonstrate one authentic final JSON message separated from Codex transport
+and logs. The classification remains `INVALID_OUTPUT`; no verdict was
+recovered or fabricated.
+
+The Run remains unique, active, and `VALIDATING`, with no active job and no
+candidate. No provider was called during this audit.
+
+The published correction separates future stdout response data from stderr
+diagnostics, records truncation explicitly, persists issue/Run context hashes
+alongside artifact hashes, and rejects reuse when any hash differs. Re-entry
+from `INVALID_OUTPUT` or `IN_PROGRESS` now returns `BLOCKED`/`PAUSED` without
+dispatching a provider; only an explicitly authorized new invocation could
+change that state. Recovery accepts only a complete, non-truncated, single
+JSON response with attempt metadata, artifact hashes, and context hashes.
+
+Deterministic tests cover separated diagnostics, contradictory responses,
+incidental JSON, truncation, hash changes, explicit-channel recovery, and
+zero provider calls on invalid re-entry. F3 remains 37/41; tasks 5.8, 6.3,
+6.4, and 6.5 remain incomplete.

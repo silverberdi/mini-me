@@ -62,6 +62,9 @@ class ComplexityAssessment:
     timed_out: bool = False
     preflight_error: str | None = None
     output: str = ""
+    structured_output: str = ""
+    diagnostic_output: str = ""
+    output_truncated: bool = False
 
     @property
     def is_valid(self) -> bool:
@@ -145,7 +148,6 @@ class NativeOrchestrationCoordinator:
                 "BLOCKED", run_id, None, None, {}, empty,
                 "Checkpoint issue does not match the original run.",
             )
-        stored = self._stored_complexity_assessment(run)
         hashes = self._proposal_artifact_hashes(worktree_path, run.change_name)
         if not self._proposal_artifacts_present(worktree_path, run.change_name):
             return ClassificationCheckpointResult(
@@ -166,18 +168,60 @@ class NativeOrchestrationCoordinator:
                 "BLOCKED", run_id, None, model_identity, hashes, empty,
                 "Checkpoint provider does not match the persisted thinking profile.",
             )
-        if stored is not None:
-            return ClassificationCheckpointResult(
-                "REUSED", run_id, None, model_identity, hashes, stored,
-                "A valid persisted classification was reused without invocation.",
-            )
-
         issue_title = issue_title if issue_title is not None else str(
             (run.stop_details or {}).get("issue_title") or ""
         )
         issue_body = issue_body if issue_body is not None else str(
             (run.stop_details or {}).get("issue_body") or ""
         )
+        context_hashes = self._classification_context_hashes(
+            run, issue_number, issue_title, issue_body
+        )
+        stored = self._stored_complexity_assessment(run, hashes, context_hashes)
+        if stored is not None:
+            return ClassificationCheckpointResult(
+                "REUSED", run_id, None, model_identity, hashes, stored,
+                "A valid persisted classification was reused without invocation.",
+            )
+        persisted = (run.stop_details or {}).get("complexity_assessment")
+        if (
+            isinstance(persisted, dict)
+            and persisted.get("artifact_hashes") == hashes
+            and persisted.get("context_hashes") == context_hashes
+        ):
+            recovered = self._recover_persisted_complexity(persisted)
+            if recovered is not None:
+                recovered_payload = dict(persisted)
+                recovered_payload.update(
+                    {
+                        "status": "VALID",
+                        "complexity": recovered.complexity,
+                        "evidence": recovered.evidence,
+                        "reason": recovered.reason,
+                        "structured_output": recovered.structured_output,
+                        "diagnostic_output": recovered.diagnostic_output,
+                        "recovered_without_invocation": True,
+                    }
+                )
+                details = dict(run.stop_details or {})
+                details["complexity_assessment"] = recovered_payload
+                run.stop_details = details
+                uow.orchestration_runs.save(run)
+                uow.commit()
+                return ClassificationCheckpointResult(
+                    "RECOVERED",
+                    run_id,
+                    str(persisted.get("attempt_id") or ""),
+                    model_identity,
+                    hashes,
+                    recovered,
+                    "Classification recovered from the original separated response channel.",
+                )
+        if (run.stop_details or {}).get("complexity_attempts"):
+            return ClassificationCheckpointResult(
+                "BLOCKED", run_id, None, model_identity, hashes, empty,
+                "A prior classification attempt exists; a new invocation requires explicit authorization.",
+            )
         attempt_id = str(uuid4())
         in_progress = ComplexityAssessment(
             status="IN_PROGRESS", reason="classification invocation started"
@@ -188,6 +232,7 @@ class NativeOrchestrationCoordinator:
             attempt_id=attempt_id,
             model_identity=model_identity,
             artifact_hashes=hashes,
+            context_hashes=context_hashes,
         )
         uow.orchestration_runs.save(run)
         uow.commit()
@@ -200,6 +245,7 @@ class NativeOrchestrationCoordinator:
             attempt_id=attempt_id,
             model_identity=model_identity,
             artifact_hashes=hashes,
+            context_hashes=context_hashes,
         )
         uow.orchestration_runs.save(run)
         uow.commit()
@@ -382,9 +428,23 @@ class NativeOrchestrationCoordinator:
                     message="Strict CLI validation failed after max correction attempts. Worktree preserved.",
                 )
 
-            # Evaluate Complexity
-            complexity_result = self._stored_complexity_assessment(active_run)
+            # Evaluate Complexity. A previous non-valid attempt is durable evidence
+            # that automatic re-entry must stop; it may not spend another call.
+            artifact_hashes = self._proposal_artifact_hashes(worktree_path, change_name)
+            context_hashes = self._classification_context_hashes(
+                active_run, issue_number, issue_title, issue_body
+            )
+            complexity_result = self._stored_complexity_assessment(
+                active_run, artifact_hashes, context_hashes
+            )
             if complexity_result is None:
+                if (active_run.stop_details or {}).get("complexity_attempts"):
+                    return OrchestrationCoordinationResult(
+                        status="PAUSED",
+                        run_id=active_run.run_id,
+                        current_stage=OrchestrationStage.VALIDATING,
+                        message="A previous complexity attempt exists; explicit authorization is required before a new invocation.",
+                    )
                 complexity_result = await self._assess_complexity(
                     worktree_path, thinker_provider, issue_title, issue_body, project_id
                 )
@@ -393,7 +453,8 @@ class NativeOrchestrationCoordinator:
                     complexity_result,
                     attempt_id=str(uuid4()),
                     model_identity=self._configured_model(uow, project_id, "thinking"),
-                    artifact_hashes=self._proposal_artifact_hashes(worktree_path, change_name),
+                    artifact_hashes=artifact_hashes,
+                    context_hashes=context_hashes,
                 )
             if not complexity_result.is_valid:
                 if hasattr(uow, "orchestration_runs"):
@@ -899,9 +960,44 @@ class NativeOrchestrationCoordinator:
         return str(raw.get("model_id") or "").strip() or None if isinstance(raw, dict) else None
 
     @staticmethod
-    def _stored_complexity_assessment(run: OrchestrationRun) -> ComplexityAssessment | None:
+    def _classification_context_hashes(
+        run: OrchestrationRun,
+        issue_number: int | None,
+        issue_title: str,
+        issue_body: str,
+    ) -> dict[str, str]:
+        issue_payload = json.dumps(
+            {"number": issue_number, "title": issue_title, "body": issue_body},
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+        run_payload = json.dumps(
+            {
+                "run_id": run.run_id,
+                "project_id": run.project_id,
+                "change_name": run.change_name,
+                "base_sha": run.base_sha,
+            },
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+        return {
+            "issue": hashlib.sha256(issue_payload.encode()).hexdigest(),
+            "run": hashlib.sha256(run_payload.encode()).hexdigest(),
+        }
+
+    @staticmethod
+    def _stored_complexity_assessment(
+        run: OrchestrationRun,
+        artifact_hashes: dict[str, str] | None = None,
+        context_hashes: dict[str, str] | None = None,
+    ) -> ComplexityAssessment | None:
         payload = (run.stop_details or {}).get("complexity_assessment")
         if not isinstance(payload, dict) or payload.get("status") != "VALID":
+            return None
+        if artifact_hashes is not None and payload.get("artifact_hashes") != artifact_hashes:
+            return None
+        if context_hashes is not None and payload.get("context_hashes") != context_hashes:
             return None
         return ComplexityAssessment(
             status=str(payload.get("status")),
@@ -912,6 +1008,9 @@ class NativeOrchestrationCoordinator:
             timed_out=bool(payload.get("timed_out")),
             preflight_error=payload.get("preflight_error"),
             output=payload.get("output", ""),
+            structured_output=payload.get("structured_output", ""),
+            diagnostic_output=payload.get("diagnostic_output", ""),
+            output_truncated=bool(payload.get("output_truncated")),
         )
 
     @staticmethod
@@ -922,6 +1021,7 @@ class NativeOrchestrationCoordinator:
         attempt_id: str,
         model_identity: str | None,
         artifact_hashes: dict[str, str],
+        context_hashes: dict[str, str] | None = None,
     ) -> None:
         payload = {
             "status": assessment.status,
@@ -936,6 +1036,10 @@ class NativeOrchestrationCoordinator:
             "model_identity": model_identity,
             "artifact_hashes": artifact_hashes,
             "consumption": "unknown",
+            "context_hashes": context_hashes,
+            "structured_output": assessment.structured_output,
+            "diagnostic_output": assessment.diagnostic_output,
+            "output_truncated": assessment.output_truncated,
         }
         details = dict(run.stop_details or {})
         attempts = list(details.get("complexity_attempts") or [])
@@ -966,6 +1070,41 @@ class NativeOrchestrationCoordinator:
             return None
         return value if isinstance(value, dict) else None
 
+    @classmethod
+    def _recover_persisted_complexity(
+        cls, payload: dict[str, Any]
+    ) -> ComplexityAssessment | None:
+        """Recover only an explicitly separated, complete provider response."""
+        if (
+            payload.get("exit_code") != 0
+            or payload.get("output_truncated")
+            or not isinstance(payload.get("attempt_id"), str)
+            or not payload.get("attempt_id")
+            or not isinstance(payload.get("artifact_hashes"), dict)
+            or not isinstance(payload.get("context_hashes"), dict)
+        ):
+            return None
+        structured = payload.get("structured_output")
+        diagnostics = payload.get("diagnostic_output")
+        if not isinstance(structured, str) or not isinstance(diagnostics, str):
+            return None
+        parsed = cls._parse_json_object(structured)
+        if not parsed or parsed.get("complexity") not in {"low", "moderate", "high"}:
+            return None
+        evidence = parsed.get("evidence")
+        if not isinstance(evidence, str) or not evidence.strip():
+            return None
+        return ComplexityAssessment(
+            status="VALID",
+            complexity=parsed["complexity"],
+            evidence=redact_secrets(evidence.strip())[:1000],
+            reason="Recovered from the original separated response channel.",
+            exit_code=0,
+            output=redact_secrets(payload.get("output", ""))[:4000],
+            structured_output=redact_secrets(structured)[:4000],
+            diagnostic_output=redact_secrets(diagnostics)[:4000],
+        )
+
     async def _assess_complexity(
         self, worktree_path: Path, provider: str, title: str, body: str, project_id: str | None
     ) -> ComplexityAssessment:
@@ -986,6 +1125,11 @@ class NativeOrchestrationCoordinator:
             workflow=wf,
         )
         output = redact_secrets(getattr(result, "full_output", ""))[:4000]
+        structured_output = redact_secrets(getattr(result, "response_output", ""))[:4000]
+        diagnostic_output = redact_secrets(
+            "\n".join(getattr(result, "diagnostic_output", None) or getattr(result, "stderr", []))
+        )[:4000]
+        output_truncated = bool(getattr(result, "output_truncated", False))
         if getattr(result, "preflight_error", None):
             return ComplexityAssessment(
                 status="PREFLIGHT_FAILED",
@@ -994,6 +1138,9 @@ class NativeOrchestrationCoordinator:
                 timed_out=bool(getattr(result, "timed_out", False)),
                 preflight_error=redact_secrets(result.preflight_error),
                 output=output,
+                structured_output=structured_output,
+                diagnostic_output=diagnostic_output,
+                output_truncated=output_truncated,
             )
         if not self._execution_is_successful(result):
             return ComplexityAssessment(
@@ -1002,14 +1149,29 @@ class NativeOrchestrationCoordinator:
                 exit_code=getattr(result, "exit_code", None),
                 timed_out=bool(getattr(result, "timed_out", False)),
                 output=output,
+                structured_output=structured_output,
+                diagnostic_output=diagnostic_output,
+                output_truncated=output_truncated,
             )
-        payload = self._parse_json_object(result.full_output)
+        if output_truncated:
+            return ComplexityAssessment(
+                status="MISSING_EVIDENCE",
+                reason="provider response or diagnostics were truncated",
+                exit_code=result.exit_code,
+                output=output,
+                structured_output=structured_output,
+                diagnostic_output=diagnostic_output,
+                output_truncated=True,
+            )
+        payload = self._parse_json_object(structured_output)
         if not payload or payload.get("complexity") not in {"low", "moderate", "high"}:
             return ComplexityAssessment(
                 status="INVALID_OUTPUT",
                 reason="exactly one structured complexity object was not returned",
                 exit_code=result.exit_code,
                 output=output,
+                structured_output=structured_output,
+                diagnostic_output=diagnostic_output,
             )
         if not isinstance(payload.get("evidence"), str) or not payload["evidence"].strip():
             return ComplexityAssessment(
@@ -1017,6 +1179,8 @@ class NativeOrchestrationCoordinator:
                 reason="structured complexity verdict has no concrete evidence",
                 exit_code=result.exit_code,
                 output=output,
+                structured_output=structured_output,
+                diagnostic_output=diagnostic_output,
             )
         return ComplexityAssessment(
             status="VALID",
@@ -1024,6 +1188,8 @@ class NativeOrchestrationCoordinator:
             evidence=redact_secrets(payload["evidence"].strip())[:1000],
             exit_code=result.exit_code,
             output=output,
+            structured_output=structured_output,
+            diagnostic_output=diagnostic_output,
         )
 
     async def _run_explore(

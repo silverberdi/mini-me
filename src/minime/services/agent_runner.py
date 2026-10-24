@@ -55,10 +55,18 @@ class AgentExecutionResult:
     preflight_error: str | None = None
     environment_error: bool = False
     workflow: ResolvedWorkflow | None = None
+    structured_output: list[str] | None = None
+    diagnostic_output: list[str] | None = None
+    output_truncated: bool = False
 
     @property
     def full_output(self) -> str:
         return "\n".join(self.stdout + self.stderr)
+
+    @property
+    def response_output(self) -> str:
+        """Return only the provider response channel, excluding diagnostics."""
+        return "\n".join(self.structured_output if self.structured_output is not None else self.stdout)
 
     def contains_token(self, token: str) -> bool:
         return token in self.full_output
@@ -418,13 +426,20 @@ class CliAgentRunner:
                 workflow=workflow,
             )
 
+        raw_stdout_lines = result.stdout.decode("utf-8", errors="replace").splitlines()
+        raw_stderr_lines = result.stderr.decode("utf-8", errors="replace").splitlines()
+        output_truncated = (
+            len(raw_stdout_lines) > self.MAX_OUTPUT_LINES
+            or len(raw_stderr_lines) > self.MAX_OUTPUT_LINES
+            or any(len(line) > self.MAX_LINE_CHARS for line in raw_stdout_lines + raw_stderr_lines)
+        )
         stdout_lines = [
             redact_secrets(line[: self.MAX_LINE_CHARS])
-            for line in result.stdout.decode("utf-8", errors="replace").splitlines()
+            for line in raw_stdout_lines
         ][: self.MAX_OUTPUT_LINES]
         stderr_lines = [
             redact_secrets(line[: self.MAX_LINE_CHARS])
-            for line in result.stderr.decode("utf-8", errors="replace").splitlines()
+            for line in raw_stderr_lines
         ][: self.MAX_OUTPUT_LINES]
         rotation_error = (
             "credential_rotation_not_persisted"
@@ -439,4 +454,7 @@ class CliAgentRunner:
             duration_ms=int((asyncio.get_running_loop().time() - start) * 1000),
             preflight_error=rotation_error,
             workflow=workflow,
+            structured_output=stdout_lines,
+            diagnostic_output=stderr_lines,
+            output_truncated=output_truncated,
         )

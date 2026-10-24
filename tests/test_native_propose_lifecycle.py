@@ -294,3 +294,149 @@ async def test_classification_checkpoint_stops_after_one_codex_call(mock_env):
     assert persisted is not None
     assert persisted.current_stage == OrchestrationStage.VALIDATING
     assert persisted.stop_details["complexity_assessment"]["artifact_hashes"]
+
+
+@pytest.mark.asyncio
+async def test_complexity_uses_response_channel_and_ignores_diagnostics(mock_env):
+    coordinator, _, _, repo_dir = mock_env
+    coordinator.agent_runner.run = AsyncMock(return_value=AgentExecutionResult(
+        exit_code=0,
+        timed_out=False,
+        stdout=['{"complexity":"moderate","evidence":"bounded change"}'],
+        stderr=["Codex session metadata and progress output"],
+        duration_ms=1,
+    ))
+
+    result = await coordinator._assess_complexity(
+        repo_dir, "antigravity", "Issue", "Body", "proj-1"
+    )
+
+    assert result.status == "VALID"
+    assert result.complexity == "moderate"
+    assert result.diagnostic_output == "Codex session metadata and progress output"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "stdout,expected",
+    [
+        ('{"complexity":"low","evidence":"one"}\n{"complexity":"high","evidence":"two"}', "INVALID_OUTPUT"),
+        ('session log {"complexity":"low","evidence":"incidental"}', "INVALID_OUTPUT"),
+    ],
+)
+async def test_complexity_rejects_ambiguous_response_channel(mock_env, stdout, expected):
+    coordinator, _, _, repo_dir = mock_env
+    coordinator.agent_runner.run = AsyncMock(return_value=AgentExecutionResult(
+        exit_code=0,
+        timed_out=False,
+        stdout=stdout.splitlines(),
+        stderr=[],
+        duration_ms=1,
+    ))
+
+    result = await coordinator._assess_complexity(
+        repo_dir, "antigravity", "Issue", "Body", "proj-1"
+    )
+
+    assert result.status == expected
+
+
+@pytest.mark.asyncio
+async def test_complexity_rejects_truncated_response(mock_env):
+    coordinator, _, _, repo_dir = mock_env
+    coordinator.agent_runner.run = AsyncMock(return_value=AgentExecutionResult(
+        exit_code=0,
+        timed_out=False,
+        stdout=['{"complexity":"moderate","evidence":"bounded change"}'],
+        stderr=[],
+        duration_ms=1,
+        output_truncated=True,
+    ))
+
+    result = await coordinator._assess_complexity(
+        repo_dir, "antigravity", "Issue", "Body", "proj-1"
+    )
+
+    assert result.status == "MISSING_EVIDENCE"
+
+
+@pytest.mark.asyncio
+async def test_invalid_classification_reentry_never_invokes_again(mock_env):
+    coordinator, uow, _, repo_dir = mock_env
+    change_name = "req-101-add-caching-layer"
+    change_dir = repo_dir / "openspec" / "changes" / change_name
+    (change_dir / "specs" / "feature").mkdir(parents=True)
+    for name in ("proposal.md", "design.md", "tasks.md"):
+        (change_dir / name).write_text("# existing")
+    (change_dir / "specs" / "feature" / "spec.md").write_text("# existing")
+    (repo_dir / ".agents" / "skills" / "openspec-propose").mkdir(parents=True)
+    (repo_dir / ".agents" / "skills" / "openspec-propose" / "SKILL.md").write_text("native")
+    run = OrchestrationRun(
+        project_id="proj-1",
+        change_name=change_name,
+        base_sha="abc1234",
+        current_stage=OrchestrationStage.VALIDATING,
+        resumable_stage=OrchestrationStage.VALIDATING,
+        stop_details={
+            "issue_number": 101,
+            "issue_title": "title",
+            "issue_body": "body",
+            "complexity_attempts": [{"status": "INVALID_OUTPUT", "attempt_id": "old"}],
+            "complexity_assessment": {"status": "INVALID_OUTPUT"},
+        },
+    )
+    uow.orchestration_runs.save(run)
+    coordinator.openspec_adapter.validate_change_strict = MagicMock(
+        return_value={"status": "PASS", "returncode": 0}
+    )
+    coordinator.agent_runner.run = AsyncMock(side_effect=AssertionError("re-entry must not invoke"))
+
+    result = await coordinator.classify_existing_run(
+        "proj-1", run.run_id, repo_dir, thinker_provider="codex", issue_number=101
+    )
+
+    assert result.status == "BLOCKED"
+    assert coordinator.agent_runner.run.await_count == 0
+
+
+def test_persisted_recovery_requires_explicit_channels_and_accepts_one_valid_message():
+    recovered = NativeOrchestrationCoordinator._recover_persisted_complexity({
+        "exit_code": 0,
+        "output_truncated": False,
+        "structured_output": '{"complexity":"low","evidence":"one focused change"}',
+        "diagnostic_output": "Codex session banner",
+        "output": "combined sanitized output",
+        "attempt_id": "attempt-1",
+        "artifact_hashes": {"proposal.md": "hash"},
+        "context_hashes": {"issue": "hash", "run": "hash"},
+    })
+    assert recovered is not None
+    assert recovered.complexity == "low"
+    assert NativeOrchestrationCoordinator._recover_persisted_complexity({
+        "exit_code": 0,
+        "structured_output": '{"complexity":"low","evidence":"one"}',
+        "diagnostic_output": "",
+    }) is None
+
+
+def test_valid_classification_is_not_reused_after_artifact_hash_change():
+    run = OrchestrationRun(
+        project_id="proj-1",
+        change_name="req-101-add-caching-layer",
+        base_sha="abc1234",
+        stop_details={
+            "complexity_assessment": {
+                "status": "VALID",
+                "complexity": "low",
+                "evidence": "one",
+                "artifact_hashes": {"proposal.md": "old"},
+                "context_hashes": {"issue": "issue", "run": "run"},
+            }
+        },
+    )
+
+    assert NativeOrchestrationCoordinator._stored_complexity_assessment(
+        run,
+        {"proposal.md": "new"},
+        {"issue": "issue", "run": "run"},
+    ) is None
