@@ -41,12 +41,18 @@ F3 debe conectar estos componentes en un flujo orquestado autónomo y real gober
 - **Alternativas consideradas:** Usar PyGithub u octokit; descartadas por violar la política de mínimas dependencias y añadir capas redundantes.
 
 ### 2. Servicio de orquestación cohesivo (`NativeOrchestrationCoordinator`)
-- **Decisión:** Implementar un servicio modular y pequeño (`NativeOrchestrationCoordinator`) que coordina secuencialmente las etapas del Request (Explore → Propose → Validate → Complejidad → Revisión Propuesta → Apply → Pruebas → Verify → Revisión Código → PR1 → DocClose → Sync/Archive → PR2 → Cierre) persistiendo transiciones en `orchestration_runs`. El intake de issues se apoya en `RemoteRequestIntakeService` sin fragmentar el núcleo en múltiples microservicios innecesarios.
-- **Razón:** Cumple con la directriz de «la gacela, no el paquidermo»: lógica clara, determinista y orientada a objetos sin crear motores genéricos de workflows ni sagas sobre-dimensionadas.
+- **Decisión:** Implementar un servicio modular y pequeño (`NativeOrchestrationCoordinator`) que coordina secuencialmente las etapas del Request (Explore → Propose → Validate → Complejidad → Revisión Propuesta → Apply → Pruebas → Verify → Revisión Código → PR1 → DocClose → Sync/Archive → PR2 → Cierre) persistiendo transiciones en `orchestration_runs`. El coordinador delega cada etapa operativa a los agentes configurados mediante `CliAgentRunner` y adaptadores oficiales, prohibiendo taxativamente:
+  1. Emular Explore con respuestas simuladas o diccionarios estáticos.
+  2. Emular Propose generando plantillas de texto en Python en lugar del workflow nativo.
+  3. Emular revisiones independientes con retornos estáticos `return True` o stubs vacíos.
+  4. Emular Apply simulando cambios de tareas mediante expresiones regulares en `tasks.md`.
+  5. Emular Sync o Archive con llamadas directas a `shutil.move` u operaciones arbitrarias de ficheros en Python.
+  El intake de issues se apoya en `RemoteRequestIntakeService` sin fragmentar el núcleo en múltiples microservicios innecesarios.
+- **Razón:** Cumple con la directriz de «la gacela, no el paquidermo»: lógica clara, determinista y orientada a objetos sin crear motores genéricos de workflows ni sagas sobre-dimensionadas, garantizando ejecuciones 100% auténticas y demostrables.
 - **Alternativas consideradas:** Reutilizar o extender `SagaEngine` para cada sub-paso de agente; descartado porque las sagas añaden overhead de compensación innecesario para un flujo lineal donde la recuperación se basa en inspeccionar el estado observable de Git y OpenSpec.
 
 ### 3. Ejecutor unificado de agentes (`CliAgentRunner`)
-- **Decisión:** Consolidar el despacho de procesos de agentes en un runner reutilizable (`CliAgentRunner`) que maneja los perfiles de invocación (`CliInvocationProfile`), el confinamiento en sandbox (`AgentProcessConfinement`), el timeout y la captura de trazas para los roles de pensamiento, ejecución y revisión independiente.
+- **Decisión:** Consolidar el despacho de procesos de agentes en un runner reutilizable (`CliAgentRunner`) que maneja los perfiles de invocación (`CliInvocationProfile`), el confinamiento en sandbox (`AgentProcessConfinement`), el timeout y la captura de trazas para los roles de pensamiento, ejecución y revisión independiente. Todas las invocaciones a agentes capturan código de salida, stdout y stderr, registrando la evidencia observable en la base de datos o logs durables.
 - **Razón:** Elimina la duplicación entre `CliImplementerRunner` y `CliReviewerRunner`, permitiendo invocar al agente de pensamiento con el mismo rigor de confinamiento y captura que a los demás roles.
 - **Alternativas consideradas:** Crear tres clases de runner separadas (`ThinkerRunner`, `ImplementerRunner`, `ReviewerRunner`); descartado porque la mecánica de ejecución subprocess y sandbox es común a todos los roles.
 
