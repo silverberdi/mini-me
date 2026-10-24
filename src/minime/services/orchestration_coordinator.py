@@ -3,12 +3,14 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import inspect
 import json
 import re
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
+from uuid import uuid4
 
 from minime.adapters.github import GitHubAdapter
 from minime.adapters.openspec import OpenSpecAdapter
@@ -66,6 +68,19 @@ class ComplexityAssessment:
         return self.status == "VALID" and self.complexity is not None and bool(self.evidence)
 
 
+@dataclass(frozen=True)
+class ClassificationCheckpointResult:
+    """Bounded result for the one-shot complexity recovery checkpoint."""
+
+    status: str
+    run_id: str
+    attempt_id: str | None
+    model_identity: str | None
+    artifact_hashes: dict[str, str]
+    assessment: ComplexityAssessment
+    message: str
+
+
 class GitOperationError(RuntimeError):
     """A git operation failed and must be recoverable without advancing the run."""
 
@@ -94,6 +109,84 @@ class NativeOrchestrationCoordinator:
         self.openspec_adapter = openspec_adapter or OpenSpecAdapter()
         self.pr_preparer = pr_preparer or PrPreparerService()
         self.max_correction_attempts = max_correction_attempts
+
+    async def classify_existing_run(
+        self,
+        project_id: str,
+        run_id: str,
+        worktree_path: Path,
+        *,
+        thinker_provider: str = "codex",
+    ) -> ClassificationCheckpointResult:
+        """Run only the pending complexity checkpoint for an existing VALIDATING run.
+
+        This deliberately has no transition into proposal review, Apply, tests,
+        Verify, or PR handling. It is the bounded recovery entrypoint used when
+        the original classification evidence was not durable.
+        """
+        uow = self.uow_factory()
+        run = uow.orchestration_runs.get_by_id(run_id)
+        empty = ComplexityAssessment(status="BLOCKED", reason="checkpoint preflight failed")
+        if not run or run.project_id != project_id or not run.is_active:
+            return ClassificationCheckpointResult(
+                "BLOCKED", run_id, None, None, {}, empty, "Original active run was not found."
+            )
+        if run.current_stage != OrchestrationStage.VALIDATING:
+            return ClassificationCheckpointResult(
+                "BLOCKED", run_id, None, None, {}, empty,
+                f"Run is not in VALIDATING (found {run.current_stage.value}).",
+            )
+        stored = self._stored_complexity_assessment(run)
+        hashes = self._proposal_artifact_hashes(worktree_path, run.change_name)
+        if not self._proposal_artifacts_present(worktree_path, run.change_name):
+            return ClassificationCheckpointResult(
+                "BLOCKED", run_id, None, None, hashes, empty,
+                "Preserved proposal artifacts are incomplete.",
+            )
+        validation = self.openspec_adapter.validate_change_strict(run.change_name, worktree_path)
+        if validation.get("status") != "PASS":
+            return ClassificationCheckpointResult(
+                "BLOCKED", run_id, None, None, hashes, empty,
+                "Preserved proposal failed strict OpenSpec validation.",
+            )
+        project = uow.projects.get_by_id(project_id)
+        configured = self._configured_provider(project, "thinking")
+        model_identity = self._configured_model(uow, project_id, "thinking")
+        if configured != thinker_provider.strip().lower():
+            return ClassificationCheckpointResult(
+                "BLOCKED", run_id, None, model_identity, hashes, empty,
+                "Checkpoint provider does not match the persisted thinking profile.",
+            )
+        if stored is not None:
+            return ClassificationCheckpointResult(
+                "REUSED", run_id, None, model_identity, hashes, stored,
+                "A valid persisted classification was reused without invocation.",
+            )
+
+        issue_title = str((run.stop_details or {}).get("issue_title") or "")
+        issue_body = str((run.stop_details or {}).get("issue_body") or "")
+        attempt_id = str(uuid4())
+        assessment = await self._assess_complexity(
+            worktree_path, thinker_provider, issue_title, issue_body, project_id
+        )
+        self._persist_complexity_assessment(
+            run,
+            assessment,
+            attempt_id=attempt_id,
+            model_identity=model_identity,
+            artifact_hashes=hashes,
+        )
+        uow.orchestration_runs.save(run)
+        uow.commit()
+        return ClassificationCheckpointResult(
+            "CLASSIFIED" if assessment.is_valid else "BLOCKED",
+            run_id,
+            attempt_id,
+            model_identity,
+            hashes,
+            assessment,
+            "Classification persisted; checkpoint stopped before Review or Apply.",
+        )
 
     async def execute_project_request(
         self,
@@ -265,19 +358,18 @@ class NativeOrchestrationCoordinator:
                 )
 
             # Evaluate Complexity
-            complexity_result = await self._assess_complexity(
-                worktree_path, thinker_provider, issue_title, issue_body, project_id
-            )
-            active_run.stop_details["complexity_assessment"] = {
-                "status": complexity_result.status,
-                "complexity": complexity_result.complexity,
-                "evidence": complexity_result.evidence,
-                "reason": complexity_result.reason,
-                "exit_code": complexity_result.exit_code,
-                "timed_out": complexity_result.timed_out,
-                "preflight_error": complexity_result.preflight_error,
-                "output": complexity_result.output,
-            }
+            complexity_result = self._stored_complexity_assessment(active_run)
+            if complexity_result is None:
+                complexity_result = await self._assess_complexity(
+                    worktree_path, thinker_provider, issue_title, issue_body, project_id
+                )
+                self._persist_complexity_assessment(
+                    active_run,
+                    complexity_result,
+                    attempt_id=str(uuid4()),
+                    model_identity=self._configured_model(uow, project_id, "thinking"),
+                    artifact_hashes=self._proposal_artifact_hashes(worktree_path, change_name),
+                )
             if not complexity_result.is_valid:
                 if hasattr(uow, "orchestration_runs"):
                     uow.orchestration_runs.save(active_run)
@@ -751,6 +843,81 @@ class NativeOrchestrationCoordinator:
         return all(path.is_file() for path in required) and specs_dir.is_dir() and any(
             path.is_file() and path.suffix == ".md" for path in specs_dir.rglob("*.md")
         )
+
+    @staticmethod
+    def _proposal_artifact_hashes(worktree_path: Path, change_name: str) -> dict[str, str]:
+        change_dir = worktree_path / "openspec" / "changes" / change_name
+        paths = [
+            path for path in change_dir.rglob("*")
+            if path.is_file() and path.suffix == ".md"
+        ] if change_dir.is_dir() else []
+        return {
+            str(path.relative_to(worktree_path)): hashlib.sha256(path.read_bytes()).hexdigest()
+            for path in sorted(paths)
+        }
+
+    @staticmethod
+    def _configured_provider(project: Any, role: str) -> str | None:
+        profiles = getattr(project, "agent_profiles", {}) if project else {}
+        raw = profiles.get(role) if isinstance(profiles, dict) else None
+        if hasattr(raw, "model_dump"):
+            raw = raw.model_dump()
+        return str(raw.get("agent_id") or "").strip().lower() if isinstance(raw, dict) else None
+
+    @classmethod
+    def _configured_model(cls, uow: Any, project_id: str, role: str) -> str | None:
+        project = uow.projects.get_by_id(project_id) if hasattr(uow, "projects") else None
+        profiles = getattr(project, "agent_profiles", {}) if project else {}
+        raw = profiles.get(role) if isinstance(profiles, dict) else None
+        if hasattr(raw, "model_dump"):
+            raw = raw.model_dump()
+        return str(raw.get("model_id") or "").strip() or None if isinstance(raw, dict) else None
+
+    @staticmethod
+    def _stored_complexity_assessment(run: OrchestrationRun) -> ComplexityAssessment | None:
+        payload = (run.stop_details or {}).get("complexity_assessment")
+        if not isinstance(payload, dict) or payload.get("status") != "VALID":
+            return None
+        return ComplexityAssessment(
+            status=str(payload.get("status")),
+            complexity=payload.get("complexity"),
+            evidence=payload.get("evidence"),
+            reason=payload.get("reason"),
+            exit_code=payload.get("exit_code"),
+            timed_out=bool(payload.get("timed_out")),
+            preflight_error=payload.get("preflight_error"),
+            output=payload.get("output", ""),
+        )
+
+    @staticmethod
+    def _persist_complexity_assessment(
+        run: OrchestrationRun,
+        assessment: ComplexityAssessment,
+        *,
+        attempt_id: str,
+        model_identity: str | None,
+        artifact_hashes: dict[str, str],
+    ) -> None:
+        payload = {
+            "status": assessment.status,
+            "complexity": assessment.complexity,
+            "evidence": assessment.evidence,
+            "reason": assessment.reason,
+            "exit_code": assessment.exit_code,
+            "timed_out": assessment.timed_out,
+            "preflight_error": assessment.preflight_error,
+            "output": assessment.output,
+            "attempt_id": attempt_id,
+            "model_identity": model_identity,
+            "artifact_hashes": artifact_hashes,
+            "consumption": "unknown",
+        }
+        details = dict(run.stop_details or {})
+        attempts = list(details.get("complexity_attempts") or [])
+        attempts.append(payload)
+        details["complexity_attempts"] = attempts
+        details["complexity_assessment"] = payload
+        run.stop_details = details
 
     @staticmethod
     def _external_success(result: Any) -> bool:

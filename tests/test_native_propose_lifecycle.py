@@ -189,6 +189,9 @@ async def test_resume_validating_reuses_existing_proposal_without_propose(mock_e
     for name in ("proposal.md", "design.md", "tasks.md"):
         (change_dir / name).write_text("# existing")
     (change_dir / "specs" / "feature" / "spec.md").write_text("# existing")
+    codex_skill = repo_dir / ".agents" / "skills" / "openspec-propose"
+    codex_skill.mkdir(parents=True)
+    (codex_skill / "SKILL.md").write_text("native")
     uow.orchestration_runs.save(
         OrchestrationRun(
             project_id="proj-1",
@@ -239,3 +242,55 @@ async def test_explore_failed_blocks_propose(mock_env):
     assert result.status == "PAUSED"
     assert result.current_stage == OrchestrationStage.EXPLORING
     coordinator._run_propose.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_classification_checkpoint_stops_after_one_codex_call(mock_env):
+    coordinator, uow, _, repo_dir = mock_env
+    project = uow.projects.get_by_id("proj-1")
+    project.agent_profiles = {"thinking": {"agent_id": "codex", "model_id": "gpt-test"}}
+    uow.projects.save(project)
+    change_name = "req-101-add-caching-layer"
+    change_dir = repo_dir / "openspec" / "changes" / change_name
+    (change_dir / "specs" / "feature").mkdir(parents=True)
+    for name in ("proposal.md", "design.md", "tasks.md"):
+        (change_dir / name).write_text("# existing")
+    (change_dir / "specs" / "feature" / "spec.md").write_text("# existing")
+    codex_skill = repo_dir / ".agents" / "skills" / "openspec-propose"
+    codex_skill.mkdir(parents=True)
+    (codex_skill / "SKILL.md").write_text("native")
+    run = OrchestrationRun(
+        project_id="proj-1",
+        change_name=change_name,
+        base_sha="abc1234",
+        current_stage=OrchestrationStage.VALIDATING,
+        resumable_stage=OrchestrationStage.VALIDATING,
+        stop_details={"issue_number": 101, "issue_title": "title", "issue_body": "body"},
+    )
+    uow.orchestration_runs.save(run)
+    coordinator.openspec_adapter.validate_change_strict = MagicMock(
+        return_value={"status": "PASS", "returncode": 0}
+    )
+    coordinator.agent_runner.run = AsyncMock(return_value=AgentExecutionResult(
+        exit_code=0,
+        timed_out=False,
+        stdout=['{"complexity":"moderate","evidence":"single focused change"}'],
+        stderr=[],
+        duration_ms=1,
+    ))
+    coordinator._run_explore = AsyncMock(side_effect=AssertionError("Explore must not run"))
+    coordinator._run_propose = AsyncMock(side_effect=AssertionError("Propose must not run"))
+    coordinator._run_apply = AsyncMock(side_effect=AssertionError("Apply must not run"))
+
+    result = await coordinator.classify_existing_run(
+        "proj-1", run.run_id, repo_dir, thinker_provider="codex"
+    )
+
+    assert result.status == "CLASSIFIED"
+    assert result.assessment.complexity == "moderate"
+    assert result.attempt_id
+    assert coordinator.agent_runner.run.await_count == 1
+    persisted = uow.orchestration_runs.get_by_id(run.run_id)
+    assert persisted is not None
+    assert persisted.current_stage == OrchestrationStage.VALIDATING
+    assert persisted.stop_details["complexity_assessment"]["artifact_hashes"]
