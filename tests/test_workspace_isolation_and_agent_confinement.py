@@ -1,18 +1,16 @@
-import pytest
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import MagicMock
 
+import pytest
 from tests.conftest import InMemoryPersistenceUnitOfWork, setup_managed_repository_fixture
-from minime.services.worktree_manager import (
-    WorktreeManager,
-    WorktreeInfo,
-)
+
 from minime.services.agent_runner import (
-    CliAgentRunner,
     CapacityExhaustedError,
+    CliAgentRunner,
     NativeOpenSpecWorkflowUnavailable,
 )
+from minime.services.worktree_manager import WorktreeInfo, WorktreeManager
 
 
 def test_slugify_request_and_branch_formatting():
