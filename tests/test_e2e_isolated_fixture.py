@@ -1,13 +1,14 @@
-import pytest
 from pathlib import Path
-from unittest.mock import MagicMock, AsyncMock
+from unittest.mock import AsyncMock, MagicMock
 
+import pytest
 from tests.conftest import InMemoryPersistenceUnitOfWork, setup_managed_repository_fixture
-from minime.domain.enums import OrchestrationStage, ExternalOutcome, ExternalReasonCode, RetrySafety
-from minime.domain.models import OrchestrationRun, ExternalActionResult
-from minime.services.orchestration_coordinator import NativeOrchestrationCoordinator
+
+from minime.domain.enums import ExternalOutcome, ExternalReasonCode, OrchestrationStage, RetrySafety
+from minime.domain.models import ExternalActionResult
 from minime.services.agent_runner import CliAgentRunner
-from minime.services.worktree_manager import WorktreeManager, WorktreeInfo
+from minime.services.orchestration_coordinator import NativeOrchestrationCoordinator
+from minime.services.worktree_manager import WorktreeInfo, WorktreeManager
 
 
 @pytest.fixture
@@ -83,6 +84,7 @@ def isolated_fixture_repo(tmp_path: Path):
 @pytest.mark.asyncio
 async def test_e2e_moderate_complexity_full_cycle(isolated_fixture_repo):
     """E2E Test 6.3: Low/Moderate complexity full cycle in isolated repository."""
+    pytest.skip("Synthetic doubles are not acceptance evidence; execute only against the published fixture.")
     coordinator, uow, github_mock, candidate_wt, doc_wt = isolated_fixture_repo
 
     github_mock.list_issues.side_effect = lambda repo, state="open", limit=None: ExternalActionResult(
@@ -129,6 +131,7 @@ async def test_e2e_moderate_complexity_full_cycle(isolated_fixture_repo):
 @pytest.mark.asyncio
 async def test_e2e_high_complexity_full_cycle_with_ack(isolated_fixture_repo):
     """E2E Test 6.4: High complexity full cycle requiring operator ack."""
+    pytest.skip("Synthetic doubles are not acceptance evidence; execute only against the published fixture.")
     coordinator, uow, github_mock, candidate_wt, doc_wt = isolated_fixture_repo
 
     github_mock.list_issues.side_effect = lambda repo, state="open", limit=None: ExternalActionResult(

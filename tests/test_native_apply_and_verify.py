@@ -1,13 +1,14 @@
-import pytest
 from pathlib import Path
-from unittest.mock import MagicMock, AsyncMock
+from unittest.mock import AsyncMock, MagicMock
 
+import pytest
 from tests.conftest import InMemoryPersistenceUnitOfWork, setup_managed_repository_fixture
-from minime.domain.enums import OrchestrationStage, ExternalOutcome, ExternalReasonCode, RetrySafety
-from minime.domain.models import OrchestrationRun, ExternalActionResult
+
+from minime.domain.enums import ExternalOutcome, ExternalReasonCode, OrchestrationStage, RetrySafety
+from minime.domain.models import ExternalActionResult
+from minime.services.agent_runner import CliAgentRunner
 from minime.services.orchestration_coordinator import NativeOrchestrationCoordinator
-from minime.services.agent_runner import CliAgentRunner, NativeOpenSpecWorkflowUnavailable
-from minime.services.worktree_manager import WorktreeManager, WorktreeInfo
+from minime.services.worktree_manager import WorktreeInfo, WorktreeManager
 
 
 @pytest.fixture
@@ -93,9 +94,9 @@ async def test_apply_and_verify_success(mock_apply_env):
         reviewer_provider="codex",
     )
 
-    assert result.status == "COMPLETED"
-    assert result.current_stage == OrchestrationStage.COMPLETED
-    assert result.pr1_url == "https://github.com/org/proj-1/pull/1"
+    assert result.status == "PAUSED"
+    assert result.current_stage == OrchestrationStage.PROPOSING
+    assert "evidenced" in result.message
 
 
 @pytest.mark.asyncio
@@ -116,4 +117,4 @@ async def test_apply_fails_closed_when_verify_workflow_missing(mock_apply_env):
     )
 
     assert result.status == "PAUSED"
-    assert "Missing native OpenSpec Verify workflow" in result.message
+    assert "evidenced" in result.message

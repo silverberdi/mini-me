@@ -1,13 +1,14 @@
-import pytest
 from pathlib import Path
-from unittest.mock import MagicMock, AsyncMock
+from unittest.mock import AsyncMock, MagicMock
 
+import pytest
 from tests.conftest import InMemoryPersistenceUnitOfWork, setup_managed_repository_fixture
-from minime.domain.enums import OrchestrationStage, ExternalOutcome, ExternalReasonCode, RetrySafety
-from minime.domain.models import OrchestrationRun, ExternalActionResult
+
+from minime.domain.enums import ExternalOutcome, ExternalReasonCode, OrchestrationStage, RetrySafety
+from minime.domain.models import ExternalActionResult
+from minime.services.agent_runner import CliAgentRunner
 from minime.services.orchestration_coordinator import NativeOrchestrationCoordinator
-from minime.services.agent_runner import CliAgentRunner, NativeOpenSpecWorkflowUnavailable
-from minime.services.worktree_manager import WorktreeManager, WorktreeInfo
+from minime.services.worktree_manager import WorktreeInfo, WorktreeManager
 
 
 @pytest.mark.asyncio
@@ -88,21 +89,24 @@ async def test_orchestration_continuity_worktree_preserved_on_failure(tmp_path: 
     )
 
     assert result.status == "PAUSED"
-    assert "Failed to merge PR1" in result.message
+    assert result.current_stage == OrchestrationStage.PROPOSING
+    assert "evidenced" in result.message
     # Critical requirement: Worktree MUST be preserved, not deleted!
     assert candidate_worktree.exists()
 
     # Active run record MUST remain active in PostgreSQL (not abandoned or unlocked)
     active_runs = uow.orchestration_runs.list_runs(project_id="proj-1", is_active=True)
     assert len(active_runs) == 1
-    assert active_runs[0].current_stage == OrchestrationStage.PR1_PENDING
+    assert active_runs[0].current_stage == OrchestrationStage.PROPOSING
 
 
 def test_request_rest_api_endpoints(in_memory_uow, tmp_path: Path):
+    from unittest.mock import MagicMock, patch
+
     from fastapi.testclient import TestClient
-    from minime.api.app import app, get_uow, get_current_operator
+
+    from minime.api.app import app, get_current_operator, get_uow
     from minime.domain.models import AuthorizedOperator, Project
-    from unittest.mock import patch, MagicMock
 
     repo_root = tmp_path / "repo-test"
     repo_root.mkdir()
@@ -144,7 +148,8 @@ def test_request_rest_api_endpoints(in_memory_uow, tmp_path: Path):
             assert len(data["eligible_requests"]) == 1
 
         # 2. POST request run
-        with patch("minime.services.orchestration_coordinator.NativeOrchestrationCoordinator.execute_project_request") as mock_exec:
+        with patch("minime.services.agent_runner.CliAgentRunner.for_project_profiles", return_value=MagicMock()), \
+             patch("minime.services.orchestration_coordinator.NativeOrchestrationCoordinator.execute_project_request") as mock_exec:
             mock_res = MagicMock(
                 status="COMPLETED",
                 run_id="run-1",
@@ -157,12 +162,14 @@ def test_request_rest_api_endpoints(in_memory_uow, tmp_path: Path):
             mock_exec.return_value = mock_res
             res = client.post("/api/v1/projects/proj-test/requests/run", json={"operator_ack": False})
             assert res.status_code == 200
+            assert "operator_response" not in mock_exec.call_args.kwargs
             data = res.json()
             assert data["status"] == "COMPLETED"
             assert data["pr1_url"] == "https://github.com/org/repo-test/pull/1"
 
         # 3. POST request ack
-        with patch("minime.services.orchestration_coordinator.NativeOrchestrationCoordinator.execute_project_request") as mock_exec:
+        with patch("minime.services.agent_runner.CliAgentRunner.for_project_profiles", return_value=MagicMock()), \
+             patch("minime.services.orchestration_coordinator.NativeOrchestrationCoordinator.execute_project_request") as mock_exec:
             mock_exec.return_value = mock_res
             res = client.post("/api/v1/projects/proj-test/requests/ack")
             assert res.status_code == 200

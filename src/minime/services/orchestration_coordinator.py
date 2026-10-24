@@ -4,8 +4,8 @@ from __future__ import annotations
 
 import asyncio
 import inspect
+import json
 import re
-import subprocess
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -16,9 +16,10 @@ from minime.domain.enums import ExternalOutcome, OrchestrationStage, Orchestrati
 from minime.domain.interfaces import PersistenceUnitOfWork
 from minime.domain.models import OrchestrationRun, utc_now
 from minime.logging import get_logger
-from minime.services.agent_runner import CliAgentRunner, NativeOpenSpecWorkflowUnavailable, CapacityExhaustedError
-from minime.services.pr_preparer_service import PrPreparerService, PrPreparationInput
+from minime.services.agent_runner import CliAgentRunner, NativeOpenSpecWorkflowUnavailable
+from minime.services.pr_preparer_service import PrPreparationInput, PrPreparerService
 from minime.services.remote_request_intake import RemoteRequestIntakeService
+from minime.services.review_verdict_parser import MalformedReviewOutputError, parse_review_verdict
 from minime.services.worktree_manager import WorktreeManager
 
 logger = get_logger("services.orchestration_coordinator")
@@ -33,6 +34,26 @@ class OrchestrationCoordinationResult:
     pr1_url: str | None = None
     pr2_url: str | None = None
     human_payload: dict[str, Any] | None = None
+
+
+@dataclass(frozen=True)
+class GitCommandResult:
+    args: tuple[str, ...]
+    returncode: int
+    stdout: str
+    stderr: str
+
+    @property
+    def ok(self) -> bool:
+        return self.returncode == 0
+
+
+class GitOperationError(RuntimeError):
+    """A git operation failed and must be recoverable without advancing the run."""
+
+    def __init__(self, result: GitCommandResult) -> None:
+        super().__init__(f"git {' '.join(result.args)} failed ({result.returncode}): {result.stderr.strip()}")
+        self.result = result
 
 
 class NativeOrchestrationCoordinator:
@@ -70,14 +91,31 @@ class NativeOrchestrationCoordinator:
         uow: PersistenceUnitOfWork = self.uow_factory()
         intake_service = RemoteRequestIntakeService(github_adapter=self.github_adapter, uow=uow)
 
-        # Resolve repository from project or managed binding
-        repository = "org/repo"
+        # Resolve repository from the persisted project/binding. Never use a
+        # placeholder: publishing against an unverified repository is unsafe.
+        repository = None
         if hasattr(uow, "projects"):
             getter = getattr(uow.projects, "get_by_id", None) or getattr(uow.projects, "get", None)
             if getter:
                 proj = getter(project_id)
-                if proj and hasattr(proj, "repository"):
+                if proj and getattr(proj, "repository", None):
                     repository = proj.repository
+        binding = None
+        if hasattr(uow, "project_managed_repository_bindings"):
+            binding = uow.project_managed_repository_bindings.get_by_project_id(project_id)
+        if not repository or binding is None or not getattr(binding, "managed_repository_root", None):
+            return OrchestrationCoordinationResult(
+                status="PAUSED", run_id=None, current_stage=OrchestrationStage.ADMITTED,
+                message="Project has no verified repository binding; work was not started.",
+            )
+        canonical = str(getattr(binding, "canonical_repository_identity", ""))
+        expected = f"github.com/{repository}".lower().removeprefix("https://")
+        if (canonical.lower().startswith(("github.com/", "https://"))
+                and canonical.lower().removeprefix("https://") != expected):
+            return OrchestrationCoordinationResult(
+                status="PAUSED", run_id=None, current_stage=OrchestrationStage.ADMITTED,
+                message="Project repository does not match its verified managed binding.",
+            )
 
         # Step 1: Remote Request Intake and Selection
         selected = intake_service.select_next_request(project_id, repository)
@@ -164,6 +202,12 @@ class NativeOrchestrationCoordinator:
                 issue_body=issue_body,
                 project_id=project_id,
             )
+            if propose_result.get("status") != "READY_TO_VALIDATE":
+                return OrchestrationCoordinationResult(
+                    status="PAUSED", run_id=active_run.run_id,
+                    current_stage=OrchestrationStage.PROPOSING,
+                    message=propose_result.get("message", "Native Propose did not produce a valid result."),
+                )
 
             self._update_stage(uow, active_run, OrchestrationStage.VALIDATING)
             validate_pass = False
@@ -174,7 +218,11 @@ class NativeOrchestrationCoordinator:
                     break
                 # Correction pass
                 logger.info(f"OpenSpec strict validation failed on attempt {attempt + 1}. Running correction pass...")
-                await self._run_propose_correction(worktree_path, thinker_provider, change_name, val_res.get("stderr", ""), project_id=project_id)
+                correction_ok = await self._run_propose_correction(
+                    worktree_path, thinker_provider, change_name, val_res.get("stderr", ""), project_id=project_id
+                )
+                if not correction_ok:
+                    break
 
             if not validate_pass:
                 return OrchestrationCoordinationResult(
@@ -185,7 +233,16 @@ class NativeOrchestrationCoordinator:
                 )
 
             # Evaluate Complexity
-            complexity = self._evaluate_complexity(issue_body, issue_title)
+            complexity_result = await self._assess_complexity(
+                worktree_path, thinker_provider, issue_title, issue_body, project_id
+            )
+            if complexity_result is None:
+                return OrchestrationCoordinationResult(
+                    status="PAUSED", run_id=active_run.run_id,
+                    current_stage=OrchestrationStage.VALIDATING,
+                    message="Thinking agent did not return a positive structured complexity verdict.",
+                )
+            complexity = complexity_result
             active_run.stop_details["complexity"] = complexity
             if hasattr(uow, "orchestration_runs"):
                 uow.orchestration_runs.save(active_run)
@@ -226,7 +283,13 @@ class NativeOrchestrationCoordinator:
         # Step 7: Apply Stage and Test Execution
         if active_run.current_stage in (OrchestrationStage.READY_TO_APPLY, OrchestrationStage.IMPLEMENTING):
             self._update_stage(uow, active_run, OrchestrationStage.IMPLEMENTING)
-            await self._run_apply(worktree_path, implementer_provider, change_name, project_id=project_id)
+            apply_ok = await self._run_apply(worktree_path, implementer_provider, change_name, project_id=project_id)
+            if not apply_ok:
+                return OrchestrationCoordinationResult(
+                    status="PAUSED", run_id=active_run.run_id,
+                    current_stage=OrchestrationStage.IMPLEMENTING,
+                    message="Native Apply failed or produced no authoritative evidence. Worktree preserved.",
+                )
 
             self._update_stage(uow, active_run, OrchestrationStage.RUNNING_TESTS)
             tests_ok, test_evidence = await self._run_automated_tests(worktree_path)
@@ -269,7 +332,14 @@ class NativeOrchestrationCoordinator:
         pr1_url = active_run.stop_details.get("pr1_url")
         pr1_number = active_run.stop_details.get("pr1_number")
         complexity = active_run.stop_details.get("complexity", "moderate")
-        candidate_sha = await self._get_git_head_sha(worktree_path)
+        try:
+            candidate_sha = await self._get_git_head_sha(worktree_path)
+        except GitOperationError as exc:
+            return OrchestrationCoordinationResult(
+                status="PAUSED", run_id=active_run.run_id,
+                current_stage=OrchestrationStage.READY_FOR_PR,
+                message=f"Unable to observe candidate Git state: {exc}. Worktree preserved.",
+            )
         active_run.candidate_sha = candidate_sha
 
         if not pr1_number:
@@ -291,7 +361,14 @@ class NativeOrchestrationCoordinator:
             prepared_pr = self.pr_preparer.prepare_pull_request(prep_input)
 
             # Push branch
-            await self._push_branch(worktree_path, worktree_info.branch_name)
+            try:
+                await self._push_branch(worktree_path, worktree_info.branch_name)
+            except GitOperationError as exc:
+                return OrchestrationCoordinationResult(
+                    status="PAUSED", run_id=active_run.run_id,
+                    current_stage=OrchestrationStage.PR1_PENDING,
+                    message=f"Unable to publish PR1 branch: {exc}. Worktree preserved.",
+                )
 
             # Open PR via GitHubAdapter
             opened_pr_call = self.github_adapter.create_pull_request(
@@ -309,9 +386,24 @@ class NativeOrchestrationCoordinator:
                 body=prepared_pr.body,
             )
             opened_pr_res = await opened_pr_call if inspect.isawaitable(opened_pr_call) else opened_pr_call
+            if not self._external_success(opened_pr_res):
+                return OrchestrationCoordinationResult(
+                    status="PAUSED", run_id=active_run.run_id,
+                    current_stage=OrchestrationStage.PR1_PENDING,
+                    message="GitHub did not confirm creation of PR1. Worktree preserved.",
+                )
             opened_data = opened_pr_res.data if hasattr(opened_pr_res, "data") else opened_pr_res
             pr1_number = opened_data.get("number") if isinstance(opened_data, dict) else getattr(opened_data, "number", None)
             pr1_url = opened_data.get("html_url") if isinstance(opened_data, dict) else getattr(opened_data, "html_url", None)
+            if not pr1_number or not await self._confirm_pr_open(
+                repository, pr1_number, worktree_info.branch_name, base_branch, candidate_sha
+            ):
+                return OrchestrationCoordinationResult(
+                    status="PAUSED", run_id=active_run.run_id,
+                    current_stage=OrchestrationStage.PR1_PENDING,
+                    pr1_url=pr1_url,
+                    message="PR1 identity or remote head/base state was not confirmed.",
+                )
             active_run.stop_details["pr1_number"] = pr1_number
             active_run.stop_details["pr1_url"] = pr1_url
             if hasattr(uow, "orchestration_runs"):
@@ -347,11 +439,13 @@ class NativeOrchestrationCoordinator:
                 merge_method="merge",
             )
             merge_res = await merge_call if inspect.isawaitable(merge_call) else merge_call
-            merge_data = merge_res.data if hasattr(merge_res, "data") else merge_res
-            is_merged = (merge_data.get("merged") or merge_data.get("status") == "merged") if isinstance(merge_data, dict) else (getattr(merge_res, "outcome", None) == ExternalOutcome.SUCCESS)
+            if not self._external_success(merge_res):
+                is_merged = False
+            else:
+                is_merged = await self._confirm_pr_merged(repository, pr1_number, candidate_sha)
 
             if not is_merged:
-                err_msg = merge_data.get("message") if isinstance(merge_data, dict) else getattr(merge_res, "error_message", "Merge failed")
+                err_msg = getattr(merge_res, "error_message", "Merge failed")
                 return OrchestrationCoordinationResult(
                     status="PAUSED",
                     run_id=active_run.run_id,
@@ -373,8 +467,31 @@ class NativeOrchestrationCoordinator:
         doc_path = doc_worktree_info.path
 
         # Run native Sync & Archive
-        await self._run_sync_and_archive(doc_path, thinker_provider, change_name, project_id=project_id)
-        doc_head_sha = await self._get_git_head_sha(doc_path)
+        try:
+            sync_archive_ok = await self._run_sync_and_archive(doc_path, thinker_provider, change_name, project_id=project_id)
+        except GitOperationError as exc:
+            return OrchestrationCoordinationResult(
+                status="PAUSED", run_id=active_run.run_id,
+                current_stage=OrchestrationStage.DOC_CLOSING,
+                pr1_url=pr1_url,
+                message=f"Documentation Git operation failed: {exc}. Worktree preserved.",
+            )
+        if not sync_archive_ok:
+            return OrchestrationCoordinationResult(
+                status="PAUSED", run_id=active_run.run_id,
+                current_stage=OrchestrationStage.DOC_CLOSING,
+                pr1_url=pr1_url,
+                message="Native Sync or Archive failed. Documentation worktree preserved.",
+            )
+        try:
+            doc_head_sha = await self._get_git_head_sha(doc_path)
+        except GitOperationError as exc:
+            return OrchestrationCoordinationResult(
+                status="PAUSED", run_id=active_run.run_id,
+                current_stage=OrchestrationStage.DOC_CLOSING,
+                pr1_url=pr1_url,
+                message=f"Unable to observe documentation Git state: {exc}. Worktree preserved.",
+            )
 
         # Step 12: Documentation PR (PR2)
         self._update_stage(uow, active_run, OrchestrationStage.PR2_PENDING)
@@ -393,7 +510,15 @@ class NativeOrchestrationCoordinator:
         )
         prepared_doc_pr = self.pr_preparer.prepare_pull_request(doc_prep_input)
 
-        await self._push_branch(doc_path, doc_worktree_info.branch_name)
+        try:
+            await self._push_branch(doc_path, doc_worktree_info.branch_name)
+        except GitOperationError as exc:
+            return OrchestrationCoordinationResult(
+                status="PAUSED", run_id=active_run.run_id,
+                current_stage=OrchestrationStage.PR2_PENDING,
+                pr1_url=pr1_url,
+                message=f"Unable to publish PR2 branch: {exc}. Worktree preserved.",
+            )
         opened_doc_call = self.github_adapter.create_pull_request(
             repository=repository,
             branch=doc_worktree_info.branch_name,
@@ -409,9 +534,25 @@ class NativeOrchestrationCoordinator:
             body=prepared_doc_pr.body,
         )
         opened_doc_res = await opened_doc_call if inspect.isawaitable(opened_doc_call) else opened_doc_call
+        if not self._external_success(opened_doc_res):
+            return OrchestrationCoordinationResult(
+                status="PAUSED", run_id=active_run.run_id,
+                current_stage=OrchestrationStage.PR2_PENDING,
+                pr1_url=pr1_url,
+                message="GitHub did not confirm creation of PR2. Worktree preserved.",
+            )
         opened_doc_data = opened_doc_res.data if hasattr(opened_doc_res, "data") else opened_doc_res
         pr2_number = opened_doc_data.get("number") if isinstance(opened_doc_data, dict) else getattr(opened_doc_data, "number", None)
         pr2_url = opened_doc_data.get("html_url") if isinstance(opened_doc_data, dict) else getattr(opened_doc_data, "html_url", None)
+        if not pr2_number or not await self._confirm_pr_open(
+            repository, pr2_number, doc_worktree_info.branch_name, base_branch, doc_head_sha
+        ):
+            return OrchestrationCoordinationResult(
+                status="PAUSED", run_id=active_run.run_id,
+                current_stage=OrchestrationStage.PR2_PENDING,
+                pr1_url=pr1_url, pr2_url=pr2_url,
+                message="PR2 identity or remote head/base state was not confirmed.",
+            )
         active_run.stop_details["pr2_number"] = pr2_number
         active_run.stop_details["pr2_url"] = pr2_url
 
@@ -427,11 +568,12 @@ class NativeOrchestrationCoordinator:
             merge_method="merge",
         )
         merge_doc_res = await merge_doc_call if inspect.isawaitable(merge_doc_call) else merge_doc_call
-        merge_doc_data = merge_doc_res.data if hasattr(merge_doc_res, "data") else merge_doc_res
-        doc_merged = (merge_doc_data.get("merged") or merge_doc_data.get("status") == "merged") if isinstance(merge_doc_data, dict) else (getattr(merge_doc_res, "outcome", None) == ExternalOutcome.SUCCESS)
+        doc_merged = self._external_success(merge_doc_res) and await self._confirm_pr_merged(
+            repository, pr2_number, doc_head_sha
+        )
 
         if not doc_merged:
-            err_msg = merge_doc_data.get("message") if isinstance(merge_doc_data, dict) else getattr(merge_doc_res, "error_message", "Merge PR2 failed")
+            err_msg = getattr(merge_doc_res, "error_message", "Merge PR2 failed")
             return OrchestrationCoordinationResult(
                 status="PAUSED",
                 run_id=active_run.run_id,
@@ -462,8 +604,21 @@ class NativeOrchestrationCoordinator:
                 f"- OpenSpec Change: `{change_name}` archived."
             ),
         )
-        if inspect.isawaitable(close_call):
-            await close_call
+        close_res = await close_call if inspect.isawaitable(close_call) else close_call
+        if not self._external_success(close_res) or not await self._confirm_issue_closed(repository, issue_number):
+            return OrchestrationCoordinationResult(
+                status="PAUSED", run_id=active_run.run_id,
+                current_stage=OrchestrationStage.PR2_MERGED,
+                pr1_url=pr1_url, pr2_url=pr2_url,
+                message="Remote issue closure was not confirmed; lock remains held.",
+            )
+
+        # Record the next FIFO candidate only after remote completion is
+        # confirmed. The scheduler remains the sole owner of starting it.
+        next_request = intake_service.select_next_request(project_id, repository)
+        active_run.stop_details["next_fifo_request"] = (
+            next_request.get("issue_number") if next_request else None
+        )
 
         active_run.is_active = False
         active_run.stop_outcome = OrchestrationStopOutcome.COMPLETED
@@ -478,6 +633,48 @@ class NativeOrchestrationCoordinator:
             message=f"Request #{issue_number} successfully implemented, verified, merged, and closed.",
         )
 
+    async def _confirm_pr_merged(self, repository: str, pr_number: int, candidate_sha: str) -> bool:
+        """Re-read the remote PR; a merge request response alone is not proof."""
+        getter = getattr(self.github_adapter, "get_pull_request_details", None)
+        if not getter:
+            return False
+        result = getter(repository=repository, pr_number=pr_number)
+        result = await result if inspect.isawaitable(result) else result
+        if not self._external_success(result):
+            return False
+        data = result.data if hasattr(result, "data") else result
+        if not isinstance(data, dict):
+            return False
+        return bool(data.get("is_merged") or data.get("merged")) and data.get("merge_commit_sha") is not None and (
+            not data.get("head_sha") or data.get("head_sha") == candidate_sha
+        )
+
+    async def _confirm_pr_open(
+        self, repository: str, pr_number: int, head_branch: str, base_branch: str, candidate_sha: str
+    ) -> bool:
+        getter = getattr(self.github_adapter, "get_pull_request_details", None)
+        if not getter:
+            return False
+        result = getter(repository=repository, pr_number=pr_number)
+        result = await result if inspect.isawaitable(result) else result
+        if not self._external_success(result):
+            return False
+        data = result.data if hasattr(result, "data") else result
+        return isinstance(data, dict) and data.get("state") == "open" and data.get("head_sha") == candidate_sha and (
+            data.get("head_branch") == head_branch and data.get("base_branch") == base_branch
+        )
+
+    async def _confirm_issue_closed(self, repository: str, issue_number: int) -> bool:
+        getter = getattr(self.github_adapter, "get_issue", None)
+        if not getter:
+            return False
+        result = getter(repository=repository, issue_number=issue_number)
+        result = await result if inspect.isawaitable(result) else result
+        if not self._external_success(result):
+            return False
+        data = result.data if hasattr(result, "data") else result
+        return isinstance(data, dict) and str(data.get("state", "")).lower() == "closed"
+
     def _update_stage(self, uow: Any, run: OrchestrationRun, stage: OrchestrationStage) -> None:
         run.current_stage = stage
         run.resumable_stage = stage
@@ -487,13 +684,69 @@ class NativeOrchestrationCoordinator:
             if hasattr(uow, "commit"):
                 uow.commit()
 
-    def _evaluate_complexity(self, body: str, title: str) -> str:
-        text = f"{title}\n{body}".lower()
-        if any(k in text for k in ["breaking change", "architectural", "migration", "security critical", "high complexity"]):
-            return "high"
-        if any(k in text for k in ["minor", "typo", "docs only", "low complexity", "trivial"]):
-            return "low"
-        return "moderate"
+    @staticmethod
+    def _execution_is_successful(result: Any) -> bool:
+        """Only an explicit, evidenced, zero-exit execution can advance a stage."""
+        if result is None or getattr(result, "exit_code", None) != 0:
+            return False
+        if getattr(result, "timed_out", False) or getattr(result, "preflight_error", None):
+            return False
+        if getattr(result, "environment_error", False):
+            return False
+        return bool(getattr(result, "full_output", "").strip())
+
+    @staticmethod
+    def _external_success(result: Any) -> bool:
+        if result is None:
+            return False
+        if isinstance(result, dict):
+            return bool(result.get("success") or result.get("merged"))
+        return getattr(result, "outcome", None) == ExternalOutcome.SUCCESS and bool(
+            getattr(result, "data", None) is not None
+        )
+
+    @staticmethod
+    def _parse_json_object(raw: str) -> dict[str, Any] | None:
+        candidates = re.findall(r"```(?:json)?\s*([\s\S]*?)\s*```", raw, re.IGNORECASE)
+        if not candidates:
+            candidates = re.findall(r"\{[\s\S]*\}", raw)
+        parsed: list[dict[str, Any]] = []
+        for candidate in candidates:
+            try:
+                value = json.loads(candidate.strip())
+            except json.JSONDecodeError:
+                continue
+            if isinstance(value, dict):
+                parsed.append(value)
+        return parsed[0] if len(parsed) == 1 else None
+
+    async def _assess_complexity(
+        self, worktree_path: Path, provider: str, title: str, body: str, project_id: str | None
+    ) -> str | None:
+        wf = self.agent_runner.resolve_workflow(
+            worktree_path=worktree_path, provider=provider, operation="propose", change_name="complexity-assessment"
+        )
+        result = await self.agent_runner.run(
+            worktree_path=worktree_path,
+            prompt_context=(
+                "Assess this Request's implementation complexity using the configured thinking agent. "
+                "Return exactly one JSON object: {\"complexity\": \"low|moderate|high\", "
+                "\"evidence\": \"brief concrete rationale\"}. Do not infer from keywords alone.\n"
+                f"Title: {title}\nBody:\n{body}"
+            ),
+            project_id=project_id,
+            role="thinker",
+            provider=provider,
+            workflow=wf,
+        )
+        if not self._execution_is_successful(result):
+            return None
+        payload = self._parse_json_object(result.full_output)
+        if not payload or payload.get("complexity") not in {"low", "moderate", "high"}:
+            return None
+        if not isinstance(payload.get("evidence"), str) or not payload["evidence"].strip():
+            return None
+        return payload["complexity"]
 
     async def _run_explore(
         self,
@@ -530,10 +783,13 @@ class NativeOrchestrationCoordinator:
             workflow=wf,
         )
 
+        if not self._execution_is_successful(res):
+            return {"status": "FAILED", "message": "Explore agent execution was not successful or evidenced."}
         full_out = res.full_output
-        if "HUMAN REQUIRED" in full_out or ("HUMAN REQUIRED" in issue_body and not operator_clarification):
-            # Extract options if present
-            options = ["Opción A: Mantener comportamiento por defecto", "Opción B: Implementar modo estricto"]
+        if "HUMAN REQUIRED" in full_out:
+            options = [line.strip(" -*") for line in full_out.splitlines() if line.strip().startswith(("-", "•"))]
+            if not options:
+                return {"status": "FAILED", "message": "Explore requested human input without concrete options."}
             return {
                 "status": "HUMAN_REQUIRED",
                 "human_payload": {
@@ -577,6 +833,8 @@ class NativeOrchestrationCoordinator:
             provider=provider,
             workflow=wf,
         )
+        if not self._execution_is_successful(res):
+            return {"status": "FAILED", "message": "Propose agent execution was not successful or evidenced."}
         return {"status": "READY_TO_VALIDATE", "workflow": wf, "execution": res}
 
     async def _run_propose_correction(
@@ -586,7 +844,7 @@ class NativeOrchestrationCoordinator:
         change_name: str,
         error_output: str,
         project_id: str | None = None,
-    ) -> None:
+    ) -> bool:
         """Run correction pass by thinking agent on strict validation failure."""
         wf = self.agent_runner.resolve_workflow(
             worktree_path=worktree_path,
@@ -600,7 +858,7 @@ class NativeOrchestrationCoordinator:
             f"Please correct the planning artifacts under openspec/changes/{change_name}/ so that "
             f"'openspec validate {change_name} --strict --type change' passes cleanly."
         )
-        await self.agent_runner.run(
+        result = await self.agent_runner.run(
             worktree_path=worktree_path,
             prompt_context=prompt,
             project_id=project_id,
@@ -608,6 +866,7 @@ class NativeOrchestrationCoordinator:
             provider=provider,
             workflow=wf,
         )
+        return self._execution_is_successful(result)
 
     async def _run_proposal_review(
         self,
@@ -623,7 +882,9 @@ class NativeOrchestrationCoordinator:
             f"You are the independent reviewer agent (read-only). Perform independent review on OpenSpec change '{change_name}'.\n\n"
             f"Proposal Artifacts:\n{proposal_text[:3000]}\n\n"
             f"Evaluate architectural soundness, requirement coverage, and absence of overengineering.\n"
-            f"Emit APPROVED if satisfactory, or CHANGES REQUESTED with concrete findings."
+            "Emit exactly one JSON review payload matching ReviewVerdictPayload. Use verdict "
+            "READY_TO_MERGE only with an empty findings list; otherwise use CHANGES_REQUIRED "
+            "with concrete findings."
         )
         res = await self.agent_runner.run(
             worktree_path=worktree_path,
@@ -632,10 +893,12 @@ class NativeOrchestrationCoordinator:
             role="reviewer",
             provider=provider,
         )
-        output = res.full_output.upper()
-        if "CHANGES REQUESTED" in output or "REJECTED" in output:
+        if not self._execution_is_successful(res):
             return False
-        return True
+        try:
+            return parse_review_verdict(res.full_output).verdict.value == "READY_TO_MERGE"
+        except MalformedReviewOutputError:
+            return False
 
     async def _run_apply(
         self,
@@ -643,7 +906,7 @@ class NativeOrchestrationCoordinator:
         provider: str,
         change_name: str,
         project_id: str | None = None,
-    ) -> None:
+    ) -> bool:
         """Dispatch configured implementer agent to execute official OpenSpec Apply workflow."""
         wf = self.agent_runner.resolve_workflow(
             worktree_path=worktree_path,
@@ -657,7 +920,7 @@ class NativeOrchestrationCoordinator:
             f"Implement all pending tasks specified in tasks.md, write unit and E2E tests, "
             f"ensure the test suite passes, and mark completed tasks as [x]."
         )
-        await self.agent_runner.run(
+        result = await self.agent_runner.run(
             worktree_path=worktree_path,
             prompt_context=prompt,
             project_id=project_id,
@@ -665,11 +928,12 @@ class NativeOrchestrationCoordinator:
             provider=provider,
             workflow=wf,
         )
+        return self._execution_is_successful(result)
 
     async def _run_automated_tests(self, worktree_path: Path) -> tuple[bool, str]:
         """Execute project automated tests and verify exit code 0."""
-        import sys
         import shutil
+        import sys
         pytest_bin = shutil.which("pytest") or str(Path(sys.executable).parent / "pytest")
         cmd = [pytest_bin, "-q"] if Path(pytest_bin).exists() else [sys.executable, "-m", "pytest", "-q"]
         try:
@@ -682,10 +946,16 @@ class NativeOrchestrationCoordinator:
             stdout, stderr = await proc.communicate()
             evidence = stdout.decode(errors="replace") + stderr.decode(errors="replace")
             if proc.returncode == 0:
-                return True, evidence or "All automated tests passed (exit code 0)."
-            if "no tests ran" in evidence or proc.returncode == 5:
-                # If project has no tests directory yet, record clean notice
-                return True, evidence or "No tests collected (pytest code 5)."
+                normalized = evidence.lower()
+                has_execution = bool(
+                    re.search(r"\b\d+\s+(?:passed|failed|skipped|xfailed|xpassed)\b", normalized)
+                    or re.search(r"collected\s+[1-9]\d*\s+items?", normalized)
+                )
+                if has_execution and "no tests ran" not in normalized:
+                    return True, evidence
+                return False, evidence or "Tests produced no collection/execution evidence."
+            if "no tests ran" in evidence.lower() or proc.returncode == 5:
+                return False, evidence or "No tests collected (pytest code 5)."
             return False, evidence
         except (OSError, FileNotFoundError) as exc:
             logger.warning(f"Automated test runner exception: {exc}")
@@ -718,11 +988,12 @@ class NativeOrchestrationCoordinator:
             provider=provider,
             workflow=wf,
         )
-        output = res.full_output.lower()
-        if "discrepanc" in output or "failed" in output or res.exit_code != 0:
-            if "error" in output or res.exit_code > 0:
-                return False
-        return True
+        if not self._execution_is_successful(res):
+            return False
+        try:
+            return parse_review_verdict(res.full_output).verdict.value == "READY_TO_MERGE"
+        except MalformedReviewOutputError:
+            return False
 
     async def _run_code_review(
         self,
@@ -746,10 +1017,12 @@ class NativeOrchestrationCoordinator:
             role="reviewer",
             provider=provider,
         )
-        out = res.full_output.upper()
-        if "CHANGES REQUESTED" in out or "REJECTED" in out:
+        if not self._execution_is_successful(res):
             return False
-        return True
+        try:
+            return parse_review_verdict(res.full_output).verdict.value == "READY_TO_MERGE"
+        except MalformedReviewOutputError:
+            return False
 
     async def _run_sync_and_archive(
         self,
@@ -757,7 +1030,7 @@ class NativeOrchestrationCoordinator:
         provider: str,
         change_name: str,
         project_id: str | None = None,
-    ) -> None:
+    ) -> bool:
         """Execute official OpenSpec Sync and Archive workflows with thinking agent."""
         sync_wf = self.agent_runner.resolve_workflow(
             worktree_path=doc_path,
@@ -772,36 +1045,52 @@ class NativeOrchestrationCoordinator:
             change_name=change_name,
         )
 
-        prompt = (
-            f"You are the thinking agent. Execute official OpenSpec Sync followed by Archive for '{change_name}'.\n\n"
-            f"1. Run Sync workflow: {sync_wf.dispatch_command}\n"
-            f"2. Run Archive workflow: {archive_wf.dispatch_command}\n"
-            f"Commit and record the updated specs and archive."
-        )
-        await self.agent_runner.run(
+        sync_result = await self.agent_runner.run(
             worktree_path=doc_path,
-            prompt_context=prompt,
+            prompt_context=(
+                f"Execute ONLY the official OpenSpec Sync workflow for '{change_name}'.\n"
+                f"Dispatch: {sync_wf.dispatch_command}\n"
+                "Return evidence of the resulting synced specs."
+            ),
             project_id=project_id,
             role="thinker",
             provider=provider,
             workflow=sync_wf,
         )
+        if not self._execution_is_successful(sync_result):
+            return False
+
+        archive_result = await self.agent_runner.run(
+            worktree_path=doc_path,
+            prompt_context=(
+                f"Execute ONLY the official OpenSpec Archive workflow for '{change_name}'.\n"
+                f"Dispatch: {archive_wf.dispatch_command}\n"
+                "Return evidence of the resulting archive."
+            ),
+            project_id=project_id,
+            role="thinker",
+            provider=provider,
+            workflow=archive_wf,
+        )
+        if not self._execution_is_successful(archive_result):
+            return False
 
         # Check git status in doc worktree; if changes are uncommitted, stage and commit them
-        status_out = await self._git_run(doc_path, ["status", "--porcelain"])
-        if status_out.strip():
+        status_result = await self._git_run(doc_path, ["status", "--porcelain"])
+        if status_result.stdout.strip():
             await self._git_run(doc_path, ["add", "openspec/"])
             await self._git_run(doc_path, ["commit", "-m", f"docs({change_name}): sync specs and archive change"])
+        return True
 
     async def _push_branch(self, worktree_path: Path, branch_name: str) -> None:
         # Git push branch
         await self._git_run(worktree_path, ["push", "-u", "origin", branch_name])
 
     async def _get_git_head_sha(self, worktree_path: Path) -> str:
-        out = await self._git_run(worktree_path, ["rev-parse", "HEAD"])
-        return out.strip()
+        result = await self._git_run(worktree_path, ["rev-parse", "HEAD"])
+        return result.stdout.strip()
 
-    async def _git_run(self, cwd: Path, args: list[str]) -> str:
+    async def _git_run(self, cwd: Path, args: list[str]) -> GitCommandResult:
         proc = await asyncio.create_subprocess_exec(
             "git", *args,
             cwd=str(cwd),
@@ -809,4 +1098,10 @@ class NativeOrchestrationCoordinator:
             stderr=asyncio.subprocess.PIPE,
         )
         stdout, stderr = await proc.communicate()
-        return stdout.decode()
+        result = GitCommandResult(
+            tuple(args), proc.returncode or 0,
+            stdout.decode(errors="replace"), stderr.decode(errors="replace"),
+        )
+        if not result.ok:
+            raise GitOperationError(result)
+        return result

@@ -1,13 +1,13 @@
-import pytest
 from pathlib import Path
-from unittest.mock import MagicMock, AsyncMock
+from unittest.mock import AsyncMock, MagicMock
 
+import pytest
 from tests.conftest import InMemoryPersistenceUnitOfWork, setup_managed_repository_fixture
+
 from minime.domain.enums import OrchestrationStage
-from minime.domain.models import OrchestrationRun
+from minime.services.agent_runner import CliAgentRunner
 from minime.services.orchestration_coordinator import NativeOrchestrationCoordinator
-from minime.services.agent_runner import CliAgentRunner, NativeOpenSpecWorkflowUnavailable
-from minime.services.worktree_manager import WorktreeManager, WorktreeInfo
+from minime.services.worktree_manager import WorktreeInfo, WorktreeManager
 
 
 @pytest.fixture
@@ -32,8 +32,8 @@ def mock_env(tmp_path: Path):
         canonical_repository_identity="github.com/org/proj-1",
     )
 
-    from minime.domain.models import ExternalActionResult
     from minime.domain.enums import ExternalOutcome, ExternalReasonCode, RetrySafety
+    from minime.domain.models import ExternalActionResult
 
     github_mock = MagicMock()
     def mock_list_issues(repo, state="open", limit=None):
@@ -118,9 +118,17 @@ async def test_propose_lifecycle_explore_and_propose(mock_env):
 @pytest.mark.asyncio
 async def test_propose_lifecycle_human_required_ambiguity(mock_env):
     coordinator, uow, github_mock, repo_dir = mock_env
+    from minime.services.agent_runner import AgentExecutionResult
+    coordinator.agent_runner.run = AsyncMock(return_value=AgentExecutionResult(
+        exit_code=0,
+        timed_out=False,
+        stdout=["HUMAN REQUIRED\n- Opción A\n- Opción B"],
+        stderr=[],
+        duration_ms=1,
+    ))
 
-    from minime.domain.models import ExternalActionResult
     from minime.domain.enums import ExternalOutcome, ExternalReasonCode, RetrySafety
+    from minime.domain.models import ExternalActionResult
 
     github_mock.list_issues.side_effect = lambda repo, state="open", limit=None: ExternalActionResult(
         outcome=ExternalOutcome.SUCCESS,
@@ -154,8 +162,16 @@ async def test_propose_lifecycle_human_required_ambiguity(mock_env):
 
 
 @pytest.mark.asyncio
-async def test_complexity_evaluation(mock_env):
+async def test_complexity_evaluation_uses_structured_agent_result(mock_env):
     coordinator, _, _, _ = mock_env
-    assert coordinator._evaluate_complexity("Small fix in typo", "Fix typo") == "low"
-    assert coordinator._evaluate_complexity("Breaking change in auth migration", "Refactor Auth") == "high"
-    assert coordinator._evaluate_complexity("Add standard endpoint", "Add endpoint") == "moderate"
+    from minime.services.agent_runner import AgentExecutionResult
+    coordinator.agent_runner.run = AsyncMock(return_value=AgentExecutionResult(
+        exit_code=0,
+        timed_out=False,
+        stdout=['{"complexity":"high","evidence":"cross-cutting architectural impact"}'],
+        stderr=[],
+        duration_ms=1,
+    ))
+    assert await coordinator._assess_complexity(
+        _, "antigravity", "Small typo", "breaking migration words", "proj-1"
+    ) == "high"

@@ -1,15 +1,19 @@
 """Deterministic negative regression tests for fail-closed orchestration behavior."""
 
-import pytest
 from pathlib import Path
-from unittest.mock import MagicMock, AsyncMock
+from unittest.mock import AsyncMock, MagicMock
 
+import pytest
 from tests.conftest import InMemoryPersistenceUnitOfWork, setup_managed_repository_fixture
-from minime.domain.enums import OrchestrationStage, ExternalOutcome, ExternalReasonCode, RetrySafety
-from minime.domain.models import OrchestrationRun, ExternalActionResult
+
+from minime.domain.enums import ExternalOutcome, ExternalReasonCode, OrchestrationStage, RetrySafety
+from minime.domain.models import ExternalActionResult
+from minime.services.agent_runner import (
+    AgentExecutionResult,
+    CliAgentRunner,
+)
 from minime.services.orchestration_coordinator import NativeOrchestrationCoordinator
-from minime.services.agent_runner import CliAgentRunner, AgentExecutionResult, NativeOpenSpecWorkflowUnavailable
-from minime.services.worktree_manager import WorktreeManager, WorktreeInfo
+from minime.services.worktree_manager import WorktreeInfo, WorktreeManager
 
 
 @pytest.fixture
@@ -58,7 +62,27 @@ def base_coordinator_env(tmp_path: Path):
             }
         ],
     )
-    github_mock.create_pull_request = AsyncMock(return_value={"number": 1, "html_url": "https://github.com/org/proj-test/pull/1"})
+    github_mock.create_pull_request = AsyncMock(return_value=ExternalActionResult(
+        outcome=ExternalOutcome.SUCCESS,
+        source_adapter="github",
+        reason_code=ExternalReasonCode.EXECUTION_SUCCESS,
+        retry_safety=RetrySafety.SAFE,
+        data={"number": 1, "html_url": "https://github.com/org/proj-test/pull/1"},
+    ))
+    github_mock.get_pull_request_details = lambda repository, pr_number: ExternalActionResult(
+        outcome=ExternalOutcome.SUCCESS,
+        source_adapter="github",
+        reason_code=ExternalReasonCode.EXECUTION_SUCCESS,
+        retry_safety=RetrySafety.SAFE,
+        data={
+            "number": pr_number,
+            "state": "open",
+            "head_sha": "commit_sha_901",
+            "head_branch": "request-901-negative-test-feature",
+            "base_branch": "main",
+            "is_merged": False,
+        },
+    )
     github_mock.merge_pull_request = AsyncMock(return_value={"merged": True, "sha": "sha_pr_merged"})
     github_mock.close_issue = AsyncMock(return_value={"closed": True})
 
@@ -84,6 +108,15 @@ def base_coordinator_env(tmp_path: Path):
     )
 
     agent_runner = CliAgentRunner()
+    async def successful_agent_run(*, prompt_context, **kwargs):
+        output = "native workflow evidence"
+        if "Assess this Request's implementation complexity" in prompt_context:
+            level = "high" if "breaking" in prompt_context.lower() else "low"
+            output = f'{{"complexity":"{level}","evidence":"scope assessed by thinking agent"}}'
+        elif "review" in prompt_context.lower() or "Verify" in prompt_context:
+            output = '{"verdict":"READY_TO_MERGE","summary":"verified","findings":[]}'
+        return AgentExecutionResult(exit_code=0, timed_out=False, stdout=[output], stderr=[], duration_ms=1)
+    agent_runner.run = successful_agent_run
     openspec_mock = MagicMock()
     openspec_mock.validate_change_strict = MagicMock(return_value={"status": "PASS", "returncode": 0})
 

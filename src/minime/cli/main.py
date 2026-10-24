@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+from pathlib import Path
 from typing import NoReturn
 
 import typer
@@ -449,13 +450,16 @@ def request_run_cmd(
 ) -> None:
     """Run or resume the next eligible OpenSpec request for a project."""
     from minime.adapters.github import GitHubAdapter
-    from minime.services.worktree_manager import WorktreeManager
     from minime.services.agent_runner import CliAgentRunner
+    from minime.services.budget_service import BudgetService
+    from minime.services.capacity_lifecycle_service import CapacityLifecycleService
     from minime.services.orchestration_coordinator import NativeOrchestrationCoordinator
+    from minime.services.worktree_manager import WorktreeManager
 
     try:
         with db_manager.session() as session:
-            uow_factory = lambda: PostgresPersistenceUnitOfWork(session)
+            def uow_factory() -> PostgresPersistenceUnitOfWork:
+                return PostgresPersistenceUnitOfWork(session)
             uow = uow_factory()
             proj = uow.projects.get_by_id(project_id)
             if not proj:
@@ -465,11 +469,22 @@ def request_run_cmd(
             binding = None
             if hasattr(uow, "project_managed_repository_bindings"):
                 binding = uow.project_managed_repository_bindings.get_by_project_id(project_id)
-            repo_root = Path(binding.managed_repository_root) if binding else Path(".")
+            if binding is None or not binding.managed_repository_root:
+                typer.echo("Verified managed repository binding is required.", err=True)
+                raise typer.Exit(code=1)
+            repo_root = Path(binding.managed_repository_root)
 
             wt_manager = WorktreeManager(project_root=repo_root, uow=uow)
             github = GitHubAdapter()
-            agent_runner = CliAgentRunner()
+            try:
+                agent_runner = CliAgentRunner.for_project_profiles(
+                    proj.agent_profiles,
+                    capacity_service=CapacityLifecycleService(uow),
+                    budget_service=BudgetService(uow),
+                )
+            except (ValueError, OSError) as exc:
+                typer.echo(f"Verified F2 agent profiles unavailable: {exc}", err=True)
+                raise typer.Exit(code=1) from exc
 
             coordinator = NativeOrchestrationCoordinator(
                 uow_factory=uow_factory,
@@ -481,6 +496,9 @@ def request_run_cmd(
                 coordinator.execute_project_request(
                     project_id=project_id,
                     operator_ack=operator_ack,
+                    thinker_provider=agent_runner.provider_for_role("thinker"),
+                    implementer_provider=agent_runner.provider_for_role("implementer"),
+                    reviewer_provider=agent_runner.provider_for_role("reviewer"),
                 )
             )
 

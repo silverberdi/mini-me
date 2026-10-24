@@ -12,11 +12,10 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from minime.config import CliInvocationProfile
+from minime.config import AppConfig, CliInvocationProfile, load_config, resolve_cli_invocation
 from minime.domain.enums import ExternalOutcome
 from minime.logging import get_logger, redact_secrets
 from minime.services.agent_confinement import AgentProcessConfinement
-from minime.services.cli_preflight import preflight_cli_invocation
 
 logger = get_logger("services.agent_runner")
 
@@ -77,6 +76,7 @@ class CliAgentRunner:
         invocation: CliInvocationProfile | list[str] | None = None,
         capacity_service: Any | None = None,
         budget_service: Any | None = None,
+        profiles: dict[tuple[str, str], CliInvocationProfile] | None = None,
     ) -> None:
         if isinstance(invocation, CliInvocationProfile):
             if invocation.prompt_transport not in {"stdin", "argument"}:
@@ -91,6 +91,50 @@ class CliAgentRunner:
             self.command = []
         self.capacity_service = capacity_service
         self.budget_service = budget_service
+        self.profiles = profiles or {}
+
+    @classmethod
+    def for_project_profiles(
+        cls,
+        project_profiles: dict[str, Any],
+        *,
+        config: AppConfig | None = None,
+        capacity_service: Any | None = None,
+        budget_service: Any | None = None,
+    ) -> "CliAgentRunner":
+        """Build verified CLI invocations from the persisted F2 profile selection."""
+        if not isinstance(project_profiles, dict):
+            raise ValueError("Project agent profiles are missing or invalid.")
+        role_map = {
+            "thinking": "implementer",
+            "execution": "implementer",
+            "independent_review": "reviewer",
+            "fallback": "implementer",
+        }
+        resolved: dict[tuple[str, str], CliInvocationProfile] = {}
+        for profile_name, role in role_map.items():
+            raw = project_profiles.get(profile_name)
+            if hasattr(raw, "model_dump"):
+                raw = raw.model_dump()
+            if not isinstance(raw, dict):
+                raise ValueError(f"Project profile '{profile_name}' is missing or invalid.")
+            provider = str(raw.get("agent_id") or "").strip().lower()
+            if not provider:
+                raise ValueError(f"Project profile '{profile_name}' has no verified agent identity.")
+            provider = "antigravity" if provider == "agy" else provider
+            profile = resolve_cli_invocation(
+                provider,
+                role,
+                config or load_config(),
+                model=str(raw.get("model_id") or "").strip() or None,
+                effort=str(raw.get("effort") or "").strip() or None,
+            )
+            resolved[(profile_name, provider)] = profile
+        return cls(
+            capacity_service=capacity_service,
+            budget_service=budget_service,
+            profiles=resolved,
+        )
 
     def resolve_workflow(
         self,
@@ -186,7 +230,8 @@ class CliAgentRunner:
             # Check capacity if method available
             if hasattr(self.capacity_service, "can_admit_change"):
                 decision = self.capacity_service.can_admit_change(project_id)
-                if not decision:
+                allowed = decision[0] if isinstance(decision, tuple) else decision
+                if not allowed:
                     raise CapacityExhaustedError(
                         provider_id=provider_id,
                         message=f"Capacity service rejected admission for project '{project_id}'.",
@@ -194,21 +239,51 @@ class CliAgentRunner:
 
         if self.budget_service is not None and project_id:
             if hasattr(self.budget_service, "get_headroom"):
-                headroom = self.budget_service.get_headroom(project_id, provider_id)
-                if headroom is not None and headroom <= 0:
+                budget_result = self.budget_service.get_headroom(project_id)
+                if isinstance(budget_result, tuple):
+                    policy, headroom = budget_result
+                else:
+                    policy, headroom = True, budget_result
+                if policy is None or headroom is None:
+                    raise CapacityExhaustedError(
+                        provider_id=provider_id,
+                        message=f"Budget policy/headroom is unavailable for project '{project_id}'.",
+                    )
+                daily = getattr(headroom, "daily_headroom_usd", headroom)
+                monthly = getattr(headroom, "monthly_headroom_usd", daily)
+                if daily <= 0 or monthly <= 0:
                     raise CapacityExhaustedError(
                         provider_id=provider_id,
                         message=f"Budget headroom exhausted for provider '{provider_id}' on project '{project_id}'.",
                     )
 
-    def _command_for_prompt(self, prompt_context: str) -> list[str]:
-        if self.profile and self.profile.prompt_transport == "argument":
+    def _profile_for(self, role: str, provider: str) -> CliInvocationProfile | None:
+        normalized_provider = "antigravity" if provider.lower() == "agy" else provider.lower()
+        profile_name = {
+            "thinker": "thinking",
+            "implementer": "execution",
+            "reviewer": "independent_review",
+        }.get(role, role)
+        return self.profiles.get((profile_name, normalized_provider)) or self.profile
+
+    def provider_for_role(self, role: str) -> str:
+        """Return the provider selected by the verified persisted F2 profile."""
+        profile_name = {"thinker": "thinking", "implementer": "execution", "reviewer": "independent_review"}.get(role, role)
+        providers = [provider for name, provider in self.profiles if name == profile_name]
+        if len(providers) != 1:
+            raise ValueError(f"No unique verified F2 provider is configured for role '{role}'.")
+        return providers[0]
+
+    def _command_for_prompt(
+        self, prompt_context: str, profile: CliInvocationProfile | None
+    ) -> list[str]:
+        if profile and profile.prompt_transport == "argument":
             raw_cmd = [
-                self.profile.executable,
-                *(arg.replace("{prompt}", prompt_context) for arg in self.profile.args),
+                profile.executable,
+                *(arg.replace("{prompt}", prompt_context) for arg in profile.args),
             ]
-        elif self.profile:
-            raw_cmd = [self.profile.executable, *self.profile.args]
+        elif profile:
+            raw_cmd = [profile.executable, *profile.args]
         else:
             raw_cmd = list(self.command)
 
@@ -249,7 +324,19 @@ class CliAgentRunner:
                 workflow=workflow,
             )
 
-        cmd = self._command_for_prompt(prompt_context)
+        profile = self._profile_for(role, provider)
+        if profile is None:
+            return AgentExecutionResult(
+                exit_code=-1,
+                timed_out=False,
+                stdout=[],
+                stderr=[f"No verified executor configured for role '{role}' and provider '{provider}'."],
+                duration_ms=0,
+                preflight_error="missing_verified_executor",
+                workflow=workflow,
+            )
+
+        cmd = self._command_for_prompt(prompt_context, profile)
         if not cmd:
             return AgentExecutionResult(
                 exit_code=-1,
@@ -261,7 +348,7 @@ class CliAgentRunner:
             )
 
         start = asyncio.get_running_loop().time()
-        is_stdin = self.profile is None or self.profile.prompt_transport == "stdin"
+        is_stdin = profile.prompt_transport == "stdin"
         stdin_data = prompt_context.encode("utf-8") if is_stdin else None
 
         env = os.environ.copy()

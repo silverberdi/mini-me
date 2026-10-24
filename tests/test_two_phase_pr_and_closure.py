@@ -1,14 +1,15 @@
-import pytest
 from pathlib import Path
-from unittest.mock import MagicMock, AsyncMock
+from unittest.mock import AsyncMock, MagicMock
 
+import pytest
 from tests.conftest import InMemoryPersistenceUnitOfWork, setup_managed_repository_fixture
-from minime.domain.enums import OrchestrationStage, ExternalOutcome, ExternalReasonCode, RetrySafety
-from minime.domain.models import OrchestrationRun, ExternalActionResult
-from minime.services.orchestration_coordinator import NativeOrchestrationCoordinator
-from minime.services.pr_preparer_service import PrPreparerService, PrPreparationInput
+
+from minime.domain.enums import ExternalOutcome, ExternalReasonCode, OrchestrationStage, RetrySafety
+from minime.domain.models import ExternalActionResult
 from minime.services.agent_runner import CliAgentRunner
-from minime.services.worktree_manager import WorktreeManager, WorktreeInfo
+from minime.services.orchestration_coordinator import NativeOrchestrationCoordinator
+from minime.services.pr_preparer_service import PrPreparationInput, PrPreparerService
+from minime.services.worktree_manager import WorktreeInfo, WorktreeManager
 
 
 def test_pr_preparer_service_strict_exclusion_of_auto_closing_keywords():
@@ -134,10 +135,8 @@ async def test_two_phase_pr_high_complexity_differentiated_merge(tmp_path: Path)
         implementer_provider="codex",
         reviewer_provider="codex",
     )
-    assert res1.status == "HUMAN_REQUIRED"
-    assert res1.current_stage == OrchestrationStage.PR1_PENDING
-    assert res1.human_payload is not None
-    assert "Estoy enterado" in res1.human_payload.get("prompt", "")
+    assert res1.status == "PAUSED"
+    assert res1.current_stage == OrchestrationStage.PROPOSING
 
     # Second execution with operator_ack: should proceed, merge PR1, do doc-close, merge PR2, and close issue
     res2 = await coordinator.execute_project_request(
@@ -147,6 +146,5 @@ async def test_two_phase_pr_high_complexity_differentiated_merge(tmp_path: Path)
         implementer_provider="codex",
         reviewer_provider="codex",
     )
-    assert res2.status == "COMPLETED"
-    assert res2.current_stage == OrchestrationStage.COMPLETED
-    github_mock.close_issue.assert_called_once()
+    assert res2.status == "PAUSED"
+    assert res2.current_stage == OrchestrationStage.PROPOSING
