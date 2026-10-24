@@ -721,10 +721,11 @@ class NativeOrchestrationCoordinator:
             )
             opened_pr_res = await opened_pr_call if inspect.isawaitable(opened_pr_call) else opened_pr_call
             if not self._external_success(opened_pr_res):
+                pr_error = getattr(opened_pr_res, "error_message", None) or "remote response was not successful"
                 return OrchestrationCoordinationResult(
                     status="PAUSED", run_id=active_run.run_id,
                     current_stage=OrchestrationStage.PR1_PENDING,
-                    message="GitHub did not confirm creation of PR1. Worktree preserved.",
+                    message=f"GitHub did not confirm creation of PR1: {pr_error}. Worktree preserved.",
                 )
             opened_data = opened_pr_res.data if hasattr(opened_pr_res, "data") else opened_pr_res
             pr1_number = opened_data.get("number") if isinstance(opened_data, dict) else getattr(opened_data, "number", None)
