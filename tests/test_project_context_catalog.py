@@ -171,3 +171,34 @@ def test_agent_cannot_create_a_nonstandard_generated_backlog(tmp_path):
     candidate.write_text("# Unauthorized new backlog", encoding="utf-8")
     with pytest.raises(GreenfieldBootstrapError, match="unrelated"):
         GreenfieldBootstrapCoordinator._validate_candidate_scope(root)
+
+
+def test_heading_only_placeholder_is_not_a_populated_document(tmp_path):
+    root, package, incoming = _workspace(tmp_path)
+    _fill(root)
+    placeholder = root / "context" / "08-seguridad" / "cifrado.md"
+    placeholder.write_text("# Cifrado\n\n## Detalles pendientes\n", encoding="utf-8")
+    assert "context/08-seguridad/cifrado.md" not in populated_catalog_documents(root)
+    GreenfieldBootstrapCoordinator._validate_candidate(
+        root, incoming, ("business.md", "planning.md"), package
+    )
+    index = root / CONTEXT_ROOT_INDEX
+    index.write_text(
+        index.read_text(encoding="utf-8")
+        + "\n[Cifrado](08-seguridad/cifrado.md)\n",
+        encoding="utf-8",
+    )
+    with pytest.raises(GreenfieldBootstrapError, match="empty canonical"):
+        GreenfieldBootstrapCoordinator._validate_candidate(
+            root, incoming, ("business.md", "planning.md"), package
+        )
+
+
+def test_thinking_agent_must_not_add_files_to_original_zip_revision(tmp_path):
+    root, package, incoming = _workspace(tmp_path)
+    _fill(root)
+    (incoming / "invented.md").write_text("not from ZIP", encoding="utf-8")
+    with pytest.raises(GreenfieldBootstrapError, match="source inventory"):
+        GreenfieldBootstrapCoordinator._validate_candidate(
+            root, incoming, ("business.md", "planning.md"), package
+        )
