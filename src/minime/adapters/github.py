@@ -1293,6 +1293,23 @@ class GitHubAdapter(GitHubAdapterInterface):
                     provider_detail=f"HTTP {response.status_code}",
                     error_message="GitHub App is unauthorized for pull-request creation.",
                 )
+            if response.status_code not in (200, 201):
+                try:
+                    payload = response.json()
+                    detail = payload.get("message") if isinstance(payload, dict) else None
+                    errors = payload.get("errors") if isinstance(payload, dict) else None
+                    if errors:
+                        detail = f"{detail}; errors={errors}"
+                except (ValueError, TypeError):
+                    detail = response.text[:500]
+                return ExternalActionResult(
+                    outcome=ExternalOutcome.FAILURE,
+                    source_adapter="github_rest",
+                    reason_code=ExternalReasonCode.CONFLICT,
+                    retry_safety=RetrySafety.UNSAFE,
+                    provider_detail=f"HTTP {response.status_code}",
+                    error_message=f"GitHub rejected pull-request creation (HTTP {response.status_code}): {detail or 'no diagnostic body'}",
+                )
             if response.status_code in (200, 201):
                 data = response.json()
                 returned_sha = data["head"]["sha"]
