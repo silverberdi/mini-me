@@ -1564,8 +1564,19 @@ class NativeOrchestrationCoordinator:
         prompt = (
             f"Execute official OpenSpec Verify for change '{change_name}'.\n"
             f"Workflow dispatch command: {wf.dispatch_command}\n\n"
-            f"Verify that all tasks and requirements are implemented and verified with green tests."
+            "Verify that all tasks and requirements are implemented and verified with green tests. "
+            "After completing the native Verify workflow, return exactly one JSON object in the "
+            "authorized final response channel matching this schema: "
+            '{"verdict":"READY_TO_MERGE|CHANGES_REQUIRED",'
+            '"summary":"brief concrete result",'
+            '"findings":[{"severity":"BLOCKER|MAJOR|MINOR",'
+            '"location":"file or requirement",'
+            '"violated_requirement":"required only for a finding",'
+            '"expected_correction":"required only for a finding"}]}.'
+            " Use READY_TO_MERGE only when the native Verify result is positive and findings is empty."
         )
+        attempt_dir = worktree_path / ".minime" / "verify-attempts" / str(uuid4())
+        response_path = attempt_dir / "last-message.json"
         res = await self.agent_runner.run(
             worktree_path=worktree_path,
             prompt_context=prompt,
@@ -1573,11 +1584,42 @@ class NativeOrchestrationCoordinator:
             role="implementer",
             provider=provider,
             workflow=wf,
+            output_schema={
+                "type": "object",
+                "properties": {
+                    "verdict": {"type": "string", "enum": ["READY_TO_MERGE", "CHANGES_REQUIRED"]},
+                    "summary": {"type": "string"},
+                    "findings": {
+                        "type": "array",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "severity": {"type": "string", "enum": ["BLOCKER", "MAJOR", "MINOR"]},
+                                "location": {"type": "string"},
+                                "violated_requirement": {"type": "string"},
+                                "expected_correction": {"type": "string"},
+                            },
+                            "required": [
+                                "severity",
+                                "location",
+                                "violated_requirement",
+                                "expected_correction",
+                            ],
+                            "additionalProperties": False,
+                        },
+                    },
+                },
+                "required": ["verdict", "summary", "findings"],
+                "additionalProperties": False,
+            },
+            output_last_message_path=response_path,
         )
         if not self._execution_is_successful(res):
             return False
+        if getattr(res, "output_truncated", False) or getattr(res, "structured_output_missing", False):
+            return False
         try:
-            return parse_review_verdict(res.full_output).verdict.value == "READY_TO_MERGE"
+            return parse_review_verdict(res.response_output).verdict.value == "READY_TO_MERGE"
         except MalformedReviewOutputError:
             return False
 

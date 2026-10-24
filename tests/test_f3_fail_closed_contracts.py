@@ -97,6 +97,20 @@ async def test_reviews_require_positive_structured_verdict(tmp_path: Path):
 
 
 @pytest.mark.asyncio
+async def test_verify_requires_native_final_response_channel(tmp_path: Path):
+    skill = tmp_path / ".agents" / "skills" / "openspec-verify-change"
+    skill.mkdir(parents=True)
+    (skill / "SKILL.md").write_text("native verify")
+    runner = ScriptedRunner('{"verdict":"READY_TO_MERGE","summary":"verified","findings":[]}')
+
+    result = await coordinator(tmp_path, runner)._run_verify(tmp_path, "codex", "change")
+
+    assert result is True
+    assert "output-schema" not in runner.calls[0]
+    assert "authorized final response channel" in runner.calls[0]
+
+
+@pytest.mark.asyncio
 async def test_apply_and_sync_fail_closed_on_agent_error(tmp_path: Path):
     runner = ScriptedRunner("failure", exit_code=2)
     c = coordinator(tmp_path, runner)
