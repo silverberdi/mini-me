@@ -2,16 +2,16 @@
 
 - [ ] 1.1 Extend `GitHubAdapter.list_issues` to support exhaustive multi-page pagination across all open issues without silent omission of older tickets
 - [ ] 1.2 Implement `RemoteRequestIntakeService` to query remote repository issues, order them ascending by `created_at` (FIFO), and apply deterministic tie-breaking on issue number
-- [ ] 1.3 Add filtering in `RemoteRequestIntakeService` to exclude issues tagged `disabled` or having open dependency issues, preserving their original FIFO priority when unblocked
-- [ ] 1.4 Enforce the single active Request constraint per project in `RemoteRequestIntakeService` and recognize re-entrant executions without creating duplicate runs
-- [ ] 1.5 Implement comprehensive unit tests in `tests/test_remote_request_intake.py` verifying FIFO ordering, pagination, exclusion rules, and single-active-request enforcement
+- [ ] 1.3 Add filtering in `RemoteRequestIntakeService` to exclude issues tagged `disabled` or having explicit formal dependency directives (`depends on #...`), without treating casual mentions as blocking, preserving FIFO priority when unblocked
+- [ ] 1.4 Enforce the constraint of at most one active Request per project in `RemoteRequestIntakeService` (allowing idle projects with zero active requests) and recognize re-entrant executions without creating duplicate runs
+- [ ] 1.5 Implement comprehensive unit tests in `tests/test_remote_request_intake.py` verifying FIFO ordering, pagination, exclusion rules, idle states, and single-active-request enforcement
 
 ## 2. Git Workspace Isolation and Agent Process Confinement
 
-- [ ] 2.1 Enhance `WorktreeManager` to create and track candidate branches named `request-<numero>-<slug-kebab>` from the latest remote reference of the configured base branch
+- [ ] 2.1 Enhance `WorktreeManager` to create and track candidate branches named `request-<numero>-<slug-kebab>` from the latest remote reference of the configured base branch under the project's configured managed root
 - [ ] 2.2 Consolidate agent execution mechanics into `CliAgentRunner` supporting `thinker`, `implementer`, and `reviewer` roles under `AgentProcessConfinement`
 - [ ] 2.3 Integrate preflight verification of provider health, quota availability, and budget limits via `CapacityLifecycleService` and `BudgetService` before each agent invocation
-- [ ] 2.4 Implement tests in `tests/test_workspace_isolation_and_agent_confinement.py` verifying branch creation, worktree sandboxing, and capacity preflight gating
+- [ ] 2.4 Implement tests in `tests/test_workspace_isolation_and_agent_confinement.py` verifying branch creation, managed root sandboxing, and capacity preflight gating
 
 ## 3. Native OpenSpec Propose and Validation Loop
 
@@ -36,22 +36,22 @@
 ## 5. Two-Phase Pull Requests, Documentation Closure, and Continuation Loop
 
 - [ ] 5.1 Implement `GitHubAdapter.merge_pull_request` method supporting merge commits, merge methods, and candidate SHA verification
-- [ ] 5.2 Implement Phase 1 Implementation PR creation from the request branch to base branch, verifying branch protections and permissions
+- [ ] 5.2 Implement Phase 1 Implementation PR preparation invoking the PR skill with its minimal functional contract (repository, branches, candidate SHA, structured evidence) and verify remote protections
 - [ ] 5.3 Implement differentiated merge policy for the first PR: auto-merge for low/moderate complexity; `HUMAN REQUIRED` for informational acknowledgement («Estoy enterado») in high complexity before merging
-- [ ] 5.4 Implement fresh documentation branch (`doc-close-<numero>-<slug-kebab>`) and worktree creation rooted at the merged commit of `main`
+- [ ] 5.4 Implement fresh documentation branch (`doc-close-<numero>-<slug-kebab>`) and worktree creation rooted at the merged commit of `main` under the project's configured managed root
 - [ ] 5.5 Implement native OpenSpec Sync and OpenSpec Archive orchestration executed by the thinking agent with lowest compatible effort in the documentation worktree
-- [ ] 5.6 Implement Phase 2 Documentation PR creation and automatic merge regardless of initial complexity
+- [ ] 5.6 Implement Phase 2 Documentation PR preparation invoking the PR skill and automatic merge regardless of initial complexity
 - [ ] 5.7 Implement remote issue closure on GitHub with idempotent completion note and release of active project lock
 - [ ] 5.8 Implement continuous FIFO transition automatically selecting and initiating the next eligible request upon completion
-- [ ] 5.9 Implement tests in `tests/test_two_phase_pr_and_closure.py` covering PR1 merge policies, documentation worktree setup, Sync/Archive, PR2 auto-merge, and issue closure
+- [ ] 5.9 Implement tests in `tests/test_two_phase_pr_and_closure.py` covering PR skill invocation, merge policies, documentation worktree setup, Sync/Archive, PR2 auto-merge, and issue closure
 
 ## 6. End-to-End Proof and System Integration
 
 - [ ] 6.1 Implement CLI operator commands (`minime request run <project_id>`, `minime request list <project_id>`, `minime request ack <project_id>`) and REST API endpoints
-- [ ] 6.2 Implement PostgreSQL state persistence and crash recovery tests in `tests/test_orchestration_continuity.py` verifying idempotent resume across daemon restarts
-- [ ] 6.3 Execute authentic end-to-end integration test with low/moderate complexity proving the full cycle from remote issue to two merged PRs and closure
-- [ ] 6.4 Execute authentic end-to-end integration test with high complexity proving Explore, proposal review, automated test execution, code review, human acknowledgement, and closure
-- [ ] 6.5 Verify that worktrees are cleaned up, git protections are respected, and no duplicate PRs, commits, or comments are created under failure scenarios
+- [ ] 6.2 Implement PostgreSQL state persistence and continuity recovery tests in `tests/test_orchestration_continuity.py` verifying that technical errors preserve worktree and run record, and only confirmed closure or authorized cancellation releases lock
+- [ ] 6.3 Execute authentic end-to-end integration test with low/moderate complexity in an isolated test repository (e.g. `mini-me-fixture`) proving the full cycle from remote issue to two merged PRs and closure
+- [ ] 6.4 Execute authentic end-to-end integration test with high complexity in an isolated test repository proving Explore, proposal review, automated test execution, code review, human acknowledgement, and closure
+- [ ] 6.5 Verify strict non-deployment policy (no application deployment executed), scheduler disabled, worktree preservation during paused runs, and no duplicate PRs, commits, or comments under failure scenarios
 
 ## 7. Canonical Documentation and Configuration Reconciliation
 

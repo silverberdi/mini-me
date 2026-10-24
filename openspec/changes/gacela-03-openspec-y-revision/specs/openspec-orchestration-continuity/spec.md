@@ -10,9 +10,20 @@ The system SHALL persist minimal orchestration state in PostgreSQL comprising th
 - **WHEN** an orchestration stage (Explore, Propose, Validate, Apply, Verify, Review, PR1, DocClose, PR2) completes
 - **THEN** the system updates the run state atomically in PostgreSQL with the new resumable stage and candidate SHA.
 
-#### Scenario: Clean completion frees project active lock
-- **WHEN** the full cycle terminates (upon remote issue closure or terminal failure)
-- **THEN** the run status is marked terminal and the active project lock is released.
+### Requirement: Strict Continuity Preservation and Lock Release Authority
+The system SHALL preserve the active Request identity, worktree workspace, candidate branch, and PostgreSQL state across recoverable technical errors, correction limit pauses, and capacity exhaustion waits (`WAITING_CAPACITY`), SHALL NOT abandon the active Request to select another issue, SHALL NOT delete or clean up the active worktree upon technical failure, and SHALL release the active project lock and authorize worktree cleanup ONLY upon confirmed remote issue closure following the second merge or upon an explicit, operator-authorized cancellation (`CANCELLED`).
+
+#### Scenario: Recoverable failure preserves worktree and request binding
+- **WHEN** an execution attempt encounters a technical error, correction limit, or capacity exhaustion
+- **THEN** the system preserves the worktree files, branch, and PostgreSQL run record without deleting workspace data and without releasing the project lock to pick up another request.
+
+#### Scenario: Confirmed closure releases active project lock
+- **WHEN** the second documentation PR is remotely confirmed merged and the remote issue is closed
+- **THEN** the run status is marked terminal, the active project lock is released, and the worktree is scheduled for clean teardown.
+
+#### Scenario: Explicit authorized operator cancellation releases project lock
+- **WHEN** an operator explicitly submits an authorized cancellation for a blocked or stalled Request
+- **THEN** the run status transitions to `CANCELLED`, the active project lock is released, and the worktree is safely cleaned up.
 
 ### Requirement: Provider Capacity and Quota Preflight
 Before dispatching any agent invocation, the system SHALL check provider health, quota availability, and budget limits using the existing capacity and budget services; if capacity is exhausted or unobservable, the system SHALL enter `WAITING_CAPACITY` and preserve the current checkpoint without burning quota or engaging unauthorized fallbacks.

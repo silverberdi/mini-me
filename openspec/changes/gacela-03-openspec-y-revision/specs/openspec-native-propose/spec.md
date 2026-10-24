@@ -4,11 +4,11 @@ Coordinate the complete native OpenSpec Propose stage including Git workspace is
 ## ADDED Requirements
 
 ### Requirement: Git Branch and Worktree Preparation
-The system SHALL retrieve the latest remote commit SHA of the configured base branch (`main`), SHALL create a dedicated branch named `request-<numero>-<slug-kebab>`, and SHALL prepare an isolated confined Worktree for the agent before launching any workflow.
+The system SHALL retrieve the latest remote commit SHA of the configured base branch (`main`), SHALL create a dedicated branch named `request-<numero>-<slug-kebab>`, and SHALL prepare an isolated confined Worktree under the project's configured managed root using `WorktreeManager` before launching any workflow.
 
 #### Scenario: Dedicated branch and worktree created from latest main
 - **WHEN** an eligible Request is admitted for execution
-- **THEN** the system updates the remote base branch reference, creates `request-<numero>-<slug-kebab>` from that remote HEAD, and mounts an isolated Worktree under `.minime/worktrees/`.
+- **THEN** the system updates the remote base branch reference, creates `request-<numero>-<slug-kebab>` from that remote HEAD, and mounts an isolated Worktree under the project's resolved managed worktree directory.
 
 #### Scenario: Existing branch and worktree preserved on continuation
 - **WHEN** a Request already has an existing valid branch and candidate worktree
