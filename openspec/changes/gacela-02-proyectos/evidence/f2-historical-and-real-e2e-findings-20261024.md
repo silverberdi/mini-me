@@ -178,3 +178,32 @@ Si el token confirma permisos, continuar con prueba segura de publicación
 autorizada en el E2E desechable. La migración productiva y los perfiles/conexiones
 históricos requieren decisiones independientes. No invocar un agente de pago
 hasta que la publicación esté probada y exista autorización nueva.
+
+## Publicación controlada con la GitHub App (2026-10-24)
+
+Se verificó directamente el intercambio del token de instalación `154974444`
+con las credenciales del servicio, sin revelar el token ni claves. Los grants
+observados fueron `contents=write`, `pull_requests=write`, `issues=write`,
+`metadata=read` y `checks=read`. El objeto `permissions.push` del repositorio
+no se utilizó como criterio de autorización.
+
+Sin ejecutar Codex, Antigravity ni ningún modelo, la App publicó en el único
+repositorio desechable autorizado:
+
+- repositorio: `silverberdi/mini-me-f2-e2e-20261023`;
+- base `main`: `fa4eb55699b2169e5ff88059504872f17df617ce`;
+- rama: `minime/f2-app-permission-probe-20261024`;
+- commit publicado: `32efe90b27d5e8c12a54a77b0808183e01001cd0`;
+- PR Draft: https://github.com/silverberdi/mini-me-f2-e2e-20261023/pull/1;
+- base/head verificados: `main` / `minime/f2-app-permission-probe-20261024`;
+- `main` permaneció intacta en el SHA base.
+
+El commit contiene únicamente `f2-e2e-permission-probe.md`. La rama, el
+commit, el archivo y el PR fueron reconsultados mediante el mismo token de
+instalación. No se fusionó ni se modificó ningún repositorio histórico.
+
+Regresión adicional: `tests/test_github_ticket_contract.py` terminó con
+`11 passed`; Ruff afectado, OpenSpec strict y `git diff --check` PASS. Esto
+demuestra publicación real y elimina el bloqueo de permisos, pero no completa
+4.4 ni 8.4: aún no existe una invocación de pensamiento autorizada en esta
+sesión, ni el primer/segundo PR documental con merges humanos.
