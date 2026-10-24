@@ -35,6 +35,12 @@ migraciones productivas.
   cuarentena. Su existencia actual es **DESCONOCIDA** hasta inspección
   explícita; no afirmar recuperación ni solicitar nueva ejecución por defecto.
   La concesión incremental permanece reservada.
+- **GitHub preflight externo de solo lectura (2026-10-23):** el repositorio
+  desechable `silverberdi/mini-me-f2-e2e-20261023` presenta únicamente la
+  rama `main`; la búsqueda de PR de bootstrap no devolvió resultados.
+  Esto no certifica inexistencia de worktree/candidato local ni permisos
+  de la GitHub App, que deben verificarse en el host antes de cualquier
+  operación pagada.
 
 ## Secuencia obligatoria — ejecutar con OpenSpec Apply, sin abrir Change ni PR nuevo
 
