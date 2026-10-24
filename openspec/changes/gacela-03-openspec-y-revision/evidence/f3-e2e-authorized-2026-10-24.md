@@ -100,3 +100,37 @@ invoked by these tests. The complete isolated regression reached `788 passed,
 12 skipped` with the same four pre-existing Python 3.14/cache/profile
 compatibility failures classified above, plus no F3-specific failure after the
 fail-closed expectation updates.
+
+## Bounded classification checkpoint — 2026-10-24
+
+The checkpoint was published at commit `3ea4797b6c4dc3879675b8b7d18e69991ea05f1e`
+and executed only against the preserved run above. The first environment check
+correctly stopped before invocation when the service environment pointed at
+`minime`; the isolated runtime was then bound to the disposable database
+`minime_f3_e2e_20261024`, whose Alembic revision is
+`f2_retire_project_legacy_context`. No production database was written.
+
+Final preflight evidence: exactly one run, active `VALIDATING`, strict OpenSpec
+validation PASS, original worktree and four proposal artifacts present, Issue
+`#5` read through the GitHub App, App permissions verified for Issues/Contents/
+Pull Requests, Codex and Antigravity profiles available, confinement preflight
+PASS, and fallback disabled. The original issue title and body were passed to
+the checkpoint; artifact hashes were recorded with the result.
+
+Exactly one Codex invocation was made for the existing run:
+
+- attempt: `6519f82c-c023-4e3f-8291-490274bfe88e`
+- model: `gpt-5.6-luna`; effort: `medium`; provider: Codex
+- exit code: `0`; timeout: `false`; preflight error: none
+- result: `INVALID_OUTPUT`; no complexity verdict was accepted
+- reason: the output contained the JSON object followed by additional Codex
+  session/inspection output, so it was not exactly one structured JSON object
+- consumption: `unknown`; no retry was made
+- persisted artifact hashes: `proposal.md`, `design.md`, `tasks.md`, and the
+  sanitized-filename spec remain associated with the attempt
+
+The run remains `VALIDATING`, active, with one run and no candidate, job, Apply,
+review, PR, merge, or Issue mutation. Explore and Propose were not repeated;
+Apply and independent review were not invoked. The checkpoint persists an
+`IN_PROGRESS` record before dispatch and the final typed diagnostic afterward,
+then stops before Review/Apply as required.
