@@ -1,5 +1,5 @@
 ## Purpose
-Allow a prepared project to add documentary context by an auditable new PR while retaining all previously approved context until human-authorized merge.
+Allow a prepared project to add documentary context by an auditable new PR while retaining all previously approved context until an authorized merge. Real project merges require human authorization; exclusively disposable F2 acceptance-test PRs may be merged by their controlled test harness after exact identity/integrity verification.
 
 ## ADDED Requirements
 
