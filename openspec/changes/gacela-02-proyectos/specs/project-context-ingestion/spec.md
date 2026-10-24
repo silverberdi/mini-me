@@ -33,6 +33,27 @@ For a valid Greenfield onboarding, mini me SHALL invoke the configured, budget-a
 - **WHEN** existing AGENTS/agent-equivalent/OpenSpec instructions conflict with a proposed context link or would be overwritten
 - **THEN** the original compatible content is preserved and the conflict is reported for explicit resolution rather than overwritten
 
+
+### Requirement: Populate a standard optional catalog, not an inferred project structure
+
+Mini me SHALL define one fixed, versioned F2 catalog of standard context folders/files (from general and business/product through architecture, UX, data, integrations, security, operations, planning, AI, legal and organization). The file-capable thinking agent SHALL read all admissible original ZIP files and populate the applicable canonical Markdown files with useful summaries/consolidation from **only** provided information. Source-supported information MAY appear in multiple relevant files to make each understandable without forced de-duplication. The catalog determines the file layout; the agent must not invent categories, product facts or implementation tasks.
+
+The agent SHALL preserve unchanged originals under `context/incoming/<sha>/`, record provenance, generate `context/INDEX.md` and optional source index, and index **only** populated files with valid links. Documents with no applicable information MAY remain absent or empty, and SHALL not appear in the index. A received roadmap MAY be represented as documentary roadmap; a received backlog MAY inform historical planning context, but neither SHALL create an operational backlog, GitHub Issues, OpenSpec tasks or authorization to implement.
+
+No semantic or business-quality review is required in F2. Technical checks for ZIP safety, immutable source fidelity, canonical paths, correct navigation, secrets and repository isolation remain mandatory.
+
+#### Scenario: One source fact belongs in several documents
+- **WHEN** one supplied statement relates to product, domain and security
+- **THEN** it may be faithfully included in all three canonical documents with provenance and without invented technical implementation
+
+#### Scenario: Sparse ZIP leaves catalog documents empty
+- **WHEN** no supplied source describes a catalog topic
+- **THEN** the corresponding file is absent or empty and is omitted from `context/INDEX.md`; no filler or unsupported claim is generated
+
+#### Scenario: Roadmap and backlog are received as source files
+- **WHEN** the ZIP includes a roadmap and an existing backlog
+- **THEN** originals remain available, documented planning information may be consolidated into standard contextual planning files, and no executable backlog or ticket is generated
+
 ### Requirement: Validate provenance, references, and official OpenSpec configuration before publication
 Before commit, mini me SHALL verify every generated context claim has source provenance, all index/config references resolve within the repository, native OpenSpec configuration passes the official CLI validation, and no secret or unrelated destructive change is present. Indexing SHALL avoid bulk duplication by linking to canonical source documents.
 
