@@ -1711,8 +1711,30 @@ class NativeOrchestrationCoordinator:
         return True
 
     async def _push_branch(self, worktree_path: Path, branch_name: str) -> None:
-        # Git push branch
-        await self._git_run(worktree_path, ["push", "-u", "origin", branch_name])
+        """Publish a candidate through the configured GitHub adapter identity."""
+        candidate_sha = await self._get_git_head_sha(worktree_path)
+        push = getattr(self.github_adapter, "push_branch", None)
+        if push is None:
+            raise GitOperationError(
+                GitCommandResult(
+                    ("push", "-u", "origin", branch_name),
+                    1,
+                    "",
+                    "Configured GitHub adapter does not provide authenticated branch publication.",
+                )
+            )
+        result = push(
+            worktree_path=str(worktree_path),
+            remote="origin",
+            branch=branch_name,
+            candidate_sha=candidate_sha,
+        )
+        result = await result if inspect.isawaitable(result) else result
+        if not self._external_success(result) or getattr(result, "data", None) != candidate_sha:
+            detail = getattr(result, "error_message", None) or "Authenticated branch publication was not confirmed."
+            raise GitOperationError(
+                GitCommandResult(("push", "-u", "origin", branch_name), 1, "", str(detail))
+            )
 
     async def _get_git_head_sha(self, worktree_path: Path) -> str:
         result = await self._git_run(worktree_path, ["rev-parse", "HEAD"])

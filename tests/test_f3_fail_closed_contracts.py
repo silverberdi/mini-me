@@ -111,6 +111,31 @@ async def test_verify_requires_native_final_response_channel(tmp_path: Path):
 
 
 @pytest.mark.asyncio
+async def test_branch_publication_uses_authenticated_github_adapter(tmp_path: Path):
+    from minime.domain.enums import ExternalOutcome, ExternalReasonCode, RetrySafety
+    from minime.domain.models import ExternalActionResult
+
+    adapter = SimpleNamespace(
+        push_branch=lambda **kwargs: ExternalActionResult(
+            outcome=ExternalOutcome.SUCCESS,
+            source_adapter="github",
+            reason_code=ExternalReasonCode.EXECUTION_SUCCESS,
+            retry_safety=RetrySafety.UNSAFE,
+            data=kwargs["candidate_sha"],
+        )
+    )
+    c = NativeOrchestrationCoordinator(
+        uow_factory=lambda: None,
+        github_adapter=adapter,
+        worktree_manager=SimpleNamespace(),
+        agent_runner=ScriptedRunner("unused"),
+    )
+    c._get_git_head_sha = AsyncMock(return_value="a" * 40)
+
+    await c._push_branch(tmp_path, "request-5-test")
+
+
+@pytest.mark.asyncio
 async def test_apply_and_sync_fail_closed_on_agent_error(tmp_path: Path):
     runner = ScriptedRunner("failure", exit_code=2)
     c = coordinator(tmp_path, runner)
