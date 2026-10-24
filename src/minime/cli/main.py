@@ -462,7 +462,7 @@ def request_run_cmd(
                 typer.echo(f"Project '{project_id}' not found.", err=True)
                 raise typer.Exit(code=1)
 
-            wt_manager = WorktreeManager(repo_root=Path("."), uow=uow)
+            wt_manager = WorktreeManager(project_root=Path("."), uow=uow)
             github = GitHubAdapter()
             agent_runner = CliAgentRunner()
 

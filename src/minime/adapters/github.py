@@ -755,6 +755,7 @@ class GitHubAdapter(GitHubAdapterInterface):
             all_items: list[dict[str, Any]] = []
             page = 1
             per_page = 100 if (limit is None or limit > 100) else max(1, limit)
+            rest_success = False
 
             while True:
                 response = self._request(
@@ -765,6 +766,7 @@ class GitHubAdapter(GitHubAdapterInterface):
                 if response.status_code == 200:
                     payload = response.json()
                     if isinstance(payload, list):
+                        rest_success = True
                         items = [item for item in payload if not item.get("pull_request")]
                         all_items.extend(items)
                         if limit is not None and len(all_items) >= limit:
@@ -787,7 +789,7 @@ class GitHubAdapter(GitHubAdapterInterface):
                     )
                 break
 
-            if all_items or page > 1:
+            if rest_success:
                 return ExternalActionResult(
                     outcome=ExternalOutcome.SUCCESS,
                     source_adapter="github_rest",

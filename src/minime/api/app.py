@@ -624,6 +624,125 @@ def verify_project_connections(
     }
 
 
+class ProjectRequestRunPayload(BaseModel):
+    operator_ack: bool = False
+    operator_response: str | None = None
+    thinker_provider: str | None = None
+    implementer_provider: str | None = None
+    reviewer_provider: str | None = None
+
+
+@app.get("/api/v1/projects/{project_id}/requests", tags=["requests"])
+def list_project_requests(
+    project_id: str,
+    _operator: AuthenticatedOperatorDep,
+    uow: UowDep,
+) -> dict[str, Any]:
+    """List eligible remote requests for a project in FIFO order."""
+    from minime.adapters.github import GitHubAdapter
+    from minime.services.remote_request_intake import RemoteRequestIntakeService
+
+    project = uow.projects.get_by_id(project_id)
+    if project is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Project not found")
+
+    intake = RemoteRequestIntakeService(github_adapter=GitHubAdapter(), uow=uow)
+    eligible = intake.get_eligible_requests(project.repository)
+    return {
+        "project_id": project_id,
+        "repository": project.repository,
+        "eligible_requests": eligible,
+    }
+
+
+@app.post("/api/v1/projects/{project_id}/requests/run", tags=["requests"])
+async def run_project_request(
+    project_id: str,
+    _operator: AuthenticatedOperatorDep,
+    uow: UowDep,
+    payload: ProjectRequestRunPayload | None = None,
+) -> dict[str, Any]:
+    """Execute or continue the active remote request for a project."""
+    from minime.adapters.github import GitHubAdapter
+    from minime.services.worktree_manager import WorktreeManager
+    from minime.services.agent_runner import CliAgentRunner
+    from minime.services.orchestration_coordinator import NativeOrchestrationCoordinator
+
+    project = uow.projects.get_by_id(project_id)
+    if project is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Project not found")
+
+    body = payload or ProjectRequestRunPayload()
+    wt_manager = WorktreeManager(project_root=Path("."), uow=uow)
+    github = GitHubAdapter()
+    agent_runner = CliAgentRunner()
+
+    coordinator = NativeOrchestrationCoordinator(
+        uow_factory=lambda: uow,
+        github_adapter=github,
+        worktree_manager=wt_manager,
+        agent_runner=agent_runner,
+    )
+    res = await coordinator.execute_project_request(
+        project_id,
+        operator_ack=body.operator_ack,
+        operator_response=body.operator_response,
+        thinker_provider=body.thinker_provider,
+        implementer_provider=body.implementer_provider,
+        reviewer_provider=body.reviewer_provider,
+    )
+    return {
+        "status": res.status,
+        "run_id": res.run_id,
+        "current_stage": res.current_stage.value if res.current_stage else None,
+        "message": res.message,
+        "pr1_url": res.pr1_url,
+        "pr2_url": res.pr2_url,
+        "human_payload": res.human_payload,
+    }
+
+
+@app.post("/api/v1/projects/{project_id}/requests/ack", tags=["requests"])
+async def ack_project_request(
+    project_id: str,
+    _operator: AuthenticatedOperatorDep,
+    uow: UowDep,
+) -> dict[str, Any]:
+    """Acknowledge («Estoy enterado») high-complexity PR merge and continue."""
+    from minime.adapters.github import GitHubAdapter
+    from minime.services.worktree_manager import WorktreeManager
+    from minime.services.agent_runner import CliAgentRunner
+    from minime.services.orchestration_coordinator import NativeOrchestrationCoordinator
+
+    project = uow.projects.get_by_id(project_id)
+    if project is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Project not found")
+
+    wt_manager = WorktreeManager(project_root=Path("."), uow=uow)
+    github = GitHubAdapter()
+    agent_runner = CliAgentRunner()
+
+    coordinator = NativeOrchestrationCoordinator(
+        uow_factory=lambda: uow,
+        github_adapter=github,
+        worktree_manager=wt_manager,
+        agent_runner=agent_runner,
+    )
+    res = await coordinator.execute_project_request(
+        project_id,
+        operator_ack=True,
+    )
+    return {
+        "status": res.status,
+        "run_id": res.run_id,
+        "current_stage": res.current_stage.value if res.current_stage else None,
+        "message": res.message,
+        "pr1_url": res.pr1_url,
+        "pr2_url": res.pr2_url,
+        "human_payload": res.human_payload,
+    }
+
+
 class JobRunRequest(BaseModel):
     change_name: str
     project_root: str = "."

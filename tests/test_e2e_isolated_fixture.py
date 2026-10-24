@@ -120,6 +120,7 @@ async def test_e2e_moderate_complexity_full_cycle(isolated_fixture_repo):
     assert github_mock.merge_pull_request.call_count == 2
     from unittest.mock import ANY
     github_mock.close_issue.assert_called_once_with(
+        repository=ANY,
         issue_number=501,
         comment=ANY,
     )

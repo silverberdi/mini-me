@@ -96,3 +96,77 @@ async def test_orchestration_continuity_worktree_preserved_on_failure(tmp_path: 
     active_runs = uow.orchestration_runs.list_runs(project_id="proj-1", is_active=True)
     assert len(active_runs) == 1
     assert active_runs[0].current_stage == OrchestrationStage.PR1_PENDING
+
+
+def test_request_rest_api_endpoints(in_memory_uow, tmp_path: Path):
+    from fastapi.testclient import TestClient
+    from minime.api.app import app, get_uow, get_current_operator
+    from minime.domain.models import AuthorizedOperator, Project
+    from unittest.mock import patch, MagicMock
+
+    repo_root = tmp_path / "repo-test"
+    repo_root.mkdir()
+    wt_root = tmp_path / "worktrees"
+    wt_root.mkdir()
+    setup_managed_repository_fixture(
+        in_memory_uow,
+        "proj-test",
+        repo_root,
+        wt_root,
+        canonical_repository_identity="github.com/org/repo-test",
+    )
+    in_memory_uow.projects.save(
+        Project(
+            project_id="proj-test",
+            display_name="Test",
+            repository="org/repo-test",
+        )
+    )
+
+    mock_operator = AuthorizedOperator(
+        email="operator@example.com",
+        name="Operator",
+        roles=["admin"],
+    )
+
+    app.dependency_overrides[get_uow] = lambda: in_memory_uow
+    app.dependency_overrides[get_current_operator] = lambda: mock_operator
+
+    try:
+        client = TestClient(app)
+
+        # 1. GET eligible requests list
+        with patch("minime.services.remote_request_intake.RemoteRequestIntakeService.get_eligible_requests", return_value=[{"number": 101, "title": "Feat"}]):
+            res = client.get("/api/v1/projects/proj-test/requests")
+            assert res.status_code == 200
+            data = res.json()
+            assert data["project_id"] == "proj-test"
+            assert len(data["eligible_requests"]) == 1
+
+        # 2. POST request run
+        with patch("minime.services.orchestration_coordinator.NativeOrchestrationCoordinator.execute_project_request") as mock_exec:
+            mock_res = MagicMock(
+                status="COMPLETED",
+                run_id="run-1",
+                current_stage=OrchestrationStage.COMPLETED,
+                message="Done",
+                pr1_url="https://github.com/org/repo-test/pull/1",
+                pr2_url="https://github.com/org/repo-test/pull/2",
+                human_payload=None,
+            )
+            mock_exec.return_value = mock_res
+            res = client.post("/api/v1/projects/proj-test/requests/run", json={"operator_ack": False})
+            assert res.status_code == 200
+            data = res.json()
+            assert data["status"] == "COMPLETED"
+            assert data["pr1_url"] == "https://github.com/org/repo-test/pull/1"
+
+        # 3. POST request ack
+        with patch("minime.services.orchestration_coordinator.NativeOrchestrationCoordinator.execute_project_request") as mock_exec:
+            mock_exec.return_value = mock_res
+            res = client.post("/api/v1/projects/proj-test/requests/ack")
+            assert res.status_code == 200
+            mock_exec.assert_called_once_with("proj-test", operator_ack=True)
+    finally:
+        app.dependency_overrides.clear()
+

@@ -79,6 +79,28 @@ def mock_env(tmp_path: Path):
 async def test_propose_lifecycle_explore_and_propose(mock_env):
     coordinator, uow, github_mock, repo_dir = mock_env
 
+    # Configure runner to create proposal artifacts on propose dispatch
+    async def mock_agent_run(worktree_path, prompt_context, **kwargs):
+        from minime.services.agent_runner import AgentExecutionResult
+        if "Execute official OpenSpec Propose" in prompt_context:
+            change_dir = worktree_path / "openspec" / "changes" / "req-101-add-caching-layer"
+            change_dir.mkdir(parents=True, exist_ok=True)
+            (change_dir / "proposal.md").write_text("# Proposal\nAdd caching layer")
+            (change_dir / "tasks.md").write_text("## Tasks\n- [ ] 1.1 Add caching")
+            specs_dir = change_dir / "specs" / "feature"
+            specs_dir.mkdir(parents=True, exist_ok=True)
+            (specs_dir / "spec.md").write_text("## Spec\nCaching spec")
+        return AgentExecutionResult(
+            exit_code=0,
+            timed_out=False,
+            stdout=["Done"],
+            stderr=[],
+            duration_ms=10,
+        )
+
+    coordinator.agent_runner.run = AsyncMock(side_effect=mock_agent_run)
+    coordinator.openspec_adapter.validate_change_strict = MagicMock(return_value={"status": "PASS", "returncode": 0})
+
     # Test Explore & Propose execution
     result = await coordinator.execute_project_request(
         "proj-1",

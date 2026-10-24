@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import inspect
 import re
 import subprocess
 from dataclasses import dataclass
@@ -11,7 +12,7 @@ from typing import Any
 
 from minime.adapters.github import GitHubAdapter
 from minime.adapters.openspec import OpenSpecAdapter
-from minime.domain.enums import OrchestrationStage, OrchestrationStopOutcome
+from minime.domain.enums import ExternalOutcome, OrchestrationStage, OrchestrationStopOutcome
 from minime.domain.interfaces import PersistenceUnitOfWork
 from minime.domain.models import OrchestrationRun, utc_now
 from minime.logging import get_logger
@@ -140,6 +141,7 @@ class NativeOrchestrationCoordinator:
                 issue_title=issue_title,
                 issue_body=issue_body,
                 operator_clarification=operator_clarification,
+                project_id=project_id,
             )
             if explore_result.get("status") == "HUMAN_REQUIRED":
                 return OrchestrationCoordinationResult(
@@ -160,6 +162,7 @@ class NativeOrchestrationCoordinator:
                 issue_number=issue_number,
                 issue_title=issue_title,
                 issue_body=issue_body,
+                project_id=project_id,
             )
 
             self._update_stage(uow, active_run, OrchestrationStage.VALIDATING)
@@ -171,7 +174,7 @@ class NativeOrchestrationCoordinator:
                     break
                 # Correction pass
                 logger.info(f"OpenSpec strict validation failed on attempt {attempt + 1}. Running correction pass...")
-                await self._run_propose_correction(worktree_path, thinker_provider, change_name, val_res.get("stderr", ""))
+                await self._run_propose_correction(worktree_path, thinker_provider, change_name, val_res.get("stderr", ""), project_id=project_id)
 
             if not validate_pass:
                 return OrchestrationCoordinationResult(
@@ -192,7 +195,7 @@ class NativeOrchestrationCoordinator:
             # Proposal Review for High Complexity
             if complexity == "high":
                 self._update_stage(uow, active_run, OrchestrationStage.PROPOSAL_REVIEW)
-                review_ok = await self._run_proposal_review(worktree_path, reviewer_provider, change_name)
+                review_ok = await self._run_proposal_review(worktree_path, reviewer_provider, change_name, project_id=project_id)
                 if not review_ok:
                     return OrchestrationCoordinationResult(
                         status="PAUSED",
@@ -223,7 +226,7 @@ class NativeOrchestrationCoordinator:
         # Step 7: Apply Stage and Test Execution
         if active_run.current_stage in (OrchestrationStage.READY_TO_APPLY, OrchestrationStage.IMPLEMENTING):
             self._update_stage(uow, active_run, OrchestrationStage.IMPLEMENTING)
-            await self._run_apply(worktree_path, implementer_provider, change_name)
+            await self._run_apply(worktree_path, implementer_provider, change_name, project_id=project_id)
 
             self._update_stage(uow, active_run, OrchestrationStage.RUNNING_TESTS)
             tests_ok, test_evidence = await self._run_automated_tests(worktree_path)
@@ -238,7 +241,7 @@ class NativeOrchestrationCoordinator:
 
             # Step 8: Verify Stage (Executed by implementer)
             self._update_stage(uow, active_run, OrchestrationStage.VERIFYING)
-            verify_ok = await self._run_verify(worktree_path, implementer_provider, change_name)
+            verify_ok = await self._run_verify(worktree_path, implementer_provider, change_name, project_id=project_id)
             if not verify_ok:
                 return OrchestrationCoordinationResult(
                     status="PAUSED",
@@ -251,7 +254,7 @@ class NativeOrchestrationCoordinator:
             complexity = active_run.stop_details.get("complexity", "moderate")
             if complexity == "high":
                 self._update_stage(uow, active_run, OrchestrationStage.CODE_REVIEW)
-                code_review_ok = await self._run_code_review(worktree_path, reviewer_provider, change_name)
+                code_review_ok = await self._run_code_review(worktree_path, reviewer_provider, change_name, project_id=project_id)
                 if not code_review_ok:
                     return OrchestrationCoordinationResult(
                         status="PAUSED",
@@ -291,14 +294,24 @@ class NativeOrchestrationCoordinator:
             await self._push_branch(worktree_path, worktree_info.branch_name)
 
             # Open PR via GitHubAdapter
-            opened_pr = await self.github_adapter.create_pull_request(
+            opened_pr_call = self.github_adapter.create_pull_request(
+                repository=repository,
+                branch=worktree_info.branch_name,
+                base=base_branch,
+                title=prepared_pr.title,
+                body=prepared_pr.body,
+                head_sha=candidate_sha,
+                draft=False,
+            ) if hasattr(self.github_adapter, "_repo") else self.github_adapter.create_pull_request(
                 base=base_branch,
                 head=worktree_info.branch_name,
                 title=prepared_pr.title,
                 body=prepared_pr.body,
             )
-            pr1_number = opened_pr.get("number")
-            pr1_url = opened_pr.get("html_url")
+            opened_pr_res = await opened_pr_call if inspect.isawaitable(opened_pr_call) else opened_pr_call
+            opened_data = opened_pr_res.data if hasattr(opened_pr_res, "data") else opened_pr_res
+            pr1_number = opened_data.get("number") if isinstance(opened_data, dict) else getattr(opened_data, "number", None)
+            pr1_url = opened_data.get("html_url") if isinstance(opened_data, dict) else getattr(opened_data, "html_url", None)
             active_run.stop_details["pr1_number"] = pr1_number
             active_run.stop_details["pr1_url"] = pr1_url
             if hasattr(uow, "orchestration_runs"):
@@ -323,18 +336,28 @@ class NativeOrchestrationCoordinator:
                 )
 
             # Merge PR1
-            merge_res = await self.github_adapter.merge_pull_request(
+            merge_call = self.github_adapter.merge_pull_request(
+                repository=repository,
+                pr_number=pr1_number,
+                candidate_sha=candidate_sha,
+                merge_method="merge",
+            ) if hasattr(self.github_adapter, "_repo") else self.github_adapter.merge_pull_request(
                 pull_number=pr1_number,
                 expected_head_sha=candidate_sha,
                 merge_method="merge",
             )
-            if not merge_res.get("merged"):
+            merge_res = await merge_call if inspect.isawaitable(merge_call) else merge_call
+            merge_data = merge_res.data if hasattr(merge_res, "data") else merge_res
+            is_merged = (merge_data.get("merged") or merge_data.get("status") == "merged") if isinstance(merge_data, dict) else (getattr(merge_res, "outcome", None) == ExternalOutcome.SUCCESS)
+
+            if not is_merged:
+                err_msg = merge_data.get("message") if isinstance(merge_data, dict) else getattr(merge_res, "error_message", "Merge failed")
                 return OrchestrationCoordinationResult(
                     status="PAUSED",
                     run_id=active_run.run_id,
                     current_stage=OrchestrationStage.PR1_PENDING,
                     pr1_url=pr1_url,
-                    message=f"Failed to merge PR1: {merge_res.get('message')}. Worktree preserved.",
+                    message=f"Failed to merge PR1: {err_msg}. Worktree preserved.",
                 )
             self._update_stage(uow, active_run, OrchestrationStage.PR1_MERGED)
 
@@ -350,7 +373,7 @@ class NativeOrchestrationCoordinator:
         doc_path = doc_worktree_info.path
 
         # Run native Sync & Archive
-        await self._run_sync_and_archive(doc_path, thinker_provider, change_name)
+        await self._run_sync_and_archive(doc_path, thinker_provider, change_name, project_id=project_id)
         doc_head_sha = await self._get_git_head_sha(doc_path)
 
         # Step 12: Documentation PR (PR2)
@@ -371,37 +394,66 @@ class NativeOrchestrationCoordinator:
         prepared_doc_pr = self.pr_preparer.prepare_pull_request(doc_prep_input)
 
         await self._push_branch(doc_path, doc_worktree_info.branch_name)
-        opened_doc_pr = await self.github_adapter.create_pull_request(
+        opened_doc_call = self.github_adapter.create_pull_request(
+            repository=repository,
+            branch=doc_worktree_info.branch_name,
+            base=base_branch,
+            title=prepared_doc_pr.title,
+            body=prepared_doc_pr.body,
+            head_sha=doc_head_sha,
+            draft=False,
+        ) if hasattr(self.github_adapter, "_repo") else self.github_adapter.create_pull_request(
             base=base_branch,
             head=doc_worktree_info.branch_name,
             title=prepared_doc_pr.title,
             body=prepared_doc_pr.body,
         )
-        pr2_number = opened_doc_pr.get("number")
-        pr2_url = opened_doc_pr.get("html_url")
+        opened_doc_res = await opened_doc_call if inspect.isawaitable(opened_doc_call) else opened_doc_call
+        opened_doc_data = opened_doc_res.data if hasattr(opened_doc_res, "data") else opened_doc_res
+        pr2_number = opened_doc_data.get("number") if isinstance(opened_doc_data, dict) else getattr(opened_doc_data, "number", None)
+        pr2_url = opened_doc_data.get("html_url") if isinstance(opened_doc_data, dict) else getattr(opened_doc_data, "html_url", None)
         active_run.stop_details["pr2_number"] = pr2_number
         active_run.stop_details["pr2_url"] = pr2_url
 
         # PR2 Auto-merge (always automatic)
-        merge_doc_res = await self.github_adapter.merge_pull_request(
+        merge_doc_call = self.github_adapter.merge_pull_request(
+            repository=repository,
+            pr_number=pr2_number,
+            candidate_sha=doc_head_sha,
+            merge_method="merge",
+        ) if hasattr(self.github_adapter, "_repo") else self.github_adapter.merge_pull_request(
             pull_number=pr2_number,
             expected_head_sha=doc_head_sha,
             merge_method="merge",
         )
-        if not merge_doc_res.get("merged"):
+        merge_doc_res = await merge_doc_call if inspect.isawaitable(merge_doc_call) else merge_doc_call
+        merge_doc_data = merge_doc_res.data if hasattr(merge_doc_res, "data") else merge_doc_res
+        doc_merged = (merge_doc_data.get("merged") or merge_doc_data.get("status") == "merged") if isinstance(merge_doc_data, dict) else (getattr(merge_doc_res, "outcome", None) == ExternalOutcome.SUCCESS)
+
+        if not doc_merged:
+            err_msg = merge_doc_data.get("message") if isinstance(merge_doc_data, dict) else getattr(merge_doc_res, "error_message", "Merge PR2 failed")
             return OrchestrationCoordinationResult(
                 status="PAUSED",
                 run_id=active_run.run_id,
                 current_stage=OrchestrationStage.PR2_PENDING,
                 pr1_url=pr1_url,
                 pr2_url=pr2_url,
-                message=f"Failed to merge documentation PR2: {merge_doc_res.get('message')}. Worktrees preserved.",
+                message=f"Failed to merge documentation PR2: {err_msg}. Worktrees preserved.",
             )
 
         self._update_stage(uow, active_run, OrchestrationStage.PR2_MERGED)
 
         # Step 13: Remote Issue Closure and Lock Release
-        await self.github_adapter.close_issue(
+        close_call = self.github_adapter.close_issue(
+            repository=repository,
+            issue_number=issue_number,
+            comment=(
+                f"Completed by mini me F3 orchestration.\n\n"
+                f"- Implementation PR: #{pr1_number} ({pr1_url})\n"
+                f"- Documentation PR: #{pr2_number} ({pr2_url})\n"
+                f"- OpenSpec Change: `{change_name}` archived."
+            ),
+        ) if hasattr(self.github_adapter, "_repo") else self.github_adapter.close_issue(
             issue_number=issue_number,
             comment=(
                 f"Completed by mini me F3 orchestration.\n\n"
@@ -410,6 +462,8 @@ class NativeOrchestrationCoordinator:
                 f"- OpenSpec Change: `{change_name}` archived."
             ),
         )
+        if inspect.isawaitable(close_call):
+            await close_call
 
         active_run.is_active = False
         active_run.stop_outcome = OrchestrationStopOutcome.COMPLETED
@@ -449,17 +503,46 @@ class NativeOrchestrationCoordinator:
         issue_title: str,
         issue_body: str,
         operator_clarification: str | None = None,
+        project_id: str | None = None,
     ) -> dict[str, Any]:
-        # Check if unresolved human clarification required
-        if "HUMAN REQUIRED" in issue_body and not operator_clarification:
+        """Execute official OpenSpec Explore workflow with configured thinking agent."""
+        wf = self.agent_runner.resolve_workflow(
+            worktree_path=worktree_path,
+            provider=provider,
+            operation="explore",
+            change_name=f"issue-{issue_number}",
+        )
+        prompt = (
+            f"You are the thinking agent for mini me. Execute official OpenSpec Explore for Request #{issue_number}.\n\n"
+            f"Command: {wf.dispatch_command}\n"
+            f"Issue Title: {issue_title}\n"
+            f"Issue Body:\n{issue_body}\n"
+        )
+        if operator_clarification:
+            prompt += f"\nOperator Clarification Provided:\n{operator_clarification}\n"
+
+        res = await self.agent_runner.run(
+            worktree_path=worktree_path,
+            prompt_context=prompt,
+            project_id=project_id,
+            role="thinker",
+            provider=provider,
+            workflow=wf,
+        )
+
+        full_out = res.full_output
+        if "HUMAN REQUIRED" in full_out or ("HUMAN REQUIRED" in issue_body and not operator_clarification):
+            # Extract options if present
+            options = ["Opción A: Mantener comportamiento por defecto", "Opción B: Implementar modo estricto"]
             return {
                 "status": "HUMAN_REQUIRED",
                 "human_payload": {
                     "question": f"¿Cómo debe resolverse la ambigüedad en el Issue #{issue_number}?",
-                    "options": ["Opción A: Mantener comportamiento por defecto", "Opción B: Implementar modo estricto"],
+                    "options": options,
+                    "agent_output": full_out[:1000] if full_out else "",
                 },
             }
-        return {"status": "READY_TO_PROPOSE"}
+        return {"status": "READY_TO_PROPOSE", "execution": res}
 
     async def _run_propose(
         self,
@@ -469,95 +552,246 @@ class NativeOrchestrationCoordinator:
         issue_number: int,
         issue_title: str,
         issue_body: str,
+        project_id: str | None = None,
     ) -> dict[str, Any]:
-        # Resolve workflow
+        """Dispatch thinking agent to execute official OpenSpec Propose workflow."""
         wf = self.agent_runner.resolve_workflow(
             worktree_path=worktree_path,
             provider=provider,
             operation="propose",
             change_name=change_name,
         )
-        # Create minimal change structure if not already present
-        change_dir = worktree_path / "openspec" / "changes" / change_name
-        change_dir.mkdir(parents=True, exist_ok=True)
-        specs_dir = change_dir / "specs" / "feature"
-        specs_dir.mkdir(parents=True, exist_ok=True)
-
-        proposal_file = change_dir / "proposal.md"
-        if not proposal_file.exists():
-            proposal_file.write_text(f"# Proposal: {change_name}\n\nAddresses #{issue_number}: {issue_title}\n\n## Summary\n{issue_body[:200]}")
-
-        tasks_file = change_dir / "tasks.md"
-        if not tasks_file.exists():
-            tasks_file.write_text("## 1. Implementation\n\n- [ ] 1.1 Implement core functionality\n- [ ] 1.2 Write tests\n")
-
-        spec_file = specs_dir / "spec.md"
-        if not spec_file.exists():
-            spec_file.write_text("## Purpose\nFeature specification.\n\n## Requirements\nFeature must work properly.\n")
-
-        return {"status": "READY_TO_VALIDATE", "workflow": wf}
+        prompt = (
+            f"Execute official OpenSpec Propose for change '{change_name}'.\n"
+            f"Workflow dispatch command: {wf.dispatch_command}\n\n"
+            f"Remote Request #{issue_number}: {issue_title}\n"
+            f"Description:\n{issue_body}\n"
+            f"Generate canonical change planning artifacts under openspec/changes/{change_name}/: "
+            f"proposal.md, specs/, design.md, and tasks.md."
+        )
+        res = await self.agent_runner.run(
+            worktree_path=worktree_path,
+            prompt_context=prompt,
+            project_id=project_id,
+            role="thinker",
+            provider=provider,
+            workflow=wf,
+        )
+        return {"status": "READY_TO_VALIDATE", "workflow": wf, "execution": res}
 
     async def _run_propose_correction(
-        self, worktree_path: Path, provider: str, change_name: str, error_output: str
+        self,
+        worktree_path: Path,
+        provider: str,
+        change_name: str,
+        error_output: str,
+        project_id: str | None = None,
     ) -> None:
-        # Re-save valid proposal files if corrupted
-        change_dir = worktree_path / "openspec" / "changes" / change_name
-        (change_dir / "proposal.md").write_text(f"# Proposal: {change_name}\n\n## Summary\nCorrected change artifact.\n")
+        """Run correction pass by thinking agent on strict validation failure."""
+        wf = self.agent_runner.resolve_workflow(
+            worktree_path=worktree_path,
+            provider=provider,
+            operation="propose",
+            change_name=change_name,
+        )
+        prompt = (
+            f"OpenSpec strict CLI validation failed for change '{change_name}'.\n"
+            f"Errors reported:\n{error_output}\n\n"
+            f"Please correct the planning artifacts under openspec/changes/{change_name}/ so that "
+            f"'openspec validate {change_name} --strict --type change' passes cleanly."
+        )
+        await self.agent_runner.run(
+            worktree_path=worktree_path,
+            prompt_context=prompt,
+            project_id=project_id,
+            role="thinker",
+            provider=provider,
+            workflow=wf,
+        )
 
-    async def _run_proposal_review(self, worktree_path: Path, provider: str, change_name: str) -> bool:
-        # Independent reviewer read-only inspection
+    async def _run_proposal_review(
+        self,
+        worktree_path: Path,
+        provider: str,
+        change_name: str,
+        project_id: str | None = None,
+    ) -> bool:
+        """Execute independent read-only proposal review for high complexity changes."""
+        change_dir = worktree_path / "openspec" / "changes" / change_name
+        proposal_text = (change_dir / "proposal.md").read_text(errors="ignore") if (change_dir / "proposal.md").exists() else ""
+        prompt = (
+            f"You are the independent reviewer agent (read-only). Perform independent review on OpenSpec change '{change_name}'.\n\n"
+            f"Proposal Artifacts:\n{proposal_text[:3000]}\n\n"
+            f"Evaluate architectural soundness, requirement coverage, and absence of overengineering.\n"
+            f"Emit APPROVED if satisfactory, or CHANGES REQUESTED with concrete findings."
+        )
+        res = await self.agent_runner.run(
+            worktree_path=worktree_path,
+            prompt_context=prompt,
+            project_id=project_id,
+            role="reviewer",
+            provider=provider,
+        )
+        output = res.full_output.upper()
+        if "CHANGES REQUESTED" in output or "REJECTED" in output:
+            return False
         return True
 
-    async def _run_apply(self, worktree_path: Path, provider: str, change_name: str) -> None:
-        # Implement tasks
-        tasks_file = worktree_path / "openspec" / "changes" / change_name / "tasks.md"
-        if tasks_file.exists():
-            content = tasks_file.read_text()
-            tasks_file.write_text(content.replace("[ ]", "[x]"))
+    async def _run_apply(
+        self,
+        worktree_path: Path,
+        provider: str,
+        change_name: str,
+        project_id: str | None = None,
+    ) -> None:
+        """Dispatch configured implementer agent to execute official OpenSpec Apply workflow."""
+        wf = self.agent_runner.resolve_workflow(
+            worktree_path=worktree_path,
+            provider=provider,
+            operation="apply",
+            change_name=change_name,
+        )
+        prompt = (
+            f"You are the implementer agent. Execute official OpenSpec Apply for change '{change_name}'.\n"
+            f"Workflow command: {wf.dispatch_command}\n\n"
+            f"Implement all pending tasks specified in tasks.md, write unit and E2E tests, "
+            f"ensure the test suite passes, and mark completed tasks as [x]."
+        )
+        await self.agent_runner.run(
+            worktree_path=worktree_path,
+            prompt_context=prompt,
+            project_id=project_id,
+            role="implementer",
+            provider=provider,
+            workflow=wf,
+        )
 
     async def _run_automated_tests(self, worktree_path: Path) -> tuple[bool, str]:
-        # Run tests with project python environment
+        """Execute project automated tests and verify exit code 0."""
         import sys
+        import shutil
+        pytest_bin = shutil.which("pytest") or str(Path(sys.executable).parent / "pytest")
+        cmd = [pytest_bin, "-q"] if Path(pytest_bin).exists() else [sys.executable, "-m", "pytest", "-q"]
         try:
             proc = await asyncio.create_subprocess_exec(
-                sys.executable, "-m", "pytest", "-q",
+                *cmd,
                 cwd=str(worktree_path),
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
             )
             stdout, stderr = await proc.communicate()
-            evidence = stdout.decode() + stderr.decode()
-            if proc.returncode == 0 or "no tests ran" in evidence or proc.returncode == 5:
-                return True, evidence or "All tests passed (exit code 0)."
+            evidence = stdout.decode(errors="replace") + stderr.decode(errors="replace")
+            if proc.returncode == 0:
+                return True, evidence or "All automated tests passed (exit code 0)."
+            if "no tests ran" in evidence or proc.returncode == 5:
+                # If project has no tests directory yet, record clean notice
+                return True, evidence or "No tests collected (pytest code 5)."
             return False, evidence
         except (OSError, FileNotFoundError) as exc:
-            logger.debug(f"Automated test runner exception: {exc}")
-            return True, "No test runner executable found; default pass."
+            logger.warning(f"Automated test runner exception: {exc}")
+            return False, f"Test execution failed to launch: {exc}"
 
-    async def _run_verify(self, worktree_path: Path, provider: str, change_name: str) -> bool:
+    async def _run_verify(
+        self,
+        worktree_path: Path,
+        provider: str,
+        change_name: str,
+        project_id: str | None = None,
+    ) -> bool:
+        """Dispatch the SAME implementer agent to execute native OpenSpec Verify workflow."""
         wf = self.agent_runner.resolve_workflow(
             worktree_path=worktree_path,
             provider=provider,
             operation="verify",
             change_name=change_name,
         )
-        return wf is not None
-
-    async def _run_code_review(self, worktree_path: Path, provider: str, change_name: str) -> bool:
+        prompt = (
+            f"Execute official OpenSpec Verify for change '{change_name}'.\n"
+            f"Workflow dispatch command: {wf.dispatch_command}\n\n"
+            f"Verify that all tasks and requirements are implemented and verified with green tests."
+        )
+        res = await self.agent_runner.run(
+            worktree_path=worktree_path,
+            prompt_context=prompt,
+            project_id=project_id,
+            role="implementer",
+            provider=provider,
+            workflow=wf,
+        )
+        output = res.full_output.lower()
+        if "discrepanc" in output or "failed" in output or res.exit_code != 0:
+            if "error" in output or res.exit_code > 0:
+                return False
         return True
 
-    async def _run_sync_and_archive(self, doc_path: Path, provider: str, change_name: str) -> None:
-        # Native sync and archive simulation on worktree
-        change_dir = doc_path / "openspec" / "changes" / change_name
-        archive_dir = doc_path / "openspec" / "archive" / change_name
-        archive_dir.parent.mkdir(parents=True, exist_ok=True)
-        if change_dir.exists():
-            import shutil
-            shutil.move(str(change_dir), str(archive_dir))
+    async def _run_code_review(
+        self,
+        worktree_path: Path,
+        provider: str,
+        change_name: str,
+        project_id: str | None = None,
+    ) -> bool:
+        """Execute independent read-only code review for high-complexity changes."""
+        diff = await self._git_run(worktree_path, ["diff", "HEAD~1..HEAD"])
+        prompt = (
+            f"You are the independent reviewer agent (read-only). Perform code review on OpenSpec change '{change_name}'.\n\n"
+            f"Candidate Diff:\n{diff[:4000]}\n\n"
+            f"Evaluate implementation correctness, security, maintainability, and absence of overengineering.\n"
+            f"Emit APPROVED if code meets requirements, or CHANGES REQUESTED with actionable feedback."
+        )
+        res = await self.agent_runner.run(
+            worktree_path=worktree_path,
+            prompt_context=prompt,
+            project_id=project_id,
+            role="reviewer",
+            provider=provider,
+        )
+        out = res.full_output.upper()
+        if "CHANGES REQUESTED" in out or "REJECTED" in out:
+            return False
+        return True
 
-        # Git commit documentation changes
-        await self._git_run(doc_path, ["add", "openspec/"])
-        await self._git_run(doc_path, ["commit", "-m", f"docs({change_name}): sync specs and archive change"])
+    async def _run_sync_and_archive(
+        self,
+        doc_path: Path,
+        provider: str,
+        change_name: str,
+        project_id: str | None = None,
+    ) -> None:
+        """Execute official OpenSpec Sync and Archive workflows with thinking agent."""
+        sync_wf = self.agent_runner.resolve_workflow(
+            worktree_path=doc_path,
+            provider=provider,
+            operation="sync",
+            change_name=change_name,
+        )
+        archive_wf = self.agent_runner.resolve_workflow(
+            worktree_path=doc_path,
+            provider=provider,
+            operation="archive",
+            change_name=change_name,
+        )
+
+        prompt = (
+            f"You are the thinking agent. Execute official OpenSpec Sync followed by Archive for '{change_name}'.\n\n"
+            f"1. Run Sync workflow: {sync_wf.dispatch_command}\n"
+            f"2. Run Archive workflow: {archive_wf.dispatch_command}\n"
+            f"Commit and record the updated specs and archive."
+        )
+        await self.agent_runner.run(
+            worktree_path=doc_path,
+            prompt_context=prompt,
+            project_id=project_id,
+            role="thinker",
+            provider=provider,
+            workflow=sync_wf,
+        )
+
+        # Check git status in doc worktree; if changes are uncommitted, stage and commit them
+        status_out = await self._git_run(doc_path, ["status", "--porcelain"])
+        if status_out.strip():
+            await self._git_run(doc_path, ["add", "openspec/"])
+            await self._git_run(doc_path, ["commit", "-m", f"docs({change_name}): sync specs and archive change"])
 
     async def _push_branch(self, worktree_path: Path, branch_name: str) -> None:
         # Git push branch
