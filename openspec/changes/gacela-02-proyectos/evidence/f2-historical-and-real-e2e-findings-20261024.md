@@ -88,3 +88,55 @@ Intervenciones concretas pendientes:
    defaults inventados, los perfiles/conexiones F2 de cada histórico y conceder
    a la GitHub App del servicio `contents=write` y `pull_requests=write` donde
    F3/F5 lo requieran. El fixture debe conservar su aislamiento.
+
+## Preflight de la instalación GitHub App y runtime (2026-10-24)
+
+Se repitió el preflight en el host del servicio usando exclusivamente el token
+de instalación generado por la App configurada; no se imprimieron tokens,
+JWT, claves ni contenido de `auth.json`.
+
+- `GET /installation/repositories` devolvió HTTP 200 y mostró exactamente
+  `silverberdi/mini-me`, `silverberdi/mini-me-r01-e2e-20261014` y
+  `silverberdi/mini-me-f2-e2e-20261023`. El repositorio E2E sí está
+  seleccionado actualmente, pero los tres registros reportan
+  `admin=false`, `maintain=false`, `pull=false`, `push=false` y
+  `triage=false`.
+- La misma respuesta de identidad del repositorio E2E fue HTTP 200, privado,
+  rama por defecto `main`, con el mismo mapa de permisos sin escritura. La
+  identidad histórica `mini-me-fixture` se verificó contra su remoto real
+  `silverberdi/mini-me-r01-e2e-20261014`; no se inventó un repositorio con
+  ese alias. No se hicieron mutaciones ni pruebas de escritura.
+- La verificación existente solicitada por el último comentario no pudo
+  ejecutarse en el runtime desplegado: el `GitHubAdapter` remoto no expone
+  `verify_connection_permissions`; por tanto, el despliegue remoto está
+  atrasado respecto al código F2 publicado y no se presenta como PASS. La
+  inspección directa del token de instalación sí permite distinguir el caso:
+  el E2E es accesible, pero sus grants efectivos no satisfacen
+  `contents=write`/`pull_requests=write`.
+- Bajo la identidad `silverman`, `CODEX_HOME` está ausente y Codex usa la
+  fuente por defecto `/home/silverman/.codex/auth.json` (modo `600`, propietario
+  `silverman`); `codex login status` respondió `Logged in using ChatGPT`.
+  `codex-cli` es `0.159.0`, `agy` `1.1.25` y OpenSpec `1.13.1`. No se ejecutó
+  `codex exec` ni ninguna inferencia.
+- El host tiene `/usr/bin/bwrap` y `/opt/minime/runtime`; `/run/minime-agent`
+  no existe y no se creó manualmente. Esto es compatible con el fallback
+  fail-closed del runtime: la raíz host efectiva disponible es
+  `/opt/minime/runtime`, mientras el mount interno del sandbox se crea solo
+  durante una sesión confinada.
+- La consulta del catálogo F2 no pudo ejecutarse en el despliegue actual:
+  falta `minime.services.project_catalog_service`. Esto confirma que el host
+  aún no ejecuta la revisión publicada; no se sustituyó por una configuración
+  inventada. Las versiones observadas de las herramientas no constituyen
+  evidencia de perfiles F2 históricos.
+
+Resultado: `BLOCKED` para 2.5/7.1b/8.4. El proyecto E2E permanece sin
+branches adicionales ni PR y el intento consumido permanece `BLOCKED`; no se
+repitió inferencia ni se consumió la concesión incremental.
+
+Acción administrativa exacta: actualizar la instalación de la GitHub App del
+servicio para otorgar `contents=write` y `pull_requests=write` al repositorio
+E2E y a cada repositorio histórico donde F3/F5 deba publicar, y desplegar el
+commit que contiene el gate F2 antes de volver a verificar. Además, deben
+configurarse explícitamente los cuatro perfiles/conexiones de cada proyecto
+histórico, sin defaults. Ninguna autorización de gasto se reutiliza ni se
+solicita implícitamente en esta evidencia.
