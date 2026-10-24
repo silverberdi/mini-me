@@ -259,6 +259,15 @@ class CliAgentRunner:
                     policy, headroom = budget_result
                 else:
                     policy, headroom = True, budget_result
+                # BudgetService governs the optional OpenRouter drain path. A
+                # project that explicitly disables that fallback must not be
+                # forced to create a meaningless positive OpenRouter allowance
+                # before a direct primary-provider invocation can start.
+                if (
+                    str(provider_id).strip().lower() != "openrouter"
+                    and getattr(policy, "enabled", True) is False
+                ):
+                    return
                 if policy is None or headroom is None:
                     raise CapacityExhaustedError(
                         provider_id=provider_id,

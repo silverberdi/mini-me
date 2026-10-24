@@ -1,5 +1,6 @@
 import pytest
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import MagicMock
 
 from tests.conftest import InMemoryPersistenceUnitOfWork, setup_managed_repository_fixture
@@ -130,3 +131,20 @@ def test_agent_runner_capacity_preflight_gating():
     capacity_service.can_admit_change.return_value = True
     with pytest.raises(CapacityExhaustedError, match="Budget headroom exhausted"):
         runner.check_capacity_preflight(project_id="proj-1", provider_id="openai", role="thinker")
+
+
+def test_agent_runner_allows_direct_provider_when_openrouter_budget_disabled():
+    capacity_service = MagicMock()
+    capacity_service.can_admit_change.return_value = True
+    budget_service = MagicMock()
+    budget_service.get_headroom.return_value = (
+        SimpleNamespace(enabled=False),
+        SimpleNamespace(daily_headroom_usd=0, monthly_headroom_usd=0),
+    )
+
+    CliAgentRunner(
+        capacity_service=capacity_service,
+        budget_service=budget_service,
+    ).check_capacity_preflight(
+        project_id="proj-1", provider_id="codex", role="thinker"
+    )
