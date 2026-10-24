@@ -381,3 +381,8 @@ The owner clarified that F2's thinking agent is **a document organizer and write
 - **Reuse:** Greenfield and incremental ZIPs use the same catalog and indexing semantics. The existing protected PR publication and human-authorized merge remain unchanged. Generated candidate preservation/recovery remains mandatory after any paid invocation.
 - **Testing scope:** `tests/test_project_context_catalog.py` introduces deterministic tests for standard folders/docs, multi-placement instructions, source/roadmap/backlog boundary, dynamic nonempty index, omitted files, nonstandard path rejection; legacy candidate tests now create a Git base for the fail-closed scope inspection. These are code changes **not yet proven by Ubuntu pytest/Ruff/OpenSpec or real E2E** from this connector; no model invocation was spent. Do not mark 4.4, 7.1b, 8.4 or 8.5 complete until actual evidence.
 
+
+
+### Excepción controlada: merges del E2E F2 desechable (2026-10-24)
+
+La exigencia de autorización humana para PRs de **proyectos reales** permanece intacta. Durante la **prueba de aceptación F2 exclusivamente**, un controlador de E2E puede fusionar un PR del repositorio desechable vinculado después de validar identidad exacta de repositorio, base SHA, head SHA, integridad documental, procedencia y ausencia de modificaciones productivas; observará después el merge SHA exacto antes de avanzar el checkpoint. No extiende la capacidad de auto-merge del producto a proyectos registrados. Esta excepción evita requerir al propietario aprobar manualmente los PRs ficticios de ensayo. Evidencia real del PR Greenfield #2 fusionado: `evidence/f2-disposable-greenfield-merge-20261024.md`. Incremental y reconciliación histórica siguen pendientes.
