@@ -462,7 +462,12 @@ def request_run_cmd(
                 typer.echo(f"Project '{project_id}' not found.", err=True)
                 raise typer.Exit(code=1)
 
-            wt_manager = WorktreeManager(project_root=Path("."), uow=uow)
+            binding = None
+            if hasattr(uow, "project_managed_repository_bindings"):
+                binding = uow.project_managed_repository_bindings.get_by_project_id(project_id)
+            repo_root = Path(binding.managed_repository_root) if binding else Path(".")
+
+            wt_manager = WorktreeManager(project_root=repo_root, uow=uow)
             github = GitHubAdapter()
             agent_runner = CliAgentRunner()
 

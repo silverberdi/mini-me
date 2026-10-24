@@ -59,3 +59,4 @@
 - [x] 7.2 Reconcile `docs/BACKLOG.md` and `AGENTS.md` aligning stage boundaries, roles, and verification criteria with F3 decisions
 - [x] 7.3 Update `openspec/config.yaml` to reflect the refined F3 lifecycle transitions and prompt guidelines
 - [x] 7.4 Audit and clean up dead code, retired functions, and obsolete imports within the F3 orchestration scope
+

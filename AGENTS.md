@@ -16,4 +16,8 @@
 ## Orden operativo
 Contrato rector → OpenSpec del Change autorizado → inventario del código/DB real → diseñar la menor solución suficiente → aplicar por skill nativa → probar resultado real → PR humano → sync/archive nativos → cierre. Conservar evidencia sin crear nueva burocracia.
 
+## Regla permanente de aceptación de entregas
+Una implementación no se declara completa por el número de tareas marcadas, la cantidad de tests aprobados o el informe de su ejecutor. Todo criterio que exija una integración real necesita evidencia observable de la invocación, su resultado y sus efectos. Las pruebas simuladas no pueden presentarse como E2E reales. La revisión independiente debe contrastar el código y la evidencia contra un SHA inmutable. Ante evidencia ausente, ambigua o fallida, se aplica fail-closed.
+
 Los expedientes anteriores MM-Rxx y Nxx quedan como referencias históricas hasta reconciliación; el backlog vigente se limita a los Issues #169–#174.
+

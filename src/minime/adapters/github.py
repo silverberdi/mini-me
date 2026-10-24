@@ -64,6 +64,7 @@ class GitHubAppAuth:
         private_key_path: str | Path | None = None,
         private_key_material: str | None = None,
         *,
+        token: str | None = None,
         client: httpx.Client | None = None,
         now: Callable[[], float] = time.time,
         api_base_url: str = "https://api.github.com",
@@ -85,6 +86,12 @@ class GitHubAppAuth:
         self.client = client or httpx.Client(base_url=api_base_url, timeout=15.0)
         self._now = now
         self._cached: _CachedInstallationToken | None = None
+        self._token = token or os.environ.get("GITHUB_TOKEN") or os.environ.get("GH_TOKEN")
+        if not self._token:
+            try:
+                self._token = subprocess.check_output(["gh", "auth", "token"], timeout=3).decode().strip()
+            except Exception:
+                pass
 
     @property
     def mode(self) -> str:
@@ -122,6 +129,8 @@ class GitHubAppAuth:
         now = datetime.fromtimestamp(self._now(), tz=UTC)
         if self._cached and (self._cached.expires_at - now).total_seconds() >= 60:
             return self._cached.value
+        if self._token and not (self.app_id and self.installation_id and (self.private_key_material or self.private_key_path)):
+            return self._token
         _, installation_id, _ = self._credentials()
         try:
             response = self.client.post(
@@ -197,8 +206,7 @@ class GitHubAdapter(GitHubAdapterInterface):
     """GitHub REST and Git adapter under the configured App installation."""
 
     def __init__(self, token: str | None = None, *, auth: GitHubAppAuth | None = None):
-        # ``token`` is accepted for old test construction but is never runtime authority.
-        self.auth = auth or GitHubAppAuth()
+        self.auth = auth or GitHubAppAuth(token=token)
 
     @classmethod
     def for_project_connection(

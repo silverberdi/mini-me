@@ -627,6 +627,7 @@ def verify_project_connections(
 class ProjectRequestRunPayload(BaseModel):
     operator_ack: bool = False
     operator_response: str | None = None
+    operator_clarification: str | None = None
     thinker_provider: str | None = None
     implementer_provider: str | None = None
     reviewer_provider: str | None = None
@@ -673,7 +674,12 @@ async def run_project_request(
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Project not found")
 
     body = payload or ProjectRequestRunPayload()
-    wt_manager = WorktreeManager(project_root=Path("."), uow=uow)
+    binding = None
+    if hasattr(uow, "project_managed_repository_bindings"):
+        binding = uow.project_managed_repository_bindings.get_by_project_id(project_id)
+    repo_root = Path(binding.managed_repository_root) if binding else Path(".")
+
+    wt_manager = WorktreeManager(project_root=repo_root, uow=uow)
     github = GitHubAdapter()
     agent_runner = CliAgentRunner()
 
@@ -683,10 +689,12 @@ async def run_project_request(
         worktree_manager=wt_manager,
         agent_runner=agent_runner,
     )
+    clarification = body.operator_clarification or body.operator_response
     res = await coordinator.execute_project_request(
         project_id,
         operator_ack=body.operator_ack,
-        operator_response=body.operator_response,
+        operator_clarification=clarification,
+        operator_response=clarification,
         thinker_provider=body.thinker_provider,
         implementer_provider=body.implementer_provider,
         reviewer_provider=body.reviewer_provider,
