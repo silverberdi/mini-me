@@ -4,7 +4,7 @@ Execute end-to-end implementation and automated test verification through offici
 ## ADDED Requirements
 
 ### Requirement: Full End-to-End OpenSpec Apply Execution
-The configured implementer agent SHALL recover the exact candidate branch, worktree, and Change name, SHALL invoke the official installed OpenSpec Apply workflow (`/opsx-apply` or `$openspec-apply-change`), and SHALL complete implementation from beginning to end without artificial pauses or requesting continuation OKs for partial deliverables.
+The system SHALL dynamically resolve the official OpenSpec Apply workflow for the configured implementer agent based on the workflows installed in the worktree (`.agent/workflows/opsx-apply.md` for Antigravity or `.agents/skills/openspec-apply-change/SKILL.md` for Codex) using the resolution mechanics in `native_openspec_apply.py`. The configured implementer agent SHALL recover the exact candidate branch, worktree, and Change name, SHALL invoke the resolved workflow, and SHALL complete implementation from beginning to end without artificial pauses or requesting continuation OKs for partial deliverables.
 
 #### Scenario: Implementer executes complete task set
 - **WHEN** the change reaches `READY TO APPLY`
@@ -25,12 +25,17 @@ The implementer agent SHALL design, execute, and verify real unit and E2E tests 
 - **WHEN** test execution produces errors or assertion failures during Apply
 - **THEN** the implementer analyzes the failure output, adjusts code or test logic, and re-executes tests until green before completing Apply.
 
-### Requirement: Native OpenSpec Verify Executed by Implementer
-The system SHALL invoke the official OpenSpec Verify workflow using the SAME implementer agent that executed Apply (and NOT the thinking agent), utilizing the verified project context and preflighted capacity.
+### Requirement: Native OpenSpec Verify Executed by Implementer with Capability Verification
+The system SHALL verify that the configured implementer agent has the official OpenSpec Verify workflow installed and compatible in the candidate worktree (`.agent/workflows/opsx-verify.md` for Antigravity or `.agents/skills/openspec-verify-change/SKILL.md` for Codex) before dispatching. If the Verify workflow is missing or unverified, the system SHALL block fail-closed, report the missing capability, and preserve the Request. Upon successful Apply, the system SHALL invoke the official OpenSpec Verify workflow using the SAME implementer agent that executed Apply (and NOT the thinking agent), utilizing the verified project context and preflighted capacity.
 
 #### Scenario: Implementer executes official verify workflow
 - **WHEN** Apply finishes with passing tests
-- **THEN** mini me instructs the implementer agent to run the official OpenSpec Verify workflow in the candidate worktree.
+- **AND** the presence of the native OpenSpec Verify workflow is verified in the worktree
+- **THEN** mini me instructs the implementer agent to run the resolved official OpenSpec Verify workflow in the candidate worktree.
+
+#### Scenario: Missing native Verify blocks execution fail-closed
+- **WHEN** the implementer agent lacks the verified native OpenSpec Verify workflow in the candidate worktree
+- **THEN** mini me halts the execution fail-closed, reports the missing capability, preserves the candidate worktree and run record in PostgreSQL, and prevents dispatch without fabricating replacements or guessing shell commands.
 
 ### Requirement: Verify Failure Feedback Loop
 If OpenSpec Verify fails, the system SHALL extract the authentic findings report, deliver it as context to the implementer agent in an official OpenSpec Apply correction prompt, re-execute the test suite, and re-run Verify up to the project's configured correction limit without human intervention.

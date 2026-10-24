@@ -15,7 +15,7 @@ The system SHALL retrieve the latest remote commit SHA of the configured base br
 - **THEN** the system verifies identity and commit SHA and reuses the existing branch and worktree without overwriting or duplicating them.
 
 ### Requirement: Native OpenSpec Explore with Autonomous Investigation
-The configured thinking agent SHALL invoke the official OpenSpec Explore workflow within the isolated worktree, SHALL autonomously investigate the full issue text, comments, attachments, images, diagrams, design documents, and repository context, and SHALL emit `READY TO PROPOSE` or `HUMAN REQUIRED`.
+The system SHALL dynamically resolve the official OpenSpec Explore workflow for the configured thinking agent based on the workflows actually installed in the worktree (`.agent/workflows/opsx-explore.md` for Antigravity or `.agents/skills/openspec-explore/SKILL.md` for Codex) and provider prompt transport. If the workflow is missing or incompatible, the system SHALL block fail-closed, report the missing capability, and preserve the Request. The configured thinking agent SHALL invoke the resolved workflow within the isolated worktree, SHALL autonomously investigate the full issue text, comments, attachments, images, diagrams, design documents, and repository context, and SHALL emit `READY TO PROPOSE` or `HUMAN REQUIRED`.
 
 #### Scenario: Autonomous resolution produces ready to propose
 - **WHEN** the thinking agent finds sufficient context in the repository and issue assets to clarify requirements
@@ -26,11 +26,11 @@ The configured thinking agent SHALL invoke the official OpenSpec Explore workflo
 - **THEN** the agent pauses with `HUMAN REQUIRED`, formulating concise, actionable questions in plain Spanish, preserving verbatim OpenSpec prompts, distinguishing agent-elaborated recommendations, and resuming immediately upon human answer.
 
 ### Requirement: Native OpenSpec Propose Execution
-Upon receiving `READY TO PROPOSE`, the same thinking agent SHALL invoke the official OpenSpec Propose workflow (`/opsx-propose` or `$openspec-propose`), SHALL generate the canonical change artifacts (`proposal.md`, `specs/`, `design.md`, `tasks.md`) under `openspec/changes/<change-name>/`, and SHALL emit `READY TO VALIDATE`.
+Upon receiving `READY TO PROPOSE`, the system SHALL dynamically resolve the official OpenSpec Propose workflow for the thinking agent based on the workflows actually installed in the worktree (`.agent/workflows/opsx-propose.md` for Antigravity or `.agents/skills/openspec-propose/SKILL.md` for Codex) and provider prompt transport. If the workflow is not installed or incompatible, the system SHALL block fail-closed, record the missing capability, and preserve the Request. The thinking agent SHALL invoke the resolved workflow, SHALL generate the canonical change artifacts (`proposal.md`, `specs/`, `design.md`, `tasks.md`) under `openspec/changes/<change-name>/`, and SHALL emit `READY TO VALIDATE`.
 
 #### Scenario: Canonical change artifacts generated natively
 - **WHEN** `READY TO PROPOSE` is achieved
-- **THEN** the thinking agent executes the installed official OpenSpec Propose workflow, producing `proposal.md`, delta specifications, `design.md`, and `tasks.md` without python template generation by mini me.
+- **THEN** the thinking agent executes the resolved official OpenSpec Propose workflow, producing `proposal.md`, delta specifications, `design.md`, and `tasks.md` without python template generation by mini me.
 
 ### Requirement: Strict CLI Validation and Correction Loop
 The system SHALL execute the installed official CLI command `openspec validate <change-name> --strict --no-interactive`, and if validation fails, SHALL return the CLI findings report to the thinking agent to correct artifacts via the native OpenSpec update workflow and re-validate up to the configured retry limit.

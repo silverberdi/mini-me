@@ -16,17 +16,17 @@ F3 debe conectar estos componentes en un flujo orquestado autónomo y real gober
 
 **Goals:**
 - Implementar la selección FIFO remota de GitHub Issues con paginación real, exclusión de `disabled` y dependencias explícitas no resueltas, y unicidad de a lo sumo un Request activo en ejecución por proyecto (permitiendo proyectos sin trabajo elegible).
-- Coordinar el ciclo de Propose: preparación Git (`request-<numero>-<slug-kebab>`) en la raíz administrada configurable mediante `WorktreeManager`, Explore oficial por el agente de pensamiento, Propose nativo oficial, Validate estricto por CLI con autocorrección, evaluación de complejidad por LLM y revisión independiente de propuesta para alta complejidad.
-- Coordinar el ciclo de Apply y Verify: ejecución de OpenSpec Apply oficial por el agente ejecutor, diseño y ejecución obligatoria de pruebas unitarias/E2E reales, Verify oficial ejecutado por el propio ejecutor, bucle de corrección en fallos de Verify y revisión independiente de código para alta complejidad.
-- Gestionar dos Pull Requests mediante punto de invocación de skill con contrato funcional mínimo en F3: primer PR de implementación con merge automático para complejidad baja/moderada y acuse informativo humano («Estoy enterado») para alta complejidad; preparación de rama y worktree frescos para cierre documental en la raíz administrada; ejecución de OpenSpec Sync y Archive oficiales por el agente de pensamiento; segundo PR documental con merge automático; y cierre remoto del issue con transición FIFO al siguiente.
+- Coordinar el ciclo de Propose: preparación Git (`request-<numero>-<slug-kebab>`) en la raíz administrada configurable mediante `WorktreeManager`, resolución dinámica de Explore oficial para el agente de pensamiento, Propose nativo oficial resuelto, Validate estricto por CLI con autocorrección, evaluación de complejidad por LLM y revisión independiente de propuesta para alta complejidad.
+- Coordinar el ciclo de Apply y Verify: resolución desacoplada de workflows según agente y worktree; verificación obligatoria de la presencia nativa de Verify en el ejecutor antes del despacho (bloqueo *fail-closed* si falta); ejecución de OpenSpec Apply oficial por el agente ejecutor, diseño y ejecución obligatoria de pruebas unitarias/E2E reales, Verify oficial ejecutado por el propio ejecutor, bucle de corrección en fallos de Verify y revisión independiente de código para alta complejidad.
+- Entregar en F3 la capacidad mínima operativa de preparación de Pull Requests (`minime-pr-preparer`) con contrato funcional concreto (entrada: proyecto, repositorio, tipo de PR1/PR2, request, ramas, SHA candidato, evidencias; salida: título, cuerpo Markdown formateado y referencias), eliminando la dependencia externa de F4 para completar el ciclo; primer PR de implementación con merge automático para baja/moderada y acuse informativo humano («Estoy enterado») para alta complejidad; preparación de rama y worktree frescos para cierre documental en la raíz administrada; ejecución de OpenSpec Sync y Archive oficiales resueltos para el agente de pensamiento; segundo PR documental con merge automático; y cierre remoto del issue con transición FIFO al siguiente.
 - Mantener continuidad estricta: los fallos recuperables, límites de corrección y esperas de capacidad preservan los artefactos y el Worktree sin seleccionar silenciosamente otro Request ni limpiar el espacio de trabajo; solo un cierre real o una cancelación gobernada y autorizada libera la ejecución.
 - Mantener persistencia mínima, observabilidad y resiliencia ante caídas en PostgreSQL, respetando cuotas y el protocolo humano en español.
-- Ejecutar pruebas E2E en un repositorio de pruebas autorizado y aislado (e.g. `mini-me-fixture`) sin alterar el repositorio operativo ni los Issues de mini me.
+- Ejecutar pruebas E2E en un repositorio de pruebas autorizado y aislado (e.g. `mini-me-fixture`) demostrando la resolución real de workflows y sin alterar el repositorio operativo ni los Issues de mini me.
 - Reconciliar la documentación canónica (`CONTRATO_RECTOR.md`, `BACKLOG.md`, `AGENTS.md` y `openspec/config.yaml`) con las decisiones funcionales de F3.
 
 **Non-Goals:**
 - No implementar una UI web/tablet/mobile (reservada para F5).
-- No construir un catálogo generalizado de skills, harnesses o hooks (reservado para F4).
+- No construir un catálogo generalizado de skills, harnesses o hooks (reservado para F4; F3 solo entrega la skill mínima de PR).
 - No implementar soporte para Azure DevOps ni proveedores secundarios de tickets.
 - No realizar despliegue productivo de mini me ni de proyectos gestionados (la política actual es no desplegar salvo autorización expresa del operador).
 - No habilitar el scheduler heredado en background de forma automática.
@@ -50,17 +50,44 @@ F3 debe conectar estos componentes en un flujo orquestado autónomo y real gober
 - **Razón:** Elimina la duplicación entre `CliImplementerRunner` y `CliReviewerRunner`, permitiendo invocar al agente de pensamiento con el mismo rigor de confinamiento y captura que a los demás roles.
 - **Alternativas consideradas:** Crear tres clases de runner separadas (`ThinkerRunner`, `ImplementerRunner`, `ReviewerRunner`); descartado porque la mecánica de ejecución subprocess y sandbox es común a todos los roles.
 
-### 4. Invocación nativa estricta de OpenSpec
-- **Decisión:** Mini me únicamente invoca los workflows oficiales instalados (`opsx-explore`, `opsx-propose`, `opsx-apply`, `opsx-verify`, `opsx-sync`, `opsx-archive`) o el comando CLI (`openspec validate`). Mini me nunca genera ni manipula contenido Markdown ni estructura interna de cambios.
-- **Razón:** Cumple la prohibición explícita del Contrato Rector v1.2 y el Issue #171.
-- **Alternativas consideradas:** Generar plantillas preliminares en Python; estrictamente prohibido.
+### 4. Resolución e invocación nativa estricta de OpenSpec
+- **Decisión:** Mini me resuelve dinámicamente cada operación oficial de OpenSpec (Explore, Propose, Apply, Verify, Sync, Archive) y el comando CLI (`openspec validate`) sin hardcodear comandos universales ni asumir la sintaxis de un único proveedor. La resolución de cada etapa se determina estrictamente a partir de:
+  1. *Agente configurado para el rol:* agente asociado a la etapa (`thinking`, `execution`/`implementer`, `independent_review`) validado contra el catálogo de perfiles.
+  2. *Versión oficial de OpenSpec instalada:* inspeccionada mediante `OpenSpecAdapter.inspect_cli()`.
+  3. *Workflows realmente instalados en el Worktree:* descubrimiento estricto mediante `OpenSpecAdapter.inspect_integrations()` y verificación de rutas libres de symlinks (e.g. `.agent/workflows/opsx-<op>.md` para Antigravity vs `.agents/skills/openspec-<op>/SKILL.md` para Codex, reutilizando `native_openspec_apply.py`).
+  4. *Capacidades verificadas del perfil:* roles de edición (`file_edit_roles`) para pensamiento y ejecución, y roles de solo lectura (`read_only_roles`) para revisión, validados por `ProjectCatalogService.validate_project_profiles()`.
+  5. *Transporte nativo del proveedor:* despacho mediante `stdin` o `argument` según `CliInvocationProfile.prompt_transport`, utilizando la sintaxis nativa correspondiente (`/opsx-...` en Antigravity, `$openspec-...` en Codex) como ejemplos específicos de proveedor y nunca como comandos universales.
+- **Verificación previa de Verify nativo:** Antes de despachar al implementador a Apply o Verify, el coordinador comprueba obligatoriamente que el agente de ejecución dispone del workflow oficial de Verify (`opsx-verify` o `openspec-verify-change`) instalado y verificado en el worktree. Si el workflow no está presente o no es compatible, el sistema bloquea inmediatamente en *fail-closed*, reporta la capacidad ausente y preserva el Request y su worktree para intervención o remediación.
+- **Prohibición de sustitutos:** Mini me jamás emula OpenSpec, no genera Markdown en Python, no reemplaza Verify con comandos de shell supuestos ni construye un segundo catálogo paralelo.
+- **Razón:** Satisface las observaciones de la revisión independiente de Codex, eliminando el acoplamiento rígido a Antigravity y asegurando que Codex o cualquier proveedor configurado ejecute su integración nativa real.
 
-### 5. Integración de skill para preparación de Pull Requests y política de merge
-- **Decisión:** La preparación del Pull Request (tanto de implementación como documental) se delega a una invocación de skill con un contrato mínimo y operativo en F3 (insumos: repositorio, rama base, rama head, título, resumen estructurado y SHA candidato verificado; salida: número de PR y URL). F3 deja la invocación funcional real para completar su E2E sin depender de F4, mientras que el catálogo completo de skills, harnesses y hooks se refinará en F4.
+### 5. Skill mínima operativa de preparación de Pull Requests y política de merge
+- **Decisión:** F3 entrega la skill mínima de preparación de Pull Requests (`minime-pr-preparer`), proporcionando la capacidad operativa completa para preparar el primer PR (implementación) y el segundo PR (documental) sin depender de F4. F4 consolidará más adelante el catálogo generalizado de skills, harnesses y hooks.
+- **Contrato de la skill (`minime-pr-preparer`):**
+  - *Entrada estructurada:*
+    - Proyecto y repositorio autorizados.
+    - Tipo de PR: `implementation` (PR1) o `documentation` (PR2).
+    - Request original (número de issue, título, cuerpo).
+    - Rama base (`main`) y rama candidata (`request-...` o `doc-close-...`).
+    - Commit SHA exacto del candidato verificado.
+    - Resumen estructurado del cambio y área afectada.
+    - Evidencia de pruebas/verificación correspondiente (salida de pytest/E2E para PR1; evidencia de OpenSpec Sync/Archive para PR2).
+    - Referencia canónica al Change de OpenSpec (`gacela-03-openspec-y-revision`).
+  - *Salida estructurada:*
+    - Título estandarizado del PR.
+    - Cuerpo descriptivo en Markdown estructurado (resumen, componentes modificados, cobertura de pruebas, enlace de cierre `Fixes #...`, referencias OpenSpec).
+    - Metadatos suficientes para que el adaptador publique el PR sin ambigüedades.
+- **Separación de responsabilidades y permisos:**
+  - La skill prepara exclusivamente el contenido textual y semántico del PR.
+  - `GitHubAdapter` ejecuta de forma determinista las operaciones de Git y GitHub API: push de la rama, creación del PR (`pull_request.create`), consulta de estado y protecciones, y ejecución del merge (`merge_pull_request`).
+  - La skill y el agente no reciben tokens ni permisos de GitHub adicionales innecesarios; las credenciales seguras de GitHub App permanecen confinadas dentro de `GitHubAdapter`.
+- **Reconciliación con guardianes heredados (`minime-git-workspace-guardian` y `minime-github-work-management-guardian`):**
+  - Las directivas de los guardianes existentes («create a PR for executable work, never merge» y «Human merge is mandatory») regulan la conducta autónoma no coordinada de los agentes en el worktree, impidiendo que un agente ejecute `git merge` local o fusione ramas de forma arbitraria en la terminal.
+  - No colisionan con el coordinador de mini me, que ejecuta el merge remoto gobernado vía GitHub API respetando la política autorizada de F3. El prompt de invocación al agente delimita explícitamente que la fusión remota es potestad exclusiva del coordinador mini me.
 - **Política de merge:**
-  1. *Primer PR:* De `request-<numero>-<slug>` a `main`. Baja/moderada: merge automático por mini me. Alta: estado `HUMAN REQUIRED` exclusivamente para acuse «Estoy enterado» con resumen en español; tras acuse, mini me ejecuta el merge.
-  2. *Segundo PR:* De `doc-close-<numero>-<slug>` a `main`. Creado desde `main` actualizado tras la fusión del primer PR. El agente de pensamiento ejecuta Sync y Archive nativos. Merge automático por mini me siempre.
-- **Razón:** La preparación vía skill garantiza extensibilidad sin anticipar prematuramente el catálogo de F4.
+  1. *Primer PR (implementación):* De `request-<numero>-<slug>` a `main`. Complejidad baja/moderada: merge automático por mini me. Complejidad alta: estado `HUMAN REQUIRED` exclusivamente para acuse informativo «Estoy enterado» con resumen en español; tras confirmación del acuse, mini me ejecuta el merge.
+  2. *Segundo PR (documental):* De `doc-close-<numero>-<slug>` a `main` desde el commit fusionado de `main`. El agente de pensamiento ejecuta Sync y Archive nativos. Merge automático por mini me siempre.
+- **Razón:** La entrega de la skill mínima en F3 desbloquea la prueba E2E completa sin depender de F4, manteniendo un diseño limpio y desacoplado.
 
 ### 6. Continuidad estricta y preservación de Worktrees ante fallos recuperables
 - **Decisión:** Un Request en ejecución conserva su continuidad y el bloqueo activo del proyecto. Ante fallos técnicos, límites de corrección o esperas de capacidad (`WAITING_CAPACITY`), el sistema preserva el Worktree, los artefactos generados y las referencias de estado en PostgreSQL; NUNCA abandona el Request para seleccionar silenciosamente otro ni destruye el Worktree.

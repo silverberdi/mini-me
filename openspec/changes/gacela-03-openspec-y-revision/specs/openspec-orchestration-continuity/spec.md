@@ -17,6 +17,10 @@ The system SHALL preserve the active Request identity, worktree workspace, candi
 - **WHEN** an execution attempt encounters a technical error, correction limit, or capacity exhaustion
 - **THEN** the system preserves the worktree files, branch, and PostgreSQL run record without deleting workspace data and without releasing the project lock to pick up another request.
 
+#### Scenario: Missing workflow capability preserves worktree and pauses for remediation
+- **WHEN** an orchestration stage cannot resolve a required native workflow (such as Verify) for the configured agent in the worktree
+- **THEN** the system halts fail-closed, reports the missing capability, preserves the candidate worktree and run record in PostgreSQL, and pauses without releasing the project lock or selecting another ticket.
+
 #### Scenario: Confirmed closure releases active project lock
 - **WHEN** the second documentation PR is remotely confirmed merged and the remote issue is closed
 - **THEN** the run status is marked terminal, the active project lock is released, and the worktree is scheduled for clean teardown.

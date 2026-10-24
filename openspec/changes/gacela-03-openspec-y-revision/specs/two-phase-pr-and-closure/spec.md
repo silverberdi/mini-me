@@ -3,12 +3,12 @@ Manage the two-phase pull request delivery cycle, complexity-differentiated merg
 
 ## ADDED Requirements
 
-### Requirement: Implementation Pull Request Preparation and Creation via Skill
-Upon receiving `READY FOR PR` from the implementation stage, the system SHALL invoke the PR preparation skill with its minimal functional contract (repository, base branch, request branch, candidate SHA, and structured change/test evidence summary), SHALL push the request branch to the remote repository, SHALL open a Pull Request targeting the configured base branch (`main`), SHALL bind the PR to the exact verified candidate commit SHA, and SHALL confirm remote branch protections and permissions.
+### Requirement: Implementation Pull Request Preparation via Minimal Skill Delivered in F3
+The system SHALL deliver the minimal PR preparation skill (`minime-pr-preparer`) within F3 and SHALL invoke it to generate the structured title and Markdown description for the implementation PR without depending on F4 capabilities. The skill contract SHALL accept structured input (project, repository, `pr_type: implementation`, original request details, base branch, candidate branch, candidate commit SHA, change summary, test/verify evidence, and OpenSpec change name) and SHALL return structured output (formatted title, structured description with test evidence and `Fixes #...`, and metadata). The system SHALL use `GitHubAdapter` to push the branch, open the Pull Request, bind it to the verified candidate SHA, and check remote protections. Agent guardian directives (`minime-git-workspace-guardian`, `minime-github-work-management-guardian`) SHALL apply strictly to autonomous agent git operations in the worktree, whereas the remote merge SHALL be executed exclusively by mini me coordinator via `GitHubAdapter`.
 
-#### Scenario: Implementation PR prepared via skill and opened
+#### Scenario: Implementation PR prepared via minimal skill and opened
 - **WHEN** the implementation and verification (and code review if high complexity) succeed
-- **THEN** mini me invokes the PR preparation skill, opens the implementation PR with structured evidence and verified candidate SHA, and records the PR number and URL.
+- **THEN** mini me invokes the minimal PR preparation skill in the agent runner, receives the structured PR content, opens the implementation PR via `GitHubAdapter` bound to the verified candidate SHA, and records the PR number and URL.
 
 ### Requirement: Merge Policy for Implementation PR
 The system SHALL apply a differentiated merge policy for the implementation PR based on the complexity assessed during Propose: for low or moderate complexity, mini me SHALL merge the PR automatically; for high complexity, mini me SHALL emit `HUMAN REQUIRED` exclusively for an informational acknowledgement («Estoy enterado») with a plain Spanish summary before merging.
@@ -34,17 +34,17 @@ Following remote confirmation that the implementation PR is merged into `main`, 
 - **THEN** mini me creates `doc-close-<numero>-<slug-kebab>` from updated `main` and prepares an isolated worktree under the resolved managed root for documentation operations.
 
 ### Requirement: Native OpenSpec Sync and Archive Execution
-The system SHALL dispatch the thinking agent configured with lowest compatible effort to execute the official OpenSpec Sync workflow followed by the official OpenSpec Archive workflow, SHALL commit and push the resulting documentation changes, and SHALL NOT emulate Sync or Archive via custom Markdown scripts or manual directory moves.
+The system SHALL dynamically resolve the official OpenSpec Sync and Archive workflows for the thinking agent based on the workflows installed in the documentation worktree (`.agent/workflows/opsx-sync.md` and `opsx-archive.md` for Antigravity vs `.agents/skills/openspec-sync-specs/SKILL.md` and `openspec-archive-change/SKILL.md` for Codex) and provider prompt transport. The system SHALL dispatch the thinking agent configured with lowest compatible effort to execute the resolved Sync workflow followed by Archive, SHALL commit and push the resulting documentation changes, and SHALL NOT emulate Sync or Archive via custom Markdown scripts or manual directory moves.
 
 #### Scenario: Thinking agent executes native sync and archive
 - **WHEN** the documentation worktree is ready
-- **THEN** the thinking agent executes official OpenSpec Sync, updates main specs from deltas, executes official OpenSpec Archive, moves the change to archive, commits the files, pushes the branch, and emits `READY FOR PR`.
+- **THEN** the thinking agent executes the resolved official OpenSpec Sync, updates main specs from deltas, executes resolved official OpenSpec Archive, moves the change to archive, commits the files, pushes the branch, and emits `READY FOR PR`.
 
-### Requirement: Documentation Pull Request via Skill and Auto-Merge
-The system SHALL invoke the PR preparation skill for the documentation branch, SHALL open a second Pull Request from the documentation branch to `main`, SHALL verify that it contains exclusively documentation and OpenSpec updates, and SHALL automatically merge it regardless of the original change's complexity.
+### Requirement: Documentation Pull Request via Minimal Skill and Auto-Merge
+The system SHALL invoke the minimal PR preparation skill (`minime-pr-preparer`) with `pr_type: documentation` for the documentation branch, SHALL open a second Pull Request from the documentation branch to `main` via `GitHubAdapter`, SHALL verify that it contains exclusively documentation and OpenSpec updates, and SHALL automatically merge it regardless of the original change's complexity.
 
 #### Scenario: Second PR auto-merges unconditionally
-- **WHEN** the documentation PR is opened via the PR preparation skill
+- **WHEN** the documentation PR is opened via the minimal PR preparation skill
 - **THEN** mini me automatically merges the second PR into `main`, confirming remote merge completion.
 
 ### Requirement: Remote Issue Closure, FIFO Continuation, and Test Isolation
