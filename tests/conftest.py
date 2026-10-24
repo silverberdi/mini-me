@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import hashlib
 import os
+import shutil
+import tempfile
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any
@@ -133,6 +135,18 @@ from minime.domain.models import (
 )
 
 
+@pytest.fixture(autouse=True)
+def isolated_runtime_root(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    """Give process-runner tests a private host root without weakening production."""
+    runtime_root = Path(tempfile.mkdtemp(prefix="minime-runtime-", dir=tmp_path.parent))
+    runtime_root.chmod(0o700)
+    monkeypatch.setenv("MINIME_RUNTIME_ROOT", str(runtime_root))
+    try:
+        yield runtime_root
+    finally:
+        shutil.rmtree(runtime_root, ignore_errors=True)
+
+
 class ReadinessGitHubStub:
     """Explicit offline double for legacy readiness tests; live validation is tested separately."""
 
@@ -200,30 +214,6 @@ class ReadinessGitHubStub:
             operation_key=operation_key,
         )
 
-    def add_issue_to_project(
-        self, project_number: int, owner: str, issue_url: str, operation_key: str | None = None
-    ) -> ExternalActionResult[str]:
-        return ExternalActionResult(
-            outcome=ExternalOutcome.SUCCESS,
-            source_adapter="github_stub",
-            reason_code=ExternalReasonCode.EXECUTION_SUCCESS,
-            retry_safety=RetrySafety.UNSAFE,
-            data="PVTI_12345",
-            external_id="PVTI_12345",
-            operation_key=operation_key,
-        )
-
-    def list_project_items(
-        self, project_number: int = 2, owner: str = "silverberdi", limit: int = 50
-    ) -> ExternalActionResult[list[dict]]:
-        return ExternalActionResult(
-            outcome=ExternalOutcome.SUCCESS,
-            source_adapter="github_stub",
-            reason_code=ExternalReasonCode.EXECUTION_SUCCESS,
-            retry_safety=RetrySafety.SAFE,
-            data=[],
-        )
-
     def get_pull_request(
         self, repository: str, branch: str, base: str = "main"
     ) -> ExternalActionResult[dict]:
@@ -257,18 +247,6 @@ class ReadinessGitHubStub:
             retry_safety=RetrySafety.UNSAFE,
             data=True,
             external_id=str(issue_number),
-        )
-
-    def update_project_item_status(
-        self, project_number: int, owner: str, item_id: str, status: str = "Done"
-    ) -> ExternalActionResult[bool]:
-        return ExternalActionResult(
-            outcome=ExternalOutcome.SUCCESS,
-            source_adapter="github_stub",
-            reason_code=ExternalReasonCode.EXECUTION_SUCCESS,
-            retry_safety=RetrySafety.UNSAFE,
-            data=True,
-            external_id=item_id,
         )
 
     def delete_remote_branch(

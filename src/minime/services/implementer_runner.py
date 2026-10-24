@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import os
 import re
@@ -189,6 +190,7 @@ class CliImplementerRunner(ImplementerRunnerInterface):
             and not process_result.credential_access_refresh_only
         )
         stdout_lines: list[str]
+        stderr_errors: list[str] = []
         workflow_evidence: dict[str, object] | None = None
         if (
             self.profile is not None
@@ -205,9 +207,9 @@ class CliImplementerRunner(ImplementerRunnerInterface):
             sha_match = NATIVE_APPLY_SKILL_SHA_RE.search(prompt_context)
             expected_change = change_match.group(1) if change_match else ""
             expected_sha = sha_match.group(1) if sha_match else ""
-            raw_jsonl_lines = process_result.stdout.decode(errors="replace").splitlines()[
-                : self.MAX_OUTPUT_LINES
-            ]
+            all_jsonl_lines = process_result.stdout.decode(errors="replace").splitlines()
+            raw_jsonl_lines = all_jsonl_lines[: self.MAX_OUTPUT_LINES]
+            diagnostic_lines = all_jsonl_lines[-self.MAX_OUTPUT_LINES :]
             extracted_messages, workflow_evidence = parse_codex_apply_jsonl(
                 raw_jsonl_lines,
                 change_name=expected_change,
@@ -215,6 +217,16 @@ class CliImplementerRunner(ImplementerRunnerInterface):
                 workflow_sha256=expected_sha,
             )
             stdout_lines = self._sanitize_output("\n".join(extracted_messages).encode())
+            usage_summary = self._codex_usage_summary(diagnostic_lines)
+            if usage_summary is not None and workflow_evidence is not None:
+                workflow_evidence["usage"] = usage_summary
+            # Codex may report a failed turn only through JSONL stdout. The
+            # workflow parser intentionally discards non-message events, so
+            # retain only bounded/redacted error summaries in stderr on failure.
+            if process_result.returncode != 0 or process_result.timed_out:
+                stderr_errors = self._codex_failure_events(diagnostic_lines)
+            else:
+                stderr_errors = []
         elif (
             self.profile is not None
             and self.profile.provider.lower() in {"antigravity", "agy"}
@@ -242,11 +254,14 @@ class CliImplementerRunner(ImplementerRunnerInterface):
             stdout_lines = self._sanitize_output("\n".join(extracted_messages).encode())
         else:
             stdout_lines = self._sanitize_output(process_result.stdout)
+        stderr_lines = self._sanitize_output(process_result.stderr)
+        if self.profile is not None and self.profile.provider.lower() == "codex":
+            stderr_lines.extend(stderr_errors)
         return ImplementerResult(
             exit_code=process_result.returncode,
             timed_out=process_result.timed_out,
             stdout=stdout_lines,
-            stderr=self._sanitize_output(process_result.stderr),
+            stderr=stderr_lines,
             duration_ms=duration_ms,
             preflight_error=(
                 "PROVIDER_CREDENTIAL_ROTATION_NOT_PERSISTED" if rotation_error else None
@@ -254,6 +269,56 @@ class CliImplementerRunner(ImplementerRunnerInterface):
             environment_error=rotation_error,
             native_workflow_evidence=workflow_evidence,
         )
+
+    @staticmethod
+    def _codex_usage_summary(jsonl_lines: list[str]) -> dict[str, int] | None:
+        """Read only actual Codex token counters, never infer missing usage."""
+        for line in reversed(jsonl_lines):
+            try:
+                event = json.loads(line)
+            except (TypeError, json.JSONDecodeError):
+                continue
+            if not isinstance(event, dict) or event.get("type") != "turn.completed":
+                continue
+            usage = event.get("usage")
+            if not isinstance(usage, dict):
+                continue
+            mandatory = ("input_tokens", "output_tokens")
+            if not all(type(usage.get(key)) is int and usage[key] >= 0 for key in mandatory):
+                continue
+            allowed = ("input_tokens", "cached_input_tokens", "output_tokens")
+            return {
+                key: usage[key]
+                for key in allowed
+                if type(usage.get(key)) is int and usage[key] >= 0
+            }
+        return None
+
+    @staticmethod
+    def _codex_failure_events(jsonl_lines: list[str]) -> list[str]:
+        """Retain only bounded, redacted CLI error events; never tool/model text."""
+        errors: list[str] = []
+        for line in jsonl_lines:
+            try:
+                event = json.loads(line)
+            except (TypeError, json.JSONDecodeError):
+                continue
+            if not isinstance(event, dict) or event.get("type") not in {
+                "error", "turn.failed"
+            }:
+                continue
+            item = event.get("error")
+            if isinstance(item, dict):
+                message = item.get("message")
+            elif isinstance(item, str):
+                message = item
+            else:
+                message = event.get("message")
+            if isinstance(message, str) and message.strip():
+                errors.append("codex error: " + redact_secrets(message.strip())[:512])
+            if len(errors) == 3:
+                break
+        return errors
 
     async def _terminate_process_group(self, proc: asyncio.subprocess.Process) -> None:
         """Bounded, cancellation-protected process-group teardown.

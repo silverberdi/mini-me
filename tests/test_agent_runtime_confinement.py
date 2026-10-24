@@ -49,6 +49,29 @@ def _confinement(tmp_path: Path) -> tuple[AgentProcessConfinement, Path, Path]:
     )
 
 
+def test_runtime_root_uses_explicit_environment_and_missing_fallback_fails_closed(
+    tmp_path: Path, monkeypatch
+):
+    worktree = tmp_path / "worktree"
+    worktree.mkdir()
+    configured = tmp_path / "configured-runtime"
+    configured.mkdir(mode=0o700)
+    monkeypatch.setenv("MINIME_RUNTIME_ROOT", str(configured))
+    configured_confinement = AgentProcessConfinement(
+        str(worktree), require_kernel_confinement=False
+    )
+    assert configured_confinement.runtime_root == str(configured)
+
+    monkeypatch.delenv("MINIME_RUNTIME_ROOT")
+    monkeypatch.chdir(tmp_path)
+    fallback_confinement = AgentProcessConfinement(
+        str(worktree), require_kernel_confinement=False
+    )
+    assert fallback_confinement.runtime_root == str(tmp_path / ".minime")
+    preflight = fallback_confinement.validate_command_preflight(str(worktree))
+    assert preflight.error_message == "Runtime root is not an available directory."
+
+
 def test_attempt_state_is_private_sanitized_and_removed(tmp_path: Path):
     confinement, _worktree, _runtime = _confinement(tmp_path)
     auth = tmp_path / "authorized-codex-auth.json"

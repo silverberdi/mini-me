@@ -234,3 +234,54 @@ def test_antigravity_apply_output_parses_workflow_evidence():
     assert evidence["apply_instructions_observed"] is True
     assert evidence["completed_tool_events"] == 1
 
+
+
+def test_codex_runner_retains_only_jsonl_error_summaries_on_failure():
+    lines = [
+        json.dumps({"type": "thread.started", "thread_id": "thread"}),
+        json.dumps(
+            {
+                "type": "item.completed",
+                "item": {
+                    "type": "command_execution",
+                    "aggregated_output": "private tool output must not persist",
+                    "command": "cat /secret/file",
+                },
+            }
+        ),
+        json.dumps({"type": "turn.failed", "error": {"message": "model unavailable"}}),
+        json.dumps({"type": "error", "message": "network failed"}),
+        "not-json",
+    ]
+    errors = CliImplementerRunner._codex_failure_events(lines)
+    assert errors == ["codex error: model unavailable", "codex error: network failed"]
+    assert "private tool output" not in str(errors)
+    assert "/secret/file" not in str(errors)
+
+
+def test_codex_runner_usage_summary_requires_actual_completed_turn():
+    observed = [
+        json.dumps({"type": "thread.started", "thread_id": "x"}),
+        json.dumps(
+            {
+                "type": "turn.completed",
+                "usage": {
+                    "input_tokens": 31,
+                    "cached_input_tokens": 4,
+                    "output_tokens": 9,
+                    "secret": "must not persist",
+                },
+            }
+        ),
+    ]
+    assert CliImplementerRunner._codex_usage_summary(observed) == {
+        "input_tokens": 31,
+        "cached_input_tokens": 4,
+        "output_tokens": 9,
+    }
+    assert CliImplementerRunner._codex_usage_summary(
+        [json.dumps({"type": "turn.failed", "error": {"message": "quota failed"}})]
+    ) is None
+    assert CliImplementerRunner._codex_usage_summary(
+        [json.dumps({"type": "turn.completed", "usage": {"input_tokens": True, "output_tokens": 9}})]
+    ) is None

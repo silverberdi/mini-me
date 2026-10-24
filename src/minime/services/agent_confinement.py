@@ -511,17 +511,7 @@ class AgentProcessConfinement:
         self.allowed_worktree_path = self._canonical_directory(
             allowed_worktree_path, "assigned worktree"
         )
-        default_root = os.environ.get("MINIME_RUNTIME_ROOT")
-        if not default_root:
-            cwd_minime = os.path.join(os.getcwd(), ".minime")
-            if os.path.isdir(cwd_minime):
-                default_root = cwd_minime
-            elif os.path.isdir("/opt/minime/runtime"):
-                default_root = "/opt/minime/runtime"
-            elif os.path.isdir("/opt/minime/app/.minime"):
-                default_root = "/opt/minime/app/.minime"
-            else:
-                default_root = cwd_minime
+        default_root = self.resolve_runtime_root()
         self.runtime_root = self._canonical_directory(
             runtime_root or default_root,
             "runtime root",
@@ -535,6 +525,27 @@ class AgentProcessConfinement:
         self.private_state_parent = private_state_parent
         self.require_kernel_confinement = require_kernel_confinement
         self.confinement_mechanism = self._detect_confinement_mechanism()
+
+    @staticmethod
+    def resolve_runtime_root() -> str:
+        """Resolve the configured host runtime root without creating it.
+
+        The service deployment provides this path through ``MINIME_RUNTIME_ROOT``
+        or one of the known managed installation roots.  A missing fallback is
+        intentionally returned as-is so preflight fails closed; test fixtures
+        must provide their own private directory explicitly.
+        """
+        configured = os.environ.get("MINIME_RUNTIME_ROOT")
+        if configured:
+            return configured
+        cwd_minime = os.path.join(os.getcwd(), ".minime")
+        if os.path.isdir(cwd_minime):
+            return cwd_minime
+        if os.path.isdir("/opt/minime/runtime"):
+            return "/opt/minime/runtime"
+        if os.path.isdir("/opt/minime/app/.minime"):
+            return "/opt/minime/app/.minime"
+        return cwd_minime
 
     @staticmethod
     def _canonical_directory(raw_path: str, label: str) -> str:

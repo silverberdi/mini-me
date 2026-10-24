@@ -228,6 +228,8 @@ class ProviderConfig(BaseModel):
     command: str | None = None
     enabled: bool = True
     roles: list[str] = Field(default_factory=list)
+    file_edit_roles: list[str] = Field(default_factory=list)
+    read_only_roles: list[str] = Field(default_factory=list)
     invocation: dict[str, CliInvocationConfig] = Field(default_factory=dict)
     base_url: str | None = None
     api_key_env: str | None = None
@@ -262,7 +264,6 @@ class GitHubConfig(BaseModel):
     app_id_env: str = "MINIME_GITHUB_APP_ID"
     installation_id_env: str = "MINIME_GITHUB_INSTALLATION_ID"
     private_key_path_env: str = "MINIME_GITHUB_PRIVATE_KEY_PATH"
-    global_project_number: int | None = None
 
 
 class SecurityConfig(BaseModel):

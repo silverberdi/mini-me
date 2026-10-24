@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from abc import ABC, abstractmethod
 from datetime import datetime
-from typing import Any
+from typing import Any, Protocol, runtime_checkable
 
 from minime.domain.enums import (
     ExternalActionStatus,
@@ -885,7 +885,94 @@ class OpenSpecAdapterInterface(ABC):
     ) -> dict[str, Any]: ...
 
 
+@runtime_checkable
+class TicketSourceAdapter(Protocol):
+    """Narrow remote-ticket contract, independent of Git and pull requests."""
+
+    def list_issues(
+        self, repository: str, state: str = "open", limit: int = 50
+    ) -> ExternalActionResult[list[dict[str, Any]]]: ...
+
+    def get_issue(self, repository: str, issue_number: int) -> ExternalActionResult[dict[str, Any]]: ...
+
+    def create_issue(
+        self,
+        repository: str,
+        title: str,
+        body: str,
+        labels: list[str] | None = None,
+        operation_key: str | None = None,
+    ) -> ExternalActionResult[dict[str, Any]]: ...
+
+    def comment_issue(
+        self, repository: str, issue_number: int, body: str, operation_key: str
+    ) -> ExternalActionResult[dict[str, Any]]: ...
+
+    def close_issue(
+        self, repository: str, issue_number: int, comment: str | None = None
+    ) -> ExternalActionResult[bool]: ...
+
+
+@runtime_checkable
+class GitPullRequestAdapter(Protocol):
+    """Narrow repository/branch/PR contract, independent of ticket lifecycle."""
+
+    def verify_repository(self, repository: str) -> ExternalActionResult[bool]: ...
+
+    def get_repository_default_branch(self, repository: str) -> ExternalActionResult[str]: ...
+
+    def get_repository_branch_head(
+        self, repository: str, branch: str
+    ) -> ExternalActionResult[str]: ...
+
+    def create_remote_branch(
+        self, repository: str, branch: str, base_sha: str
+    ) -> ExternalActionResult[str]: ...
+
+    def get_remote_branch_head(
+        self, repository: str, branch: str, remote: str = "origin"
+    ) -> ExternalActionResult[str]: ...
+
+    def push_branch(
+        self, worktree_path: str, remote: str, branch: str, candidate_sha: str
+    ) -> ExternalActionResult[str]: ...
+
+    def get_pull_request(
+        self, repository: str, branch: str, base: str = "main"
+    ) -> ExternalActionResult[dict[str, Any]]: ...
+
+    def create_pull_request(
+        self,
+        repository: str,
+        branch: str,
+        base: str,
+        title: str,
+        body: str,
+        head_sha: str,
+    ) -> ExternalActionResult[dict[str, Any]]: ...
+
+    def get_pull_request_details(
+        self, repository: str, pr_number: int
+    ) -> ExternalActionResult[dict[str, Any]]: ...
+
+
 class GitHubAdapterInterface(ABC):
+    def get_repository_default_branch(self, repository: str) -> ExternalActionResult[str]:
+        return ExternalActionResult[str](
+            outcome=ExternalOutcome.UNKNOWN,
+            source_adapter="interface",
+            reason_code=ExternalReasonCode.UNSUPPORTED,
+        )
+
+    def create_remote_branch(
+        self, repository: str, branch: str, base_sha: str
+    ) -> ExternalActionResult[str]:
+        return ExternalActionResult[str](
+            outcome=ExternalOutcome.UNKNOWN,
+            source_adapter="interface",
+            reason_code=ExternalReasonCode.UNSUPPORTED,
+        )
+
     def validate_issue_binding(
         self,
         expected_repository: str,
@@ -991,26 +1078,6 @@ class GitHubAdapterInterface(ABC):
             reason_code=ExternalReasonCode.UNSUPPORTED,
         )
 
-    def add_issue_to_project(
-        self, project_number: int, owner: str, issue_url: str, operation_key: str | None = None
-    ) -> ExternalActionResult[str]:
-        return ExternalActionResult[str](
-            outcome=ExternalOutcome.UNKNOWN,
-            value="",
-            source_adapter="interface",
-            reason_code=ExternalReasonCode.UNSUPPORTED,
-        )
-
-    def list_project_items(
-        self, project_number: int = 2, owner: str = "silverberdi", limit: int = 50
-    ) -> ExternalActionResult[list[dict[str, Any]]]:
-        return ExternalActionResult[list[dict[str, Any]]](
-            outcome=ExternalOutcome.UNKNOWN,
-            value=[],
-            source_adapter="interface",
-            reason_code=ExternalReasonCode.UNSUPPORTED,
-        )
-
     def get_pull_request_details(
         self, repository: str, pr_number: int
     ) -> ExternalActionResult[dict[str, Any]]:
@@ -1031,16 +1098,6 @@ class GitHubAdapterInterface(ABC):
 
     def close_issue(
         self, repository: str, issue_number: int, comment: str | None = None
-    ) -> ExternalActionResult[bool]:
-        return ExternalActionResult[bool](
-            outcome=ExternalOutcome.UNKNOWN,
-            value=False,
-            source_adapter="interface",
-            reason_code=ExternalReasonCode.UNSUPPORTED,
-        )
-
-    def update_project_item_status(
-        self, project_number: int, owner: str, item_id: str, status: str = "Done"
     ) -> ExternalActionResult[bool]:
         return ExternalActionResult[bool](
             outcome=ExternalOutcome.UNKNOWN,

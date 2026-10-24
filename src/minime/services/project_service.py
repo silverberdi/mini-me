@@ -2,20 +2,25 @@
 
 from __future__ import annotations
 
-import os
+from pathlib import Path
 from typing import Any
 
-from minime.domain.enums import EventType, ProjectStatus
+from minime.domain.enums import EventType, ProjectOnboardingStatus, ProjectStatus, ProjectType
 from minime.domain.interfaces import (
     PersistenceUnitOfWork,
 )
-from minime.domain.models import Event, Project, utc_now
-from minime.logging import get_logger, set_correlation_context
+from minime.domain.models import (
+    Event,
+    Project,
+    ProjectConfigurationInput,
+    ProjectConfigurationPatch,
+    utc_now,
+)
+from minime.logging import redact_secrets
+from minime.services.project_credential_store import ProjectCredentialStore
 from minime.services.repository_identity import (
     normalize_repository_identity as _normalize_repository_identity,
 )
-
-logger = get_logger("services.project")
 
 
 def normalize_repository_identity(repo_input: str) -> str:
@@ -26,332 +31,662 @@ def normalize_repository_identity(repo_input: str) -> str:
     return normalized
 
 
-def validate_complementary_roles(implementer: str, reviewer: str) -> None:
-    """Validate that implementer and reviewer are complementary if both are primary agents."""
-    norm_impl = implementer.strip().lower()
-    norm_rev = reviewer.strip().lower()
-
-    valid_primaries = {"codex", "antigravity"}
-    if norm_impl in valid_primaries and norm_rev in valid_primaries and norm_impl == norm_rev:
-        raise ValueError(
-            f"Invalid role configuration: '{implementer}' cannot be both implementer and reviewer. "
-            f"mini me requires Codex and Antigravity to be complementary primary roles."
-        )
-
-
-def validate_admission_policy(
-    auto_prepare: bool, auto_admit: bool, max_concurrent_jobs: int
-) -> None:
-    """Reject invalid admission settings before mutating project state."""
-    for name, value in (("auto_prepare", auto_prepare), ("auto_admit", auto_admit)):
-        if type(value) is not bool:
-            raise ValueError(f"{name} must be a boolean")
-    if type(max_concurrent_jobs) is not int or max_concurrent_jobs < 1:
-        raise ValueError("max_concurrent_jobs must be a positive integer")
-
-
-def validate_project_policy(data: dict[str, Any]) -> list[str]:
-    """Validate required project configuration fields and return any missing or invalid errors."""
-    errors: list[str] = []
-
-    if not data.get("project_id"):
-        errors.append("project_id is required and cannot be empty")
-    if not data.get("display_name"):
-        errors.append("display_name is required and cannot be empty")
-    if not data.get("repository"):
-        errors.append("repository is required and cannot be empty")
-    if not data.get("base_branch"):
-        errors.append("base_branch is required and cannot be empty")
-
-    implementer = data.get("implementer", "codex")
-    reviewer = data.get("reviewer", "antigravity")
-    try:
-        validate_complementary_roles(implementer, reviewer)
-    except ValueError as e:
-        errors.append(str(e))
-
-    return errors
-
-
 class ProjectService:
-    """Service for managing project registrations, updates, and repository binding."""
+    """Manage validated project configuration and lifecycle without onboarding side effects."""
 
-    def __init__(self, uow: PersistenceUnitOfWork):
-        self.uow = uow
-
-    def register_project(
+    def __init__(
         self,
-        project_id: str,
-        display_name: str,
-        repository: str,
-        base_branch: str = "main",
-        openspec_path: str = "openspec",
-        implementer: str = "codex",
-        reviewer: str = "antigravity",
-        checks: list[dict[str, Any]] | None = None,
-        external_providers_allowed: list[str] | None = None,
-        openrouter_drain_allowed: bool = False,
-        independent_audit_required: bool = False,
-        strict_validation_required: bool = True,
-        verify_gate_required: bool = True,
-        sync_gate_required: bool = True,
-        archive_gate_required: bool = True,
-        deployment_preview: dict[str, Any] | None = None,
-        deployment_production: dict[str, Any] | None = None,
-        auto_prepare: bool = True,
-        auto_admit: bool = True,
-        max_concurrent_jobs: int = 1,
+        uow: PersistenceUnitOfWork,
+        credential_store: ProjectCredentialStore | None = None,
+    ):
+        self.uow = uow
+        self.credential_store = credential_store or ProjectCredentialStore()
+
+    def create_configured_project(
+        self,
+        configuration: ProjectConfigurationInput,
+        *,
+        allow_greenfield: bool = False,
+        onboarding_checkpoint: dict[str, Any] | None = None,
     ) -> Project:
-        """Register a new project with immutable project_id and validated policy."""
-        set_correlation_context(project_id=project_id, operation_id="register_project")
+        """Persist a validated project configuration without claiming bootstrap readiness.
 
-        validate_admission_policy(auto_prepare, auto_admit, max_concurrent_jobs)
+        Greenfield creation is deliberately refused here: it must be paired with a
+        validated context package and the durable bootstrap coordinator.
+        """
+        if configuration.project_type == ProjectType.GREENFIELD and not allow_greenfield:
+            raise ValueError("GREENFIELD requires a validated ZIP bootstrap operation")
+        project_id = configuration.project_id.strip()
+        repository = normalize_repository_identity(configuration.repository)
+        self._validate_profile_author_separation(configuration.agent_profiles)
+        normalized_connections: dict[str, dict[str, Any]] = {}
+        for key, value in configuration.provider_connections.items():
+            connection_repository = normalize_repository_identity(value.repository_url)
+            if not connection_repository or connection_repository.startswith(("/", "file:")):
+                raise ValueError(f"Provider connection '{key}' requires a GitHub repository identity")
+            if "://" in value.repository_url and "github.com/" not in value.repository_url.lower():
+                raise ValueError(f"Provider connection '{key}' must use a GitHub repository URL")
+            normalized_connections[key] = value.model_dump(mode="json")
+            normalized_connections[key]["repository_url"] = connection_repository
+        if normalized_connections["git_pr"]["repository_url"] != repository:
+            raise ValueError("Git/PR connection repository must match the immutable project repository")
+        if self.uow.projects.get_by_id(project_id):
+            raise ValueError(f"Project with ID '{project_id}' is already registered")
+        for existing in self.uow.projects.list_all():
+            if normalize_repository_identity(existing.repository) == repository:
+                raise ValueError(
+                    f"Repository '{repository}' is already bound to project '{existing.project_id}'"
+                )
 
-        norm_repo = ""
-        if repository and repository.strip():
-            try:
-                norm_repo = normalize_repository_identity(repository)
-            except ValueError:
-                norm_repo = ""
+        credential_ref: str | None = None
+        commit_started = False
+        try:
+            if configuration.github_app_credentials:
+                credentials = configuration.github_app_credentials
+                credential_ref = self.credential_store.store_github_app(
+                    project_id,
+                    credentials.app_id,
+                    credentials.installation_id,
+                    credentials.private_key.get_secret_value(),
+                )
+            connections = normalized_connections
+            for key, value in configuration.provider_connections.items():
+                connection = connections[key]
+                if value.auth_mode == "project_app" and credential_ref:
+                    connection["secret_reference"] = credential_ref
+                connections[key] = connection
 
-        data = {
-            "project_id": project_id.strip() if project_id else "",
-            "display_name": display_name.strip() if display_name else "",
-            "repository": norm_repo,
-            "base_branch": base_branch.strip() if base_branch else "",
-            "implementer": implementer,
-            "reviewer": reviewer,
-        }
-        errors = validate_project_policy(data)
-        if errors:
-            raise ValueError(f"Project registration failed policy validation: {'; '.join(errors)}")
+            now = utc_now()
+            project = Project(
+                project_id=project_id,
+                display_name=configuration.display_name.strip(),
+                repository=repository,
+                project_type=configuration.project_type,
+                base_branch=configuration.base_branch.strip() or "main",
+                provider_connections=connections,
+                agent_profiles={
+                    key: value.model_dump(mode="json")
+                    for key, value in configuration.agent_profiles.items()
+                },
+                execution_policy=configuration.execution_policy.model_dump(mode="json"),
+                onboarding_status=(
+                    ProjectOnboardingStatus.BOOTSTRAPPING
+                    if configuration.project_type == ProjectType.GREENFIELD
+                    else ProjectOnboardingStatus.CONFIGURED
+                ),
+                onboarding_reasons=[
+                    "Greenfield bootstrap is pending."
+                    if configuration.project_type == ProjectType.GREENFIELD
+                    else "Brownfield adaptation is deferred; project is configuration-only."
+                ],
+                onboarding_checkpoint=onboarding_checkpoint or {},
+                status=ProjectStatus.ACTIVE,
+                created_at=now,
+                updated_at=now,
+            )
+            self.uow.projects.save(project)
+            self.uow.events.save(
+                Event(
+                    project_id=project.project_id,
+                    event_type=EventType.PROJECT_REGISTERED,
+                    payload={
+                        "project_type": project.project_type.value,
+                        "repository": project.repository,
+                        "onboarding_status": project.onboarding_status.value,
+                    },
+                    timestamp=now,
+                )
+            )
+            commit_started = True
+            self.uow.commit()
+            return project
+        except Exception:
+            if credential_ref and not commit_started:
+                self.credential_store.remove_github_app(project_id, credential_ref)
+            self.uow.rollback()
+            raise
 
-        # Check for existing project with this project_id
-        existing = self.uow.projects.get_by_id(project_id)
-        if existing:
+    def set_lifecycle(self, project_id: str, *, active: bool) -> Project:
+        project = self.uow.projects.get_by_id(project_id)
+        if project is None:
+            raise ValueError(f"Project '{project_id}' not found")
+        if (
+            active
+            and project.project_type == ProjectType.GREENFIELD
+            and project.onboarding_status != ProjectOnboardingStatus.PREPARED
+        ):
             raise ValueError(
-                f"Project with ID '{project_id}' is already registered. "
-                f"Project identifiers are immutable."
+                "Greenfield project cannot be activated before its exact bootstrap PR merge is observed"
             )
-
-        now = utc_now()
-        project = Project(
-            project_id=project_id,
-            display_name=display_name,
-            repository=norm_repo,
-            base_branch=base_branch,
-            openspec_path=openspec_path,
-            implementer=implementer,
-            reviewer=reviewer,
-            checks=checks or [],
-            external_providers_allowed=external_providers_allowed
-            or ["codex", "antigravity", "deepseek"],
-            openrouter_drain_allowed=openrouter_drain_allowed,
-            independent_audit_required=independent_audit_required,
-            strict_validation_required=strict_validation_required,
-            verify_gate_required=verify_gate_required,
-            sync_gate_required=sync_gate_required,
-            archive_gate_required=archive_gate_required,
-            deployment_preview=deployment_preview or {},
-            deployment_production=deployment_production or {},
-            auto_prepare=auto_prepare,
-            auto_admit=auto_admit,
-            max_concurrent_jobs=max_concurrent_jobs,
-            status=ProjectStatus.ACTIVE,
-            created_at=now,
-            updated_at=now,
-        )
-
-        from minime.domain.models import ProjectManagedRepositoryBinding
-        from minime.services.workspace_guard import ManagedWorkspaceGuard
-
-        trusted_root = os.path.realpath(os.environ.get("MINIME_MANAGED_ROOT", "/opt/minime/repos"))
-        managed_root = os.path.realpath(
-            openspec_path if openspec_path.startswith("/") else f"{trusted_root}/{project_id}"
-        )
-        runtime_root = os.path.realpath(os.environ.get("MINIME_RUNTIME_ROOT", os.getcwd()))
-        worktree_parent_dir = os.path.realpath(f"{managed_root}/.minime/worktrees")
-
-        mismatch_reasons: list[str] = []
-        guard = ManagedWorkspaceGuard(
-            self.uow, runtime_root=runtime_root, trusted_managed_root=trusted_root
-        )
-
-        # Check forward & reverse overlap
-        if guard._paths_overlap(managed_root, runtime_root):
-            mismatch_reasons.append(
-                f"Managed repository root '{managed_root}' aliases or overlaps runtime root '{runtime_root}'."
-            )
-
-        if guard._paths_overlap(worktree_parent_dir, runtime_root):
-            mismatch_reasons.append(
-                f"Worktree parent dir '{worktree_parent_dir}' aliases or overlaps runtime root '{runtime_root}'."
-            )
-
-        # Check trusted root for BOTH managed_root and worktree_parent_dir
-        if trusted_root:
-            if not (
-                guard._is_path_inside(managed_root, trusted_root) or managed_root == trusted_root
-            ):
-                mismatch_reasons.append(
-                    f"Managed repository root '{managed_root}' is outside trusted managed root '{trusted_root}'."
-                )
-            if not (
-                guard._is_path_inside(worktree_parent_dir, trusted_root)
-                or worktree_parent_dir == trusted_root
-            ):
-                mismatch_reasons.append(
-                    f"Worktree parent directory '{worktree_parent_dir}' is outside trusted managed root '{trusted_root}'."
-                )
-
-        # Check directory existence and Git repository proof
-        if not os.path.exists(managed_root) or not os.path.isdir(managed_root):
-            mismatch_reasons.append(
-                f"Managed repository root directory '{managed_root}' does not exist on disk."
-            )
-        else:
-            valid_git, git_reason = guard.verify_git_repository_identity(
-                managed_root, norm_repo, remote_name="origin"
-            )
-            if not valid_git:
-                mismatch_reasons.append(
-                    f"Git repository identity verification failed for '{managed_root}': {git_reason}"
-                )
-
-        if not os.path.exists(worktree_parent_dir) or not os.path.isdir(worktree_parent_dir):
-            mismatch_reasons.append(
-                f"Worktree parent directory '{worktree_parent_dir}' does not exist on disk."
-            )
-
-        is_valid_binding = len(mismatch_reasons) == 0
-
-        managed_binding = ProjectManagedRepositoryBinding(
-            project_id=project_id,
-            canonical_repository_identity=norm_repo,
-            remote_name="origin",
-            managed_repository_root=managed_root,
-            worktree_parent_dir=worktree_parent_dir,
-            default_base_branch=base_branch,
-            is_valid=is_valid_binding,
-            mismatch_reasons=mismatch_reasons,
-            created_at=now,
-            updated_at=now,
-        )
-        self.uow.project_managed_repository_bindings.save(managed_binding)
-
-        event = Event(
-            event_type=EventType.PROJECT_REGISTERED,
-            project_id=project.project_id,
-            payload={
-                "project_id": project.project_id,
-                "display_name": project.display_name,
-                "repository": project.repository,
-                "base_branch": project.base_branch,
-                "implementer": project.implementer,
-                "reviewer": project.reviewer,
-            },
-            timestamp=now,
-        )
-
+        project.status = ProjectStatus.ACTIVE if active else ProjectStatus.PAUSED
+        project.updated_at = utc_now()
         self.uow.projects.save(project)
-        self.uow.events.save(event)
         self.uow.commit()
-
-        logger.info(
-            f"Registered project '{project.project_id}' bound to repository '{project.repository}'"
-        )
         return project
 
-    def update_project(
-        self,
-        project_id: str,
-        display_name: str | None = None,
-        base_branch: str | None = None,
-        openspec_path: str | None = None,
-        implementer: str | None = None,
-        reviewer: str | None = None,
-        checks: list[dict[str, Any]] | None = None,
-        external_providers_allowed: list[str] | None = None,
-        openrouter_drain_allowed: bool | None = None,
-        independent_audit_required: bool | None = None,
-        deployment_preview: dict[str, Any] | None = None,
-        deployment_production: dict[str, Any] | None = None,
-        auto_prepare: bool | None = None,
-        auto_admit: bool | None = None,
-        max_concurrent_jobs: int | None = None,
-        status: ProjectStatus | None = None,
-    ) -> Project:
-        """Update mutable fields of a registered project. The project_id remains immutable."""
-        set_correlation_context(project_id=project_id, operation_id="update_project")
+    def observe_bootstrap_merge(self, project_id: str) -> dict[str, Any]:
+        """Advance Greenfield readiness only from an exact provider-observed PR merge."""
+        from minime.domain.enums import ExternalOutcome
+        from minime.services.project_connection_service import ProjectConnectionService
 
         project = self.uow.projects.get_by_id(project_id)
-        if not project:
-            raise ValueError(f"Project '{project_id}' not found.")
-
-        validate_admission_policy(
-            auto_prepare if auto_prepare is not None else project.auto_prepare,
-            auto_admit if auto_admit is not None else project.auto_admit,
-            max_concurrent_jobs if max_concurrent_jobs is not None else project.max_concurrent_jobs,
+        if project is None:
+            raise ValueError(f"Project '{project_id}' not found")
+        if project.project_type != ProjectType.GREENFIELD:
+            raise ValueError("Bootstrap merge observation applies only to Greenfield projects")
+        retryable_block = project.onboarding_status == ProjectOnboardingStatus.BLOCKED and any(
+            reason.startswith("BOOTSTRAP_PR_") or reason.startswith("BOOTSTRAP_MERGE_")
+            for reason in project.onboarding_reasons
         )
-
-        new_impl = implementer if implementer is not None else project.implementer
-        new_rev = reviewer if reviewer is not None else project.reviewer
-        validate_complementary_roles(new_impl, new_rev)
-
-        if display_name is not None:
-            project.display_name = display_name
-        if base_branch is not None:
-            project.base_branch = base_branch
-        if openspec_path is not None:
-            project.openspec_path = openspec_path
-        if implementer is not None:
-            project.implementer = implementer
-        if reviewer is not None:
-            project.reviewer = reviewer
-        if checks is not None:
-            project.checks = checks
-        if external_providers_allowed is not None:
-            project.external_providers_allowed = external_providers_allowed
-        if openrouter_drain_allowed is not None:
-            project.openrouter_drain_allowed = openrouter_drain_allowed
-        if independent_audit_required is not None:
-            project.independent_audit_required = independent_audit_required
-        if deployment_preview is not None:
-            project.deployment_preview = deployment_preview
-        if deployment_production is not None:
-            project.deployment_production = deployment_production
-        if auto_prepare is not None:
-            project.auto_prepare = auto_prepare
-        if auto_admit is not None:
-            project.auto_admit = auto_admit
-        if max_concurrent_jobs is not None:
-            project.max_concurrent_jobs = max_concurrent_jobs
-        if status is not None:
-            project.status = status
-
-        now = utc_now()
-        project.updated_at = now
-
-        event = Event(
-            event_type=EventType.PROJECT_UPDATED,
-            project_id=project.project_id,
-            payload={
-                "project_id": project.project_id,
-                "display_name": project.display_name,
-                "status": project.status.value,
-            },
-            timestamp=now,
+        if project.onboarding_status not in {
+            ProjectOnboardingStatus.PR_PENDING,
+            ProjectOnboardingStatus.BOOTSTRAP_PENDING,
+            ProjectOnboardingStatus.AWAITING_REVIEW,
+        } and not retryable_block:
+            return {
+                "project_id": project_id,
+                "onboarding_status": project.onboarding_status.value,
+                "observed": False,
+                "reason": "project_has_no_pending_bootstrap_pr",
+            }
+        checkpoint = project.onboarding_checkpoint
+        required = (
+            "pull_request_number",
+            "pull_request_url",
+            "bootstrap_branch",
+            "head_sha",
+            "base_branch",
         )
-
+        if any(not checkpoint.get(field) for field in required):
+            return self._block_bootstrap_observation(project, "BOOTSTRAP_PR_IDENTITY_INCOMPLETE")
+        try:
+            pr_number = int(checkpoint["pull_request_number"])
+        except (TypeError, ValueError):
+            pr_number = 0
+        if pr_number <= 0:
+            return self._block_bootstrap_observation(project, "BOOTSTRAP_PR_IDENTITY_INCOMPLETE")
+        try:
+            adapter = ProjectConnectionService(self.credential_store).adapter_for(
+                project, "git_pr"
+            )
+        except (ValueError, RuntimeError):
+            return self._block_bootstrap_observation(project, "BOOTSTRAP_PR_CONNECTION_UNAVAILABLE")
+        try:
+            result = adapter.get_pull_request_details(
+                project.provider_connections["git_pr"]["repository_url"],
+                pr_number,
+            )
+        except Exception:
+            return self._block_bootstrap_observation(project, "BOOTSTRAP_PR_UNOBSERVABLE")
+        if result.outcome != ExternalOutcome.SUCCESS or not isinstance(result.data, dict):
+            return self._block_bootstrap_observation(project, "BOOTSTRAP_PR_UNOBSERVABLE")
+        details = result.data
+        try:
+            configured_repository = normalize_repository_identity(
+                project.provider_connections["git_pr"]["repository_url"]
+            )
+            observed_repository = normalize_repository_identity(str(details.get("repository", "")))
+        except (KeyError, TypeError, ValueError):
+            configured_repository = observed_repository = ""
+        exact_identity = bool(configured_repository) and (
+            observed_repository == configured_repository
+            and details.get("number") == pr_number
+            and details.get("url") == checkpoint["pull_request_url"]
+            and details.get("head_branch") == checkpoint["bootstrap_branch"]
+            and details.get("head_sha") == checkpoint["head_sha"]
+            and details.get("base_branch") == checkpoint["base_branch"] == project.base_branch
+        )
+        if not exact_identity:
+            return self._block_bootstrap_observation(project, "BOOTSTRAP_PR_IDENTITY_MISMATCH")
+        if not details.get("is_merged"):
+            if details.get("state") == "closed":
+                return self._block_bootstrap_observation(project, "BOOTSTRAP_PR_CLOSED_UNMERGED")
+            return {
+                "project_id": project_id,
+                "onboarding_status": project.onboarding_status.value,
+                "observed": True,
+                "merged": False,
+                "pull_request_number": pr_number,
+            }
+        if not details.get("merge_commit_sha") or not details.get("merged_at"):
+            return self._block_bootstrap_observation(project, "BOOTSTRAP_MERGE_POSTCONDITION_INCOMPLETE")
+        project.onboarding_status = ProjectOnboardingStatus.PREPARED
+        project.onboarding_reasons = []
+        project.onboarding_checkpoint = {
+            **checkpoint,
+            "merge_commit_sha": details["merge_commit_sha"],
+            "merge_observed_at": utc_now().isoformat(),
+        }
+        project.updated_at = utc_now()
         self.uow.projects.save(project)
-        self.uow.events.save(event)
         self.uow.commit()
+        return {
+            "project_id": project_id,
+            "onboarding_status": project.onboarding_status.value,
+            "observed": True,
+            "merged": True,
+            "merge_commit_sha": details["merge_commit_sha"],
+        }
 
-        logger.info(f"Updated project '{project.project_id}'")
-        return project
+    def observe_context_merge(self, project_id: str) -> dict[str, Any]:
+        """Advance approved context only after exact incremental PR merge proof."""
+        from minime.domain.enums import ExternalOutcome
+        from minime.services.project_connection_service import ProjectConnectionService
+
+        project = self.uow.projects.get_by_id(project_id)
+        if project is None:
+            raise ValueError(f"Project '{project_id}' not found")
+        pending = project.onboarding_checkpoint.get("pending_context")
+        retryable_block = project.onboarding_status == ProjectOnboardingStatus.BLOCKED and any(
+            reason.startswith("CONTEXT_PR_") or reason.startswith("CONTEXT_MERGE_")
+            for reason in project.onboarding_reasons
+        )
+        if (
+            project.onboarding_status != ProjectOnboardingStatus.PREPARED and not retryable_block
+        ) or not isinstance(pending, dict):
+            return {
+                "project_id": project_id,
+                "observed": False,
+                "reason": "project_has_no_pending_context_pr",
+            }
+        required = (
+            "pull_request_number",
+            "pull_request_url",
+            "head_sha",
+            "base_sha",
+            "base_branch",
+        )
+        if any(not pending.get(field) for field in required):
+            return self._block_context_observation(project, "CONTEXT_PR_IDENTITY_INCOMPLETE")
+        try:
+            pr_number = int(pending["pull_request_number"])
+        except (TypeError, ValueError):
+            pr_number = 0
+        if pr_number <= 0:
+            return self._block_context_observation(project, "CONTEXT_PR_IDENTITY_INCOMPLETE")
+        try:
+            adapter = ProjectConnectionService(self.credential_store).adapter_for(project, "git_pr")
+            result = adapter.get_pull_request_details(
+                project.provider_connections["git_pr"]["repository_url"], pr_number
+            )
+        except Exception:
+            return self._block_context_observation(project, "CONTEXT_PR_UNOBSERVABLE")
+        if result.outcome != ExternalOutcome.SUCCESS or not isinstance(result.data, dict):
+            return self._block_context_observation(project, "CONTEXT_PR_UNOBSERVABLE")
+        details = result.data
+        try:
+            repository_ok = normalize_repository_identity(str(details.get("repository", ""))) == normalize_repository_identity(
+                project.provider_connections["git_pr"]["repository_url"]
+            )
+        except (KeyError, TypeError, ValueError):
+            repository_ok = False
+        branch = pending.get("context_branch") or pending.get("bootstrap_branch")
+        exact_identity = repository_ok and (
+            details.get("number") == pr_number
+            and details.get("url") == pending["pull_request_url"]
+            and details.get("head_branch") == branch
+            and details.get("head_sha") == pending["head_sha"]
+            and details.get("base_branch") == pending["base_branch"] == project.base_branch
+        )
+        if not exact_identity:
+            return self._block_context_observation(project, "CONTEXT_PR_IDENTITY_MISMATCH")
+        if not details.get("is_merged"):
+            if details.get("state") == "closed":
+                return self._block_context_observation(project, "CONTEXT_PR_CLOSED_UNMERGED")
+            return {
+                "project_id": project_id,
+                "observed": True,
+                "merged": False,
+                "pending_context": pending,
+            }
+        merge_sha = details.get("merge_commit_sha")
+        if not merge_sha or not details.get("merged_at"):
+            return self._block_context_observation(project, "CONTEXT_MERGE_POSTCONDITION_INCOMPLETE")
+        checkpoint = {key: value for key, value in project.onboarding_checkpoint.items() if key != "pending_context"}
+        checkpoint.update(
+            {
+                "approved_context_sha": merge_sha,
+                "approved_context_source_zip_sha256": pending.get("source_zip_sha256"),
+                "context_merge_commit_sha": merge_sha,
+                "context_merge_observed_at": utc_now().isoformat(),
+            }
+        )
+        project.onboarding_checkpoint = checkpoint
+        project.onboarding_status = ProjectOnboardingStatus.PREPARED
+        project.onboarding_reasons = []
+        project.updated_at = utc_now()
+        self.uow.projects.save(project)
+        self.uow.commit()
+        return {
+            "project_id": project_id,
+            "observed": True,
+            "merged": True,
+            "approved_context_sha": merge_sha,
+        }
+
+    def _block_context_observation(self, project: Project, reason: str) -> dict[str, Any]:
+        project.onboarding_status = ProjectOnboardingStatus.BLOCKED
+        project.onboarding_reasons = [reason]
+        project.updated_at = utc_now()
+        self.uow.projects.save(project)
+        self.uow.commit()
+        return {
+            "project_id": project.project_id,
+            "onboarding_status": project.onboarding_status.value,
+            "observed": False,
+            "reason": reason.lower(),
+        }
+
+    def _block_bootstrap_observation(self, project: Project, reason: str) -> dict[str, Any]:
+        """Persist a bounded bootstrap observation blocker without exposing provider detail."""
+        project.onboarding_status = ProjectOnboardingStatus.BLOCKED
+        project.onboarding_reasons = [reason]
+        project.updated_at = utc_now()
+        self.uow.projects.save(project)
+        self.uow.commit()
+        return {
+            "project_id": project.project_id,
+            "onboarding_status": project.onboarding_status.value,
+            "observed": False,
+            "reason": reason.lower(),
+        }
+
+    def update_configuration(
+        self, project_id: str, patch: ProjectConfigurationPatch
+    ) -> Project:
+        project = self.uow.projects.get_by_id(project_id)
+        if project is None:
+            raise ValueError(f"Project '{project_id}' not found")
+        if patch.github_app_credentials and patch.provider_connections is None:
+            raise ValueError("updating GitHub App credentials requires an explicit provider connection update")
+        if patch.agent_profiles is not None:
+            self._validate_profile_author_separation(patch.agent_profiles)
+
+        binding = self.uow.project_managed_repository_bindings.get_by_project_id(project_id)
+        changed_base_branch = (
+            patch.base_branch is not None and patch.base_branch.strip() != project.base_branch
+        )
+        if changed_base_branch and binding is not None:
+            from minime.adapters.github import GitHubAdapter
+            from minime.domain.enums import ExternalOutcome
+            from minime.services.workspace_guard import (
+                ManagedWorkspaceGuard,
+                is_binding_fully_valid,
+            )
+
+            if not is_binding_fully_valid(binding) or normalize_repository_identity(
+                binding.canonical_repository_identity
+            ) != normalize_repository_identity(project.repository):
+                raise ValueError("Cannot change base branch while repository binding is invalid")
+            guard = ManagedWorkspaceGuard(self.uow)
+            marker_ok, _, _, _ = guard.verify_managed_repository_ownership_marker(
+                binding.managed_repository_root,
+                project_id,
+                binding.canonical_repository_identity,
+                binding.ownership_marker_filename,
+            )
+            if not marker_ok:
+                raise ValueError("Cannot change base branch without a valid managed-repository marker")
+            git_connection = (
+                patch.provider_connections.get("git_pr")
+                if patch.provider_connections is not None
+                else project.provider_connections.get("git_pr")
+            )
+            if not isinstance(git_connection, dict):
+                raise ValueError("Cannot change base branch without a configured Git/PR connection")
+            adapter = GitHubAdapter.for_project_connection(
+                project_id, git_connection, self.credential_store
+            )
+            identity_ok, identity_reason = guard.verify_git_repository_identity(
+                binding.managed_repository_root,
+                binding.canonical_repository_identity,
+                remote_name="origin",
+            )
+            if not identity_ok:
+                raise ValueError(f"Cannot change base branch: repository identity failed: {identity_reason}")
+            branch_result = adapter.get_remote_branch_head(
+                binding.managed_repository_root, patch.base_branch.strip(), remote="origin"
+            )
+            if branch_result.outcome != ExternalOutcome.SUCCESS or not branch_result.data:
+                raise ValueError(
+                    "Cannot change base branch because the configured remote branch is absent or unobservable"
+                )
+
+        credential_ref: str | None = None
+        commit_started = False
+        try:
+            if patch.github_app_credentials:
+                credentials = patch.github_app_credentials
+                credential_ref = self.credential_store.store_github_app(
+                    project_id,
+                    credentials.app_id,
+                    credentials.installation_id,
+                    credentials.private_key.get_secret_value(),
+                )
+            if patch.display_name is not None:
+                project.display_name = patch.display_name.strip()
+            if patch.base_branch is not None:
+                project.base_branch = patch.base_branch.strip()
+                if changed_base_branch and binding is not None:
+                    binding.default_base_branch = project.base_branch
+                    binding.updated_at = utc_now()
+                    self.uow.project_managed_repository_bindings.save(binding)
+            if patch.provider_connections is not None:
+                connections: dict[str, dict[str, Any]] = {}
+                for key, value in patch.provider_connections.items():
+                    connection_repository = normalize_repository_identity(value.repository_url)
+                    if not connection_repository or connection_repository.startswith(("/", "file:")):
+                        raise ValueError(
+                            f"Provider connection '{key}' requires a GitHub repository identity"
+                        )
+                    if "://" in value.repository_url and "github.com/" not in value.repository_url.lower():
+                        raise ValueError(f"Provider connection '{key}' must use a GitHub repository URL")
+                    connection = value.model_dump(mode="json")
+                    connection["repository_url"] = connection_repository
+                    if value.auth_mode == "project_app":
+                        reference = credential_ref or connection.get("secret_reference")
+                        if not reference:
+                            existing = project.provider_connections.get(key, {})
+                            reference = existing.get("secret_reference")
+                        if not reference:
+                            raise ValueError("project_app connection has no protected credential")
+                        connection["secret_reference"] = reference
+                    connections[key] = connection
+                if connections["git_pr"]["repository_url"] != normalize_repository_identity(
+                    project.repository
+                ):
+                    raise ValueError(
+                        "Git/PR connection repository must match the immutable project repository"
+                    )
+                project.provider_connections = connections
+            if patch.agent_profiles is not None:
+                expected = {"thinking", "execution", "independent_review", "fallback"}
+                missing = expected - set(patch.agent_profiles)
+                if missing:
+                    raise ValueError("Missing agent profiles: " + ", ".join(sorted(missing)))
+                project.agent_profiles = {
+                    key: value.model_dump(mode="json")
+                    for key, value in patch.agent_profiles.items()
+                }
+            if patch.execution_policy is not None:
+                project.execution_policy = patch.execution_policy.model_dump(mode="json")
+            project.updated_at = utc_now()
+            self.uow.projects.save(project)
+            commit_started = True
+            self.uow.commit()
+            return project
+        except Exception:
+            if credential_ref and not commit_started:
+                self.credential_store.remove_github_app(project_id, credential_ref)
+            self.uow.rollback()
+            raise
+
+    @staticmethod
+    def _validate_profile_author_separation(profiles) -> None:
+        """Keep author/reviewer identity distinct without consulting static catalogs.
+
+        Runtime model, effort, role, and transport capability checks belong to
+        ProjectCatalogService at the authenticated API/CLI boundary; static YAML
+        model lists are not authoritative for project profiles.
+        """
+        normalized_ids: dict[str, str] = {}
+        for role, profile in profiles.items():
+            agent_id = profile.agent_id.strip().lower()
+            provider_id = "antigravity" if agent_id == "agy" else agent_id
+            normalized_ids[role] = provider_id
+        reviewer_id = normalized_ids.get("independent_review")
+        for author_role in ("thinking", "execution"):
+            if reviewer_id and reviewer_id == normalized_ids.get(author_role):
+                raise ValueError(
+                    f"Independent review must use an agent distinct from the {author_role} author"
+                )
 
     def get_project(self, project_id: str) -> Project | None:
         return self.uow.projects.get_by_id(project_id)
 
     def list_projects(self) -> list[Project]:
         return self.uow.projects.list_all()
+
+    def verified_managed_workspace_root(self, project_id: str) -> Path | None:
+        """Resolve a workspace only when its durable binding, marker, and remote agree."""
+        from minime.services.workspace_guard import ManagedWorkspaceGuard, is_binding_fully_valid
+
+        binding = self.uow.project_managed_repository_bindings.get_by_project_id(project_id)
+        if binding is None or not is_binding_fully_valid(binding):
+            return None
+        root = Path(binding.managed_repository_root)
+        if root.is_symlink() or not root.is_dir():
+            return None
+        try:
+            guard = ManagedWorkspaceGuard(self.uow)
+            marker_ok, _, _, _ = guard.verify_managed_repository_ownership_marker(
+                str(root), project_id, binding.canonical_repository_identity,
+                binding.ownership_marker_filename,
+            )
+            identity_ok, _ = guard.verify_git_repository_identity(
+                str(root), binding.canonical_repository_identity, remote_name=binding.remote_name
+            )
+        except (OSError, RuntimeError, ValueError):
+            return None
+        return root if marker_ok and identity_ok else None
+
+    @staticmethod
+    def public_project_payload(project: Project) -> dict[str, Any]:
+        """Serialize project configuration without host-secret references."""
+        payload = project.model_dump(mode="json")
+        # Project responses and onboarding-status must share the same safe
+        # checkpoint projection. Never expose bounded private CLI diagnostics,
+        # even to callers of the general project list/get endpoints.
+        payload["onboarding_checkpoint"] = ProjectService.public_onboarding_state(project)[
+            "checkpoint"
+        ]
+        for connection in payload.get("provider_connections", {}).values():
+            if not isinstance(connection, dict):
+                continue
+            credential_configured = bool(connection.pop("secret_reference", None))
+            connection["credential_configured"] = credential_configured
+        return payload
+
+    @staticmethod
+    def public_onboarding_state(project: Project) -> dict[str, Any]:
+        """Expose truthful onboarding progress without returning arbitrary checkpoint data."""
+        checkpoint_fields = {
+            "operation_revision",
+            "source_zip_sha256",
+            "provenance_reference",
+            "bootstrap_branch",
+            "base_branch",
+            "base_sha",
+            "head_sha",
+            "pull_request_number",
+            "pull_request_url",
+            "expected_base_sha",
+            "merge_commit_sha",
+            "merge_observed_at",
+            "approved_context_sha",
+            "approved_context_source_zip_sha256",
+            "context_merge_commit_sha",
+            "context_merge_observed_at",
+        }
+        checkpoint = {
+            key: value
+            for key, value in project.onboarding_checkpoint.items()
+            if key in checkpoint_fields
+        }
+        attempt = project.onboarding_checkpoint.get("thinking_agent_attempt")
+        if isinstance(attempt, dict):
+            # Authenticated status exposes bounded operational metadata only.
+            # Raw stderr/stdout and secret-bearing provider diagnostics stay in
+            # the durable checkpoint, never in the public onboarding payload.
+            checkpoint["thinking_agent_attempt"] = {
+                key: attempt[key]
+                for key in (
+                    "status",
+                    "agent",
+                    "model",
+                    "effort",
+                    "usage_status",
+                    "exit_code",
+                    "timed_out",
+                    "duration_ms",
+                    "environment_error",
+                    "started_at",
+                    "finished_at",
+                )
+                if key in attempt
+            }
+        recovery = project.onboarding_checkpoint.get("bootstrap_recovery")
+        if isinstance(recovery, dict):
+            checkpoint["bootstrap_recovery"] = {
+                key: recovery[key]
+                for key in (
+                    "status",
+                    "reason",
+                    "checked_at",
+                    "safe_to_resume",
+                    "bootstrap_branch",
+                    "remote_branch_sha",
+                )
+                if key in recovery
+            }
+        grant = project.onboarding_checkpoint.get("thinking_agent_retry_authorization")
+        if isinstance(grant, dict):
+            checkpoint["thinking_agent_retry_authorization"] = {
+                key: grant[key]
+                for key in (
+                    "authorization_reference",
+                    "project_id",
+                    "source_zip_sha256",
+                    "repository",
+                    "base_branch",
+                    "base_sha",
+                    "purpose",
+                    "max_new_invocations",
+                    "single_use",
+                    "used",
+                    "used_at",
+                )
+                if key in grant
+            }
+        pending = project.onboarding_checkpoint.get("pending_context")
+        if isinstance(pending, dict):
+            checkpoint["pending_context"] = {
+                key: pending.get(key)
+                for key in (
+                    "source_zip_sha256",
+                    "context_branch",
+                    "base_sha",
+                    "head_sha",
+                    "pull_request_number",
+                    "pull_request_url",
+                )
+                if pending.get(key) is not None
+            }
+        return {
+            "project_id": project.project_id,
+            "project_type": project.project_type.value,
+            "lifecycle": project.status.value,
+            "onboarding_status": project.onboarding_status.value,
+            "reasons": [redact_secrets(reason) for reason in project.onboarding_reasons],
+            "checkpoint": checkpoint,
+        }

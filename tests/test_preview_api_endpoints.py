@@ -1,245 +1,47 @@
-"""API integration tests for Container Preview & Guided Validation endpoints."""
+"""Negative regressions for preview/validation writes deferred to F5."""
 
 from __future__ import annotations
 
-from datetime import UTC, datetime
-from types import SimpleNamespace
-from unittest.mock import AsyncMock, MagicMock, patch
-
 import pytest
-from fastapi import Request
 from fastapi.testclient import TestClient
 
-from minime.api.app import ValidationSubmitRequest, app, get_uow, submit_validation
-from minime.domain.enums import PreviewStatus, ValidationVerdict
-from minime.domain.models import PreviewSession, Project, ValidationRun
+from minime.api.app import app, get_uow
 
 
 @pytest.fixture
-def mock_uow():
-    uow = MagicMock()
-    uow.projects = MagicMock()
-    uow.preview_sessions = MagicMock()
-    uow.validation_runs = MagicMock()
-    uow.orchestration_runs = MagicMock()
-    uow.events = MagicMock()
-    return uow
+def client(in_memory_uow):
+    app.dependency_overrides[get_uow] = lambda: in_memory_uow
+    try:
+        yield TestClient(app), in_memory_uow
+    finally:
+        app.dependency_overrides.clear()
 
 
-@pytest.fixture
-def client(mock_uow):
-    app.dependency_overrides[get_uow] = lambda: mock_uow
-    yield TestClient(app)
-    app.dependency_overrides.clear()
-
-
-def test_build_preview_endpoint(client, mock_uow):
-    project = Project(
-        project_id="mini-me",
-        display_name="mini me",
-        repository="silverberdi/mini-me",
+@pytest.mark.parametrize(
+    ("method", "path", "payload"),
+    [
+        ("POST", "/api/v1/previews/build", {"project_id": "p", "change_name": "c"}),
+        ("POST", "/api/v1/previews/start", {"preview_id": "p"}),
+        ("POST", "/api/v1/previews/p/teardown", {}),
+        ("POST", "/api/v1/previews/reconcile", {}),
+        ("POST", "/api/v1/validations/submit", {"project_id": "p"}),
+    ],
+)
+def test_deferred_preview_and_validation_writes_are_explicitly_unavailable(
+    client, method, path, payload
+):
+    http, uow = client
+    before = (
+        len(uow.preview_sessions._store),
+        len(uow.validation_runs._store),
+        len(uow.events._store),
     )
-    mock_uow.projects.get_by_id.return_value = project
+    response = http.request(method, path, json=payload)
 
-    with patch(
-        "minime.api.app.ContainerPreviewService.build_image", new_callable=AsyncMock
-    ) as mock_build:
-        mock_build.return_value = "sha256:112233445566778899"
-
-        res = client.post(
-            "/api/v1/previews/build",
-            json={
-                "project_id": "mini-me",
-                "change_name": "013-preview",
-                "head_sha": "abc1234",
-                "base_sha": "def5678",
-                "candidate_generation": 1,
-            },
-        )
-
-        assert res.status_code == 200
-        data = res.json()
-        assert data["image_digest"] == "sha256:112233445566778899"
-        assert data["status"] == "BUILDING"
-        assert mock_uow.preview_sessions.save.called
-
-
-def test_start_preview_endpoint(client, mock_uow):
-    session = PreviewSession(
-        preview_id="prev_01",
-        project_id="mini-me",
-        change_name="013-preview",
-        head_sha="abc1234",
-        base_sha="def5678",
-        image_digest="sha256:112233",
-        status=PreviewStatus.BUILDING,
+    assert response.status_code == 410
+    assert response.json()["detail"]["code"] == "operation_unavailable"
+    assert before == (
+        len(uow.preview_sessions._store),
+        len(uow.validation_runs._store),
+        len(uow.events._store),
     )
-    mock_uow.preview_sessions.get_by_id.return_value = session
-
-    with (
-        patch(
-            "minime.api.app.ContainerPreviewService.start_preview_container", new_callable=AsyncMock
-        ) as mock_start,
-        patch(
-            "minime.api.app.ContainerPreviewService.probe_health", new_callable=AsyncMock
-        ) as mock_probe,
-    ):
-        mock_start.return_value = ("c12345", "http://127.0.0.1:18787", 18787)
-        mock_probe.return_value = True
-
-        res = client.post(
-            "/api/v1/previews/start",
-            json={"preview_id": "prev_01", "internal_port": 8787, "probe_health": True},
-        )
-
-        assert res.status_code == 200
-        data = res.json()
-        assert data["status"] == "READY"
-        assert data["preview_url"] == "http://127.0.0.1:18787"
-        assert data["allocated_port"] == 18787
-
-
-def test_get_preview_session_endpoint(client, mock_uow):
-    session = PreviewSession(
-        preview_id="prev_01",
-        project_id="mini-me",
-        change_name="013-preview",
-        head_sha="abc1234",
-        base_sha="def5678",
-        image_digest="sha256:112233",
-        status=PreviewStatus.READY,
-        preview_url="http://127.0.0.1:18787",
-        allocated_port=18787,
-    )
-    mock_uow.preview_sessions.get_by_id.return_value = session
-
-    res = client.get("/api/v1/previews/prev_01")
-    assert res.status_code == 200
-    data = res.json()
-    assert data["preview_id"] == "prev_01"
-    assert data["status"] == "READY"
-    assert data["preview_url"] == "http://127.0.0.1:18787"
-
-
-def test_teardown_preview_endpoint(client, mock_uow):
-    session = PreviewSession(
-        preview_id="prev_01",
-        project_id="mini-me",
-        change_name="013-preview",
-        head_sha="abc1234",
-        base_sha="def5678",
-        status=PreviewStatus.READY,
-    )
-    mock_uow.preview_sessions.get_by_id.return_value = session
-
-    with patch(
-        "minime.api.app.ContainerPreviewService.teardown_preview", new_callable=AsyncMock
-    ) as mock_teardown:
-        mock_teardown.return_value = True
-        res = client.post("/api/v1/previews/prev_01/teardown")
-        assert res.status_code == 200
-        assert res.json()["status"] == "TERMINATED"
-
-
-def test_validation_submit_endpoint(client, mock_uow):
-    res = client.post(
-        "/api/v1/validations/submit",
-        json={
-            "project_id": "mini-me",
-            "change_name": "013-preview",
-            "head_sha": "abc1234",
-            "base_sha": "def5678",
-            "image_digest": "sha256:112233",
-            "verdict": "PASS",
-            "scenario_results": [{"scenario_id": "sc_01", "verdict": "PASS"}],
-            "notes": "Verified visual appearance",
-            "operator": "operator_bob",
-        },
-    )
-    assert res.status_code == 200
-    data = res.json()
-    assert data["verdict"] == "PASS"
-    assert data["head_sha"] == "abc1234"
-    assert mock_uow.validation_runs.save.called
-    assert mock_uow.validation_runs.save.call_args.args[0].operator == "unauthenticated"
-    assert mock_uow.events.save.called
-
-
-def test_validation_record_uses_authenticated_operator_over_request_body(mock_uow):
-    request = Request(
-        {
-            "type": "http",
-            "http_version": "1.1",
-            "method": "POST",
-            "scheme": "http",
-            "path": "/api/v1/validations/submit",
-            "raw_path": b"/api/v1/validations/submit",
-            "query_string": b"",
-            "headers": [],
-            "client": ("test", 1234),
-            "server": ("test", 80),
-            "state": {"operator": SimpleNamespace(email="verified@example.test")},
-        }
-    )
-    payload = ValidationSubmitRequest(
-        project_id="mini-me",
-        change_name="013-preview",
-        head_sha="abc1234",
-        base_sha="def5678",
-        image_digest="sha256:112233",
-        verdict="PASS",
-        operator="forged@example.test",
-    )
-
-    with patch("minime.api.app.ValidationAuthorityService") as service_type:
-        service_type.return_value.record_validation.return_value = SimpleNamespace(
-            validation_id="validation-1",
-            project_id="mini-me",
-            change_name="013-preview",
-            head_sha="abc1234",
-            base_sha="def5678",
-            image_digest="sha256:112233",
-            verdict=ValidationVerdict.PASS,
-            operator="verified@example.test",
-            created_at=datetime.now(UTC),
-        )
-        submit_validation(payload, request, mock_uow)
-
-    assert (
-        service_type.return_value.record_validation.call_args.kwargs["operator"]
-        == "verified@example.test"
-    )
-
-
-def test_validation_authority_endpoint(client, mock_uow):
-    project = Project(
-        project_id="mini-me",
-        display_name="mini me",
-        repository="silverberdi/mini-me",
-    )
-    mock_uow.projects.get_by_id.return_value = project
-
-    val = ValidationRun(
-        validation_id="val_01",
-        project_id="mini-me",
-        change_name="013-preview",
-        head_sha="abc1234",
-        base_sha="def5678",
-        image_digest="sha256:112233",
-        verdict=ValidationVerdict.PASS,
-    )
-    mock_uow.validation_runs.get_latest_for_candidate.return_value = val
-
-    res = client.get(
-        "/api/v1/validations/authority/mini-me/013-preview",
-        params={
-            "head_sha": "abc1234",
-            "base_sha": "def5678",
-            "image_digest": "sha256:112233",
-        },
-    )
-    assert res.status_code == 200
-    data = res.json()
-    assert data["is_authorized"] is True
-    assert data["is_stale"] is False
-    assert data["latest_verdict"] == "PASS"

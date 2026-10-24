@@ -232,6 +232,7 @@ def project_model_to_domain(model: ProjectModel) -> Project:
         project_id=model.id,
         display_name=model.display_name,
         repository=model.repository,
+        project_type=getattr(model, "project_type", "BROWNFIELD") or "BROWNFIELD",
         base_branch=model.base_branch,
         openspec_path=model.openspec_path,
         implementer=model.implementer,
@@ -246,18 +247,14 @@ def project_model_to_domain(model: ProjectModel) -> Project:
         archive_gate_required=getattr(model, "archive_gate_required", True),
         deployment_preview=model.deployment_preview or {},
         deployment_production=model.deployment_production or {},
-        context_sources=model.context_sources or ["README.md", "docs/", "ROADMAP.md"],
-        roadmap_path=model.roadmap_path or "docs/ROADMAP.md",
-        backlog_path=model.backlog_path or "docs/ROADMAP.md",
-        github_project_number=model.github_project_number,
-        github_project_owner=model.github_project_owner,
         onboarding_status=ProjectOnboardingStatus(model.onboarding_status)
         if model.onboarding_status
-        else ProjectOnboardingStatus.READY_FOR_WORK,
+        else ProjectOnboardingStatus.CONFIGURED,
         onboarding_reasons=model.onboarding_reasons or [],
-        auto_prepare=getattr(model, "auto_prepare", True),
-        auto_admit=getattr(model, "auto_admit", True),
-        max_concurrent_jobs=getattr(model, "max_concurrent_jobs", 1),
+        provider_connections=getattr(model, "provider_connections", None) or {},
+        agent_profiles=getattr(model, "agent_profiles", None) or {},
+        execution_policy=getattr(model, "execution_policy", None) or {},
+        onboarding_checkpoint=getattr(model, "onboarding_checkpoint", None) or {},
         status=ProjectStatus(model.status),
         created_at=model.created_at,
         updated_at=model.updated_at,
@@ -927,6 +924,11 @@ class PostgresProjectRepository(ProjectRepositoryInterface):
         if existing:
             existing.display_name = project.display_name
             existing.repository = project.repository
+            existing.project_type = project.project_type.value
+            existing.provider_connections = project.provider_connections
+            existing.agent_profiles = project.agent_profiles
+            existing.execution_policy = project.execution_policy
+            existing.onboarding_checkpoint = project.onboarding_checkpoint
             existing.base_branch = project.base_branch
             existing.openspec_path = project.openspec_path
             existing.implementer = project.implementer
@@ -941,16 +943,8 @@ class PostgresProjectRepository(ProjectRepositoryInterface):
             existing.archive_gate_required = project.archive_gate_required
             existing.deployment_preview = project.deployment_preview
             existing.deployment_production = project.deployment_production
-            existing.context_sources = project.context_sources
-            existing.roadmap_path = project.roadmap_path
-            existing.backlog_path = project.backlog_path
-            existing.github_project_number = project.github_project_number
-            existing.github_project_owner = project.github_project_owner
             existing.onboarding_status = project.onboarding_status.value
             existing.onboarding_reasons = project.onboarding_reasons
-            existing.auto_prepare = project.auto_prepare
-            existing.auto_admit = project.auto_admit
-            existing.max_concurrent_jobs = project.max_concurrent_jobs
             existing.status = project.status.value
             existing.updated_at = project.updated_at
         else:
@@ -958,6 +952,11 @@ class PostgresProjectRepository(ProjectRepositoryInterface):
                 id=project.project_id,
                 display_name=project.display_name,
                 repository=project.repository,
+                project_type=project.project_type.value,
+                provider_connections=project.provider_connections,
+                agent_profiles=project.agent_profiles,
+                execution_policy=project.execution_policy,
+                onboarding_checkpoint=project.onboarding_checkpoint,
                 base_branch=project.base_branch,
                 openspec_path=project.openspec_path,
                 implementer=project.implementer,
@@ -972,16 +971,8 @@ class PostgresProjectRepository(ProjectRepositoryInterface):
                 archive_gate_required=project.archive_gate_required,
                 deployment_preview=project.deployment_preview,
                 deployment_production=project.deployment_production,
-                context_sources=project.context_sources,
-                roadmap_path=project.roadmap_path,
-                backlog_path=project.backlog_path,
-                github_project_number=project.github_project_number,
-                github_project_owner=project.github_project_owner,
                 onboarding_status=project.onboarding_status.value,
                 onboarding_reasons=project.onboarding_reasons,
-                auto_prepare=project.auto_prepare,
-                auto_admit=project.auto_admit,
-                max_concurrent_jobs=project.max_concurrent_jobs,
                 status=project.status.value,
                 created_at=project.created_at,
                 updated_at=project.updated_at,

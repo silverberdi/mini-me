@@ -4,13 +4,23 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
+import subprocess
 import uuid
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from decimal import Decimal
 from typing import Any, Generic, TypeVar
 
-from pydantic import BaseModel, ConfigDict, Field, computed_field, model_validator
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    SecretStr,
+    computed_field,
+    field_validator,
+    model_validator,
+)
 
 from minime.domain.enums import (
     PRIMARY_PROVIDERS,
@@ -52,6 +62,7 @@ from minime.domain.enums import (
     ProgressClassification,
     ProjectOnboardingStatus,
     ProjectStatus,
+    ProjectType,
     ProviderHealthStatus,
     ProviderResultClass,
     PullRequestLookupState,
@@ -82,6 +93,22 @@ def utc_now() -> datetime:
     return datetime.now(UTC)
 
 
+def _is_valid_git_branch_name(value: str) -> bool:
+    if not isinstance(value, str) or not value or value.startswith("-"):
+        return False
+    try:
+        result = subprocess.run(
+            ["git", "check-ref-format", "--branch", value],
+            capture_output=True,
+            text=True,
+            timeout=5,
+            check=False,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return False
+    return result.returncode == 0
+
+
 def generate_uuid() -> str:
     """Generate a UUID4 hex string."""
     return str(uuid.uuid4())
@@ -93,6 +120,7 @@ class Project(BaseModel):
     project_id: str
     display_name: str
     repository: str
+    project_type: ProjectType = ProjectType.BROWNFIELD
     base_branch: str = "main"
     openspec_path: str = "openspec"
     implementer: str = "codex"
@@ -109,19 +137,185 @@ class Project(BaseModel):
     archive_gate_required: bool = True
     deployment_preview: dict[str, Any] = Field(default_factory=dict)
     deployment_production: dict[str, Any] = Field(default_factory=dict)
-    context_sources: list[str] = Field(default_factory=lambda: ["README.md", "docs/", "ROADMAP.md"])
-    roadmap_path: str = "docs/ROADMAP.md"
-    backlog_path: str = "docs/ROADMAP.md"
-    github_project_number: int | None = None
-    github_project_owner: str | None = None
-    onboarding_status: ProjectOnboardingStatus = ProjectOnboardingStatus.READY_FOR_WORK
+    onboarding_status: ProjectOnboardingStatus = ProjectOnboardingStatus.CONFIGURED
     onboarding_reasons: list[str] = Field(default_factory=list)
-    auto_prepare: bool = True
-    auto_admit: bool = True
-    max_concurrent_jobs: int = 1
+    provider_connections: dict[str, Any] = Field(default_factory=dict)
+    agent_profiles: dict[str, Any] = Field(default_factory=dict)
+    execution_policy: dict[str, Any] = Field(default_factory=dict)
+    onboarding_checkpoint: dict[str, Any] = Field(default_factory=dict)
     status: ProjectStatus = ProjectStatus.ACTIVE
     created_at: datetime = Field(default_factory=utc_now)
     updated_at: datetime = Field(default_factory=utc_now)
+
+
+class ProjectProviderConnection(BaseModel):
+    """Non-secret connection metadata for one project/provider responsibility."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    provider_id: str
+    repository_url: str
+    auth_mode: str
+    secret_reference: str | None = None
+
+    @model_validator(mode="after")
+    def validate_github_connection(self) -> "ProjectProviderConnection":
+        if self.provider_id != "github":
+            raise ValueError("Only the GitHub provider is implemented in F2")
+        if self.auth_mode not in {"environment_app", "project_app"}:
+            raise ValueError("auth_mode must be environment_app or project_app")
+        if self.auth_mode == "environment_app" and self.secret_reference:
+            raise ValueError("environment_app connections cannot reference project credentials")
+        return self
+
+
+class ProjectAgentProfile(BaseModel):
+    """A selected, catalog-resolved agent capability profile; no free-form command."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    agent_id: str = Field(min_length=1, max_length=64)
+    model_id: str = Field(min_length=1, max_length=128)
+    effort: str = Field(min_length=1, max_length=32)
+    workflows: list[str] = Field(default_factory=list)
+    skills: list[str] = Field(default_factory=list)
+
+
+class ProjectExecutionPolicy(BaseModel):
+    """Finite per-project review, correction, and fallback authorization limits."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    max_review_rounds: int = Field(default=2, ge=1, le=3)
+    max_correction_attempts: int = Field(default=1, ge=0, le=3)
+    code_review_policy: str = Field(default="risk_based", pattern="^(required|risk_based|disabled)$")
+    fallback_authorized: bool = False
+    fallback_daily_cap_usd: Decimal = Field(default=Decimal("0"), ge=0, max_digits=8, decimal_places=2)
+    fallback_monthly_cap_usd: Decimal = Field(default=Decimal("0"), ge=0, max_digits=8, decimal_places=2)
+
+    @model_validator(mode="after")
+    def require_fallback_budget(self) -> "ProjectExecutionPolicy":
+        if self.fallback_authorized and (
+            self.fallback_daily_cap_usd <= 0 or self.fallback_monthly_cap_usd <= 0
+        ):
+            raise ValueError("authorized fallback requires positive finite daily and monthly caps")
+        return self
+
+
+class ProjectGitHubAppCredentials(BaseModel):
+    """Transient authenticated intake; private key is never persisted in PostgreSQL."""
+
+    app_id: str
+    installation_id: str
+    private_key: SecretStr
+
+
+class ProjectConfigurationInput(BaseModel):
+    """Validated shared contract for project configuration before persistence."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    project_id: str
+    display_name: str
+    project_type: ProjectType
+    repository: str
+    base_branch: str = "main"
+    provider_connections: dict[str, ProjectProviderConnection]
+    agent_profiles: dict[str, ProjectAgentProfile]
+    execution_policy: ProjectExecutionPolicy = Field(default_factory=ProjectExecutionPolicy)
+    github_app_credentials: ProjectGitHubAppCredentials | None = None
+
+    @model_validator(mode="after")
+    def validate_required_profiles(self) -> "ProjectConfigurationInput":
+        expected = {"thinking", "execution", "independent_review", "fallback"}
+        missing = expected - set(self.agent_profiles)
+        if missing:
+            raise ValueError("Missing agent profiles: " + ", ".join(sorted(missing)))
+        unknown = set(self.agent_profiles) - expected
+        if unknown:
+            raise ValueError("Unknown agent profiles: " + ", ".join(sorted(unknown)))
+        if not self.project_id.strip() or not self.display_name.strip():
+            raise ValueError("project_id and display_name are required")
+        if not self.repository.strip():
+            raise ValueError("repository is required")
+        if not self.base_branch.strip():
+            raise ValueError("base_branch must not be empty")
+        if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,63}", self.project_id):
+            raise ValueError("project_id must be a safe 1-64 character identifier")
+        if not {"tickets", "git_pr"}.issubset(self.provider_connections):
+            raise ValueError("tickets and git_pr provider connections are required")
+        if set(self.provider_connections) - {"tickets", "git_pr"}:
+            raise ValueError("Only tickets and git_pr provider responsibilities are supported in F2")
+        for connection in self.provider_connections.values():
+            if connection.auth_mode == "project_app" and not (
+                connection.secret_reference or self.github_app_credentials
+            ):
+                raise ValueError("project_app connections require credentials or a protected reference")
+            if connection.secret_reference and not self.github_app_credentials:
+                raise ValueError("secret references are server-owned and cannot be supplied by operators")
+        if self.github_app_credentials and not any(
+            connection.auth_mode == "project_app"
+            for connection in self.provider_connections.values()
+        ):
+            raise ValueError("GitHub App credentials were supplied but no connection selects project_app")
+        return self
+
+    @field_validator("base_branch")
+    @classmethod
+    def validate_base_branch(cls, value: str) -> str:
+        if not _is_valid_git_branch_name(value):
+            raise ValueError("base_branch must be a valid Git branch name")
+        return value
+
+
+class ProjectConfigurationPatch(BaseModel):
+    """Mutable project configuration fields; identity is intentionally omitted."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    display_name: str | None = None
+    base_branch: str | None = None
+    provider_connections: dict[str, ProjectProviderConnection] | None = None
+    agent_profiles: dict[str, ProjectAgentProfile] | None = None
+    execution_policy: ProjectExecutionPolicy | None = None
+    github_app_credentials: ProjectGitHubAppCredentials | None = None
+
+    @model_validator(mode="after")
+    def require_changes(self) -> "ProjectConfigurationPatch":
+        if not self.model_fields_set - {"github_app_credentials"}:
+            raise ValueError("at least one project setting must be provided")
+        if self.display_name is not None and not self.display_name.strip():
+            raise ValueError("display_name must not be empty")
+        if self.base_branch is not None and not self.base_branch.strip():
+            raise ValueError("base_branch must not be empty")
+        if self.provider_connections is not None:
+            if not {"tickets", "git_pr"}.issubset(self.provider_connections):
+                raise ValueError("tickets and git_pr provider connections are required")
+            if set(self.provider_connections) - {"tickets", "git_pr"}:
+                raise ValueError("Only tickets and git_pr provider responsibilities are supported in F2")
+        if self.agent_profiles is not None:
+            expected = {"thinking", "execution", "independent_review", "fallback"}
+            missing = expected - set(self.agent_profiles)
+            if missing:
+                raise ValueError("Missing agent profiles: " + ", ".join(sorted(missing)))
+            unknown = set(self.agent_profiles) - expected
+            if unknown:
+                raise ValueError("Unknown agent profiles: " + ", ".join(sorted(unknown)))
+        for connection in (self.provider_connections or {}).values():
+            if connection.secret_reference and not self.github_app_credentials:
+                raise ValueError("secret references are server-owned and cannot be supplied by operators")
+            if connection.auth_mode == "project_app" and not (
+                connection.secret_reference or self.github_app_credentials
+            ):
+                raise ValueError("project_app connections require credentials or an existing reference")
+        return self
+
+    @field_validator("base_branch")
+    @classmethod
+    def validate_base_branch(cls, value: str | None) -> str | None:
+        if value is not None and not _is_valid_git_branch_name(value):
+            raise ValueError("base_branch must be a valid Git branch name")
+        return value
 
 
 class ProjectBinding(BaseModel):
@@ -1296,26 +1490,6 @@ class ContextDiscoveryReport(BaseModel):
     missing_required_context: list[str] = Field(default_factory=list)
     discovered_items_count: int = 0
     discovered_at: datetime = Field(default_factory=utc_now)
-
-
-class ProjectOnboardingInput(BaseModel):
-    """Input payload for onboarding an external project."""
-
-    project_id: str
-    display_name: str
-    repository: str
-    base_branch: str = "main"
-    openspec_path: str = "openspec"
-    context_sources: list[str] = Field(default_factory=lambda: ["README.md", "docs/", "ROADMAP.md"])
-    roadmap_path: str = "docs/ROADMAP.md"
-    backlog_path: str = "docs/ROADMAP.md"
-    github_project_number: int | None = None
-    github_project_owner: str | None = None
-    implementer: str = "codex"
-    reviewer: str = "antigravity"
-    checks: list[dict[str, Any]] = Field(default_factory=list)
-    managed_repository_root: str | None = None
-    worktree_parent_dir: str | None = None
 
 
 class ProjectOnboardingResult(BaseModel):

@@ -10,6 +10,8 @@ from pathlib import Path
 from typing import Annotated, Any, Generator
 
 from fastapi import Depends, FastAPI, HTTPException, Query, Request, status
+from fastapi.concurrency import run_in_threadpool
+from fastapi.exceptions import RequestValidationError
 from fastapi.responses import (
     FileResponse,
     HTMLResponse,
@@ -18,10 +20,8 @@ from fastapi.responses import (
     Response,
 )
 from fastapi.staticfiles import StaticFiles
-from pydantic import BaseModel, Field
+from pydantic import BaseModel
 
-from minime.adapters.github import GitHubAdapter
-from minime.adapters.openspec import OpenSpecAdapter
 from minime.config import load_config
 from minime.db.repository import PostgresPersistenceUnitOfWork
 from minime.db.session import db_manager
@@ -29,7 +29,6 @@ from minime.domain.enums import (
     AuthEventType,
     OperatorActionType,
     OperatorAuthDecision,
-    ProjectStatus,
 )
 from minime.domain.interfaces import PersistenceUnitOfWork
 from minime.domain.models import (
@@ -45,9 +44,8 @@ from minime.domain.models import (
     OperatorActionRequest,
     OperatorActionResult,
     OperatorIdentityDTO,
-    Project,
-    ProjectOnboardingInput,
-    ProjectOnboardingResult,
+    ProjectConfigurationInput,
+    ProjectConfigurationPatch,
     ProviderEfficiencyMetrics,
     ProviderHealth,
     SchedulerStatus,
@@ -63,8 +61,13 @@ from minime.services.budget_service import BudgetService
 from minime.services.capacity_lifecycle_service import CapacityLifecycleService
 from minime.services.context_discovery_service import ContextDiscoveryService
 from minime.services.current_check_batch import validate_current_checks_batch
+from minime.services.greenfield_bootstrap import (
+    GreenfieldBootstrapCoordinator,
+    GreenfieldBootstrapError,
+)
 from minime.services.legacy_unavailable import unavailable_payload
-from minime.services.project_onboarding_service import ProjectOnboardingService
+from minime.services.project_catalog_service import ProjectCatalogService
+from minime.services.project_connection_service import ProjectConnectionService
 from minime.services.project_service import ProjectService
 from minime.services.provider_health_service import ProviderHealthService
 from minime.services.status_service import StatusService
@@ -162,6 +165,22 @@ app = FastAPI(
 )
 
 
+@app.exception_handler(RequestValidationError)
+async def redact_request_validation_details(
+    _request: Request, exc: RequestValidationError
+) -> JSONResponse:
+    """Do not echo request input (which can contain credential material) in 422 bodies."""
+    return JSONResponse(
+        status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+        content={
+            "detail": [
+                {"type": error.get("type"), "loc": error.get("loc"), "msg": error.get("msg")}
+                for error in exc.errors()
+            ]
+        },
+    )
+
+
 def get_uow() -> Generator[PostgresPersistenceUnitOfWork, None, None]:
     """Dependency that yields a persistence unit of work backed by a database session."""
     sess = db_manager.sessionmaker()
@@ -175,20 +194,34 @@ def get_uow() -> Generator[PostgresPersistenceUnitOfWork, None, None]:
 UowDep = Annotated[PostgresPersistenceUnitOfWork, Depends(get_uow)]
 
 
-def get_github_adapter() -> GitHubAdapter:
-    return GitHubAdapter()
+def _run_greenfield_bootstrap_in_session(
+    configuration: ProjectConfigurationInput,
+    archive: bytes,
+    operator_email: str,
+) -> dict[str, Any]:
+    """Run blocking bootstrap work with a session owned by the worker thread."""
+    session = db_manager.sessionmaker()
+    try:
+        uow = PostgresPersistenceUnitOfWork(session)
+        return GreenfieldBootstrapCoordinator(
+            uow,
+            trusted_managed_root=load_config().paths.repos_root,
+        ).bootstrap(configuration, archive, operator_email=operator_email)
+    finally:
+        session.close()
 
 
-GitHubAdapterDep = Annotated[GitHubAdapter, Depends(get_github_adapter)]
-
-
-def get_onboarding_service(
-    uow: UowDep, github_adapter: GitHubAdapterDep
-) -> ProjectOnboardingService:
-    return ProjectOnboardingService(uow, github_adapter=github_adapter)
-
-
-OnboardingServiceDep = Annotated[ProjectOnboardingService, Depends(get_onboarding_service)]
+def _run_incremental_context_in_session(project_id: str, archive: bytes) -> dict[str, Any]:
+    """Run blocking context publication with a session owned by the worker thread."""
+    session = db_manager.sessionmaker()
+    try:
+        uow = PostgresPersistenceUnitOfWork(session)
+        return GreenfieldBootstrapCoordinator(
+            uow,
+            trusted_managed_root=load_config().paths.repos_root,
+        ).add_context(project_id, archive)
+    finally:
+        session.close()
 
 
 def get_context_service(uow: UowDep) -> ContextDiscoveryService:
@@ -383,43 +416,212 @@ def get_current_operator(
 AuthenticatedOperatorDep = Annotated[AuthorizedOperator, Depends(get_current_operator)]
 
 
-class ProjectCreateRequest(BaseModel):
-    project_id: str
-    display_name: str
-    repository: str
-    base_branch: str = "main"
-    openspec_path: str = "openspec"
-    implementer: str = "codex"
-    reviewer: str = "antigravity"
-    checks: list[dict[str, Any]] = Field(default_factory=list)
-    external_providers_allowed: list[str] = Field(
-        default_factory=lambda: ["codex", "antigravity", "deepseek"]
+@app.get("/api/v1/catalogs/providers", tags=["catalogs"])
+def project_provider_catalog(_operator: AuthenticatedOperatorDep) -> list[dict[str, Any]]:
+    """Return provider metadata only; project connections and secrets are never included."""
+    return ProjectCatalogService().provider_catalog()
+
+
+@app.get("/api/v1/catalogs/agents", tags=["catalogs"])
+async def project_agent_catalog(
+    _operator: AuthenticatedOperatorDep,
+    uow: UowDep,
+    project_id: str | None = None,
+) -> dict[str, Any]:
+    """Expose locally configured, read-only discovered agent capabilities."""
+    project_root = (
+        ProjectService(uow).verified_managed_workspace_root(project_id) if project_id else None
     )
-    openrouter_drain_allowed: bool = False
-    independent_audit_required: bool = False
-    deployment_preview: dict[str, Any] = Field(default_factory=dict)
-    deployment_production: dict[str, Any] = Field(default_factory=dict)
-    auto_prepare: bool = Field(default=True, strict=True)
-    auto_admit: bool = Field(default=True, strict=True)
-    max_concurrent_jobs: int = Field(default=1, strict=True, ge=1)
+    if project_id and project_root is None:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="Project workspace binding is unavailable or does not match its repository identity",
+        )
+    return await ProjectCatalogService().agent_catalog(project_root)
 
 
-class ProjectUpdateRequest(BaseModel):
-    display_name: str | None = None
-    base_branch: str | None = None
-    openspec_path: str | None = None
-    implementer: str | None = None
-    reviewer: str | None = None
-    checks: list[dict[str, Any]] | None = None
-    external_providers_allowed: list[str] | None = None
-    openrouter_drain_allowed: bool | None = None
-    independent_audit_required: bool | None = None
-    deployment_preview: dict[str, Any] | None = None
-    deployment_production: dict[str, Any] | None = None
-    auto_prepare: bool | None = Field(default=None, strict=True)
-    auto_admit: bool | None = Field(default=None, strict=True)
-    max_concurrent_jobs: int | None = Field(default=None, strict=True, ge=1)
-    status: ProjectStatus | None = None
+@app.get("/api/v1/projects", tags=["projects"])
+def list_project_configurations(_operator: AuthenticatedOperatorDep, uow: UowDep) -> list[dict[str, Any]]:
+    service = ProjectService(uow)
+    return [service.public_project_payload(project) for project in service.list_projects()]
+
+
+@app.post("/api/v1/projects", status_code=status.HTTP_201_CREATED, tags=["projects"])
+async def create_project_configuration(
+    configuration: ProjectConfigurationInput,
+    _operator: AuthenticatedOperatorDep,
+    uow: UowDep,
+) -> dict[str, Any]:
+    """Create a configuration-only Brownfield registration; Greenfield needs ZIP bootstrap."""
+    try:
+        await ProjectCatalogService().validate_project_profiles(
+            configuration.agent_profiles
+        )
+        service = ProjectService(uow)
+        return service.public_project_payload(service.create_configured_project(configuration))
+    except ValueError as exc:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
+
+
+@app.post("/api/v1/projects/greenfield/bootstrap", status_code=status.HTTP_202_ACCEPTED, tags=["projects"])
+async def bootstrap_greenfield_project(
+    operator: AuthenticatedOperatorDep,
+    uow: UowDep,
+    payload: dict[str, Any],
+) -> dict[str, Any]:
+    """Bootstrap a Greenfield project through its first human-reviewed PR.
+
+    The archive is supplied as base64 in ``context_zip_base64`` so the API keeps
+    its existing JSON-only dependency surface; the ZIP is still validated before
+    any project or repository mutation.
+    """
+
+    import base64
+
+    try:
+        configuration = ProjectConfigurationInput.model_validate(payload.get("configuration"))
+        if configuration.project_type.value != "GREENFIELD":
+            raise ValueError("project_type must be GREENFIELD")
+        encoded_archive = payload.get("context_zip_base64")
+        if not isinstance(encoded_archive, str):
+            raise ValueError("context_zip_base64 is required")
+        archive = base64.b64decode(encoded_archive, validate=True)
+        await ProjectCatalogService().validate_project_profiles(configuration.agent_profiles)
+        result = await run_in_threadpool(
+            _run_greenfield_bootstrap_in_session,
+            configuration,
+            archive,
+            operator.email if operator else "operator",
+        )
+        return result
+    except (ValueError, GreenfieldBootstrapError) as exc:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
+
+
+@app.patch("/api/v1/projects/{project_id}", tags=["projects"])
+async def update_project_configuration(
+    project_id: str,
+    patch: ProjectConfigurationPatch,
+    _operator: AuthenticatedOperatorDep,
+    uow: UowDep,
+) -> dict[str, Any]:
+    try:
+        service = ProjectService(uow)
+        if service.get_project(project_id) is None:
+            raise ValueError(f"Project '{project_id}' not found")
+        if patch.agent_profiles is not None:
+            workspace_root = service.verified_managed_workspace_root(project_id)
+            binding = uow.project_managed_repository_bindings.get_by_project_id(project_id)
+            if binding is not None and workspace_root is None:
+                raise ValueError(
+                    "Project agent profiles cannot be changed while its managed workspace identity is invalid"
+                )
+            await ProjectCatalogService().validate_project_profiles(
+                patch.agent_profiles, project_root=workspace_root
+            )
+        return service.public_project_payload(service.update_configuration(project_id, patch))
+    except ValueError as exc:
+        message = str(exc)
+        code = status.HTTP_404_NOT_FOUND if message.endswith("not found") else status.HTTP_400_BAD_REQUEST
+        raise HTTPException(status_code=code, detail=message) from exc
+
+
+@app.get("/api/v1/projects/{project_id}/onboarding", tags=["projects"])
+def get_project_onboarding_state(
+    project_id: str,
+    _operator: AuthenticatedOperatorDep,
+    uow: UowDep,
+) -> dict[str, Any]:
+    project = ProjectService(uow).get_project(project_id)
+    if project is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Project not found")
+    return ProjectService.public_onboarding_state(project)
+
+
+@app.post("/api/v1/projects/{project_id}/onboarding/observe-merge", tags=["projects"])
+def observe_project_bootstrap_merge(
+    project_id: str,
+    _operator: AuthenticatedOperatorDep,
+    uow: UowDep,
+) -> dict[str, Any]:
+    """Read the exact recorded bootstrap PR and persist PREPARED only after merge proof."""
+    try:
+        return ProjectService(uow).observe_bootstrap_merge(project_id)
+    except ValueError as exc:
+        message = str(exc)
+        code = status.HTTP_404_NOT_FOUND if message.endswith("not found") else status.HTTP_409_CONFLICT
+        raise HTTPException(status_code=code, detail=message) from exc
+
+
+@app.post("/api/v1/projects/{project_id}/context", status_code=status.HTTP_202_ACCEPTED, tags=["projects"])
+async def add_project_context(
+    project_id: str,
+    payload: dict[str, Any],
+    _operator: AuthenticatedOperatorDep,
+    uow: UowDep,
+) -> dict[str, Any]:
+    """Publish incremental context on a new PR; approved main remains authoritative."""
+    import base64
+
+    try:
+        encoded_archive = payload.get("context_zip_base64")
+        if not isinstance(encoded_archive, str):
+            raise ValueError("context_zip_base64 is required")
+        archive = base64.b64decode(encoded_archive, validate=True)
+        return await run_in_threadpool(_run_incremental_context_in_session, project_id, archive)
+    except (ValueError, GreenfieldBootstrapError) as exc:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
+
+
+@app.post("/api/v1/projects/{project_id}/context/observe-merge", tags=["projects"])
+def observe_project_context_merge(
+    project_id: str,
+    _operator: AuthenticatedOperatorDep,
+    uow: UowDep,
+) -> dict[str, Any]:
+    """Advance effective context only after exact incremental PR merge proof."""
+    try:
+        return ProjectService(uow).observe_context_merge(project_id)
+    except ValueError as exc:
+        message = str(exc)
+        code = status.HTTP_404_NOT_FOUND if message.endswith("not found") else status.HTTP_409_CONFLICT
+        raise HTTPException(status_code=code, detail=message) from exc
+
+
+@app.post("/api/v1/projects/{project_id}/pause", tags=["projects"])
+def pause_project(project_id: str, _operator: AuthenticatedOperatorDep, uow: UowDep) -> dict[str, Any]:
+    try:
+        service = ProjectService(uow)
+        return service.public_project_payload(service.set_lifecycle(project_id, active=False))
+    except ValueError as exc:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
+
+
+@app.post("/api/v1/projects/{project_id}/activate", tags=["projects"])
+def activate_project(project_id: str, _operator: AuthenticatedOperatorDep, uow: UowDep) -> dict[str, Any]:
+    try:
+        service = ProjectService(uow)
+        return service.public_project_payload(service.set_lifecycle(project_id, active=True))
+    except ValueError as exc:
+        message = str(exc)
+        code = status.HTTP_404_NOT_FOUND if message.endswith("not found") else status.HTTP_409_CONFLICT
+        raise HTTPException(status_code=code, detail=message) from exc
+
+
+@app.post("/api/v1/projects/{project_id}/connections/verify", tags=["projects"])
+def verify_project_connections(
+    project_id: str,
+    _operator: AuthenticatedOperatorDep,
+    uow: UowDep,
+) -> dict[str, Any]:
+    """Read-only verification of repository identity and project-scoped App grants."""
+    project = uow.projects.get_by_id(project_id)
+    if project is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Project not found")
+    return {
+        "project_id": project_id,
+        "connections": ProjectConnectionService().verify(project),
+    }
 
 
 class JobRunRequest(BaseModel):
@@ -539,47 +741,27 @@ def get_openrouter_status(uow: UowDep, project_id: str | None = None) -> dict[st
 
 @app.get("/projects")
 def list_projects(
+    _operator: AuthenticatedOperatorDep,
     uow: UowDep,
-) -> list[Project]:
+) -> list[dict[str, Any]]:
     service = ProjectService(uow)
-    return service.list_projects()
+    return [service.public_project_payload(project) for project in service.list_projects()]
 
 
 @app.post("/projects", status_code=status.HTTP_201_CREATED)
-def register_project(
-    req: ProjectCreateRequest,
-    uow: UowDep,
-) -> Project:
-    try:
-        service = ProjectService(uow)
-        return service.register_project(
-            project_id=req.project_id,
-            display_name=req.display_name,
-            repository=req.repository,
-            base_branch=req.base_branch,
-            openspec_path=req.openspec_path,
-            implementer=req.implementer,
-            reviewer=req.reviewer,
-            checks=req.checks,
-            external_providers_allowed=req.external_providers_allowed,
-            openrouter_drain_allowed=req.openrouter_drain_allowed,
-            independent_audit_required=req.independent_audit_required,
-            deployment_preview=req.deployment_preview,
-            deployment_production=req.deployment_production,
-            auto_prepare=req.auto_prepare,
-            auto_admit=req.auto_admit,
-            max_concurrent_jobs=req.max_concurrent_jobs,
-        )
-    except ValueError as e:
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e))
+def register_project() -> None:
+    raise HTTPException(
+        status_code=status.HTTP_410_GONE,
+        detail=unavailable_payload("legacy_project_registration", "F2"),
+    )
 
 
 @app.get("/projects/{project_id}")
-@app.get("/api/v1/projects/{project_id}", tags=["projects"])
 def get_project(
     project_id: str,
+    _operator: AuthenticatedOperatorDep,
     uow: UowDep,
-) -> Project:
+) -> dict[str, Any]:
     service = ProjectService(uow)
     project = service.get_project(project_id)
     if not project:
@@ -587,38 +769,31 @@ def get_project(
             status_code=status.HTTP_404_NOT_FOUND,
             detail=f"Project '{project_id}' not found",
         )
-    return project
+    return ProjectService.public_project_payload(project)
+
+
+@app.get("/api/v1/projects/{project_id}", tags=["projects"])
+def get_project_configuration(
+    project_id: str,
+    _operator: AuthenticatedOperatorDep,
+    uow: UowDep,
+) -> dict[str, Any]:
+    project = ProjectService(uow).get_project(project_id)
+    if project is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Project not found")
+    return ProjectService.public_project_payload(project)
 
 
 @app.patch("/projects/{project_id}")
-@app.patch("/api/v1/projects/{project_id}", tags=["projects"])
 def update_project_endpoint(
     project_id: str,
-    req: ProjectUpdateRequest,
     uow: UowDep,
-) -> Project:
-    service = ProjectService(uow)
-    try:
-        return service.update_project(
-            project_id=project_id,
-            display_name=req.display_name,
-            base_branch=req.base_branch,
-            openspec_path=req.openspec_path,
-            implementer=req.implementer,
-            reviewer=req.reviewer,
-            checks=req.checks,
-            external_providers_allowed=req.external_providers_allowed,
-            openrouter_drain_allowed=req.openrouter_drain_allowed,
-            independent_audit_required=req.independent_audit_required,
-            deployment_preview=req.deployment_preview,
-            deployment_production=req.deployment_production,
-            auto_prepare=req.auto_prepare,
-            auto_admit=req.auto_admit,
-            max_concurrent_jobs=req.max_concurrent_jobs,
-            status=req.status,
-        )
-    except ValueError as e:
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e))
+) -> None:
+    del project_id, uow
+    raise HTTPException(
+        status_code=status.HTTP_410_GONE,
+        detail=unavailable_payload("legacy_project_update", "F2"),
+    )
 
 
 # -----------------------------------------------------------------------------
@@ -626,42 +801,38 @@ def update_project_endpoint(
 # -----------------------------------------------------------------------------
 
 
-@app.post("/api/v1/projects/onboard", status_code=status.HTTP_201_CREATED, tags=["projects"])
-def onboard_project_endpoint(
-    req: ProjectOnboardingInput,
-    request: Request,
-    onboarding_service: OnboardingServiceDep,
-) -> ProjectOnboardingResult:
-    """Onboard an external project with repository validation and context discovery."""
-    operator_email = getattr(request.state, "operator_email", "operator")
-    try:
-        return onboarding_service.onboard_project(req, operator_email=operator_email)
-    except ValueError as e:
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e))
+@app.post("/api/v1/projects/onboard", tags=["projects"])
+def onboard_project_endpoint() -> None:
+    raise HTTPException(
+        status_code=status.HTTP_410_GONE,
+        detail=unavailable_payload("legacy_project_onboarding", "F2"),
+    )
 
 
 @app.get("/api/v1/projects/{project_id}/context", tags=["projects"])
 def get_project_context_endpoint(
     project_id: str,
+    _operator: AuthenticatedOperatorDep,
+    uow: UowDep,
     context_service: ContextServiceDep,
 ) -> ContextDiscoveryReport:
     """Get categorized context report (discovered facts, inferred structure, missing context)."""
+    if uow.projects.get_by_id(project_id) is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Project not found")
     try:
         return context_service.discover_context_pure(project_id)
     except ValueError as e:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(e))
+        code = status.HTTP_404_NOT_FOUND if str(e).endswith("not found.") else status.HTTP_409_CONFLICT
+        raise HTTPException(status_code=code, detail=str(e)) from e
 
 
 @app.post("/api/v1/projects/{project_id}/context/discover", tags=["projects"])
-def discover_project_context_endpoint(
-    project_id: str,
-    context_service: ContextServiceDep,
-) -> ContextDiscoveryReport:
-    """Trigger fresh context and backlog discovery."""
-    try:
-        return context_service.discover_context(project_id)
-    except ValueError as e:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(e))
+def discover_project_context_endpoint(project_id: str) -> None:
+    del project_id
+    raise HTTPException(
+        status_code=status.HTTP_410_GONE,
+        detail=unavailable_payload("legacy_context_discovery", "F2"),
+    )
 
 
 @app.get("/api/v1/projects/{project_id}/backlog", tags=["backlog"])
@@ -780,22 +951,12 @@ def list_project_changes(
 
 
 @app.post("/projects/{project_id}/discover")
-def discover_project_changes(
-    project_id: str,
-    project_root: str,
-    uow: UowDep,
-) -> list[Change]:
-    """Inspect native Change directories without creating local workflow state."""
-    service = ProjectService(uow)
-    project = service.get_project(project_id)
-    if not project:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail=f"Project '{project_id}' not found",
-        )
-
-    adapter = OpenSpecAdapter()
-    return adapter.discover_changes(project, project_root)
+def discover_project_changes(project_id: str) -> None:
+    del project_id
+    raise HTTPException(
+        status_code=status.HTTP_410_GONE,
+        detail=unavailable_payload("legacy_context_discovery", "F2"),
+    )
 
 
 @app.get("/projects/{project_id}/changes/{change_name}/readiness")
