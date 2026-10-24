@@ -282,12 +282,22 @@ def catalog_instruction() -> str:
     )
 
 
+def has_substantive_content(text: str) -> bool:
+    """Ignore heading-only placeholders without attempting semantic validation."""
+    return any(
+        line.strip()
+        and not line.lstrip().startswith("#")
+        and line.strip() not in {"---", "***", "___"}
+        for line in text.splitlines()
+    )
+
+
 def populated_catalog_documents(worktree: Path) -> tuple[str, ...]:
     """Only substantive canonical Markdown documents belong in the main index."""
     docs: list[str] = []
     for relative in sorted(CONTEXT_DOCUMENT_PATHS):
         path = worktree / relative
-        if path.is_file() and path.read_text(encoding="utf-8").strip():
+        if path.is_file() and has_substantive_content(path.read_text(encoding="utf-8")):
             docs.append(relative)
     return tuple(docs)
 
