@@ -617,9 +617,15 @@ class NativeOrchestrationCoordinator:
                     current_stage=OrchestrationStage.IMPLEMENTING,
                     message="Native Apply failed or produced no authoritative evidence. Worktree preserved.",
                 )
-
             self._update_stage(uow, active_run, OrchestrationStage.RUNNING_TESTS)
+
+        if active_run.current_stage == OrchestrationStage.RUNNING_TESTS:
             tests_ok, test_evidence = await self._run_automated_tests(worktree_path)
+            active_run.stop_details["test_evidence"] = test_evidence
+            if hasattr(uow, "orchestration_runs"):
+                uow.orchestration_runs.save(active_run)
+                if hasattr(uow, "commit"):
+                    uow.commit()
             if not tests_ok:
                 return OrchestrationCoordinationResult(
                     status="PAUSED",
@@ -627,10 +633,11 @@ class NativeOrchestrationCoordinator:
                     current_stage=OrchestrationStage.RUNNING_TESTS,
                     message="Automated tests failed during Apply. Worktree preserved.",
                 )
-            active_run.stop_details["test_evidence"] = test_evidence
 
-            # Step 8: Verify Stage (Executed by implementer)
             self._update_stage(uow, active_run, OrchestrationStage.VERIFYING)
+
+        if active_run.current_stage == OrchestrationStage.VERIFYING:
+            # Step 8: Verify Stage (Executed by implementer)
             verify_ok = await self._run_verify(worktree_path, implementer_provider, change_name, project_id=project_id)
             if not verify_ok:
                 return OrchestrationCoordinationResult(
@@ -1510,10 +1517,11 @@ class NativeOrchestrationCoordinator:
 
     async def _run_automated_tests(self, worktree_path: Path) -> tuple[bool, str]:
         """Execute project automated tests and verify exit code 0."""
-        import shutil
         import sys
-        pytest_bin = shutil.which("pytest") or str(Path(sys.executable).parent / "pytest")
-        cmd = [pytest_bin, "-q"] if Path(pytest_bin).exists() else [sys.executable, "-m", "pytest", "-q"]
+        # Use the runtime interpreter that launched mini me.  A PATH-resolved
+        # pytest may belong to another environment and can produce a false
+        # failure even when the candidate's declared dependencies pass.
+        cmd = [sys.executable, "-m", "pytest", "-q"]
         try:
             proc = await asyncio.create_subprocess_exec(
                 *cmd,

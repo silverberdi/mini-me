@@ -4090,6 +4090,86 @@ class WorktreeManager:
         slug = cls.slugify_request_title(issue_title)
         return f"doc-close-{issue_number}-{slug}"
 
+    async def _reconcile_existing_request_worktree(
+        self,
+        *,
+        project_id: str,
+        run_id: str | None,
+        change_name: str,
+        path: Path,
+        branch: str,
+        source_base_sha: str,
+    ) -> None:
+        """Reconcile an existing request worktree before reusing it.
+
+        A path alone is never authority. Legacy runs without an ownership row
+        may be repaired only after exact Git identity, branch, base, and
+        binding checks; any mismatch remains fail-closed.
+        """
+        if not run_id:
+            raise RuntimeError("Existing request worktree requires the original Run identity.")
+        canonical_path = path.resolve()
+        if path.is_symlink() or not path.is_dir():
+            raise RuntimeError("Existing request worktree is absent or symlinked.")
+        ownership_repo = getattr(self.uow, "orchestration_worktree_ownerships", None)
+        binding_repo = getattr(self.uow, "project_managed_repository_bindings", None)
+        binding = binding_repo.get_by_project_id(project_id) if binding_repo else None
+        if ownership_repo is None or binding is None:
+            raise RuntimeError("Existing request worktree lacks durable binding repositories.")
+        listing = await self._git(["worktree", "list", "--porcelain"], cwd=self.project_root)
+        listed_paths = {
+            str(Path(line[9:].strip()).resolve())
+            for line in listing.splitlines()
+            if line.startswith("worktree ")
+        }
+        if str(canonical_path) not in listed_paths:
+            raise RuntimeError("Existing request path is not a registered Git worktree.")
+        actual_branch = (await self._git(["branch", "--show-current"], cwd=canonical_path)).strip()
+        if actual_branch != branch:
+            raise RuntimeError(f"Existing request branch '{actual_branch}' does not match '{branch}'.")
+        head_sha = (await self._git(["rev-parse", "HEAD"], cwd=canonical_path)).strip()
+        if head_sha != source_base_sha:
+            raise RuntimeError("Existing request worktree HEAD does not match its source base.")
+        from minime.services.workspace_guard import ManagedWorkspaceGuard
+
+        guard = self.workspace_guard or ManagedWorkspaceGuard(self.uow)
+        valid_git, git_reason = guard.verify_git_repository_identity(
+            str(canonical_path), binding.canonical_repository_identity, binding.remote_name
+        )
+        if not valid_git:
+            raise RuntimeError(f"Existing request Git identity is not verified: {git_reason}")
+        ownership = ownership_repo.get_by_canonical_path(str(canonical_path))
+        if ownership is not None:
+            await self._verify_worktree_adoption_proof(
+                path=canonical_path,
+                job_id=run_id,
+                eff_project_id=project_id,
+                eff_run_id=run_id,
+                eff_change_name=change_name,
+                expected_branch=branch,
+                expected_base_sha=source_base_sha,
+                require_clean=False,
+                worktree_kind="request worktree",
+            )
+            return
+        ownership = OrchestrationWorktreeOwnership(
+            project_id=project_id,
+            job_id=run_id,
+            run_id=run_id,
+            change_name=change_name,
+            canonical_worktree_path=str(canonical_path),
+            source_repository_identity=binding.canonical_repository_identity,
+            source_base_sha=source_base_sha,
+            branch=branch,
+            creation_state=WorktreeCreationState.CREATED,
+        )
+        ownership_repo.save(ownership)
+        self._flush_uow()
+        self._write_ownership_marker(canonical_path, ownership)
+        await self._verify_creation_postconditions(
+            canonical_path, ownership, expected_branch=branch, expected_base_sha=source_base_sha
+        )
+
     async def create_request_worktree(
         self,
         project_id: str,
@@ -4122,6 +4202,14 @@ class WorktreeManager:
             base_sha_str = (await self._git(["rev-parse", base_branch], project_id=project_id)).strip()
 
         if worktree_path.exists() and reuse_existing:
+            await self._reconcile_existing_request_worktree(
+                project_id=project_id,
+                run_id=run_id,
+                change_name=f"req-{issue_number}-{self.slugify_request_title(issue_title)}",
+                path=worktree_path,
+                branch=branch_name,
+                source_base_sha=base_sha_str,
+            )
             return WorktreeInfo(
                 path=worktree_path,
                 branch_name=branch_name,
