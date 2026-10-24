@@ -30,8 +30,9 @@ El resultado observado fue:
 - La GitHub App del servicio confirmó lectura de ambas identidades y sus ramas
   `main` (`2f7ae04530a4b3d993611c29b20c850bedc87a8c` para `mini-me` y
   `6c051b87eb9a8f379e9305b62773bf486a7825f5` para el fixture). En la respuesta
-  de instalación, ambos repositorios reportan `push=false`; no existe permiso
-  efectivo para publicar ramas/PR desde mini me. No se intentó mutar ninguno.
+  de instalación, ambos repositorios reportan `push=false`; esos campos del
+  objeto repositorio NO prueban qué grants `contents`/`pull_requests` posee
+  el token GitHub App. La escritura sigue SIN PROBAR. No se intentó mutar ninguno.
 
 ## Continuidad en PostgreSQL desechable
 
@@ -77,17 +78,17 @@ se reutilizó la concesión incremental.
 La evidencia local determinista publicada en `8ed15fe` y la regresión
 `745 passed, 13 skipped` siguen vigentes. Las tareas 4.4, 7.1b, 8.4 y 8.5 no
 se marcan completas: falta un candidato/PR Greenfield real y los dos históricos
-carecen de configuración F2 verificable; además, la GitHub App del servicio no
-tiene `push` efectivo en los repos históricos.
+carecen de configuración F2 verificable. El gate de publicación GitHub sigue
+SIN PROBAR: la evidencia no muestra los grants del token de instalación.
 
 Intervenciones concretas pendientes:
 
 1. Una nueva autorización explícita de consumo para un bootstrap Greenfield no
    puede inferirse de la concesión incremental consumida/reservada.
 2. Para 7.1b, una intervención administrativa debe configurar y verificar, sin
-   defaults inventados, los perfiles/conexiones F2 de cada histórico y conceder
-   a la GitHub App del servicio `contents=write` y `pull_requests=write` donde
-   F3/F5 lo requieran. El fixture debe conservar su aislamiento.
+   defaults inventados, los perfiles/conexiones F2 de cada histórico. Verificar los
+   grants `contents`/`pull_requests` del token de instalación exacto antes
+   de solicitar cambios de permisos. El fixture debe conservar su aislamiento.
 
 ## Preflight de la instalación GitHub App y runtime (2026-10-24)
 
@@ -110,9 +111,10 @@ JWT, claves ni contenido de `auth.json`.
   ejecutarse en el runtime desplegado: el `GitHubAdapter` remoto no expone
   `verify_connection_permissions`; por tanto, el despliegue remoto está
   atrasado respecto al código F2 publicado y no se presenta como PASS. La
-  inspección directa del token de instalación sí permite distinguir el caso:
-  el E2E es accesible, pero sus grants efectivos no satisfacen
-  `contents=write`/`pull_requests=write`.
+  preflight NO registró los grants `contents`/`pull_requests` del objeto
+  `permissions` devuelto por `POST /app/installations/{id}/access_tokens`.
+  No hay evidencia de falta de escritura: los flags `push`/`pull` del objeto
+  repositorio no sustituyen los permisos efectivos del token.
 - Bajo la identidad `silverman`, `CODEX_HOME` está ausente y Codex usa la
   fuente por defecto `/home/silverman/.codex/auth.json` (modo `600`, propietario
   `silverman`); `codex login status` respondió `Logged in using ChatGPT`.
@@ -129,17 +131,22 @@ JWT, claves ni contenido de `auth.json`.
   inventada. Las versiones observadas de las herramientas no constituyen
   evidencia de perfiles F2 históricos.
 
-Resultado: `BLOCKED` para 2.5/7.1b/8.4. El proyecto E2E permanece sin
+Resultado: `BLOCKED` para aceptación 7.1b/8.4 por runtime obsoleto,
+configuración histórica ausente y E2E real no ejecutado. Gate GitHub 2.5:
+`PERMISSIONS_UNVERIFIED`, no `WRITE_DENIED`. El proyecto E2E permanece sin
 branches adicionales ni PR y el intento consumido permanece `BLOCKED`; no se
 repitió inferencia ni se consumió la concesión incremental.
 
-Acción administrativa exacta: actualizar la instalación de la GitHub App del
-servicio para otorgar `contents=write` y `pull_requests=write` al repositorio
-E2E y a cada repositorio histórico donde F3/F5 deba publicar, y desplegar el
-commit que contiene el gate F2 antes de volver a verificar. Además, deben
-configurarse explícitamente los cuatro perfiles/conexiones de cada proyecto
-histórico, sin defaults. Ninguna autorización de gasto se reutiliza ni se
-solicita implícitamente en esta evidencia.
+Corrección de interpretación: el propietario confirmó que la GitHub App ya
+estaba configurada con `Contents: Read and write` y `Pull requests: Read and
+write`. NO solicitar reinstalación ni nuevos cambios de permisos sobre la
+base de `permissions.push=false`. Verificar desde el runtime F2 aislado
+con identidad exacta los grants del token de instalación (sin revelar secretos).
+Si son correctos, probar la publicación solo con una operación segura y
+autorizada en el repositorio E2E, nunca con una inferencia pagada. El runtime
+productivo continúa fuera de alcance hasta rollout autorizado y faltan los
+perfiles/conexiones históricos explícitos. Ninguna autorización de gasto se
+reutiliza ni se solicita implícitamente.
 
 ## Runtime F2 aislado y límite administrativo (2026-10-24)
 
