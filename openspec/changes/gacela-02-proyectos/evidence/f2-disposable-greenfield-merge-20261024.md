@@ -55,3 +55,20 @@ no se autorizó un merge general automático en el producto mini me.
 
 No se modificó el repositorio operativo ni su base de datos y no se activó
 el scheduler.
+
+## Observación del merge por el servicio F2
+
+El 2026-10-24, en el runtime F2 aislado y contra PostgreSQL desechable, se
+ejecutó `ProjectService.observe_bootstrap_merge` para
+`f2-e2e-gacela-20261023e`. La identidad persistida coincidió con el repositorio,
+PR, rama, base SHA y head SHA del PR #2; la consulta GitHub confirmó `merged`
+con merge SHA `89297274076dd1dd4aa377da9950a69da6c8a40a`. El coordinador
+persistió el estado `PREPARED` y `merge_commit_sha` sin invocar ningún agente ni
+modificar `main` directamente.
+
+El checkpoint no contiene todavía un `pending_context`, hash de ZIP
+incremental ni una concesión incremental identificable. En los artefactos
+locales y en el workspace aislado solo está disponible el ZIP Greenfield
+`3eed0a…eef12e81`; no se fabricó ni se reutilizó como ZIP incremental. Por
+tanto, el segundo dispatch y el PR incremental no se ejecutaron: hacerlo ahora
+no tendría paquete y autorización independientes verificables.
