@@ -6,24 +6,33 @@ Provide one small, traceable contract for turning a remote Request into usable G
 
 ### Requirement: Request normalization preserves source authority
 
-The system SHALL normalize an eligible GitHub Request into valid Gherkin on the same Issue while preserving the complete original body, comments, attachments, acceptance criteria, and stable criterion identifiers.
+The system SHALL normalize an eligible GitHub Request into complete valid Gherkin on the same Issue while preserving the complete original body in a comment on that Issue, together with comments, attachments, all identified acceptance criteria, and stable criterion identifiers.
 
 #### Scenario: Informal Request becomes a vertical slice
 
 - **WHEN** an eligible Issue contains informal requirements and its sources are available
-- **THEN** the normalized body SHALL describe one vertical slice with observable Given, When, and Then scenarios
-- **AND** the original text SHALL remain traceable in a comment or preserved source reference
+- **THEN** the normalized body SHALL fully express one vertical slice with observable Given, When, and Then scenarios
+- **AND** the complete original body SHALL be preserved verbatim in a comment on the same Issue
+- **AND** every identified acceptance criterion SHALL remain represented and traceable
 
 #### Scenario: Existing Gherkin is preserved
 
 - **WHEN** the Issue body is already complete and precise Gherkin
 - **THEN** the system SHALL preserve its meaning without duplicating criteria or comments
+- **AND** it SHALL still preserve the complete source body according to the Request provenance contract
 
 #### Scenario: Material ambiguity remains explicit
 
 - **WHEN** authoritative sources do not resolve a material business decision
-- **THEN** the system SHALL preserve the uncertainty and emit the existing concrete HUMAN REQUIRED path
+- **THEN** the system SHALL preserve the uncertainty and use the existing concrete HUMAN REQUIRED path only for the unresolved material decision
 - **AND** it SHALL NOT invent requirements, endpoints, tables, frameworks, or approvals
+- **AND** technical failures, missing capabilities, authentication, quota, or security issues SHALL follow their technical preflight and recovery paths rather than HUMAN REQUIRED
+
+#### Scenario: Controlled test Issue protects the F4 Request
+
+- **WHEN** S01 is verified during F4
+- **THEN** it SHALL use a controlled disposable test Issue and SHALL NOT rewrite the already normalized Issue #172
+- **AND** any legitimate F3 closure communication for Issue #172 SHALL remain governed by F3
 
 #### Scenario: Concurrent normalization is safe
 
@@ -33,19 +42,20 @@ The system SHALL normalize an eligible GitHub Request into valid Gherkin on the 
 
 ### Requirement: Delivery communication is concise Spanish
 
-The system SHALL prepare only value-adding comments in simple Spanish for material blockers, questions, milestones, results, and final closure, using GitHub as the remote authority and avoiding secrets, long logs, and repeated messages.
+The agent skill SHALL produce the semantic content of value-adding comments in simple Spanish for material blockers, questions, milestones, results, and final closure. The existing GitHub adapter SHALL only query and publish that content deterministically, safely, and idempotently, avoiding secrets, long logs, and repeated messages.
 
 #### Scenario: Material event gets a useful comment
 
 - **WHEN** a blocker, question, relevant result, or milestone needs remote communication
 - **THEN** the comment SHALL state what happened, the result, and the required action in concrete Spanish
-- **AND** the GitHub adapter SHALL publish it idempotently
+- **AND** the GitHub adapter SHALL publish it idempotently without generating semantic text by template
 
 #### Scenario: Closure follows F3 evidence
 
 - **WHEN** F3 confirms both PR merges and native Sync and Archive have completed
 - **THEN** the system SHALL publish one concise Spanish closure comment with verifiable links
 - **AND** a retry SHALL not duplicate the comment or close the Issue twice
+- **AND** technical failures SHALL not be escalated as human decisions
 
 ### Requirement: PR preparation remains under F3 authority
 

@@ -35,8 +35,15 @@ El cambio debe hacer utilizables las capacidades mínimas de F4 sin convertirlas
 
 - Adaptar el flujo de preparación Greenfield para resolver un manifest de capacidades por perfil desde el catálogo observado, instalar solo recursos compatibles y verificar disponibilidad ligera en reanudaciones.
 - Adaptar la preparación de contexto del agente para incluir Request, comentarios, adjuntos, decisiones y referencias canónicas sin copias divergentes.
-- Adaptar las plantillas/serializadores de comunicación y PR del adaptador existente para español sencillo, enlaces verificables, ausencia de secretos y deduplicación remota.
+- Adaptar el contenido semántico de las skills de comunicación/PR, mientras el adaptador GitHub solo consulta y publica de forma determinista, con español sencillo, enlaces verificables, ausencia de secretos y deduplicación remota.
 - Mantener los PR de implementación y documental dentro de la integración mínima de F3; F4 no decide complejidad, revisión, merge o cierre.
+
+### ADAPT: skills existentes en ambas instalaciones
+
+- Adaptar `.agents/skills/minime-engineering-discipline/SKILL.md` y `.agent/skills/minime-engineering-discipline/SKILL.md` para que orienten arquitectura definida por el contexto, código comprensible y pruebas proporcionales, sin exigir intervención en artefactos OpenSpec, postdeploy obligatorio o reglas heredadas que no correspondan.
+- Adaptar `.agents/skills/minime-real-e2e-proof/SKILL.md` y `.agent/skills/minime-real-e2e-proof/SKILL.md` para distinguir evidencia técnica, E2E real y verificación desplegada; F4 exige E2E real cuando corresponda, pero no despliegue ni postdeploy. Sin capacidad o autorización, el resultado es `NOT_VERIFIED`/`WAITING_CAPACITY`, nunca PASS ni HUMAN REQUIRED por un fallo técnico.
+- Adaptar `.agents/skills/minime-safe-retirement/SKILL.md` y `.agent/skills/minime-safe-retirement/SKILL.md` para retirar solo consumidores demostrados como obsoletos, usar una nota de evidencia proporcional cuando aplique y no exigir un Removal Ledger universal, postdeploy o referencias R01–R10.
+- Mantener ambas copias coherentes y con la misma procedencia; no crear un tercer espejo ni convertir estas skills en gates ejecutables.
 
 ### CREATE: solo lo que el contrato de F4 exige
 
@@ -44,17 +51,21 @@ El cambio debe hacer utilizables las capacidades mínimas de F4 sin convertirlas
 - Enlaces o entradas de skills de asistencia para contexto, disciplina de ingeniería, E2E y retiro seguro cuando no exista una capacidad equivalente reutilizable.
 - Casos de prueba y evidencia determinista/real que cubran instalación Greenfield, no sobrescritura, disponibilidad, Request Gherkin, comunicación, PR y retiro.
 
-No se crean comandos OpenSpec, generadores Markdown, verificadores semánticos ni un sistema de instalación paralelo. Si el inventario demuestra que una capacidad ya existe, se conserva como REUSE y no se crea un duplicado.
+No se crean comandos OpenSpec, generadores Markdown, verificadores semánticos ni un sistema de instalación paralelo. El agente, mediante su skill, produce el contenido Gherkin, comentarios y PR; `GitHubAdapter` ejecuta únicamente lecturas/publicaciones deterministas con seguridad e idempotencia. No se genera texto semántico por plantillas dentro del adaptador ni se duplica `minime-pr-preparer`. Si el inventario demuestra que una capacidad ya existe, se conserva como REUSE y no se crea un duplicado.
 
 ### Seguridad, continuidad y autoridad
 
 La instalación se ejecuta en el workspace Greenfield ya vinculado y solo después de verificar repositorio, identidad, branch base, proveedor, permisos, capacidad y confinamiento. Cada recurso se valida por nombre/procedencia/hash o contrato observable antes de usarse; un conflicto queda preservado para la recuperación existente. Brownfield no se modifica.
 
-Los comentarios y PR se publican únicamente mediante GitHub y con candidato/Issue exactos. Las decisiones humanas, el gasto, los merges y el cierre remoto no se autoconceden. Los fallos conservan candidato, fuentes y checkpoint y no disparan reintentos pagados implícitos.
+Los comentarios y PR se publican únicamente mediante GitHub y con candidato/Issue exactos. Las decisiones humanas, el gasto, los merges y el cierre remoto no se autoconceden. Los fallos conservan candidato, fuentes y checkpoint y no disparan reintentos pagados implícitos. El agente investiga y resuelve primero; `HUMAN REQUIRED` queda reservado a una decisión material no resoluble o a una autorización humana, mientras fallos de capacidad, seguridad, autenticación, cuota o herramienta siguen las rutas técnicas de preflight y recuperación.
 
 ### Pruebas y retiro
 
-El recorrido de aceptación usa un fixture Greenfield desechable, agentes reales solo cuando Apply/E2E esté autorizado, y pruebas locales deterministas para errores, idempotencia y seguridad. Mocks pueden probar contratos aislados, pero no se presentan como E2E. Un censo de callers, configuración y dependencias precede cualquier retiro; datos históricos y compatibilidad legítima se conservan.
+El recorrido de aceptación usa un Issue de prueba controlado y un fixture Greenfield desechable, agentes reales solo cuando Apply/E2E esté autorizado, y pruebas locales deterministas para errores, idempotencia y seguridad. Mocks pueden probar contratos aislados, pero no se presentan como E2E. Un censo de callers, configuración y dependencias precede cualquier retiro; datos históricos y compatibilidad legítima se conservan.
+
+### Cobertura de aceptación del Issue #172
+
+El Apply debe registrar una matriz de evidencia, no repetir escenarios en las specs. Los 35 criterios quedan cubiertos así: S01 (`S01_AC01`–`S01_AC05`) por `request-normalization-and-communication` y tareas 2.1–2.6; S02 (`S02_AC01`–`S02_AC02`) por la misma spec y tareas 2.3–2.4; S03 (`S03_AC01`–`S03_AC02`) por la misma spec y tarea 2.5; S05 (`S05_AC01`–`S05_AC03`) por `delivery-quality-and-safe-retirement` y tareas 4.2–4.3; S06 (`S06_AC01`–`S06_AC03`) por esa spec y tareas 5.1–5.4; S07 (`S07_AC01`–`S07_AC02`) por esa spec y tareas 5.5–5.7; GF (`GF_AC01`–`GF_AC05`) por `greenfield-agent-capability-bootstrap` y tareas 3.1–3.6; HA (`HA01_AC01`–`HA04_AC01`) por tareas 4.1–4.5; H (`H01_AC01`–`H03_AC01`) por tareas 3.5, 4.3 y 4.5; F3 (`F3_AC01`–`F3_AC04`) por tareas 2.4–2.5, 3.5 y 4.3–4.4; DONE (`DONE_AC01`–`DONE_AC02`) por tareas 5.4 y 6.1–6.6. La ausencia de autorización o capacidad real se registra como no verificada, nunca como PASS.
 
 ## Risks / Trade-offs
 
@@ -74,4 +85,4 @@ El recorrido de aceptación usa un fixture Greenfield desechable, agentes reales
 
 ## Open Questions
 
-No hay decisiones materiales pendientes para Propose. La disponibilidad concreta de una skill o workflow se resolverá durante Apply mediante el catálogo real; si una capacidad imprescindible no existe, se conservará el bloqueo técnico y se usará únicamente la ruta autorizada de HUMAN REQUIRED.
+No hay decisiones materiales pendientes para Propose. La disponibilidad concreta de una skill o workflow se resolverá durante Apply mediante el catálogo real; una ausencia, fallo de capacidad, seguridad o cuota se conserva como bloqueo técnico y sigue la recuperación existente. Solo una decisión material no resoluble o una autorización humana reservada usa `HUMAN REQUIRED`.
