@@ -49,13 +49,39 @@ async def test_complexity_requires_thinking_agent_and_evidence(tmp_path: Path):
     result = await coordinator(tmp_path, runner)._assess_complexity(
         tmp_path, "codex", "Breaking migration wording", "ordinary request", "p1"
     )
-    assert result == "low"
+    assert result.status == "VALID"
+    assert result.complexity == "low"
     assert len(runner.calls) == 1
 
     runner.output = "low"
-    assert await coordinator(tmp_path, runner)._assess_complexity(
+    invalid = await coordinator(tmp_path, runner)._assess_complexity(
         tmp_path, "codex", "title", "body", "p1"
-    ) is None
+    )
+    assert invalid.is_valid is False
+
+
+@pytest.mark.asyncio
+async def test_complexity_rejects_multiple_or_prose_objects(tmp_path: Path):
+    skill = tmp_path / ".agents" / "skills" / "openspec-propose"
+    skill.mkdir(parents=True)
+    (skill / "SKILL.md").write_text("native")
+    runner = ScriptedRunner('{"complexity":"low","evidence":"a"}\n{"complexity":"high","evidence":"b"}')
+    result = await coordinator(tmp_path, runner)._assess_complexity(
+        tmp_path, "codex", "title", "body", "p1"
+    )
+    assert result.status == "INVALID_OUTPUT"
+    assert result.is_valid is False
+
+
+@pytest.mark.asyncio
+async def test_explore_failure_blocks_propose(tmp_path: Path):
+    runner = ScriptedRunner("not valid")
+    c = coordinator(tmp_path, runner)
+    result = await c._run_explore(tmp_path, "codex", 5, "title", "body", project_id="p1")
+    assert result["status"] == "READY_TO_PROPOSE"
+    runner.exit_code = 2
+    result = await c._run_explore(tmp_path, "codex", 5, "title", "body", project_id="p1")
+    assert result["status"] == "FAILED"
 
 
 @pytest.mark.asyncio

@@ -5,7 +5,8 @@ import pytest
 from tests.conftest import InMemoryPersistenceUnitOfWork, setup_managed_repository_fixture
 
 from minime.domain.enums import OrchestrationStage
-from minime.services.agent_runner import CliAgentRunner
+from minime.domain.models import OrchestrationRun
+from minime.services.agent_runner import AgentExecutionResult, CliAgentRunner
 from minime.services.orchestration_coordinator import NativeOrchestrationCoordinator
 from minime.services.worktree_manager import WorktreeInfo, WorktreeManager
 
@@ -172,6 +173,69 @@ async def test_complexity_evaluation_uses_structured_agent_result(mock_env):
         stderr=[],
         duration_ms=1,
     ))
-    assert await coordinator._assess_complexity(
+    result = await coordinator._assess_complexity(
         _, "antigravity", "Small typo", "breaking migration words", "proj-1"
-    ) == "high"
+    )
+    assert result.status == "VALID"
+    assert result.complexity == "high"
+
+
+@pytest.mark.asyncio
+async def test_resume_validating_reuses_existing_proposal_without_propose(mock_env):
+    coordinator, uow, _, repo_dir = mock_env
+    change_name = "req-101-add-caching-layer"
+    change_dir = repo_dir / "openspec" / "changes" / change_name
+    (change_dir / "specs" / "feature").mkdir(parents=True)
+    for name in ("proposal.md", "design.md", "tasks.md"):
+        (change_dir / name).write_text("# existing")
+    (change_dir / "specs" / "feature" / "spec.md").write_text("# existing")
+    uow.orchestration_runs.save(
+        OrchestrationRun(
+            project_id="proj-1",
+            change_name=change_name,
+            base_sha="abc1234",
+            current_stage=OrchestrationStage.VALIDATING,
+            resumable_stage=OrchestrationStage.VALIDATING,
+        )
+    )
+    coordinator.openspec_adapter.validate_change_strict = MagicMock(
+        return_value={"status": "PASS", "returncode": 0}
+    )
+    coordinator._run_propose = AsyncMock(side_effect=AssertionError("propose must not repeat"))
+    coordinator.agent_runner.run = AsyncMock(return_value=AgentExecutionResult(
+        exit_code=0,
+        timed_out=False,
+        stdout=['{"complexity":"low","evidence":"one focused change"}'],
+        stderr=[],
+        duration_ms=1,
+    ))
+    coordinator._run_apply = AsyncMock(return_value=False)
+
+    result = await coordinator.execute_project_request(
+        "proj-1", thinker_provider="antigravity", implementer_provider="antigravity", reviewer_provider="antigravity"
+    )
+
+    assert result.status == "PAUSED"
+    coordinator._run_propose.assert_not_awaited()
+    assert uow.orchestration_runs.list_runs(project_id="proj-1")[0].run_id
+
+
+@pytest.mark.asyncio
+async def test_explore_failed_blocks_propose(mock_env):
+    coordinator, _, _, _ = mock_env
+    coordinator.agent_runner.run = AsyncMock(return_value=AgentExecutionResult(
+        exit_code=2,
+        timed_out=False,
+        stdout=[],
+        stderr=["explore failed"],
+        duration_ms=1,
+    ))
+    coordinator._run_propose = AsyncMock(side_effect=AssertionError("failed Explore must block Propose"))
+
+    result = await coordinator.execute_project_request(
+        "proj-1", thinker_provider="antigravity", implementer_provider="antigravity", reviewer_provider="antigravity"
+    )
+
+    assert result.status == "PAUSED"
+    assert result.current_stage == OrchestrationStage.EXPLORING
+    coordinator._run_propose.assert_not_awaited()

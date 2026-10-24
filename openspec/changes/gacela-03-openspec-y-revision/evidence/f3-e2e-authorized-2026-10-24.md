@@ -67,3 +67,36 @@ Tasks 5.8, 6.3, 6.4, and 6.5 remain incomplete. The E2E is `BLOCKED` at the
 first authorized scenario because the real thinker did not return the required
 positive structured complexity verdict. Issue #6 was not mutated, no PR1 was
 created, no human merge gate was reached, and Issue #7 was not started.
+
+## Recovery audit for run `7d227da6-19be-4f7d-8bd9-f398bafcdc2e`
+
+A read-only inspection of the disposable PostgreSQL database found:
+
+- one active run with the original run ID, `current_stage=VALIDATING`,
+  `resumable_stage=VALIDATING`, no active job, no candidate, and no second run;
+- no persisted job attempt, job log, evidence diagnostic, stage event, or external
+  action for the complexity call;
+- the previous `stop_details.complexity=moderate` was the run-construction
+  default, not a verified classification result, and is no longer treated as
+  evidence by the coordinator;
+- the preserved request worktree still contains `proposal.md`, `design.md`,
+  `tasks.md`, and the OpenSpec spec, and strict OpenSpec validation passes.
+
+The original process output, exit code, timeout, and transport metadata were not
+durably recorded. Therefore the original failure cannot be proven to be an agent
+failure, transport failure, incomplete response, or parser failure; it is
+specifically **irrecoverable as a classified cause** from the available evidence.
+No new model invocation was made to fill that gap.
+
+The coordinator correction now preserves the worktree and run identity, resumes
+`VALIDATING` without re-running Propose when the existing artifacts pass strict
+validation, blocks any failed Explore result, and persists a typed, redacted
+complexity assessment (`VALID`, `EXECUTION_FAILED`, `PREFLIGHT_FAILED`,
+`INVALID_OUTPUT`, or `MISSING_EVIDENCE`) before allowing progression.
+
+Deterministic regression after the correction: `15 passed`; affected Ruff:
+`PASS`; OpenSpec strict and `git diff --check`: `PASS`. No agent or model was
+invoked by these tests. The complete isolated regression reached `788 passed,
+12 skipped` with the same four pre-existing Python 3.14/cache/profile
+compatibility failures classified above, plus no F3-specific failure after the
+fail-closed expectation updates.

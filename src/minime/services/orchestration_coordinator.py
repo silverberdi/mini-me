@@ -15,7 +15,7 @@ from minime.adapters.openspec import OpenSpecAdapter
 from minime.domain.enums import ExternalOutcome, OrchestrationStage, OrchestrationStopOutcome
 from minime.domain.interfaces import PersistenceUnitOfWork
 from minime.domain.models import OrchestrationRun, utc_now
-from minime.logging import get_logger
+from minime.logging import get_logger, redact_secrets
 from minime.services.agent_runner import CliAgentRunner, NativeOpenSpecWorkflowUnavailable
 from minime.services.pr_preparer_service import PrPreparationInput, PrPreparerService
 from minime.services.remote_request_intake import RemoteRequestIntakeService
@@ -46,6 +46,24 @@ class GitCommandResult:
     @property
     def ok(self) -> bool:
         return self.returncode == 0
+
+
+@dataclass(frozen=True)
+class ComplexityAssessment:
+    """Typed, fail-closed result of the thinking-agent complexity stage."""
+
+    status: str
+    complexity: str | None = None
+    evidence: str | None = None
+    reason: str | None = None
+    exit_code: int | None = None
+    timed_out: bool = False
+    preflight_error: str | None = None
+    output: str = ""
+
+    @property
+    def is_valid(self) -> bool:
+        return self.status == "VALID" and self.complexity is not None and bool(self.evidence)
 
 
 class GitOperationError(RuntimeError):
@@ -151,7 +169,7 @@ class NativeOrchestrationCoordinator:
                 base_sha="main",
                 current_stage=OrchestrationStage.ADMITTED,
                 resumable_stage=OrchestrationStage.ADMITTED,
-                stop_details={"issue_number": issue_number, "issue_title": issue_title, "complexity": "moderate"},
+                stop_details={"issue_number": issue_number, "issue_title": issue_title},
             )
             if hasattr(uow, "orchestration_runs"):
                 uow.orchestration_runs.save(active_run)
@@ -189,32 +207,46 @@ class NativeOrchestrationCoordinator:
                     message="Explore stage requires operator clarification.",
                     human_payload=explore_result.get("human_payload"),
                 )
+            if explore_result.get("status") != "READY_TO_PROPOSE":
+                return OrchestrationCoordinationResult(
+                    status="PAUSED",
+                    run_id=active_run.run_id,
+                    current_stage=OrchestrationStage.EXPLORING,
+                    message=explore_result.get("message", "Explore failed; proposal cannot start."),
+                )
 
         # Step 5: Propose and Strict Validation Loop
         if active_run.current_stage in (OrchestrationStage.EXPLORING, OrchestrationStage.PROPOSING, OrchestrationStage.VALIDATING):
-            self._update_stage(uow, active_run, OrchestrationStage.PROPOSING)
-            propose_result = await self._run_propose(
-                worktree_path=worktree_path,
-                provider=thinker_provider,
-                change_name=change_name,
-                issue_number=issue_number,
-                issue_title=issue_title,
-                issue_body=issue_body,
-                project_id=project_id,
+            existing_proposal = (
+                active_run.current_stage == OrchestrationStage.VALIDATING
+                and self._proposal_artifacts_present(worktree_path, change_name)
             )
-            if propose_result.get("status") != "READY_TO_VALIDATE":
-                return OrchestrationCoordinationResult(
-                    status="PAUSED", run_id=active_run.run_id,
-                    current_stage=OrchestrationStage.PROPOSING,
-                    message=propose_result.get("message", "Native Propose did not produce a valid result."),
+            if not existing_proposal:
+                self._update_stage(uow, active_run, OrchestrationStage.PROPOSING)
+                propose_result = await self._run_propose(
+                    worktree_path=worktree_path,
+                    provider=thinker_provider,
+                    change_name=change_name,
+                    issue_number=issue_number,
+                    issue_title=issue_title,
+                    issue_body=issue_body,
+                    project_id=project_id,
                 )
+                if propose_result.get("status") != "READY_TO_VALIDATE":
+                    return OrchestrationCoordinationResult(
+                        status="PAUSED", run_id=active_run.run_id,
+                        current_stage=OrchestrationStage.PROPOSING,
+                        message=propose_result.get("message", "Native Propose did not produce a valid result."),
+                    )
 
-            self._update_stage(uow, active_run, OrchestrationStage.VALIDATING)
+                self._update_stage(uow, active_run, OrchestrationStage.VALIDATING)
             validate_pass = False
-            for attempt in range(self.max_correction_attempts):
+            for attempt in range(self.max_correction_attempts if not existing_proposal else 1):
                 val_res = self.openspec_adapter.validate_change_strict(change_name, worktree_path)
                 if val_res.get("status") == "PASS":
                     validate_pass = True
+                    break
+                if existing_proposal:
                     break
                 # Correction pass
                 logger.info(f"OpenSpec strict validation failed on attempt {attempt + 1}. Running correction pass...")
@@ -236,14 +268,29 @@ class NativeOrchestrationCoordinator:
             complexity_result = await self._assess_complexity(
                 worktree_path, thinker_provider, issue_title, issue_body, project_id
             )
-            if complexity_result is None:
+            active_run.stop_details["complexity_assessment"] = {
+                "status": complexity_result.status,
+                "complexity": complexity_result.complexity,
+                "evidence": complexity_result.evidence,
+                "reason": complexity_result.reason,
+                "exit_code": complexity_result.exit_code,
+                "timed_out": complexity_result.timed_out,
+                "preflight_error": complexity_result.preflight_error,
+                "output": complexity_result.output,
+            }
+            if not complexity_result.is_valid:
+                if hasattr(uow, "orchestration_runs"):
+                    uow.orchestration_runs.save(active_run)
+                    if hasattr(uow, "commit"):
+                        uow.commit()
                 return OrchestrationCoordinationResult(
                     status="PAUSED", run_id=active_run.run_id,
                     current_stage=OrchestrationStage.VALIDATING,
-                    message="Thinking agent did not return a positive structured complexity verdict.",
+                    message=f"Thinking agent complexity assessment failed: {complexity_result.reason or complexity_result.status}.",
                 )
-            complexity = complexity_result
+            complexity = complexity_result.complexity
             active_run.stop_details["complexity"] = complexity
+            active_run.stop_details["complexity_evidence"] = complexity_result.evidence
             if hasattr(uow, "orchestration_runs"):
                 uow.orchestration_runs.save(active_run)
                 if hasattr(uow, "commit"):
@@ -696,6 +743,16 @@ class NativeOrchestrationCoordinator:
         return bool(getattr(result, "full_output", "").strip())
 
     @staticmethod
+    def _proposal_artifacts_present(worktree_path: Path, change_name: str) -> bool:
+        """Confirm a complete existing proposal before resuming VALIDATING."""
+        change_dir = worktree_path / "openspec" / "changes" / change_name
+        required = (change_dir / "proposal.md", change_dir / "design.md", change_dir / "tasks.md")
+        specs_dir = change_dir / "specs"
+        return all(path.is_file() for path in required) and specs_dir.is_dir() and any(
+            path.is_file() and path.suffix == ".md" for path in specs_dir.rglob("*.md")
+        )
+
+    @staticmethod
     def _external_success(result: Any) -> bool:
         if result is None:
             return False
@@ -707,22 +764,19 @@ class NativeOrchestrationCoordinator:
 
     @staticmethod
     def _parse_json_object(raw: str) -> dict[str, Any] | None:
-        candidates = re.findall(r"```(?:json)?\s*([\s\S]*?)\s*```", raw, re.IGNORECASE)
-        if not candidates:
-            candidates = re.findall(r"\{[\s\S]*\}", raw)
-        parsed: list[dict[str, Any]] = []
-        for candidate in candidates:
-            try:
-                value = json.loads(candidate.strip())
-            except json.JSONDecodeError:
-                continue
-            if isinstance(value, dict):
-                parsed.append(value)
-        return parsed[0] if len(parsed) == 1 else None
+        """Parse exactly one JSON object; reject prose, multiple objects, and ambiguity."""
+        text = raw.strip()
+        fenced = re.fullmatch(r"```(?:json)?\s*([\s\S]*?)\s*```", text, re.IGNORECASE)
+        candidate = fenced.group(1).strip() if fenced else text
+        try:
+            value = json.loads(candidate)
+        except json.JSONDecodeError:
+            return None
+        return value if isinstance(value, dict) else None
 
     async def _assess_complexity(
         self, worktree_path: Path, provider: str, title: str, body: str, project_id: str | None
-    ) -> str | None:
+    ) -> ComplexityAssessment:
         wf = self.agent_runner.resolve_workflow(
             worktree_path=worktree_path, provider=provider, operation="propose", change_name="complexity-assessment"
         )
@@ -739,14 +793,46 @@ class NativeOrchestrationCoordinator:
             provider=provider,
             workflow=wf,
         )
+        output = redact_secrets(getattr(result, "full_output", ""))[:4000]
+        if getattr(result, "preflight_error", None):
+            return ComplexityAssessment(
+                status="PREFLIGHT_FAILED",
+                reason="agent preflight failed",
+                exit_code=getattr(result, "exit_code", None),
+                timed_out=bool(getattr(result, "timed_out", False)),
+                preflight_error=redact_secrets(result.preflight_error),
+                output=output,
+            )
         if not self._execution_is_successful(result):
-            return None
+            return ComplexityAssessment(
+                status="EXECUTION_FAILED",
+                reason="agent exit, timeout, environment, or evidence check failed",
+                exit_code=getattr(result, "exit_code", None),
+                timed_out=bool(getattr(result, "timed_out", False)),
+                output=output,
+            )
         payload = self._parse_json_object(result.full_output)
         if not payload or payload.get("complexity") not in {"low", "moderate", "high"}:
-            return None
+            return ComplexityAssessment(
+                status="INVALID_OUTPUT",
+                reason="exactly one structured complexity object was not returned",
+                exit_code=result.exit_code,
+                output=output,
+            )
         if not isinstance(payload.get("evidence"), str) or not payload["evidence"].strip():
-            return None
-        return payload["complexity"]
+            return ComplexityAssessment(
+                status="MISSING_EVIDENCE",
+                reason="structured complexity verdict has no concrete evidence",
+                exit_code=result.exit_code,
+                output=output,
+            )
+        return ComplexityAssessment(
+            status="VALID",
+            complexity=payload["complexity"],
+            evidence=redact_secrets(payload["evidence"].strip())[:1000],
+            exit_code=result.exit_code,
+            output=output,
+        )
 
     async def _run_explore(
         self,

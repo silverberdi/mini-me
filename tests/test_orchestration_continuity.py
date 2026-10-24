@@ -89,15 +89,15 @@ async def test_orchestration_continuity_worktree_preserved_on_failure(tmp_path: 
     )
 
     assert result.status == "PAUSED"
-    assert result.current_stage == OrchestrationStage.PROPOSING
-    assert "evidenced" in result.message
+    assert result.current_stage == OrchestrationStage.EXPLORING
+    assert "Explore" in result.message
     # Critical requirement: Worktree MUST be preserved, not deleted!
     assert candidate_worktree.exists()
 
     # Active run record MUST remain active in PostgreSQL (not abandoned or unlocked)
     active_runs = uow.orchestration_runs.list_runs(project_id="proj-1", is_active=True)
     assert len(active_runs) == 1
-    assert active_runs[0].current_stage == OrchestrationStage.PROPOSING
+    assert active_runs[0].current_stage == OrchestrationStage.EXPLORING
 
 
 def test_request_rest_api_endpoints(in_memory_uow, tmp_path: Path):

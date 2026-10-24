@@ -127,7 +127,8 @@ async def test_two_phase_pr_high_complexity_differentiated_merge(tmp_path: Path)
     coordinator._get_git_head_sha = AsyncMock(return_value="commit_head_301")
     coordinator._git_run = AsyncMock(return_value="")
 
-    # First execution without operator_ack: should pause with HUMAN_REQUIRED
+    # Explore must fail closed before any proposal or merge gate when no evidenced
+    # agent result is available.
     res1 = await coordinator.execute_project_request(
         "proj-1",
         operator_ack=False,
@@ -136,9 +137,9 @@ async def test_two_phase_pr_high_complexity_differentiated_merge(tmp_path: Path)
         reviewer_provider="codex",
     )
     assert res1.status == "PAUSED"
-    assert res1.current_stage == OrchestrationStage.PROPOSING
+    assert res1.current_stage == OrchestrationStage.EXPLORING
 
-    # Second execution with operator_ack: should proceed, merge PR1, do doc-close, merge PR2, and close issue
+    # Acknowledgement cannot bypass the failed Explore stage.
     res2 = await coordinator.execute_project_request(
         "proj-1",
         operator_ack=True,
@@ -147,4 +148,4 @@ async def test_two_phase_pr_high_complexity_differentiated_merge(tmp_path: Path)
         reviewer_provider="codex",
     )
     assert res2.status == "PAUSED"
-    assert res2.current_stage == OrchestrationStage.PROPOSING
+    assert res2.current_stage == OrchestrationStage.EXPLORING

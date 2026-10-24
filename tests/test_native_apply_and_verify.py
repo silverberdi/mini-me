@@ -95,8 +95,8 @@ async def test_apply_and_verify_success(mock_apply_env):
     )
 
     assert result.status == "PAUSED"
-    assert result.current_stage == OrchestrationStage.PROPOSING
-    assert "evidenced" in result.message
+    assert result.current_stage == OrchestrationStage.EXPLORING
+    assert "Explore" in result.message
 
 
 @pytest.mark.asyncio
@@ -117,4 +117,4 @@ async def test_apply_fails_closed_when_verify_workflow_missing(mock_apply_env):
     )
 
     assert result.status == "PAUSED"
-    assert "evidenced" in result.message
+    assert "Explore" in result.message
