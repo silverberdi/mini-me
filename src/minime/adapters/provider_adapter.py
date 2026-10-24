@@ -327,6 +327,13 @@ class CodexProviderAdapter(ProviderAdapterInterface):
             expires_at=expires_at,
             source_signal=CapacitySignalSource.CODEX_APP_SERVER,
         )
+        model_capability_verified = False
+        if selected_model:
+            model_capability_verified, _ = await self.check_model_supported(
+                selected_model, timeout_seconds=timeout_seconds
+            )
+            if not model_capability_verified:
+                return unresolved
         result = await self._call_app_server_method(
             "account/rateLimits/read", timeout_seconds=timeout_seconds
         )
@@ -337,6 +344,7 @@ class CodexProviderAdapter(ProviderAdapterInterface):
             observed_at=observed_at,
             expires_at=expires_at,
             selected_model=selected_model,
+            model_capability_verified=model_capability_verified,
         )
 
     async def discover_account_capabilities(self, timeout_seconds: float = 10.0) -> dict[str, Any]:
@@ -411,6 +419,7 @@ class CodexProviderAdapter(ProviderAdapterInterface):
         observed_at: datetime,
         expires_at: datetime,
         selected_model: str | None = None,
+        model_capability_verified: bool = False,
     ) -> CapacityObservation:
         """Parse only the installed App Server's authoritative permission field."""
         unknown = CapacityObservation(
@@ -440,11 +449,12 @@ class CodexProviderAdapter(ProviderAdapterInterface):
         ):
             return unknown
         reported_model = bucket.get("normalModelSlug")
-        if selected_model and (
-            not isinstance(reported_model, str)
-            or reported_model.strip().lower() != selected_model.strip().lower()
-        ):
-            return unknown
+        if selected_model:
+            if isinstance(reported_model, str):
+                if reported_model.strip().lower() != selected_model.strip().lower():
+                    return unknown
+            elif not model_capability_verified:
+                return unknown
         reset_candidates = []
         for window_name in ("primary", "secondary"):
             window = bucket.get(window_name)
@@ -461,7 +471,7 @@ class CodexProviderAdapter(ProviderAdapterInterface):
             expires_at=expires_at,
             source_signal=CapacitySignalSource.CODEX_APP_SERVER,
             account_id=account_id,
-            model=reported_model or bucket.get("limitId"),
+            model=reported_model or selected_model or bucket.get("limitId"),
             capacity_reset_at=min(reset_candidates) if reset_candidates else None,
             quota_scope=bucket.get("limitId"),
         )

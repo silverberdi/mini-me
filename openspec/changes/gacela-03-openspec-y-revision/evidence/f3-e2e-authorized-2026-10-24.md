@@ -197,3 +197,37 @@ four pre-existing E2E tasks as incomplete and does not claim F3 completion.
 Readiness result: **READY_FOR_AUTHORIZED_CLASSIFICATION**. This is readiness
 only; F3 remains 37/41 and the next runtime operation still requires one
 explicit authorization for the original Run and exactly one Codex call.
+
+## Capacity contract correction and authorized classification — 2026-10-24
+
+The service identity `minime` queried the installed Codex App Server without a
+model turn. `account/read` completed successfully; `account/rateLimits/read`
+returned `ordinaryUsageAllowed=true`, a `codex` bucket with fresh primary and
+secondary reset timestamps, `rateLimitReachedType=null`, and
+`spendControlReached=false`. The official `model/list` response contained
+`gpt-5.6-luna` with `medium` among its supported reasoning efforts.
+
+The root cause of the previous `UNKNOWN` was the parser requiring
+`normalModelSlug` to be a non-null exact match. The installed official schema
+defines that field as nullable. The correction keeps the gate fail-closed: a
+null alias is accepted only after the same App Server session family confirms
+the selected model in `model/list`; an absent model, malformed bucket, null
+permission, transport error, or mismatched non-null alias remains `UNKNOWN`.
+Deterministic tests cover the nullable official shape and the negative model
+capability case.
+
+The single-use authorization reference
+`f3-issue5-classification-retry-20261024-run-7d227da6` was then registered and
+consumed transactionally for the original Run and prior attempt only. Exactly
+one Codex invocation was dispatched:
+
+- new attempt: `6cccaeb6-ccb0-4ebd-b2ad-e1432a60c05c`;
+- model/provider/effort: `gpt-5.6-luna` / Codex / `medium`;
+- exit code `0`, timeout `false`, structured native output accepted;
+- result: `CLASSIFIED`, complexity `low`;
+- evidence: isolated dependency-free sanitizer change with deterministic edge-case tests;
+- authorization status: `COMPLETED`, consumed once;
+- no Explore, Propose, Apply, Review, fixture mutation, PR, merge, or Issue action.
+
+The original Run remains active at `VALIDATING`; no later stage was entered.
+F3 remains 37/41 because the four authentic E2E tasks are still pending.
