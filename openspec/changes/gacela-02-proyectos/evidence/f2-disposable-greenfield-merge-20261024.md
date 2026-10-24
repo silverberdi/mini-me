@@ -72,3 +72,58 @@ locales y en el workspace aislado solo está disponible el ZIP Greenfield
 `3eed0a…eef12e81`; no se fabricó ni se reutilizó como ZIP incremental. Por
 tanto, el segundo dispatch y el PR incremental no se ejecutaron: hacerlo ahora
 no tendría paquete y autorización independientes verificables.
+
+## E2E incremental real observado
+
+El 2026-10-24 se registró una concesión incremental única y auditable para el
+proyecto `f2-e2e-gacela-20261023e`, repositorio exacto y ZIP SHA-256
+`2dc14bf0d2d203c8c44bc33686f5a697d85d252882c07548ddf494becb9bde41`.
+La reserva comprobó `PREPARED`, base aprobada
+`89297274076dd1dd4aa377da9950a69da6c8a40a`, perfil `codex`, modelo
+`gpt-5.6-luna`, esfuerzo `medium`, una invocación y sin fallback. El checkpoint
+marcó la concesión como usada al persistir la admisión del agente.
+
+La única invocación incremental real terminó con código 0, duración 91,140 ms
+(91.140 s),
+uso observado de 312.545 tokens de entrada (286.336 cacheados) y 12.016 de
+salida. El candidato incorporó las fuentes originales y las adiciones
+`contexto-incremental-e2e.md`,
+`diagramas/flujo-incremental-e2e.svg` y
+`observacion-contradictoria-e2e.md`; el delta no propuso reemplazos. Las
+validaciones de alcance, procedencia, índice, secretos, enlaces y OpenSpec
+pasaron antes de publicar.
+
+Se publicó el PR incremental #3:
+https://github.com/silverberdi/mini-me-f2-e2e-20261023/pull/3
+
+- base: `89297274076dd1dd4aa377da9950a69da6c8a40a`
+- head: `def5c13c6c0abd27c29092e0eefb504d4f988f06`
+- merge: `4a3a5b985150dab1bc1018e781a6ca187f15ed0d`
+
+Antes del merge se verificó que `main` seguía en el SHA Greenfield y que el PR
+tenía el repositorio, rama, base y head exactos. El PR desechable se fusionó
+automáticamente con la GitHub App usando el head como precondición; después
+`main` coincidió con el merge SHA, las fuentes incrementales estuvieron
+presentes y el servicio F2 observó el merge. El checkpoint eliminó
+`pending_context` y promovió `approved_context_sha` a
+`4a3a5b985150dab1bc1018e781a6ca187f15ed0d`. No se modificó producción, no se
+activó scheduler y no se ejecutó una segunda invocación.
+
+## Correcciones deterministas de continuidad
+
+Durante esta ejecución se corrigieron y probaron cuatro defectos sin repetir
+inferencias: el delta incremental recibía un directorio como `str` en lugar de
+`Path`; una rama local huérfana exactamente en el SHA base no podía reconciliarse
+si el `main` local aún no la contenía; el checkpoint incremental omitía
+`base_branch`; y una observación incremental bloqueada por identidad incompleta
+no podía reobservar el mismo PR ni restaurar `PREPARED`. También se añadió la
+reserva durable de concesión incremental, ligada a proyecto, repositorio, ZIP,
+SHA base, agente, modelo, esfuerzo y uso único. Las pruebas focalizadas de
+coordinador/configuración pasan **77**, Ruff de los archivos afectados pasa,
+OpenSpec strict y `git diff --check` pasan.
+
+La tarea 7.1b sigue pendiente: la continuidad histórica ya está probada en
+PostgreSQL desechable y los workspaces/34 bindings se conservaron, pero no se
+han configurado en producción perfiles y conexiones F2 verificables. La tarea
+8.5 queda pendiente de esa reconciliación histórica; no se marca completa por
+inferencia.

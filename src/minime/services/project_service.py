@@ -277,7 +277,13 @@ class ProjectService:
         if project is None:
             raise ValueError(f"Project '{project_id}' not found")
         pending = project.onboarding_checkpoint.get("pending_context")
-        if project.onboarding_status != ProjectOnboardingStatus.PREPARED or not isinstance(pending, dict):
+        retryable_block = project.onboarding_status == ProjectOnboardingStatus.BLOCKED and any(
+            reason.startswith("CONTEXT_PR_") or reason.startswith("CONTEXT_MERGE_")
+            for reason in project.onboarding_reasons
+        )
+        if (
+            project.onboarding_status != ProjectOnboardingStatus.PREPARED and not retryable_block
+        ) or not isinstance(pending, dict):
             return {
                 "project_id": project_id,
                 "observed": False,
@@ -346,6 +352,7 @@ class ProjectService:
             }
         )
         project.onboarding_checkpoint = checkpoint
+        project.onboarding_status = ProjectOnboardingStatus.PREPARED
         project.onboarding_reasons = []
         project.updated_at = utc_now()
         self.uow.projects.save(project)

@@ -238,6 +238,41 @@ def test_incremental_context_delta_preserves_approved_context_and_marks_replacem
     assert (worktree / "context" / "existing.md").read_text(encoding="utf-8") == "approved"
 
 
+def test_incremental_authorization_is_bound_to_project_base_zip_and_profile(in_memory_uow):
+    project = Project(
+        project_id="prepared",
+        display_name="Prepared",
+        repository="example/prepared",
+        project_type=ProjectType.GREENFIELD,
+        base_branch="main",
+        onboarding_status=ProjectOnboardingStatus.PREPARED,
+        onboarding_checkpoint={"approved_context_sha": "m" * 40},
+    )
+    authorization = {
+        "authorization_reference": "operator-instruction-f2-incremental-20261024-1",
+        "project_id": "prepared",
+        "repository": "example/prepared",
+        "base_branch": "main",
+        "base_sha": "m" * 40,
+        "source_zip_sha256": "z" * 64,
+        "agent": "codex",
+        "model": "gpt-5.6-luna",
+        "effort": "medium",
+        "max_new_invocations": 1,
+        "single_use": True,
+        "purpose": "INCREMENTAL_CONTEXT_E2E",
+    }
+
+    GreenfieldBootstrapCoordinator._validate_incremental_authorization(
+        project, authorization, "z" * 64
+    )
+    invalid = {**authorization, "source_zip_sha256": "x" * 64}
+    with pytest.raises(GreenfieldBootstrapError, match="ZIP_MISMATCH"):
+        GreenfieldBootstrapCoordinator._validate_incremental_authorization(
+            project, invalid, "z" * 64
+        )
+
+
 def test_incremental_retry_reconciles_existing_pr_before_agent(in_memory_uow, tmp_path):
     project = Project(
         project_id="prepared",

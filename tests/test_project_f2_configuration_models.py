@@ -771,6 +771,61 @@ def test_incremental_context_merge_observation_advances_only_exact_pending_pr(
     assert "pending_context" not in saved.onboarding_checkpoint
 
 
+def test_incremental_merge_observation_recovers_its_own_identity_block(
+    in_memory_uow, monkeypatch
+):
+    from types import SimpleNamespace
+
+    from minime.domain.enums import ExternalOutcome, ProjectOnboardingStatus
+    from minime.domain.models import Project
+    from minime.services.project_connection_service import ProjectConnectionService
+
+    project = Project(
+        project_id="blocked-context",
+        display_name="Blocked context",
+        repository="example/blocked-context",
+        project_type=ProjectType.BROWNFIELD,
+        base_branch="main",
+        provider_connections={"git_pr": {"provider_id": "github", "repository_url": "example/blocked-context", "auth_mode": "environment_app"}},
+        onboarding_status=ProjectOnboardingStatus.BLOCKED,
+        onboarding_reasons=["CONTEXT_PR_IDENTITY_INCOMPLETE"],
+        onboarding_checkpoint={
+            "pending_context": {
+                "context_branch": "minime/context/blocked-context-zip",
+                "base_sha": "base-sha",
+                "base_branch": "main",
+                "head_sha": "candidate-sha",
+                "pull_request_number": 7,
+                "pull_request_url": "https://github.com/example/blocked-context/pull/7",
+            }
+        },
+    )
+    in_memory_uow.projects.save(project)
+
+    class Adapter:
+        def get_pull_request_details(self, repository, number):
+            return SimpleNamespace(
+                outcome=ExternalOutcome.SUCCESS,
+                data={
+                    "repository": repository,
+                    "number": number,
+                    "url": "https://github.com/example/blocked-context/pull/7",
+                    "head_branch": "minime/context/blocked-context-zip",
+                    "head_sha": "candidate-sha",
+                    "base_branch": "main",
+                    "is_merged": True,
+                    "merged_at": "2026-10-24T10:00:00Z",
+                    "merge_commit_sha": "merged-sha",
+                },
+            )
+
+    monkeypatch.setattr(ProjectConnectionService, "adapter_for", lambda *_args: Adapter())
+    result = ProjectService(in_memory_uow).observe_context_merge("blocked-context")
+
+    assert result["merged"] is True
+    assert in_memory_uow.projects.get_by_id("blocked-context").onboarding_status is ProjectOnboardingStatus.PREPARED
+
+
 def test_project_update_preserves_identity_and_can_change_settings(in_memory_uow):
     service = ProjectService(in_memory_uow)
     original = service.create_configured_project(_configuration())

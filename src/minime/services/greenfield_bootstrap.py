@@ -180,6 +180,7 @@ class GreenfieldBootstrapCoordinator:
         project_id: str,
         archive: bytes,
         *,
+        authorization: dict[str, Any] | None = None,
         timeout_seconds: int = 1_800,
     ) -> dict[str, Any]:
         """Publish one incremental context PR without changing approved context."""
@@ -189,6 +190,16 @@ class GreenfieldBootstrapCoordinator:
         if project.onboarding_status is not ProjectOnboardingStatus.PREPARED:
             raise GreenfieldBootstrapError("Incremental context requires a prepared project")
         package_sha = hashlib.sha256(archive).hexdigest() if archive else ""
+        if authorization is not None:
+            self.reserve_incremental_authorization(project_id, package_sha, authorization)
+        else:
+            pending_authorization = (project.onboarding_checkpoint or {}).get(
+                "pending_incremental_authorization"
+            )
+            if isinstance(pending_authorization, dict) and pending_authorization.get(
+                "source_zip_sha256"
+            ) != package_sha:
+                raise GreenfieldBootstrapError("INCREMENTAL_AUTHORIZATION_ZIP_MISMATCH")
         retained = project.onboarding_checkpoint.get("candidate_recovery")
         if isinstance(retained, dict) and retained.get("status") == "QUARANTINED_REVIEW_REQUIRED":
             raise GreenfieldBootstrapError(
@@ -241,7 +252,7 @@ class GreenfieldBootstrapCoordinator:
                     target.parent.mkdir(parents=True, exist_ok=True)
                     shutil.copyfile(source, target)
                     target.chmod(0o600)
-                context_delta = self._context_delta(worktree, extracted.files, package_dir)
+                context_delta = self._context_delta(worktree, extracted.files, Path(package_dir))
                 self._validate_candidate_scope(worktree)
                 agent_started = True
                 result = self._run_thinking_agent(project, worktree, profile, timeout_seconds)
@@ -267,6 +278,7 @@ class GreenfieldBootstrapCoordinator:
                     "context_branch": branch,
                     "bootstrap_branch": branch,
                     "base_sha": base_sha,
+                    "base_branch": project.base_branch,
                     "head_sha": head_sha,
                     "pull_request_number": pr.data.get("number"),
                     "pull_request_url": pr.data.get("url"),
@@ -808,9 +820,100 @@ class GreenfieldBootstrapCoordinator:
                 "used": True,
                 "used_at": utc_now().isoformat(),
             }
+        pending_incremental = current.onboarding_checkpoint.get(
+            "pending_incremental_authorization"
+        )
+        if isinstance(pending_incremental, dict):
+            current.onboarding_checkpoint.pop("pending_incremental_authorization", None)
+            current.onboarding_checkpoint["incremental_authorization"] = {
+                **pending_incremental,
+                "status": "USED",
+                "used": True,
+                "used_at": utc_now().isoformat(),
+            }
         current.updated_at = utc_now()
         self.uow.projects.save(current)
         self.uow.commit()
+
+    @staticmethod
+    def _validate_incremental_authorization(
+        project: Project, authorization: dict[str, Any], source_zip_sha256: str
+    ) -> None:
+        required = {
+            "authorization_reference",
+            "project_id",
+            "repository",
+            "base_branch",
+            "base_sha",
+            "source_zip_sha256",
+            "agent",
+            "model",
+            "effort",
+            "max_new_invocations",
+            "single_use",
+            "purpose",
+        }
+        if not required.issubset(authorization):
+            raise GreenfieldBootstrapError("INCREMENTAL_AUTHORIZATION_INCOMPLETE")
+        if authorization["project_id"] != project.project_id:
+            raise GreenfieldBootstrapError("INCREMENTAL_AUTHORIZATION_PROJECT_MISMATCH")
+        if authorization["repository"] != project.repository:
+            raise GreenfieldBootstrapError("INCREMENTAL_AUTHORIZATION_REPOSITORY_MISMATCH")
+        if authorization["base_branch"] != project.base_branch:
+            raise GreenfieldBootstrapError("INCREMENTAL_AUTHORIZATION_BRANCH_MISMATCH")
+        checkpoint = project.onboarding_checkpoint or {}
+        approved_context_sha = checkpoint.get("approved_context_sha") or checkpoint.get(
+            "merge_commit_sha"
+        )
+        if authorization["base_sha"] != approved_context_sha:
+            raise GreenfieldBootstrapError("INCREMENTAL_AUTHORIZATION_BASE_MISMATCH")
+        if authorization["source_zip_sha256"] != source_zip_sha256:
+            raise GreenfieldBootstrapError("INCREMENTAL_AUTHORIZATION_ZIP_MISMATCH")
+        if authorization["agent"] != "codex" or authorization["model"] != "gpt-5.6-luna":
+            raise GreenfieldBootstrapError("INCREMENTAL_AUTHORIZATION_AGENT_MISMATCH")
+        if authorization["effort"] != "medium":
+            raise GreenfieldBootstrapError("INCREMENTAL_AUTHORIZATION_EFFORT_MISMATCH")
+        if authorization["max_new_invocations"] != 1 or authorization["single_use"] is not True:
+            raise GreenfieldBootstrapError("INCREMENTAL_AUTHORIZATION_SCOPE_INVALID")
+        if authorization["purpose"] != "INCREMENTAL_CONTEXT_E2E":
+            raise GreenfieldBootstrapError("INCREMENTAL_AUTHORIZATION_PURPOSE_INVALID")
+        if not str(authorization["authorization_reference"]).strip():
+            raise GreenfieldBootstrapError("INCREMENTAL_AUTHORIZATION_REFERENCE_MISSING")
+
+    def reserve_incremental_authorization(
+        self, project_id: str, source_zip_sha256: str, authorization: dict[str, Any]
+    ) -> dict[str, Any]:
+        """Persist one explicit incremental grant before any external effect."""
+        project = self.uow.projects.get_by_id(project_id)
+        if project is None:
+            raise GreenfieldBootstrapError("Project not found")
+        if project.onboarding_status is not ProjectOnboardingStatus.PREPARED:
+            raise GreenfieldBootstrapError("Incremental context requires a prepared project")
+        self._validate_incremental_authorization(project, authorization, source_zip_sha256)
+        checkpoint = project.onboarding_checkpoint or {}
+        prior_authorization = checkpoint.get("incremental_authorization")
+        pending_authorization = checkpoint.get("pending_incremental_authorization")
+        if isinstance(prior_authorization, dict) and prior_authorization.get("used") is True:
+            raise GreenfieldBootstrapError("INCREMENTAL_AUTHORIZATION_ALREADY_USED")
+        if isinstance(pending_authorization, dict):
+            raise GreenfieldBootstrapError("INCREMENTAL_AUTHORIZATION_ALREADY_RESERVED")
+        project.onboarding_checkpoint = {
+            **checkpoint,
+            "pending_incremental_authorization": {
+                **authorization,
+                "status": "RESERVED",
+                "reserved_at": utc_now().isoformat(),
+            },
+        }
+        project.updated_at = utc_now()
+        self.uow.projects.save(project)
+        self.uow.commit()
+        return {
+            "project_id": project_id,
+            "source_zip_sha256": source_zip_sha256,
+            "authorization_reference": authorization["authorization_reference"],
+            "status": "RESERVED",
+        }
 
     def _run_thinking_agent(
         self, project: Project, worktree: Path, profile: Any, timeout_seconds: int
@@ -1001,7 +1104,7 @@ class GreenfieldBootstrapCoordinator:
         if worktrees.returncode != 0 or f"branch refs/heads/{branch}" in worktrees.stdout:
             raise GreenfieldBootstrapError("Existing bootstrap branch is bound to a worktree")
         deleted = subprocess.run(
-            ["git", "branch", "-d", branch],
+            ["git", "branch", "-D", branch],
             cwd=repository_root,
             capture_output=True,
             text=True,
