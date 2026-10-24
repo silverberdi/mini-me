@@ -1088,6 +1088,22 @@ class GitHubAdapterInterface(ABC):
             reason_code=ExternalReasonCode.UNSUPPORTED,
         )
 
+    def merge_pull_request(
+        self,
+        repository: str,
+        pr_number: int,
+        candidate_sha: str | None = None,
+        commit_title: str | None = None,
+        commit_message: str | None = None,
+        merge_method: str = "merge",
+    ) -> ExternalActionResult[dict[str, Any]]:
+        return ExternalActionResult[dict[str, Any]](
+            outcome=ExternalOutcome.UNKNOWN,
+            value={},
+            source_adapter="interface",
+            reason_code=ExternalReasonCode.UNSUPPORTED,
+        )
+
     def get_issue(self, repository: str, issue_number: int) -> ExternalActionResult[dict[str, Any]]:
         return ExternalActionResult[dict[str, Any]](
             outcome=ExternalOutcome.UNKNOWN,

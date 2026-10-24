@@ -2650,6 +2650,11 @@ def setup_managed_repository_fixture(
         and uow.project_managed_repository_bindings
     ):
         uow.project_managed_repository_bindings.save(binding)
+        # Orchestration tests need the same durable project identity that
+        # production requires before a request may be admitted.
+        if hasattr(uow, "projects") and uow.projects.get_by_id(project_id) is None:
+            repository = canonical_repository_identity.removeprefix("github.com/")
+            uow.projects.save(Project(project_id=project_id, display_name=project_id, repository=repository))
 
     # Publish a real local ref so the fail-closed readiness remote-observation checks
     # can be exercised offline, and refresh any intake ownerships auto-created earlier.

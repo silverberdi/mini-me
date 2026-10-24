@@ -624,6 +624,155 @@ def verify_project_connections(
     }
 
 
+class ProjectRequestRunPayload(BaseModel):
+    operator_ack: bool = False
+    operator_response: str | None = None
+    operator_clarification: str | None = None
+    thinker_provider: str | None = None
+    implementer_provider: str | None = None
+    reviewer_provider: str | None = None
+
+
+@app.get("/api/v1/projects/{project_id}/requests", tags=["requests"])
+def list_project_requests(
+    project_id: str,
+    _operator: AuthenticatedOperatorDep,
+    uow: UowDep,
+) -> dict[str, Any]:
+    """List eligible remote requests for a project in FIFO order."""
+    from minime.adapters.github import GitHubAdapter
+    from minime.services.remote_request_intake import RemoteRequestIntakeService
+
+    project = uow.projects.get_by_id(project_id)
+    if project is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Project not found")
+
+    intake = RemoteRequestIntakeService(github_adapter=GitHubAdapter(), uow=uow)
+    eligible = intake.get_eligible_requests(project.repository)
+    return {
+        "project_id": project_id,
+        "repository": project.repository,
+        "eligible_requests": eligible,
+    }
+
+
+@app.post("/api/v1/projects/{project_id}/requests/run", tags=["requests"])
+async def run_project_request(
+    project_id: str,
+    _operator: AuthenticatedOperatorDep,
+    uow: UowDep,
+    payload: ProjectRequestRunPayload | None = None,
+) -> dict[str, Any]:
+    """Execute or continue the active remote request for a project."""
+    from minime.adapters.github import GitHubAdapter
+    from minime.services.agent_runner import CliAgentRunner
+    from minime.services.budget_service import BudgetService
+    from minime.services.capacity_lifecycle_service import CapacityLifecycleService
+    from minime.services.orchestration_coordinator import NativeOrchestrationCoordinator
+    from minime.services.worktree_manager import WorktreeManager
+
+    project = uow.projects.get_by_id(project_id)
+    if project is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Project not found")
+
+    body = payload or ProjectRequestRunPayload()
+    binding = None
+    if hasattr(uow, "project_managed_repository_bindings"):
+        binding = uow.project_managed_repository_bindings.get_by_project_id(project_id)
+    if binding is None or not binding.managed_repository_root:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Verified managed repository binding is required")
+    repo_root = Path(binding.managed_repository_root)
+
+    wt_manager = WorktreeManager(project_root=repo_root, uow=uow)
+    github = GitHubAdapter()
+    try:
+        agent_runner = CliAgentRunner.for_project_profiles(
+            project.agent_profiles,
+            capacity_service=CapacityLifecycleService(uow),
+            budget_service=BudgetService(uow),
+        )
+    except (ValueError, OSError) as exc:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=f"Verified F2 agent profiles unavailable: {exc}") from exc
+
+    coordinator = NativeOrchestrationCoordinator(
+        uow_factory=lambda: uow,
+        github_adapter=github,
+        worktree_manager=wt_manager,
+        agent_runner=agent_runner,
+    )
+    clarification = body.operator_clarification or body.operator_response
+    res = await coordinator.execute_project_request(
+        project_id,
+        operator_ack=body.operator_ack,
+        operator_clarification=clarification,
+        thinker_provider=agent_runner.provider_for_role("thinker"),
+        implementer_provider=agent_runner.provider_for_role("implementer"),
+        reviewer_provider=agent_runner.provider_for_role("reviewer"),
+    )
+    return {
+        "status": res.status,
+        "run_id": res.run_id,
+        "current_stage": res.current_stage.value if res.current_stage else None,
+        "message": res.message,
+        "pr1_url": res.pr1_url,
+        "pr2_url": res.pr2_url,
+        "human_payload": res.human_payload,
+    }
+
+
+@app.post("/api/v1/projects/{project_id}/requests/ack", tags=["requests"])
+async def ack_project_request(
+    project_id: str,
+    _operator: AuthenticatedOperatorDep,
+    uow: UowDep,
+) -> dict[str, Any]:
+    """Acknowledge («Estoy enterado») high-complexity PR merge and continue."""
+    from minime.adapters.github import GitHubAdapter
+    from minime.services.agent_runner import CliAgentRunner
+    from minime.services.budget_service import BudgetService
+    from minime.services.capacity_lifecycle_service import CapacityLifecycleService
+    from minime.services.orchestration_coordinator import NativeOrchestrationCoordinator
+    from minime.services.worktree_manager import WorktreeManager
+
+    project = uow.projects.get_by_id(project_id)
+    if project is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Project not found")
+
+    binding = uow.project_managed_repository_bindings.get_by_project_id(project_id)
+    if binding is None or not binding.managed_repository_root:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Verified managed repository binding is required")
+    wt_manager = WorktreeManager(project_root=Path(binding.managed_repository_root), uow=uow)
+    github = GitHubAdapter()
+    try:
+        agent_runner = CliAgentRunner.for_project_profiles(
+            project.agent_profiles,
+            capacity_service=CapacityLifecycleService(uow),
+            budget_service=BudgetService(uow),
+        )
+    except (ValueError, OSError) as exc:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=f"Verified F2 agent profiles unavailable: {exc}") from exc
+
+    coordinator = NativeOrchestrationCoordinator(
+        uow_factory=lambda: uow,
+        github_adapter=github,
+        worktree_manager=wt_manager,
+        agent_runner=agent_runner,
+    )
+    res = await coordinator.execute_project_request(
+        project_id,
+        operator_ack=True,
+    )
+    return {
+        "status": res.status,
+        "run_id": res.run_id,
+        "current_stage": res.current_stage.value if res.current_stage else None,
+        "message": res.message,
+        "pr1_url": res.pr1_url,
+        "pr2_url": res.pr2_url,
+        "human_payload": res.human_payload,
+    }
+
+
 class JobRunRequest(BaseModel):
     change_name: str
     project_root: str = "."

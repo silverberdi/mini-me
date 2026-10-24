@@ -8,6 +8,7 @@ import inspect
 import json
 import logging
 import os
+import re
 import stat
 import uuid
 from dataclasses import dataclass
@@ -4068,4 +4069,157 @@ class WorktreeManager:
             outcome=ExternalOutcome.SUCCESS,
             reason_code=ExternalReasonCode.EXECUTION_SUCCESS,
             provider_detail=f"Successfully removed review worktree at '{path}'.",
+        )
+
+    @staticmethod
+    def slugify_request_title(title: str, max_length: int = 40) -> str:
+        """Convert an issue title to a clean kebab-case slug."""
+        cleaned = re.sub(r"[^\w\s-]", "", title).strip().lower()
+        slug = re.sub(r"[-\s]+", "-", cleaned).strip("-")
+        return slug[:max_length].rstrip("-") or "change"
+
+    @classmethod
+    def format_request_branch_name(cls, issue_number: int, issue_title: str) -> str:
+        """Format candidate branch as request-<numero>-<slug-kebab>."""
+        slug = cls.slugify_request_title(issue_title)
+        return f"request-{issue_number}-{slug}"
+
+    @classmethod
+    def format_documentation_branch_name(cls, issue_number: int, issue_title: str) -> str:
+        """Format documentation closure branch as doc-close-<numero>-<slug-kebab>."""
+        slug = cls.slugify_request_title(issue_title)
+        return f"doc-close-{issue_number}-{slug}"
+
+    async def create_request_worktree(
+        self,
+        project_id: str,
+        issue_number: int,
+        issue_title: str,
+        base_branch: str = "main",
+        remote: str = "origin",
+        reuse_existing: bool = True,
+        run_id: str | None = None,
+    ) -> WorktreeInfo:
+        """Create and track candidate branch and isolated worktree under managed root."""
+        branch_name = self.format_request_branch_name(issue_number, issue_title)
+        parent_dir = self.resolve_worktree_parent_dir(project_id)
+        worktree_path = (parent_dir / branch_name).resolve()
+
+        if self.workspace_guard:
+            self._authorize_mutating_operation(project_id, worktree_path, WorkspaceOperation.WORKTREE_CREATE)
+
+        try:
+            await self._git(["fetch", remote, base_branch], project_id=project_id)
+        except Exception as exc:
+            logger.debug(f"Fetch remote base branch {remote}/{base_branch} skipped: {exc}")
+
+        base_sha_str = ""
+        try:
+            base_sha_str = (await self._git(["rev-parse", f"{remote}/{base_branch}"], project_id=project_id)).strip()
+        except Exception:
+            pass
+        if not base_sha_str:
+            base_sha_str = (await self._git(["rev-parse", base_branch], project_id=project_id)).strip()
+
+        if worktree_path.exists() and reuse_existing:
+            return WorktreeInfo(
+                path=worktree_path,
+                branch_name=branch_name,
+                base_sha=base_sha_str,
+            )
+
+        branch_exists = False
+        try:
+            check_out = await self._git(["rev-parse", "--verify", branch_name], project_id=project_id)
+            if check_out and check_out.strip():
+                branch_exists = True
+        except Exception:
+            branch_exists = False
+
+        if branch_exists:
+            await self._git(["worktree", "add", str(worktree_path), branch_name], project_id=project_id)
+        else:
+            await self._git(["worktree", "add", "-b", branch_name, str(worktree_path), base_sha_str], project_id=project_id)
+
+        ownership_repo = getattr(self.uow, "orchestration_worktree_ownerships", None)
+        if ownership_repo and run_id:
+            try:
+                ownership = OrchestrationWorktreeOwnership(
+                    id=str(uuid.uuid4()),
+                    job_id=run_id,
+                    project_id=project_id,
+                    canonical_worktree_path=str(worktree_path),
+                    worktree_parent_dir=str(parent_dir),
+                    candidate_branch_name=branch_name,
+                    creation_state=WorktreeCreationState.CREATED,
+                    is_active=True,
+                    created_at=utc_now(),
+                    updated_at=utc_now(),
+                )
+                ownership_repo.save(ownership)
+                self._flush_uow()
+            except Exception as exc:
+                logger.debug(f"Failed to record worktree ownership: {exc}")
+
+        return WorktreeInfo(
+            path=worktree_path,
+            branch_name=branch_name,
+            base_sha=base_sha_str,
+        )
+
+    async def create_documentation_worktree(
+        self,
+        project_id: str,
+        issue_number: int,
+        issue_title: str,
+        base_branch: str = "main",
+        remote: str = "origin",
+        reuse_existing: bool = True,
+        run_id: str | None = None,
+    ) -> WorktreeInfo:
+        """Create fresh documentation worktree rooted at the latest merged main commit."""
+        branch_name = self.format_documentation_branch_name(issue_number, issue_title)
+        parent_dir = self.resolve_worktree_parent_dir(project_id)
+        worktree_path = (parent_dir / branch_name).resolve()
+
+        if self.workspace_guard:
+            self._authorize_mutating_operation(project_id, worktree_path, WorkspaceOperation.WORKTREE_CREATE)
+
+        try:
+            await self._git(["fetch", remote, base_branch], project_id=project_id)
+        except Exception as exc:
+            logger.debug(f"Fetch remote base branch {remote}/{base_branch} skipped: {exc}")
+
+        base_sha_str = ""
+        try:
+            base_sha_str = (await self._git(["rev-parse", f"{remote}/{base_branch}"], project_id=project_id)).strip()
+        except Exception:
+            pass
+        if not base_sha_str:
+            base_sha_str = (await self._git(["rev-parse", base_branch], project_id=project_id)).strip()
+
+        if worktree_path.exists() and reuse_existing:
+            return WorktreeInfo(
+                path=worktree_path,
+                branch_name=branch_name,
+                base_sha=base_sha_str,
+            )
+
+        branch_exists = False
+        try:
+            check_out = await self._git(["rev-parse", "--verify", branch_name], project_id=project_id)
+            if check_out and check_out.strip():
+                branch_exists = True
+        except Exception:
+            branch_exists = False
+
+        if branch_exists:
+            await self._git(["worktree", "add", str(worktree_path), branch_name], project_id=project_id)
+        else:
+            await self._git(["worktree", "add", "-b", branch_name, str(worktree_path), base_sha_str], project_id=project_id)
+
+        return WorktreeInfo(
+            path=worktree_path,
+            branch_name=branch_name,
+            base_sha=base_sha_str,
         )
