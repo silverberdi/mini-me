@@ -168,11 +168,13 @@ reutiliza ni se solicita implícitamente.
   mediante PAT ni otra identidad.
 
 Estado: el código y el runtime desechable están preparados; 4.4, 7.1b, 8.4 y
-8.5 siguen sin evidencia suficiente. El siguiente actor debe ser el propietario
-de la GitHub App en GitHub: abrir la configuración de la App cuya instalación
-es `154974444`, cambiar Repository permissions a `Contents: Read and write` y
-`Pull requests: Read and write`, conservar seleccionados los tres repositorios
-F2, y actualizar/reinstalar la instalación. Después debe desplegarse el HEAD
-F2 en el runtime del servicio y configurarse explícitamente la selección de
-perfiles/conexiones históricos. Hasta entonces no puede verificarse publicación
-real ni iniciarse ninguna invocación Codex.
+8.5 siguen sin evidencia suficiente. RETIRADA la instrucción de cambiar permisos
+o reinstalar la App `154974444`: el propietario confirma que ya tiene
+`Contents: Read and write` y `Pull requests: Read and write`. El único gate
+técnico pendiente de GitHub es consultar, usando el token de la instalación
+actual, el mapa `permissions` emitido por GitHub al crear ese token; no
+usar `permissions.push/pull` de `GET /installation/repositories` como sustituto.
+Si el token confirma permisos, continuar con prueba segura de publicación
+autorizada en el E2E desechable. La migración productiva y los perfiles/conexiones
+históricos requieren decisiones independientes. No invocar un agente de pago
+hasta que la publicación esté probada y exista autorización nueva.
