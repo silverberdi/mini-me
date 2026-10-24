@@ -667,6 +667,14 @@ class NativeOrchestrationCoordinator:
         pr1_number = active_run.stop_details.get("pr1_number")
         complexity = active_run.stop_details.get("complexity", "moderate")
         try:
+            await self._ensure_candidate_commit(worktree_path, issue_number)
+        except GitOperationError as exc:
+            return OrchestrationCoordinationResult(
+                status="PAUSED", run_id=active_run.run_id,
+                current_stage=OrchestrationStage.READY_FOR_PR,
+                message=f"Unable to persist candidate Git state: {exc}. Worktree preserved.",
+            )
+        try:
             candidate_sha = await self._get_git_head_sha(worktree_path)
         except GitOperationError as exc:
             return OrchestrationCoordinationResult(
@@ -1736,6 +1744,32 @@ class NativeOrchestrationCoordinator:
             raise GitOperationError(
                 GitCommandResult(("push", "-u", "origin", branch_name), 1, "", str(detail))
             )
+
+    async def _ensure_candidate_commit(self, worktree_path: Path, issue_number: int) -> None:
+        """Persist Apply output before publishing it; never publish a dirty worktree."""
+        status = await self._git_run(worktree_path, ["status", "--porcelain"])
+        status_text = status if isinstance(status, str) else status.stdout
+        if not status_text.strip():
+            return
+        await self._git_run(worktree_path, ["add", "-A"])
+        ignored_paths: list[str] = []
+        for cache_dir in worktree_path.rglob("__pycache__"):
+            if cache_dir.is_dir():
+                ignored_paths.append(str(cache_dir.relative_to(worktree_path)))
+        ignored_paths.extend(
+            str(path.relative_to(worktree_path))
+            for path in worktree_path.rglob("*.pyc")
+            if path.is_file()
+        )
+        if ignored_paths:
+            await self._git_run(worktree_path, ["reset", "--", *ignored_paths])
+        staged = await self._git_run(worktree_path, ["diff", "--cached", "--name-only"])
+        if not staged.stdout.strip():
+            return
+        await self._git_run(
+            worktree_path,
+            ["commit", "-m", f"feat(request-{issue_number}): implement OpenSpec change"],
+        )
 
     async def _get_git_head_sha(self, worktree_path: Path) -> str:
         result = await self._git_run(worktree_path, ["rev-parse", "HEAD"])

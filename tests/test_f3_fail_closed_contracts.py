@@ -136,6 +136,25 @@ async def test_branch_publication_uses_authenticated_github_adapter(tmp_path: Pa
 
 
 @pytest.mark.asyncio
+async def test_candidate_commit_is_created_only_for_dirty_worktree(tmp_path: Path):
+    c = coordinator(tmp_path, ScriptedRunner("unused"))
+    calls: list[list[str]] = []
+
+    async def fake_git_run(_cwd: Path, args: list[str]):
+        calls.append(args)
+        if args == ["status", "--porcelain"]:
+            return SimpleNamespace(stdout=" M src/app.py\n")
+        if args == ["diff", "--cached", "--name-only"]:
+            return SimpleNamespace(returncode=0, stdout="src/app.py\n")
+        return SimpleNamespace(returncode=0, stdout="")
+
+    c._git_run = fake_git_run
+    await c._ensure_candidate_commit(tmp_path, 5)
+    assert ["add", "-A"] in calls
+    assert ["commit", "-m", "feat(request-5): implement OpenSpec change"] in calls
+
+
+@pytest.mark.asyncio
 async def test_apply_and_sync_fail_closed_on_agent_error(tmp_path: Path):
     runner = ScriptedRunner("failure", exit_code=2)
     c = coordinator(tmp_path, runner)
