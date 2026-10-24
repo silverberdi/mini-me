@@ -27,6 +27,20 @@ from minime.services.implementer_runner import ImplementerResult
 from minime.services.project_service import ProjectService
 
 
+def _initialize_test_repository(worktree: Path) -> None:
+    """The fail-closed candidate scope gate requires a real Git base commit."""
+    subprocess.run(["git", "init"], cwd=worktree, check=True, capture_output=True)
+    subprocess.run(["git", "config", "user.name", "test"], cwd=worktree, check=True)
+    subprocess.run(["git", "config", "user.email", "test@example.com"], cwd=worktree, check=True)
+    subprocess.run(["git", "add", "."], cwd=worktree, check=True, capture_output=True)
+    subprocess.run(
+        ["git", "commit", "-m", "baseline"],
+        cwd=worktree,
+        check=True,
+        capture_output=True,
+    )
+
+
 def _configuration() -> ProjectConfigurationInput:
     profile = ProjectAgentProfile(
         agent_id="codex",
@@ -88,6 +102,7 @@ def test_candidate_validation_requires_canonical_anchors_and_preserves_source(tm
         "# Context\n\n- facts.md: context/incoming/sha/facts.md\n", encoding="utf-8"
     )
 
+    _initialize_test_repository(worktree)
     GreenfieldBootstrapCoordinator._validate_candidate(
         worktree, incoming, ("facts.md",), package
     )
@@ -110,6 +125,7 @@ def test_candidate_validation_rejects_secret_markers(tmp_path: Path):
         "context: context/incoming/sha/facts.md\n", encoding="utf-8"
     )
     (worktree / "notes.txt").write_text("BEGIN PRIVATE KEY", encoding="utf-8")
+    _initialize_test_repository(worktree)
 
     with pytest.raises(GreenfieldBootstrapError, match="secret"):
         GreenfieldBootstrapCoordinator._validate_candidate(worktree, incoming)
@@ -130,6 +146,7 @@ def test_candidate_validation_rejects_repository_escape_or_missing_links(tmp_pat
     (worktree / "context" / "INDEX.md").write_text(
         "[escape](../../outside.md)", encoding="utf-8"
     )
+    _initialize_test_repository(worktree)
 
     with pytest.raises(GreenfieldBootstrapError, match="reference"):
         GreenfieldBootstrapCoordinator._validate_candidate(worktree, incoming)
@@ -173,6 +190,7 @@ def test_candidate_validation_allows_documentary_contradictions_with_provenance(
         "\n## Contradictions\nBoth sources remain authoritative for review.\n",
         encoding="utf-8",
     )
+    _initialize_test_repository(worktree)
 
     GreenfieldBootstrapCoordinator._validate_candidate(
         worktree, incoming, ("facts.md", "new-facts.md"), worktree / "context" / "incoming" / "sha"
