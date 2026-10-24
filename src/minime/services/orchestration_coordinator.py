@@ -117,6 +117,9 @@ class NativeOrchestrationCoordinator:
         worktree_path: Path,
         *,
         thinker_provider: str = "codex",
+        issue_number: int | None = None,
+        issue_title: str | None = None,
+        issue_body: str | None = None,
     ) -> ClassificationCheckpointResult:
         """Run only the pending complexity checkpoint for an existing VALIDATING run.
 
@@ -135,6 +138,12 @@ class NativeOrchestrationCoordinator:
             return ClassificationCheckpointResult(
                 "BLOCKED", run_id, None, None, {}, empty,
                 f"Run is not in VALIDATING (found {run.current_stage.value}).",
+            )
+        persisted_issue_number = (run.stop_details or {}).get("issue_number")
+        if issue_number is not None and persisted_issue_number != issue_number:
+            return ClassificationCheckpointResult(
+                "BLOCKED", run_id, None, None, {}, empty,
+                "Checkpoint issue does not match the original run.",
             )
         stored = self._stored_complexity_assessment(run)
         hashes = self._proposal_artifact_hashes(worktree_path, run.change_name)
@@ -163,9 +172,25 @@ class NativeOrchestrationCoordinator:
                 "A valid persisted classification was reused without invocation.",
             )
 
-        issue_title = str((run.stop_details or {}).get("issue_title") or "")
-        issue_body = str((run.stop_details or {}).get("issue_body") or "")
+        issue_title = issue_title if issue_title is not None else str(
+            (run.stop_details or {}).get("issue_title") or ""
+        )
+        issue_body = issue_body if issue_body is not None else str(
+            (run.stop_details or {}).get("issue_body") or ""
+        )
         attempt_id = str(uuid4())
+        in_progress = ComplexityAssessment(
+            status="IN_PROGRESS", reason="classification invocation started"
+        )
+        self._persist_complexity_assessment(
+            run,
+            in_progress,
+            attempt_id=attempt_id,
+            model_identity=model_identity,
+            artifact_hashes=hashes,
+        )
+        uow.orchestration_runs.save(run)
+        uow.commit()
         assessment = await self._assess_complexity(
             worktree_path, thinker_provider, issue_title, issue_body, project_id
         )
