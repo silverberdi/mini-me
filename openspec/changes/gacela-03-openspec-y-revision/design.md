@@ -75,8 +75,11 @@ F3 debe conectar estos componentes en un flujo orquestado autónomo y real gober
     - Referencia canónica al Change de OpenSpec (`gacela-03-openspec-y-revision`).
   - *Salida estructurada:*
     - Título estandarizado del PR.
-    - Cuerpo descriptivo en Markdown estructurado (resumen, componentes modificados, cobertura de pruebas, enlace de cierre `Fixes #...`, referencias OpenSpec).
+    - Cuerpo descriptivo en Markdown estructurado (resumen, componentes modificados, cobertura de pruebas, referencia informativa al Issue como `Ref #...` o `Addresses #...`, referencias OpenSpec).
     - Metadatos suficientes para que el adaptador publique el PR sin ambigüedades.
+- **Prohibición de palabras clave de cierre automático en PR1 y PR2:**
+  - La skill `minime-pr-preparer` omite taxativamente cualquier directiva de cierre automático de GitHub (`Fixes #...`, `Closes #...`, `Resolves #...` y variantes equivalentes) en los contenidos preparados para PR1 y PR2. El cierre automático del Issue con el merge del primer PR violaría el contrato rector de F3, que exige completar Sync/Archive y verificar el merge del segundo PR antes del cierre.
+  - El cierre del Request se efectúa de manera exclusiva y gobernada por el coordinador a través de `GitHubAdapter.close_issue` tras confirmar el merge remoto de PR2.
 - **Separación de responsabilidades y permisos:**
   - La skill prepara exclusivamente el contenido textual y semántico del PR.
   - `GitHubAdapter` ejecuta de forma determinista las operaciones de Git y GitHub API: push de la rama, creación del PR (`pull_request.create`), consulta de estado y protecciones, y ejecución del merge (`merge_pull_request`).

@@ -36,14 +36,14 @@
 ## 5. Two-Phase Pull Requests, Documentation Closure, and Continuation Loop
 
 - [ ] 5.1 Implement `GitHubAdapter.merge_pull_request` method supporting merge commits, merge methods, and candidate SHA verification
-- [ ] 5.2 Deliver the minimal PR preparation skill (`minime-pr-preparer`) in F3 with structured input/output contract (generating title, description, test evidence, and OpenSpec refs for PR1 and PR2) and implement Phase 1 PR preparation invoking the skill without external F4 dependencies
+- [ ] 5.2 Deliver the minimal PR preparation skill (`minime-pr-preparer`) in F3 with structured input/output contract (generating title, description, test evidence, and informative issue reference strictly excluding auto-closing keywords for PR1 and PR2) and implement Phase 1 PR preparation invoking the skill without external F4 dependencies
 - [ ] 5.3 Implement differentiated merge policy for the first PR (auto-merge for low/moderate complexity; `HUMAN REQUIRED` for informational acknowledgement «Estoy enterado» in high complexity before merging), ensuring agent guardian directives do not impede coordinator-governed merges
 - [ ] 5.4 Implement fresh documentation branch (`doc-close-<numero>-<slug-kebab>`) and worktree creation rooted at the merged commit of `main` under the project's configured managed root
 - [ ] 5.5 Implement native OpenSpec Sync and OpenSpec Archive orchestration dynamically resolving native workflows (`opsx-sync`/`openspec-sync-specs` and `opsx-archive`/`openspec-archive-change`) executed by the thinking agent with lowest compatible effort in the documentation worktree
 - [ ] 5.6 Implement Phase 2 Documentation PR preparation invoking the minimal PR preparation skill and automatic merge regardless of initial complexity
 - [ ] 5.7 Implement remote issue closure on GitHub with idempotent completion note and release of active project lock
 - [ ] 5.8 Implement continuous FIFO transition automatically selecting and initiating the next eligible request upon completion
-- [ ] 5.9 Implement tests in `tests/test_two_phase_pr_and_closure.py` covering minimal PR skill content generation and invocation for PR1/PR2, merge policies, documentation worktree setup, Sync/Archive resolution, PR2 auto-merge, and issue closure
+- [ ] 5.9 Implement tests in `tests/test_two_phase_pr_and_closure.py` covering minimal PR skill content generation and invocation for PR1/PR2 (verifying exclusion of auto-closing keywords and issue remaining open after PR1), merge policies, documentation worktree setup, Sync/Archive resolution, PR2 auto-merge, and issue closure
 
 ## 6. End-to-End Proof and System Integration
 
