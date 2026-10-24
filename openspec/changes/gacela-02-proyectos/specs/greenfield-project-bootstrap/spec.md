@@ -34,7 +34,7 @@ The bootstrap SHALL verify the actual official OpenSpec CLI version and its avai
 - **THEN** setup installs/configures it through supported official mechanisms or blocks; it does not report the integration complete or emulate the missing operation
 
 ### Requirement: Publish the first bootstrap change only on a protected branch and PR
-All bootstrap file/Git writes SHALL occur on an independent branch rooted at the verified base; the default/main branch SHALL remain unchanged. After validation, mini me SHALL commit, push, and create one queryable first PR with exact base/head identities. Human review/approval/merge SHALL be the first human intervention expected in a valid onboarding flow; mini me SHALL NOT merge it.
+All bootstrap file/Git writes SHALL occur on an independent branch rooted at the verified base; the default/main branch SHALL remain unchanged. After validation, mini me SHALL commit, push, and create one queryable first PR with exact base/head identities. For an actual onboarded project, human review/approval/merge SHALL be the first human intervention expected in a valid onboarding flow; mini me SHALL NOT merge that project's PR. An isolated, disposable F2 acceptance-test harness MAY merge a PR belonging exclusively to its test repository after verifying the exact repository, branch, head SHA, expected base, context integrity and test scope; this exemption SHALL NOT enable a general-purpose automatic merge in mini me or apply to any real project.
 
 #### Scenario: Bootstrap successfully reaches a real PR
 - **WHEN** official configuration and faithful context pass integrity validation
