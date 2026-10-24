@@ -207,3 +207,41 @@ Regresión adicional: `tests/test_github_ticket_contract.py` terminó con
 demuestra publicación real y elimina el bloqueo de permisos, pero no completa
 4.4 ni 8.4: aún no existe una invocación de pensamiento autorizada en esta
 sesión, ni el primer/segundo PR documental con merges humanos.
+
+## Greenfield real: invocación y PR (2026-10-24)
+
+La autorización explícita `operator-instruction-f2-greenfield-20261024-1`
+permitió exactamente una invocación nueva. La primera ejecución del coordinador
+se detuvo antes del agente porque el runtime cargaba la configuración antigua y
+el scope guard rechazaba los dos scaffolds `.gitkeep` oficiales de OpenSpec;
+no hubo consumo. Se corrigió la allowlist y se verificó con `29 passed`.
+
+Después se ejecutó una sola invocación real, sin fallback ni reintento:
+
+- proyecto: `f2-e2e-gacela-20261023e`;
+- repositorio: `silverberdi/mini-me-f2-e2e-20261023`;
+- ZIP: `3eed0aacf1f3cbe4361805b914d4fe659dbca69266f55279cdc55c10eef12e81`;
+- modelo/esfuerzo: `gpt-5.6-luna` / `medium`;
+- aislamiento: Bubblewrap, worktree del proyecto y runtime separado;
+- resultado Codex: `exit_code=0`, `timed_out=false`, duración `71213 ms`;
+- uso observado: `222562` input, `200960` cached input, `6535` output.
+
+Codex produjo el catálogo documental, `context/INDEX.md`, procedencia e
+original bajo `context/incoming/<sha>/`. La validación de candidato, scope y
+OpenSpec oficial pasó. El commit posterior falló inicialmente por ausencia de
+identidad Git en el worktree; el candidato quedó preservado en cuarentena y se
+recuperó sin nueva inferencia configurando una identidad técnica no sensible.
+
+Resultado publicado mediante la GitHub App:
+
+- base `main`: `fa4eb55699b2169e5ff88059504872f17df617ce`;
+- rama: `minime/bootstrap/f2-e2e-gacela-20261023e-3eed0aacf1f3`;
+- commit: `16dd7f3ad84800c242d57790aea895881734edc9`;
+- PR Greenfield Draft: https://github.com/silverberdi/mini-me-f2-e2e-20261023/pull/2;
+- estado persistido: `PR_PENDING`;
+- `main` permaneció intacta.
+
+La tarea 4.4 queda completa con esta evidencia. La tarea 8.4 permanece
+pendiente hasta observar el merge humano del PR #2 y ejecutar, con autorización
+independiente, el contexto incremental y su segundo PR. No se fusionó ningún
+PR ni se inició F3.
