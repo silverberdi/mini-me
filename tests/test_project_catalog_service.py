@@ -80,6 +80,39 @@ def test_catalog_exposes_only_read_only_discovered_models(monkeypatch):
     assert catalog["capability_discovery"].startswith("read-only")
 
 
+def test_catalog_derives_legacy_role_capabilities_from_native_invocations(monkeypatch):
+    import minime.services.project_catalog_service as catalog_module
+
+    antigravity = ProviderConfig(
+        command="agy",
+        roles=["implementer", "reviewer"],
+        invocation={
+            "implementer": CliInvocationConfig(args=["--mode", "accept-edits", "--print={prompt}"]),
+            "reviewer": CliInvocationConfig(args=["--mode", "plan", "--print={prompt}"]),
+        },
+    )
+    config = AppConfig(providers={"antigravity": antigravity})
+    monkeypatch.setattr(catalog_module.shutil, "which", lambda _: "/bin/agy")
+    monkeypatch.setattr(
+        catalog_module,
+        "get_provider_adapter",
+        lambda provider_id, config: _Capabilities(
+            provider_id, {"models": {"gemini-3.8-flash-medium": ["medium"]}}
+        ),
+    )
+
+    native = _NativeSetup()
+    native.discover_official_integrations = lambda agents: {
+        "version": "test",
+        "integrations": {agent: ["apply-change"] for agent in agents},
+    }
+    catalog = asyncio.run(ProjectCatalogService(config, native).agent_catalog())
+
+    agent = catalog["agents"][0]
+    assert agent["file_edit_roles"] == ["implementer"]
+    assert agent["read_only_roles"] == ["reviewer"]
+
+
 def test_catalog_does_not_fabricate_models_when_discovery_fails(monkeypatch):
     import minime.services.project_catalog_service as catalog_module
 

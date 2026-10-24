@@ -286,13 +286,14 @@ Historical closure update (2026-10-24): the read-only production census was
 copied without secrets to two disposable PostgreSQL databases. The authentic
 rows survived `upgrade head`, downgrade to `r02_contract_review_budget_identity`,
 and re-upgrade: the exact two projects, 34 bindings, two managed bindings,
-auth/evidence rows and budget evidence remained readable. `mini-me` and the
-fixture remain `BROWNFIELD/CONFIGURED`, not `PREPARED`, until their real F2
-profiles and capabilities are verified. Codex `gpt-5.6-luna/medium` is
-observable; Antigravity and `gemini-3.8-flash-medium` are not observable in the
-current runtime. Therefore 7.1b and 8.5 remain open under the fail-closed
-contract; no profile or credential was fabricated and no production migration
-was run.
+auth/evidence rows and budget evidence remained readable. Under the actual
+`minime` service identity, Codex `gpt-5.6-luna/medium` and Antigravity
+`gemini-3.8-flash-medium/medium` are observable with the required role
+capabilities and official OpenSpec setup. The four profiles and separate
+GitHub connections were persisted only in disposable copies; both rows became
+`PREPARED` there without changing production, fabricating credentials or
+rewriting workspaces. This closes 7.1b and supplies the historical acceptance
+evidence for 8.5.
 
 ### Authorized external verification — 2026-10-23
 

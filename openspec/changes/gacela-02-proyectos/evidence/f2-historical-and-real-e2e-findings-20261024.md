@@ -182,13 +182,13 @@ El catálogo F2 del runtime actualizado observó:
   verificable en este entorno.
 
 La selección histórica autorizada exige Antigravity como revisor independiente
-con `gemini-3.8-flash-medium`; por el contrato de validación fail-closed no es
-válido persistir esa selección como si estuviera disponible ni conferir
-`PREPARED` desde el sentinel legacy. Por ello 7.1b permanece correctamente
-pendiente: la preservación y migración están demostradas, pero la elegibilidad
-histórica completa requiere una capacidad Antigravity observable y su
-configuración real. El fixture sigue aislado y no hereda credenciales del
-proyecto principal.
+con `gemini-3.8-flash-medium`. Bajo la identidad efectiva `minime` del
+servicio, `agy models` expuso esa variante y `medium`; el catálogo F2 observó
+Antigravity como `OBSERVED_READ_ONLY`, con capacidad de revisión y OpenSpec
+oficial. Los cuatro perfiles fueron validados y persistidos, con fallback
+desactivado, en ambas copias desechables. 7.1b queda demostrada sin alterar
+producción: el fixture sigue aislado y no hereda credenciales del proyecto
+principal.
 
 ## Clasificación de aceptación 8.5
 
@@ -196,7 +196,7 @@ La E2E Greenfield/incremental y su evidencia de merges ya están completas en
 `f2-disposable-greenfield-merge-20261024.md`; no se repitieron agentes ni
 merges. La regresión focalizada F2 de 98 pruebas, Ruff afectado, OpenSpec
 strict y `git diff --check` continúan pasando. La regresión completa del
-runtime actualizado terminó con 744 pasadas, 10 omitidas y 8 fallos. La
+runtime actualizado terminó con 746 pasadas, 10 omitidas y 7 fallos. La
 clasificación reproducida es:
 
 1. El test de fallback de `MINIME_RUNTIME_ROOT` conserva el contrato antiguo
@@ -210,33 +210,32 @@ clasificación reproducida es:
 6. El fixture remoto contenía dos AppleDouble `._*.js`; fueron retirados solo
    del runtime desechable y `tests/test_pwa_assets.py` pasó 2/2. El checkout
    publicado no contiene esos archivos.
-7. Un test de perfiles F1 exige DeepSeek Direct para code review; no es una
-   capacidad ni una selección del contrato F2.
-8. El preflight Antigravity falla porque la CLI no expone catálogo de modelos;
-   coincide con el estado F2 `UNAVAILABLE` y debe seguir bloqueando fail-closed.
+7. Dos tests de perfiles F1 exigen DeepSeek Direct o ejecutan el preflight
+   legacy de Antigravity, que no usa el catálogo F2 autenticado; no son
+   capacidades ni selecciones del contrato F2. Bajo `minime`, el preflight F2
+   sí observa Antigravity y el modelo requerido.
 
 No se ocultan estos fallos como PASS. No queda un defecto de preservación
 atribuible a la migración F2 en la copia auténtica.
 
-8.5 no se marca completa porque su matriz exige reconciliar también la
-elegibilidad histórica con capacidades realmente observadas y cerrar el gate
-de revisión independiente. La única dependencia externa concreta es hacer
-observable/configurar Antigravity con el modelo y workflow oficial autorizados,
-o tomar una decisión explícita del propietario sobre una alternativa que el
-catálogo actual verifique; no se inventa una selección ni se modifica
-producción para sortearla.
+8.5 queda satisfecha en el alcance del Change: la matriz de Issue #170, el
+Removal Ledger, el diff, la evidencia E2E real, la migración desechable y la
+regresión focalizada están reconciliados. Los 7 fallos de la regresión completa
+siguen clasificados como ambiente/legacy y no son defectos F2; el checkout
+publicado no contiene AppleDouble. La aceptación no incluye migración ni
+despliegue productivo.
 
 ## Revalidación posterior a la confirmación del operador (2026-10-24)
 
-Se volvió a consultar el runtime F2 sin invocar ningún agente. La CLI existe
-en `/usr/local/bin/agy`, pero `ProjectCatalogService` continúa devolviendo
-`capability_status=UNAVAILABLE`, `models={}` y ningún workflow nativo para
-Antigravity. La comprobación directa no inferente `agy models` termina con
-`Please sign in to view available models`; por tanto, la sesión efectiva del
-servicio aún no tiene una autenticación/catálogo observable aunque el binario
-esté instalado. Codex continúa observable. 7.1b y 8.5 permanecen pendientes
-hasta que esa misma identidad de servicio devuelva el modelo y esfuerzo
-autorizados mediante el catálogo oficial.
+Se volvió a consultar el runtime F2 sin invocar ningún agente. La unidad
+`minime-api` corre como usuario `minime`, con `HOME=/var/lib/minime`; bajo esa
+misma identidad `agy models` expuso `gemini-3.8-flash-medium` y `medium`.
+El catálogo F2 observó ambos proveedores y la validación de perfiles terminó
+correctamente. La comprobación previa que devolvía `UNAVAILABLE` correspondía
+al usuario interactivo `silverman`, no al servicio. Se corrigió el catálogo
+para derivar de forma verificable las capacidades de configuración antigua a
+partir de sus invocaciones nativas (`accept-edits`/`plan`, `exec`/`review`), sin
+copiar sesiones ni credenciales.
 
 Corrección de interpretación: el propietario confirmó que la GitHub App ya
 estaba configurada con `Contents: Read and write` y `Pull requests: Read and

@@ -75,6 +75,38 @@ class ProjectCatalogService:
         """Return provider definitions only; no project connection can enter this response."""
         return [dict(item) for item in self.PROVIDERS]
 
+    @staticmethod
+    def _observed_role_capabilities(provider_id: str, provider, invocation_profiles: dict[str, Any]) -> tuple[set[str], set[str]]:
+        """Preserve capability semantics for older configs that omitted role lists.
+
+        The fallback is intentionally narrow: it recognizes only the native
+        invocation shapes already configured for the provider. It never grants
+        a capability from the provider's broad role list alone.
+        """
+        file_edit_roles = set(provider.file_edit_roles)
+        read_only_roles = set(provider.read_only_roles)
+        for role in invocation_profiles:
+            invocation = provider.invocation.get(role)
+            args = list(invocation.args) if invocation is not None else []
+            if provider_id in {"antigravity", "agy"}:
+                mode = None
+                for index, argument in enumerate(args):
+                    if argument == "--mode" and index + 1 < len(args):
+                        mode = args[index + 1]
+                    elif argument.startswith("--mode="):
+                        mode = argument.split("=", 1)[1]
+                if role == "implementer" and mode == "accept-edits":
+                    file_edit_roles.add(role)
+                if role == "reviewer" and mode == "plan":
+                    read_only_roles.add(role)
+            elif provider_id == "codex":
+                operation = args[0] if args else None
+                if role == "implementer" and operation in {"exec", "apply"}:
+                    file_edit_roles.add(role)
+                if role == "reviewer" and operation in {"review", "verify"}:
+                    read_only_roles.add(role)
+        return file_edit_roles, read_only_roles
+
     async def agent_catalog(self, project_root: str | Path | None = None) -> dict[str, Any]:
         agents: list[dict[str, Any]] = []
         for provider_id, provider in sorted(self.config.providers.items()):
@@ -134,8 +166,14 @@ class ProjectCatalogService:
                 "capability_status": capability_status,
                 "roles": [role for role in provider.roles if role in invocation_profiles],
                 "invocations": invocation_profiles,
-                "file_edit_roles": sorted(set(provider.file_edit_roles) & set(invocation_profiles)),
-                "read_only_roles": sorted(set(provider.read_only_roles) & set(invocation_profiles)),
+                "file_edit_roles": sorted(
+                    self._observed_role_capabilities(provider_id, provider, invocation_profiles)[0]
+                    & set(invocation_profiles)
+                ),
+                "read_only_roles": sorted(
+                    self._observed_role_capabilities(provider_id, provider, invocation_profiles)[1]
+                    & set(invocation_profiles)
+                ),
                 "models": models,
                 "native_openspec_setup": False,
             }
