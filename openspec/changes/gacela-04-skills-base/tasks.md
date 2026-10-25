@@ -36,7 +36,7 @@
 - [x] 5.1 Definir la matriz de pruebas proporcional por tipo de proyecto, distinguiendo unitarias, integración, negativas, regresión y E2E real de mocks.
 - [x] 5.2 Implementar pruebas automatizadas del valor funcional de un Request vertical usando las interfaces reales apropiadas al fixture, sin exigir stack o despliegue ajeno.
 - [x] 5.3 Ejecutar un recorrido determinista Greenfield con agente simulado para instalación, normalización, comentarios, PR y validaciones técnicas, sin presentarlo como E2E de agente real.
-- [ ] 5.4 Ejecutar el E2E autorizado de Greenfield con agente real cuando F3, credenciales, cuota, repositorio desechable y permisos estén verificables; demostrar normalización real, capacidades Codex/Antigravity, GitHub y coordinación F3, conservar hashes, consumo y evidencias, y reutilizar evidencia F3 válida sin repetir su E2E.
+- [x] 5.4 Ejecutar el E2E autorizado de Greenfield con agente real cuando F3, credenciales, cuota, repositorio desechable y permisos estén verificables; demostrar normalización real, capacidades Codex/Antigravity, GitHub y coordinación F3, conservar hashes, consumo y evidencias, y reutilizar evidencia F3 válida sin repetir su E2E.
 - [x] 5.5 Censar consumidores estáticos, dinámicos y de configuración de cada ruta sustituida antes de retirar código, tests, dependencias o configuración.
 - [x] 5.6 Retirar solo las rutas huérfanas demostradas dentro de F4 y conservar consumidores legítimos, datos históricos y compatibilidad necesaria.
 - [x] 5.7 Ejecutar regresión después del retiro y registrar brevemente lo conservado y la razón, sin exigir un Removal Ledger universal o verificaciones postdeploy fuera del alcance.
