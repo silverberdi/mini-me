@@ -254,6 +254,7 @@ async def test_coordinator_requires_and_persists_structured_semantic_message(tmp
     assert normalized_body.startswith("Feature: Ordenación")
     assert persisted["criteria"] == ["C1", "C2", "C3"]
     assert persisted["semantic_message"].startswith("Se normalizó")
+    assert "rejected_response" not in run.stop_details
     assert any("Original Request" in str(item["body"]) for item in comments)
     assert any("Se normalizó" in str(item["body"]) for item in comments)
     assert run.current_stage is OrchestrationStage.ADMITTED
@@ -405,6 +406,7 @@ async def test_invalid_gherkin_is_quarantined_and_never_published(tmp_path: Path
                 "normalized_body": "Feature: incompleta\n\nScenario: Sin pasos",
                 "criteria": ["C1"],
                 "semantic_message": "La respuesta no cumple el formato requerido.",
+                "api_key": "do-not-persist-this-secret",
             }
             return AgentExecutionResult(
                 exit_code=0,
@@ -452,15 +454,14 @@ async def test_invalid_gherkin_is_quarantined_and_never_published(tmp_path: Path
     )
 
     assert result is None
-    assert error == (
-        "Invalid Gherkin: missing en Gherkin 'Given' step; "
-        "missing en Gherkin 'When' step; missing en Gherkin 'Then' step"
-    )
+    assert error == "Request normalization response was not structured."
     assert writes == []
     quarantine = run.stop_details["rejected_response"]
     assert quarantine["status"] == "QUARANTINED"
     assert quarantine["byte_length"] > 0
     assert quarantine["content"].startswith("{")
+    assert "do-not-persist-this-secret" not in quarantine["content"]
+    assert "[REDACTED]" in quarantine["content"]
     assert run.stop_details["normalization_attempt"]["response_status"] == "INVALID"
 
 

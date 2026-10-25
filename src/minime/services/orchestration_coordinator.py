@@ -45,6 +45,37 @@ from minime.services.worktree_manager import WorktreeManager
 
 logger = get_logger("services.orchestration_coordinator")
 
+_SENSITIVE_RESPONSE_KEYS = (
+    "api_key",
+    "apikey",
+    "access_key",
+    "client_secret",
+    "password",
+    "private_key",
+    "secret",
+    "token",
+)
+
+
+def _quarantine_response_content(raw_response: str) -> str:
+    """Retain rejected JSON diagnostically while masking sensitive fields."""
+    try:
+        payload = json.loads(raw_response)
+    except json.JSONDecodeError:
+        return redact_secrets(raw_response)
+
+    def scrub(value: Any, key: str | None = None) -> Any:
+        normalized_key = (key or "").lower().replace("-", "_")
+        if any(marker in normalized_key for marker in _SENSITIVE_RESPONSE_KEYS):
+            return "[REDACTED]"
+        if isinstance(value, dict):
+            return {str(item_key): scrub(item_value, str(item_key)) for item_key, item_value in value.items()}
+        if isinstance(value, list):
+            return [scrub(item) for item in value]
+        return redact_secrets(value)
+
+    return json.dumps(scrub(payload), ensure_ascii=False, sort_keys=True)
+
 
 @dataclass(frozen=True)
 class OrchestrationCoordinationResult:
@@ -296,7 +327,7 @@ class NativeOrchestrationCoordinator:
                     "attempt_id": attempt["attempt_id"],
                     "sha256": hashlib.sha256(response_bytes).hexdigest(),
                     "byte_length": len(response_bytes),
-                    "content": redact_secrets(raw_response)[: CliAgentRunner.MAX_STRUCTURED_OUTPUT_BYTES],
+                    "content": _quarantine_response_content(raw_response)[: CliAgentRunner.MAX_STRUCTURED_OUTPUT_BYTES],
                     "content_truncated": len(response_bytes) > CliAgentRunner.MAX_STRUCTURED_OUTPUT_BYTES,
                 }
                 self._persist_run_stop_details(active_run, details)
@@ -333,6 +364,7 @@ class NativeOrchestrationCoordinator:
                 ).hexdigest()
             try:
                 validate_normalized_body(normalized.normalized_body)
+                details.pop("rejected_response", None)
                 if normalized.semantic_message.strip():
                     service.semantic_comment(
                         normalized.semantic_message,
