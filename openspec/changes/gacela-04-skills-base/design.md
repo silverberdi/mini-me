@@ -31,12 +31,19 @@ El cambio debe hacer utilizables las capacidades mínimas de F4 sin convertirlas
 - Worktree/repository guards, confinamiento, preflight CLI, autenticación, capacidad y evidencia existentes protegen el runtime; no se copian al proyecto ni se reemplazan por hooks.
 - Las skills oficiales `openspec-*`, `minime-pr-preparer` y los guards ya instalados se reutilizan por referencia. No se crea otra versión de sus instrucciones.
 
+### S01: normalización antes de Explore
+
+- La normalización Gherkin se ejecuta como el primer paso del mismo Run F4, después de admitir el Issue y preparar el Worktree autorizado, pero antes de invocar Explore.
+- El coordinador reutiliza el Run, la identidad, el Worktree, el checkpoint y el agente de pensamiento ya seleccionados; no crea un Run paralelo ni reescribe un Issue que ya sea Gherkin completo.
+- El agente produce el contenido Gherkin y la interpretación de criterios. `GitHubAdapter` conserva literalmente el cuerpo original en un comentario, actualiza el cuerpo con control de versión y confirma el resultado remoto.
+
 ### ADAPT: contratos pequeños en sus propietarios
 
 - Adaptar el flujo de preparación Greenfield para resolver un manifest de capacidades por perfil desde el catálogo observado, instalar solo recursos compatibles y verificar disponibilidad ligera en reanudaciones.
 - Adaptar la preparación de contexto del agente para incluir Request, comentarios, adjuntos, decisiones y referencias canónicas sin copias divergentes.
 - Adaptar el contenido semántico de las skills de comunicación/PR, mientras el adaptador GitHub solo consulta y publica de forma determinista, con español sencillo, enlaces verificables, ausencia de secretos y deduplicación remota.
 - Mantener los PR de implementación y documental dentro de la integración mínima de F3; F4 no decide complejidad, revisión, merge o cierre.
+- `PrPreparerService` y `minime-pr-preparer` reciben el Request normalizado y las evidencias reales para que el agente redacte título y cuerpo; el código conserva identidad de repositorio, SHA, referencias no cerradoras, validación y publicación mediante `GitHubAdapter`.
 
 ### ADAPT: skills existentes en ambas instalaciones
 
@@ -62,6 +69,10 @@ Los comentarios y PR se publican únicamente mediante GitHub y con candidato/Iss
 ### Pruebas y retiro
 
 El recorrido de aceptación usa un Issue de prueba controlado y un fixture Greenfield desechable, agentes reales solo cuando Apply/E2E esté autorizado, y pruebas locales deterministas para errores, idempotencia y seguridad. Mocks pueden probar contratos aislados, pero no se presentan como E2E. Un censo de callers, configuración y dependencias precede cualquier retiro; datos históricos y compatibilidad legítima se conservan.
+
+La evidencia E2E debe identificar el Run y Worktree, el Request original y normalizado, los perfiles Codex/Antigravity observados, la instalación oficial OpenSpec, los comentarios y el cuerpo remoto, las ramas/SHA/PR y la coordinación F3. Las evidencias auténticas de F3 se reutilizan cuando sus hashes y alcance siguen coincidiendo; no se repiten E2E de F3. La indisponibilidad de capacidad o autorización se registra como `NOT_VERIFIED`/`WAITING_CAPACITY`.
+
+La preparación para F5 se limita a comprobar, en un Greenfield aislado, que mini me puede seleccionar sus propios perfiles instalados, resolver OpenSpec oficial, usar su Worktree/confinamiento y recorrer el mismo contrato de coordinación. No instala Brownfield ni implementa el Change F5.
 
 ### Cobertura de aceptación del Issue #172
 

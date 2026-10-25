@@ -61,3 +61,10 @@ The system SHALL reuse the existing preflight, confinement, worktree, authentica
 - **THEN** it SHALL use the prepared resources and perform only the light availability checks required by the existing lifecycle
 - **AND** it SHALL not spend quota on routine reinstallation
 
+#### Scenario: Greenfield is ready for mini me to execute F5
+
+- **WHEN** the Greenfield bootstrap is used to prepare the mini me project itself for the later F5 phase
+- **THEN** the isolated validation SHALL demonstrate the configured Codex and Antigravity profiles, official OpenSpec workflow resolution, Worktree identity, confinement, and GitHub coordination bindings
+- **AND** it SHALL record the capability evidence without executing or installing F5
+- **AND** it SHALL not modify Brownfield projects, production, PostgreSQL operational state, or the scheduler
+

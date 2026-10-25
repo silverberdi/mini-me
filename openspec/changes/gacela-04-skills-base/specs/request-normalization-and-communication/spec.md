@@ -6,7 +6,7 @@ Provide one small, traceable contract for turning a remote Request into usable G
 
 ### Requirement: Request normalization preserves source authority
 
-The system SHALL normalize an eligible GitHub Request into complete valid Gherkin on the same Issue while preserving the complete original body in a comment on that Issue, together with comments, attachments, all identified acceptance criteria, and stable criterion identifiers.
+The system SHALL normalize an eligible GitHub Request into complete valid Gherkin before invoking OpenSpec Explore, reusing the same Run, authorized Worktree, continuity checkpoint, and configured thinking agent. It SHALL update the same Issue while preserving the complete original body literally in a comment on that Issue, together with comments, attachments, all identified acceptance criteria, and stable criterion identifiers. An Issue already expressed as complete precise Gherkin SHALL continue without semantic rewrite.
 
 #### Scenario: Informal Request becomes a vertical slice
 
@@ -14,12 +14,14 @@ The system SHALL normalize an eligible GitHub Request into complete valid Gherki
 - **THEN** the normalized body SHALL fully express one vertical slice with observable Given, When, and Then scenarios
 - **AND** the complete original body SHALL be preserved verbatim in a comment on the same Issue
 - **AND** every identified acceptance criterion SHALL remain represented and traceable
+- **AND** Explore SHALL receive the normalized Request only after source-preservation and remote-version postconditions pass
 
 #### Scenario: Existing Gherkin is preserved
 
 - **WHEN** the Issue body is already complete and precise Gherkin
 - **THEN** the system SHALL preserve its meaning without duplicating criteria or comments
 - **AND** it SHALL still preserve the complete source body according to the Request provenance contract
+- **AND** the existing Run SHALL continue to Explore without rewriting the Issue body
 
 #### Scenario: Material ambiguity remains explicit
 
@@ -39,6 +41,14 @@ The system SHALL normalize an eligible GitHub Request into complete valid Gherki
 - **WHEN** a retry or remote concurrent edit occurs before publishing normalization
 - **THEN** the system SHALL re-read the remote Issue, avoid overwriting unrelated changes, and avoid duplicate comments
 - **AND** it SHALL verify the resulting remote version before continuing
+
+#### Scenario: Original body is preserved through the GitHub adapter
+
+- **WHEN** the agent-produced normalization is ready to publish
+- **THEN** `GitHubAdapter` SHALL re-read the Issue version before updating its body
+- **AND** SHALL create or reconcile one idempotent provenance comment containing the original body literally
+- **AND** SHALL confirm the updated body and comment remotely before Explore starts
+- **AND** SHALL leave the candidate and checkpoint intact if the version or postcondition cannot be confirmed
 
 ### Requirement: Delivery communication is concise Spanish
 
@@ -70,4 +80,5 @@ The system SHALL prepare implementation and documentary PR content from verified
 
 - **WHEN** the first PR is merged and native Sync and Archive finish on a fresh closure branch
 - **THEN** the documentary PR SHALL identify the implementation PR, synchronized documentation, and evidence while retaining F3 merge rules
+- **AND** `PrPreparerService` SHALL obtain the semantic title/body from `minime-pr-preparer` using the Request and evidence, while code validates repository, base/head SHA, non-closing references, and remote identity before publication
 

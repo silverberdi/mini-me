@@ -35,6 +35,20 @@ The adapted `minime-real-e2e-proof` skill in both Codex and Antigravity installa
 - **WHEN** the project is a web, mobile, console, API, or library project
 - **THEN** the test guidance SHALL use its existing tools and shall not require an unrelated browser, deployment, provider, or stack
 
+#### Scenario: F4 E2E evidence is concrete and scoped
+
+- **WHEN** F4 records evidence for the Greenfield journey
+- **THEN** the evidence SHALL identify Request normalization, preservation of the original body, observed Codex and Antigravity capabilities, official OpenSpec setup, GitHub branches/SHAs/PRs, and the F3 coordination checkpoints
+- **AND** still-valid F3 evidence SHALL be reused by exact Run, repository, SHA, and scope identity instead of repeating the F3 E2E
+- **AND** mocks MAY verify isolated contracts but SHALL NOT establish functional PASS for the real-agent journey
+- **AND** missing authorization, quota, or capacity SHALL be recorded as `NOT_VERIFIED` or `WAITING_CAPACITY`, never as PASS
+
+#### Scenario: F5 preparation remains bounded
+
+- **WHEN** F4 validates readiness for mini me to execute F5 later
+- **THEN** the validation SHALL check installed profiles, official OpenSpec workflows, Worktree/confinement, and GitHub coordination interfaces in isolated Greenfield
+- **AND** it SHALL not implement F5, install capabilities in Brownfield, deploy, migrate operational PostgreSQL, or enable the scheduler
+
 ### Requirement: Superseded code is retired safely
 
 The adapted `minime-safe-retirement` skill in both Codex and Antigravity installations SHALL retire only routes, tests, dependencies, configuration, or data structures demonstrated to be obsolete within the Change after migrating real consumers and running pertinent tests. It SHALL use proportional evidence and SHALL NOT impose a universal Removal Ledger, postdeploy verification, or R01–R10 procedure.
