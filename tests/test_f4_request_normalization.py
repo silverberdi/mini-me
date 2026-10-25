@@ -1,5 +1,6 @@
 """F4 deterministic contracts: Issue provenance, semantic PRs and capabilities."""
 
+import hashlib
 import json
 from pathlib import Path
 from types import SimpleNamespace
@@ -386,6 +387,70 @@ def test_greenfield_capability_manifest_is_idempotent_and_preserves_conflicts(tm
     (target / ".agents/skills/minime-example/SKILL.md").write_text("changed", encoding="utf-8")
     with pytest.raises(CapabilityConflictError):
         service.install_greenfield(source, target)
+
+
+def test_greenfield_capability_reconciliation_replaces_only_verified_predecessor(tmp_path: Path):
+    source = tmp_path / "source"
+    target = tmp_path / "target"
+    source_file = source / ".agents/skills/minime-request-normalizer/SKILL.md"
+    target_file = target / ".agents/skills/minime-request-normalizer/SKILL.md"
+    source_file.parent.mkdir(parents=True)
+    target_file.parent.mkdir(parents=True)
+    source_file.write_text("normalized_body criteria semantic_message", encoding="utf-8")
+    target_file.write_text("normalized_body criteria", encoding="utf-8")
+    old_hash = hashlib.sha256(target_file.read_bytes()).hexdigest()
+    service = CapabilityManifestService()
+    profiles = {"thinking": {"agent_id": "codex", "skills": ["minime-request-normalizer"]}}
+
+    result = service.reconcile_greenfield(
+        source,
+        target,
+        profiles=profiles,
+        expected_existing_hashes={".agents/skills/minime-request-normalizer/SKILL.md": old_hash},
+        project_type="GREENFIELD",
+    )
+
+    assert result["replacements"][0]["from_sha256"] == old_hash
+    assert target_file.read_text(encoding="utf-8") == source_file.read_text(encoding="utf-8")
+    again = service.reconcile_greenfield(
+        source,
+        target,
+        profiles=profiles,
+        expected_existing_hashes={".agents/skills/minime-request-normalizer/SKILL.md": old_hash},
+        project_type="GREENFIELD",
+    )
+    assert again["replacements"] == []
+
+
+def test_greenfield_capability_reconciliation_preserves_unverified_conflict_and_brownfield(tmp_path: Path):
+    source = tmp_path / "source"
+    target = tmp_path / "target"
+    source_file = source / ".agents/skills/minime-request-normalizer/SKILL.md"
+    target_file = target / ".agents/skills/minime-request-normalizer/SKILL.md"
+    source_file.parent.mkdir(parents=True)
+    target_file.parent.mkdir(parents=True)
+    source_file.write_text("new", encoding="utf-8")
+    target_file.write_text("third-party", encoding="utf-8")
+    service = CapabilityManifestService()
+    profiles = {"thinking": {"agent_id": "codex", "skills": ["minime-request-normalizer"]}}
+
+    with pytest.raises(CapabilityConflictError):
+        service.reconcile_greenfield(
+            source,
+            target,
+            profiles=profiles,
+            expected_existing_hashes={".agents/skills/minime-request-normalizer/SKILL.md": "0" * 64},
+            project_type="GREENFIELD",
+        )
+    assert target_file.read_text(encoding="utf-8") == "third-party"
+    with pytest.raises(CapabilityConflictError):
+        service.reconcile_greenfield(
+            source,
+            target,
+            profiles=profiles,
+            expected_existing_hashes={},
+            project_type="BROWNFIELD",
+        )
 
 
 def test_deterministic_greenfield_vertical_journey_uses_real_contracts(tmp_path: Path):

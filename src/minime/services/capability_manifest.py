@@ -102,6 +102,73 @@ class CapabilityManifestService:
             installed.append(relative.as_posix())
         return self.inspect(target, selected_paths=selected_paths)
 
+    def reconcile_greenfield(
+        self,
+        source_root: str | Path,
+        target_root: str | Path,
+        *,
+        profiles: dict[str, Any],
+        expected_existing_hashes: dict[str, str],
+        project_type: str,
+    ) -> dict[str, Any]:
+        """Replace only a verified stale Greenfield capability.
+
+        A replacement is permitted only when the current file hash matches
+        the recorded predecessor hash. Unselected, symlinked, external, and
+        Brownfield paths remain fail-closed.
+        """
+        if project_type != "GREENFIELD":
+            raise CapabilityConflictError("Capability reconciliation is restricted to Greenfield projects")
+        source = Path(source_root).resolve(strict=True)
+        target = Path(target_root).resolve(strict=True)
+        if source == target:
+            raise CapabilityConflictError("Capability source and Greenfield target must be isolated")
+        selected_paths = self._selected_paths(profiles)
+        source_files = self._candidate_files(source, selected_paths)
+        available = {path.relative_to(source).as_posix() for path in source_files}
+        missing = sorted(selected_paths - available)
+        if missing:
+            raise CapabilityUnavailableError(
+                "Selected profile capabilities are unavailable: " + ", ".join(missing)
+            )
+
+        replacements: list[dict[str, str]] = []
+        installed: list[str] = []
+        for source_path in source_files:
+            relative = source_path.relative_to(source)
+            relative_name = relative.as_posix()
+            target_path = target / relative
+            cursor = target
+            for part in relative.parts[:-1]:
+                cursor /= part
+                if cursor.is_symlink():
+                    raise CapabilityConflictError(f"Capability target traverses a symlink: {relative_name}")
+            if target_path.is_symlink():
+                raise CapabilityConflictError(f"Capability target is a symlink: {relative_name}")
+            source_bytes = source_path.read_bytes()
+            source_hash = hashlib.sha256(source_bytes).hexdigest()
+            if target_path.exists():
+                if not target_path.is_file():
+                    raise CapabilityConflictError(f"Capability target is not a file: {relative_name}")
+                current_hash = hashlib.sha256(target_path.read_bytes()).hexdigest()
+                if current_hash == source_hash:
+                    installed.append(relative_name)
+                    continue
+                expected_hash = expected_existing_hashes.get(relative_name)
+                if expected_hash is None or current_hash != expected_hash:
+                    raise CapabilityConflictError(f"Capability conflict preserved: {relative_name}")
+                target_path.write_bytes(source_bytes)
+                replacements.append(
+                    {"path": relative_name, "from_sha256": current_hash, "to_sha256": source_hash}
+                )
+            else:
+                target_path.parent.mkdir(parents=True, exist_ok=True)
+                target_path.write_bytes(source_bytes)
+            installed.append(relative_name)
+        evidence = self.inspect(target, selected_paths=selected_paths)
+        evidence.update({"reconciled": True, "replacements": replacements, "installed": installed})
+        return evidence
+
     def inspect(self, target_root: str | Path, *, selected_paths: set[str] | None = None) -> dict[str, Any]:
         target = Path(target_root).resolve(strict=True)
         files = self._candidate_files(target, selected_paths)
