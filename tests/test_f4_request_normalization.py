@@ -1,6 +1,7 @@
 """F4 deterministic contracts: Issue provenance, semantic PRs and capabilities."""
 
 import json
+from types import SimpleNamespace
 from pathlib import Path
 
 import httpx
@@ -8,6 +9,8 @@ import pytest
 
 from minime.adapters.github import GitHubAdapter
 from minime.domain.enums import ExternalOutcome
+from minime.domain.enums import OrchestrationStage
+from minime.domain.models import OrchestrationRun
 from minime.services.agent_runner import AgentExecutionResult
 from minime.services.capability_manifest import CapabilityConflictError, CapabilityManifestService
 from minime.services.orchestration_coordinator import NativeOrchestrationCoordinator
@@ -125,6 +128,96 @@ Scenario: Salida estable
     assert len(comments) == 2
     assert sum("Original Request" in str(item["body"]) for item in comments) == 1
     assert sum("minime-request-normalization-semantic" in str(item["body"]) for item in comments) == 1
+
+
+@pytest.mark.asyncio
+async def test_coordinator_requires_and_persists_structured_semantic_message(tmp_path: Path):
+    issue = {"number": 11, "body": "C1: ordenar. C2: conservar. C3: explicar.", "repository_url": "/repos/o/r"}
+    comments: list[dict[str, object]] = []
+
+    class Github:
+        def get_issue(self, *_):
+            return SimpleNamespace(
+                outcome=ExternalOutcome.SUCCESS,
+                data=issue,
+                observed_evidence={"etag": '"v1"'},
+            )
+
+        def list_issue_comments(self, *_):
+            return SimpleNamespace(outcome=ExternalOutcome.SUCCESS, data=comments)
+
+        def comment_issue(self, _repo, _number, body, _key):
+            if not any(item["body"] == body for item in comments):
+                comments.append({"id": len(comments) + 1, "body": body})
+            return SimpleNamespace(outcome=ExternalOutcome.SUCCESS, data=comments[-1])
+
+        def update_issue_body(self, _repo, _number, body, expected_version=None):
+            issue["body"] = body
+            return SimpleNamespace(outcome=ExternalOutcome.SUCCESS, data=issue)
+
+    class Runner:
+        def resolve_workflow(self, **_kwargs):
+            return object()
+
+        async def run(self, **_kwargs):
+            payload = {
+                "normalized_body": (
+                    "Feature: Ordenación\n\nScenario: Criterios\n"
+                    "  Given una entrada\n  When se ordena\n  Then C1 C2 y C3 permanecen trazables"
+                ),
+                "criteria": ["C1", "C2", "C3"],
+                "semantic_message": "Se normalizó el Request y se conservaron C1, C2 y C3.",
+            }
+            encoded = json.dumps(payload, ensure_ascii=False)
+            return AgentExecutionResult(
+                exit_code=0,
+                timed_out=False,
+                stdout=[],
+                stderr=[],
+                duration_ms=1,
+                structured_output=[encoded],
+                diagnostic_output=[],
+            )
+
+    run = OrchestrationRun(project_id="project", change_name="issue-11", base_sha="main")
+
+    class Runs:
+        def get_by_id(self, _run_id):
+            return run
+
+        def save(self, value):
+            nonlocal run
+            run = value
+
+    class Uow:
+        orchestration_runs = Runs()
+
+        def commit(self):
+            return None
+
+    coordinator = NativeOrchestrationCoordinator(
+        uow_factory=Uow,
+        github_adapter=Github(),
+        worktree_manager=object(),
+        agent_runner=Runner(),
+    )
+    persisted, normalized_body = await coordinator._normalize_request_before_explore(
+        active_run=run,
+        project_id="project",
+        repository="o/r",
+        worktree_path=tmp_path,
+        issue_number=11,
+        issue_title="Criterios",
+        issue_body=issue["body"],
+        provider="codex",
+    )
+
+    assert normalized_body.startswith("Feature: Ordenación")
+    assert persisted["criteria"] == ["C1", "C2", "C3"]
+    assert persisted["semantic_message"].startswith("Se normalizó")
+    assert any("Original Request" in str(item["body"]) for item in comments)
+    assert any("Se normalizó" in str(item["body"]) for item in comments)
+    assert run.current_stage is OrchestrationStage.ADMITTED
 
 
 def test_semantic_pr_content_is_validated_without_auto_close():
