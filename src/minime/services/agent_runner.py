@@ -60,6 +60,7 @@ class AgentExecutionResult:
     diagnostic_output: list[str] | None = None
     output_truncated: bool = False
     structured_output_missing: bool = False
+    structured_output_too_large: bool = False
 
     @property
     def full_output(self) -> str:
@@ -79,6 +80,7 @@ class CliAgentRunner:
 
     MAX_OUTPUT_LINES = 2500
     MAX_LINE_CHARS = 4000
+    MAX_STRUCTURED_OUTPUT_BYTES = 1_048_576
 
     def __init__(
         self,
@@ -526,15 +528,18 @@ class CliAgentRunner:
             for line in raw_stderr_lines
         ][: self.MAX_OUTPUT_LINES]
         structured_output_missing = bool(response_path and not response_path.is_file())
+        structured_output_too_large = False
+        structured_output: list[str] | None = [] if response_path else None
         if response_path and response_path.is_file():
-            response_text = response_path.read_text(encoding="utf-8", errors="replace")
-            response_lines = response_text.splitlines()
-            stdout_lines = [redact_secrets(line[: self.MAX_LINE_CHARS]) for line in response_lines][
-                : self.MAX_OUTPUT_LINES
-            ]
-            output_truncated = output_truncated or len(response_lines) > self.MAX_OUTPUT_LINES or any(
-                len(line) > self.MAX_LINE_CHARS for line in response_lines
-            )
+            if response_path.stat().st_size > self.MAX_STRUCTURED_OUTPUT_BYTES:
+                structured_output_too_large = True
+            else:
+                # The last-message file is the structured response channel,
+                # not diagnostic output. Preserve it intact so valid JSON is
+                # never cut at the diagnostic line/character limits.
+                structured_output = [
+                    response_path.read_text(encoding="utf-8", errors="replace")
+                ]
         if structured_output_missing:
             stdout_lines = []
         rotation_error = (
@@ -551,10 +556,17 @@ class CliAgentRunner:
                 duration_ms=int((asyncio.get_running_loop().time() - start) * 1000),
                 preflight_error=rotation_error,
                 workflow=workflow,
-                structured_output=stdout_lines,
-                diagnostic_output=stderr_lines,
+                structured_output=structured_output,
+                diagnostic_output=[
+                    *[
+                        redact_secrets(line[: self.MAX_LINE_CHARS])
+                        for line in raw_stdout_lines
+                    ][: self.MAX_OUTPUT_LINES],
+                    *stderr_lines,
+                ],
                 output_truncated=output_truncated,
                 structured_output_missing=structured_output_missing,
+                structured_output_too_large=structured_output_too_large,
             )
         finally:
             cleanup_structured_output()
