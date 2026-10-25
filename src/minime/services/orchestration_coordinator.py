@@ -189,7 +189,8 @@ class NativeOrchestrationCoordinator:
                     worktree_path=worktree_path,
                     prompt_context=(
                         "Use the installed minime-request-normalizer skill. Return exactly one JSON object "
-                        "with normalized_body containing complete Gherkin and criteria as an array. "
+                        "with normalized_body containing complete Gherkin, criteria as an array, and "
+                        "semantic_message containing a brief concrete Spanish comment about the result. "
                         "Preserve every fact and do not invent requirements, decisions, or tasks.\n"
                         f"Request title: {issue_title}\nRequest body:\n{issue_body}\n"
                         "Authoritative Issue context (including comments and any declared attachments):\n"
@@ -204,8 +205,9 @@ class NativeOrchestrationCoordinator:
                         "properties": {
                             "normalized_body": {"type": "string", "minLength": 1},
                             "criteria": {"type": "array", "items": {"type": "string"}},
+                            "semantic_message": {"type": "string", "minLength": 1, "maxLength": 2000},
                         },
-                        "required": ["normalized_body", "criteria"],
+                        "required": ["normalized_body", "criteria", "semantic_message"],
                         "additionalProperties": False,
                     },
                     output_last_message_path=response_path,
@@ -219,13 +221,19 @@ class NativeOrchestrationCoordinator:
                 ):
                     return None, "Request normalization agent did not produce a verified result."
                 payload = json.loads(result.response_output)
-                if not isinstance(payload, dict) or not isinstance(payload.get("normalized_body"), str):
+                if (
+                    not isinstance(payload, dict)
+                    or not isinstance(payload.get("normalized_body"), str)
+                    or not isinstance(payload.get("semantic_message"), str)
+                    or not payload["semantic_message"].strip()
+                ):
                     return None, "Request normalization response was not structured."
                 normalized = NormalizedRequest(
                     original_body=issue_body,
                     normalized_body=payload["normalized_body"].strip(),
                     already_normalized=False,
                     criteria=tuple(str(item) for item in payload.get("criteria", [])),
+                    semantic_message=payload["semantic_message"].strip(),
                 )
             evidence = service.publish(repository, issue_number, active_run.run_id, normalized)
         except (RequestNormalizationError, NativeOpenSpecWorkflowUnavailable, ValueError, json.JSONDecodeError) as exc:
@@ -237,6 +245,7 @@ class NativeOrchestrationCoordinator:
             "normalized_body": normalized.normalized_body,
             "already_normalized": normalized.already_normalized,
             "criteria": list(normalized.criteria),
+            "semantic_message": normalized.semantic_message,
             "source_context_sha256": hashlib.sha256(
                 json.dumps(source_context, sort_keys=True, ensure_ascii=False, default=str).encode("utf-8")
             ).hexdigest(),

@@ -82,6 +82,51 @@ def test_normalization_fails_closed_when_remote_issue_changed():
         service.publish("o/r", 7, "run-1", NormalizedRequest("original", "normalized", False))
 
 
+def test_semantic_normalization_comment_is_idempotent_and_confirmed():
+    original = "Necesitamos ordenar la salida y conservar tres criterios: C1, C2 y C3."
+    normalized = """Feature: Ordenación de consola
+
+Scenario: Salida estable
+  Given una entrada válida
+  When se ordena la salida
+  Then se conserva el orden definido
+"""
+    issue = {"number": 8, "body": original, "repository_url": "/repos/o/r"}
+    comments: list[dict[str, object]] = []
+
+    def handler(request):
+        if request.method == "GET" and request.url.path.endswith("/issues/8"):
+            return httpx.Response(200, json=issue, headers={"etag": '"v1"'})
+        if request.method == "GET" and request.url.path.endswith("/issues/8/comments"):
+            return httpx.Response(200, json=comments)
+        if request.method == "POST" and request.url.path.endswith("/issues/8/comments"):
+            payload = json.loads(request.content)
+            item = {"id": len(comments) + 1, "body": payload["body"]}
+            comments.append(item)
+            return httpx.Response(201, json=item)
+        if request.method == "PATCH" and request.url.path.endswith("/issues/8"):
+            issue["body"] = json.loads(request.content)["body"]
+            return httpx.Response(200, json=issue)
+        return httpx.Response(404)
+
+    service = RequestNormalizationService(GitHubAdapter(auth=StaticAuth(handler)))
+    request = NormalizedRequest(
+        original,
+        normalized,
+        False,
+        ("C1", "C2", "C3"),
+        "Se normalizó el Request y se conservaron C1, C2 y C3.",
+    )
+    first = service.publish("o/r", 8, "run-semantic", request)
+    second = service.publish("o/r", 8, "run-semantic", request)
+
+    assert first["semantic_message"] == request.semantic_message
+    assert second["provenance_key"] == "run-semantic:8"
+    assert len(comments) == 2
+    assert sum("Original Request" in str(item["body"]) for item in comments) == 1
+    assert sum("minime-request-normalization-semantic" in str(item["body"]) for item in comments) == 1
+
+
 def test_semantic_pr_content_is_validated_without_auto_close():
     prepared = PrPreparerService().prepare_pull_request(
         PrPreparationInput(

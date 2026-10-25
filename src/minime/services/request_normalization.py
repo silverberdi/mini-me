@@ -22,6 +22,7 @@ class NormalizedRequest:
     normalized_body: str
     already_normalized: bool
     criteria: tuple[str, ...] = ()
+    semantic_message: str = ""
 
 
 def looks_like_complete_gherkin(body: str) -> bool:
@@ -82,6 +83,14 @@ class RequestNormalizationService:
             f"{_PROVENANCE_PREFIX}{key} -->"
         )
 
+    @staticmethod
+    def semantic_comment(message: str, key: str) -> str:
+        """Wrap agent-authored Spanish communication with a stable idempotency marker."""
+        clean = message.strip()
+        if not clean or len(clean) > 2000:
+            raise RequestNormalizationError("Semantic normalization comment is empty or too long.")
+        return f"{clean}\n\n<!-- minime-request-normalization-semantic:{key} -->"
+
     def publish(
         self,
         repository: str,
@@ -108,6 +117,17 @@ class RequestNormalizationService:
             raise RequestNormalizationError(
                 "Original Request provenance was not confirmed remotely."
             )
+        if normalized.semantic_message.strip():
+            semantic_result = self.github.comment_issue(
+                repository,
+                issue_number,
+                self.semantic_comment(normalized.semantic_message, key),
+                f"normalize-semantic:{key}",
+            )
+            if semantic_result.outcome != ExternalOutcome.SUCCESS:
+                raise RequestNormalizationError(
+                    "Semantic normalization comment was not confirmed remotely."
+                )
         if remote_body != normalized.normalized_body:
             version = (current.observed_evidence or {}).get("etag")
             update_result = self.github.update_issue_body(
@@ -135,6 +155,14 @@ class RequestNormalizationService:
             raise RequestNormalizationError(
                 "Original Request provenance comment was not confirmed."
             )
+        semantic_key = f"minime-request-normalization-semantic:{key}"
+        if normalized.semantic_message.strip() and not any(
+            isinstance(item, dict) and semantic_key in str(item.get("body", ""))
+            for item in (comments.data or [])
+        ):
+            raise RequestNormalizationError(
+                "Semantic normalization comment was not confirmed."
+            )
         return {
             "issue_number": issue_number,
             "run_id": run_id,
@@ -146,4 +174,5 @@ class RequestNormalizationService:
                 normalized.normalized_body.encode("utf-8")
             ).hexdigest(),
             "provenance_key": key,
+            "semantic_message": normalized.semantic_message,
         }
