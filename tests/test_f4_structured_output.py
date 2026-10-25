@@ -13,7 +13,10 @@ from minime.services import agent_runner as agent_runner_module
 from minime.services.agent_confinement import AgentProcessResult
 from minime.services.agent_runner import AgentExecutionResult, CliAgentRunner
 from minime.services.orchestration_coordinator import NativeOrchestrationCoordinator
-from minime.services.request_normalization import RequestNormalizationError, RequestNormalizationService
+from minime.services.request_normalization import (
+    RequestNormalizationError,
+    RequestNormalizationService,
+)
 
 
 class _FakeConfinement:
