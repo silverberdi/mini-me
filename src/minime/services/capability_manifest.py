@@ -2,7 +2,12 @@
 
 from __future__ import annotations
 
+import fcntl
 import hashlib
+import os
+import tempfile
+from contextlib import contextmanager
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -13,6 +18,52 @@ class CapabilityConflictError(RuntimeError):
 
 class CapabilityUnavailableError(RuntimeError):
     """A selected profile requires a capability absent from the trusted source."""
+
+
+@dataclass(frozen=True)
+class GreenfieldCapabilityAuthorization:
+    """Verified identity and provenance supplied by the project/worktree authority."""
+
+    project_id: str
+    project_type: str
+    onboarding_status: str
+    binding_project_id: str
+    managed_repository_root: str
+    worktree_path: str
+    worktree_id: str
+    worktree_project_id: str
+    worktree_state: str
+    trusted_predecessor_hashes: dict[str, str]
+
+    def verify(self, target_root: Path, expected_hashes: dict[str, str]) -> None:
+        """Fail closed unless the supplied identity is internally consistent."""
+        if self.project_type != "GREENFIELD" or self.onboarding_status != "PREPARED":
+            raise CapabilityConflictError("Capability reconciliation requires a PREPARED Greenfield project")
+        if not self.project_id or self.binding_project_id != self.project_id:
+            raise CapabilityConflictError("Capability binding identity is not verified")
+        if self.worktree_project_id != self.project_id or not self.worktree_id:
+            raise CapabilityConflictError("Capability Worktree identity is not verified")
+        if self.worktree_state not in {"CREATED", "PENDING"}:
+            raise CapabilityConflictError("Capability Worktree is not managed")
+        managed_root = Path(self.managed_repository_root).resolve()
+        worktree = Path(self.worktree_path).resolve()
+        if target_root != worktree or managed_root not in (worktree, *worktree.parents):
+            raise CapabilityConflictError("Capability target is outside the authorized Worktree binding")
+        if not expected_hashes or expected_hashes != self.trusted_predecessor_hashes:
+            raise CapabilityConflictError("Capability predecessor provenance is not trusted")
+
+
+@contextmanager
+def _reconciliation_lock(target: Path):
+    """Serialize reconciliations for one authorized Worktree without changing it."""
+    lock_name = hashlib.sha256(str(target).encode("utf-8")).hexdigest()
+    lock_path = Path(tempfile.gettempdir()) / f"minime-capability-{lock_name}.lock"
+    with lock_path.open("a+", encoding="utf-8") as handle:
+        fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
+        try:
+            yield
+        finally:
+            fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
 
 
 class CapabilityManifestService:
@@ -101,6 +152,96 @@ class CapabilityManifestService:
                 target_path.write_bytes(content)
             installed.append(relative.as_posix())
         return self.inspect(target, selected_paths=selected_paths)
+
+    def reconcile_greenfield(
+        self,
+        source_root: str | Path,
+        target_root: str | Path,
+        *,
+        profiles: dict[str, Any],
+        expected_existing_hashes: dict[str, str],
+        project_type: str,
+        authorization: GreenfieldCapabilityAuthorization,
+    ) -> dict[str, Any]:
+        """Replace only a verified stale Greenfield capability.
+
+        A replacement is permitted only when the current file hash matches
+        the recorded predecessor hash. Unselected, symlinked, external, and
+        Brownfield paths remain fail-closed.
+        """
+        if project_type != authorization.project_type:
+            raise CapabilityConflictError("Capability project type does not match its authorization")
+        source = Path(source_root).resolve(strict=True)
+        target = Path(target_root).resolve(strict=True)
+        if source == target:
+            raise CapabilityConflictError("Capability source and Greenfield target must be isolated")
+        authorization.verify(target, expected_existing_hashes)
+        selected_paths = self._selected_paths(profiles)
+        source_files = self._candidate_files(source, selected_paths)
+        available = {path.relative_to(source).as_posix() for path in source_files}
+        missing = sorted(selected_paths - available)
+        if missing:
+            raise CapabilityUnavailableError(
+                "Selected profile capabilities are unavailable: " + ", ".join(missing)
+            )
+
+        replacements: list[dict[str, str]] = []
+        installed: list[str] = []
+        with _reconciliation_lock(target):
+            plan: list[tuple[Path, str, bytes, str, str | None]] = []
+            for source_path in source_files:
+                relative = source_path.relative_to(source)
+                relative_name = relative.as_posix()
+                target_path = target / relative
+                cursor = target
+                for part in relative.parts[:-1]:
+                    cursor /= part
+                    if cursor.is_symlink():
+                        raise CapabilityConflictError(f"Capability target traverses a symlink: {relative_name}")
+                if target_path.is_symlink():
+                    raise CapabilityConflictError(f"Capability target is a symlink: {relative_name}")
+                source_bytes = source_path.read_bytes()
+                source_hash = hashlib.sha256(source_bytes).hexdigest()
+                current_hash = None
+                if target_path.exists():
+                    if not target_path.is_file():
+                        raise CapabilityConflictError(f"Capability target is not a file: {relative_name}")
+                    current_hash = hashlib.sha256(target_path.read_bytes()).hexdigest()
+                    if current_hash != source_hash and current_hash != expected_existing_hashes.get(relative_name):
+                        raise CapabilityConflictError(f"Capability conflict preserved: {relative_name}")
+                plan.append((target_path, relative_name, source_bytes, source_hash, current_hash))
+
+            # Compare-and-swap immediately before creating any replacement.
+            for target_path, relative_name, _, _, planned_hash in plan:
+                observed_hash = (
+                    hashlib.sha256(target_path.read_bytes()).hexdigest() if target_path.exists() else None
+                )
+                if observed_hash != planned_hash:
+                    raise CapabilityConflictError(f"Capability changed concurrently: {relative_name}")
+            for target_path, relative_name, source_bytes, source_hash, current_hash in plan:
+                if current_hash == source_hash:
+                    installed.append(relative_name)
+                    continue
+                target_path.parent.mkdir(parents=True, exist_ok=True)
+                fd, temporary_name = tempfile.mkstemp(
+                    prefix=f".{target_path.name}.", suffix=".minime-tmp", dir=target_path.parent
+                )
+                try:
+                    with os.fdopen(fd, "wb") as temporary:
+                        temporary.write(source_bytes)
+                        temporary.flush()
+                        os.fsync(temporary.fileno())
+                    os.replace(temporary_name, target_path)
+                finally:
+                    if os.path.exists(temporary_name):
+                        os.unlink(temporary_name)
+                replacements.append(
+                    {"path": relative_name, "from_sha256": current_hash or "", "to_sha256": source_hash}
+                )
+                installed.append(relative_name)
+        evidence = self.inspect(target, selected_paths=selected_paths)
+        evidence.update({"reconciled": True, "replacements": replacements, "installed": installed})
+        return evidence
 
     def inspect(self, target_root: str | Path, *, selected_paths: set[str] | None = None) -> dict[str, Any]:
         target = Path(target_root).resolve(strict=True)
