@@ -956,16 +956,29 @@ class NativeOrchestrationCoordinator:
                 message="Remote issue closure was not confirmed; lock remains held.",
             )
 
-        # Record the next FIFO candidate only after remote completion is
-        # confirmed. The scheduler remains the sole owner of starting it.
-        next_request = intake_service.select_next_request(project_id, repository)
-        active_run.stop_details["next_fifo_request"] = (
-            next_request.get("issue_number") if next_request else None
-        )
-
         active_run.is_active = False
         active_run.stop_outcome = OrchestrationStopOutcome.COMPLETED
         self._update_stage(uow, active_run, OrchestrationStage.COMPLETED)
+
+        # Admit the next FIFO request immediately after closure confirmation.
+        # Admission creates only a durable ADMITTED checkpoint; a later explicit
+        # request run resumes it and performs provider preflight before any agent.
+        next_request = intake_service.select_next_request(project_id, repository)
+        next_run = self._admit_next_fifo_request(
+            uow=uow,
+            project_id=project_id,
+            repository=repository,
+            completed_run_id=active_run.run_id,
+            next_request=next_request,
+        )
+        active_run.stop_details["next_fifo_request"] = (
+            next_request.get("issue_number") if next_request else None
+        )
+        active_run.stop_details["next_fifo_run_id"] = next_run.run_id if next_run else None
+        if hasattr(uow, "orchestration_runs"):
+            uow.orchestration_runs.save(active_run)
+            if hasattr(uow, "commit"):
+                uow.commit()
 
         return OrchestrationCoordinationResult(
             status="COMPLETED",
@@ -975,6 +988,49 @@ class NativeOrchestrationCoordinator:
             pr2_url=pr2_url,
             message=f"Request #{issue_number} successfully implemented, verified, merged, and closed.",
         )
+
+    @staticmethod
+    def _admit_next_fifo_request(
+        *,
+        uow: PersistenceUnitOfWork,
+        project_id: str,
+        repository: str,
+        completed_run_id: str,
+        next_request: dict[str, Any] | None,
+    ) -> OrchestrationRun | None:
+        """Persist the next FIFO admission without dispatching an agent."""
+        if not next_request or next_request.get("re_entrant"):
+            return None
+        issue_number = next_request.get("issue_number")
+        issue_title = str(next_request.get("title") or "change")
+        if not isinstance(issue_number, int) or issue_number < 1:
+            return None
+        slug = re.sub(r"[-\s]+", "-", re.sub(r"[^\w\s-]", "", issue_title).strip().lower()).strip("-")
+        change_name = f"req-{issue_number}-{slug[:40].rstrip('-') or 'change'}"
+        runs = getattr(uow, "orchestration_runs", None)
+        if runs is None:
+            raise RuntimeError("Durable orchestration run repository is unavailable.")
+        existing = runs.get_active_run(project_id, change_name) if hasattr(runs, "get_active_run") else None
+        if existing:
+            return existing
+        admitted = OrchestrationRun(
+            project_id=project_id,
+            change_name=change_name,
+            base_sha="main",
+            current_stage=OrchestrationStage.ADMITTED,
+            resumable_stage=OrchestrationStage.ADMITTED,
+            stop_details={
+                "issue_number": issue_number,
+                "issue_title": issue_title,
+                "repository": repository,
+                "fifo_parent_run_id": completed_run_id,
+                "admission_only": True,
+            },
+        )
+        runs.save(admitted)
+        if hasattr(uow, "commit"):
+            uow.commit()
+        return admitted
 
     async def _confirm_pr_merged(self, repository: str, pr_number: int, candidate_sha: str) -> bool:
         """Re-read the remote PR; a merge request response alone is not proof."""
