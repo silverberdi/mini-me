@@ -1201,6 +1201,7 @@ class GreenfieldBootstrapCoordinator:
         incoming: Path,
         source_files: tuple[str, ...] = (),
         package_root: Path | None = None,
+        allowed_paths: set[str] | None = None,
     ) -> None:
         if not incoming.is_dir() or not any(incoming.rglob("*")):
             raise GreenfieldBootstrapError("Validated context package produced no candidate source")
@@ -1232,7 +1233,9 @@ class GreenfieldBootstrapCoordinator:
         context_index = worktree / "context" / "INDEX.md"
         if package_root is not None and not context_index.is_file():
             raise GreenfieldBootstrapError("Thinking agent context index is missing")
-        GreenfieldBootstrapCoordinator._validate_candidate_scope(worktree)
+        GreenfieldBootstrapCoordinator._validate_candidate_scope(
+            worktree, allowed_paths=allowed_paths
+        )
         for path in worktree.rglob("*"):
             if path.is_symlink():
                 try:
