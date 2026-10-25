@@ -7,8 +7,7 @@ import httpx
 import pytest
 
 from minime.adapters.github import GitHubAdapter
-from minime.domain.enums import ExternalOutcome, ExternalReasonCode, RetrySafety
-from minime.domain.enums import OrchestrationStage
+from minime.domain.enums import ExternalOutcome, ExternalReasonCode, OrchestrationStage, RetrySafety
 from minime.domain.models import ExternalActionResult, OrchestrationRun
 from minime.services.agent_runner import AgentExecutionResult
 from minime.services.capability_manifest import CapabilityConflictError, CapabilityManifestService
