@@ -124,3 +124,11 @@ class ProjectConnectionService:
             head_sha,
             draft=draft,
         )
+
+    def mark_pull_request_ready(
+        self, project: Project, pr_number: int, head_sha: str
+    ) -> ExternalActionResult[dict[str, Any]]:
+        """Make one exact project PR ready only after App permission verification."""
+        adapter = self.require_git_pr_write(project)
+        repository = project.provider_connections["git_pr"]["repository_url"]
+        return adapter.mark_pull_request_ready(repository, pr_number, head_sha)

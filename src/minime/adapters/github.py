@@ -1676,6 +1676,7 @@ class GitHubAdapter(GitHubAdapterInterface):
                 "base_sha": base_data.get("sha"),
                 "base_branch": base_data.get("ref"),
                 "title": data.get("title"),
+                "is_draft": bool(data.get("draft", False)),
             }
             return ExternalActionResult(
                 outcome=ExternalOutcome.SUCCESS,
@@ -1704,6 +1705,79 @@ class GitHubAdapter(GitHubAdapterInterface):
                 error_message=str(exc),
             )
 
+    def mark_pull_request_ready(
+        self, repository: str, pr_number: int, expected_head_sha: str
+    ) -> ExternalActionResult[dict[str, Any]]:
+        """Convert an exact open draft PR to ready-for-review and verify it remotely."""
+        current = self.get_pull_request_details(repository, pr_number)
+        if current.outcome is not ExternalOutcome.SUCCESS or not isinstance(current.data, dict):
+            return current
+        if current.data.get("is_merged") or current.data.get("state") != "open":
+            return ExternalActionResult(
+                outcome=ExternalOutcome.FAILURE,
+                source_adapter="github_rest",
+                reason_code=ExternalReasonCode.CONFLICT,
+                retry_safety=RetrySafety.UNSAFE,
+                error_message="Pull request is not open and cannot be made ready.",
+            )
+        if current.data.get("head_sha") != expected_head_sha:
+            return ExternalActionResult(
+                outcome=ExternalOutcome.FAILURE,
+                source_adapter="github_rest",
+                reason_code=ExternalReasonCode.CONFLICT,
+                retry_safety=RetrySafety.UNSAFE,
+                error_message="Pull request head SHA differs from the reconciled candidate.",
+            )
+        if not current.data.get("is_draft"):
+            return current
+        repo = self._repo(repository)
+        try:
+            response = self._request("PATCH", f"/repos/{repo}/pulls/{pr_number}", json={"draft": False})
+            if response.status_code in (401, 403):
+                return ExternalActionResult(
+                    outcome=ExternalOutcome.FAILURE,
+                    source_adapter="github_rest",
+                    reason_code=ExternalReasonCode.AUTH_REQUIRED,
+                    retry_safety=RetrySafety.UNSAFE,
+                    provider_detail=f"HTTP {response.status_code}",
+                    error_message="GitHub App is unauthorized to update pull requests.",
+                )
+            if response.status_code not in (200, 201):
+                return ExternalActionResult(
+                    outcome=ExternalOutcome.UNKNOWN,
+                    source_adapter="github_rest",
+                    reason_code=ExternalReasonCode.UNOBSERVABLE,
+                    retry_safety=RetrySafety.UNKNOWN,
+                    provider_detail=f"HTTP {response.status_code}",
+                    error_message="GitHub did not confirm pull-request readiness.",
+                )
+            data = response.json()
+            returned_sha = (data.get("head") or {}).get("sha")
+            if data.get("draft") is not False or returned_sha != expected_head_sha:
+                return ExternalActionResult(
+                    outcome=ExternalOutcome.UNKNOWN,
+                    source_adapter="github_rest",
+                    reason_code=ExternalReasonCode.UNOBSERVABLE,
+                    retry_safety=RetrySafety.UNKNOWN,
+                    error_message="GitHub readiness response did not match the candidate.",
+                )
+            return ExternalActionResult(
+                outcome=ExternalOutcome.SUCCESS,
+                source_adapter="github_rest",
+                reason_code=ExternalReasonCode.EXECUTION_SUCCESS,
+                retry_safety=RetrySafety.UNSAFE,
+                data={**current.data, "is_draft": False, "head_sha": returned_sha},
+                external_id=str(pr_number),
+            )
+        except (GitHubAuthorizationError, GitHubRemoteError, httpx.HTTPError) as exc:
+            return ExternalActionResult(
+                outcome=ExternalOutcome.UNKNOWN,
+                source_adapter="github_rest",
+                reason_code=ExternalReasonCode.UNOBSERVABLE,
+                retry_safety=RetrySafety.UNKNOWN,
+                error_message="GitHub readiness result is unobservable.",
+                provider_detail=_safe_error(str(exc)),
+            )
     def merge_pull_request(
         self,
         repository: str,

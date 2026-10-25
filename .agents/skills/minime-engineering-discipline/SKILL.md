@@ -4,13 +4,13 @@ description: "Comprobar coherencia de producto, rigor de ingeniería y anti-drif
 ---
 # mini me — Engineering Discipline (v1)
 
-**Extensión del workflow OpenSpec nativo del agente; nunca lo sustituye.** Lee `docs/BUSINESS_INTENT.md`, `docs/CANONICAL_DECISIONS.md`, `docs/PRODUCT.md`, `docs/ENGINEERING_DISCIPLINE.md`, `docs/CHANGE_DELIVERY_CONTRACT.md`, `AGENTS.md`, la ficha MM-Rxx y el único Change OpenSpec activo.
+**Extensión del workflow OpenSpec nativo del agente; nunca lo sustituye.** Empieza por `AGENTS.md`, `openspec/config.yaml`, el `context/INDEX.md` existente y el único Change OpenSpec activo. Consulta otros documentos solo cuando existan en el proyecto destinatario; ninguna ruta `docs/` ni ficha histórica es obligatoria.
 
 ## En propose/design
 1. Define antes/después verificable, actor y limitaciones. Ajusta pruebas y evidencia al comportamiento entregado; no impongas stacks, despliegues ni gates universales ajenos al Change.
-2. Haz el censo de servicios y callers, writers, Git/GitHub/DB, hooks/skills/comandos/harness existentes; registra reuse/modify/retire y opciones rechazadas.
+2. Haz el censo de servicios y callers, writers, Git/GitHub/DB, hooks/skills/comandos/harness existentes; registra reuse/modify/retire y opciones rechazadas usando únicamente archivos y capacidades presentes.
 3. Resuelve en design responsabilidades, cohesión, duplicación, capas, compatibilidad de API, identidad repo/WT, idempotencia/locks, manejo explícito de errores, seguridad, secretos, observabilidad, migración y rollback.
-4. Identifica consumidores sustituidos y registra evidencia concisa de retiro solo cuando este Change reemplace algo. No existe un Removal Ledger universal.
+4. Identifica consumidores sustituidos y registra evidencia concisa de retiro solo cuando este Change reemplace algo. No existe un Removal Ledger universal ni una ficha histórica obligatoria.
 5. Busca contradicciones con intención de producto y OpenSpec; detén cualquier plan que emule OpenSpec o recorte el valor acordado. Usa workflow OpenSpec update para resolver diferencias.
 
 ## En apply
@@ -25,5 +25,7 @@ description: "Comprobar coherencia de producto, rigor de ingeniería y anti-drif
 - Asegura que la retirada y ausencia de rutas duplicadas, cuando aplique, tienen evidencia más allá de un grep.
 - Reporta PASS/FAIL/BLOCKED con IDs, archivos, SHA y fallos; hooks/LLMs no se autoconceden aprobaciones.
 - Si se afirma una integración de agente real y no existe evidencia, registra NOT_VERIFIED/WAITING_CAPACITY; el despliegue pertenece al CI/CD del proyecto.
+
+**Contexto portable:** si un archivo recomendado no existe, continúa con las fuentes disponibles y declara la ausencia como contexto no disponible; no inventes contenido ni conviertas esa ausencia en un gate. No copies documentación interna del repositorio de origen a un proyecto Greenfield.
 
 **Autoridad:** esta skill orienta al agente, no concede permisos, no reemplaza guards ejecutables, no consume presupuestos ni autoriza merge.

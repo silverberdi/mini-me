@@ -4,7 +4,7 @@ description: "Diseñar y verificar pruebas E2E auténticas de etapas, resultado 
 ---
 # mini me — Real E2E Evidence (v1)
 
-Extensión de OpenSpec propose/design/apply/verify. Consulta `docs/CHANGE_DELIVERY_CONTRACT.md` y `docs/ENGINEERING_DISCIPLINE.md`; no trates fichas MM-Rxx históricas como requisitos actuales.
+Extensión de OpenSpec propose/design/apply/verify. Consulta `AGENTS.md`, `openspec/config.yaml`, `context/INDEX.md` y los documentos que existan en el proyecto destinatario. Las referencias históricas o rutas `docs/` ausentes no son requisitos.
 
 ## Evidencia proporcional
 - TECHNICAL_PASS: unit/integration/static para el contrato aislado.
@@ -19,7 +19,9 @@ Extensión de OpenSpec propose/design/apply/verify. Consulta `docs/CHANGE_DELIVE
 2. Rechazos relevantes: auth/quota, tool ausente, repo equivocado, filesystem escape, retries duplicados, sin reviewer independiente, falta de presupuesto, side effect UNKNOWN.
 3. Recuperación: kill/restart en checkpoint y entre side effect/ack. Preservar el mismo Run/Job/worktree.
 4. UI: navegador real desktop/tablet/mobile y escenarios humanos cuando aplica.
-5. Regresión de todas las capacidades críticas previas después del Removal Gate.
+5. Regresión de las capacidades críticas pertinentes después de cualquier retiro dentro del Change.
 6. Ejecutar el nivel apropiado para el proyecto; HTTP 200, una colección vacía o `pytest PASSED` sin pruebas no acreditan funcionalidad.
 
 **No fingir:** fake runners sirven solo para tests acotados. Si la inferencia real no está autorizada: NOT_VERIFIED / WAITING_CAPACITY, nunca PASS. No iniciar consumo por ejecutar esta skill.
+
+**Portabilidad:** la skill no exige copiar documentación privada o específica de mini me al proyecto Greenfield. Si una fuente recomendada no existe, registra `CONTEXT_NOT_AVAILABLE` y usa el contexto real disponible sin bloquear por una ruta histórica.
