@@ -356,7 +356,14 @@ class GreenfieldBootstrapCoordinator:
         base_sha = self._git(
             binding.managed_repository_root, "rev-parse", f"origin/{project.base_branch}"
         )
-        self._prepare_local_branch(binding.managed_repository_root, branch, base_sha)
+        self._prepare_local_branch(
+            binding.managed_repository_root,
+            branch,
+            base_sha,
+            allow_pre_dispatch_reconcile=bool(
+                project.onboarding_checkpoint.get("pre_dispatch_recovery")
+            ),
+        )
         self._git(binding.managed_repository_root, "worktree", "add", "--detach", self._worktree_path(binding, branch), base_sha)
         worktree = Path(self._worktree_path(binding, branch))
         agent_started = False
@@ -786,6 +793,7 @@ class GreenfieldBootstrapCoordinator:
                     "thinking_agent_attempt"
                 ),
                 "pending_thinking_agent_retry_authorization": authorization,
+                "pre_dispatch_recovery": pre_dispatch,
             }
             project.onboarding_status = ProjectOnboardingStatus.BOOTSTRAPPING
             project.onboarding_reasons = [
@@ -1138,8 +1146,15 @@ class GreenfieldBootstrapCoordinator:
         return result.stdout.strip()
 
     @classmethod
-    def _prepare_local_branch(cls, repository_root: str, branch: str, base_sha: str) -> None:
-        """Reconcile only an unbound stale local branch at the exact base SHA."""
+    def _prepare_local_branch(
+        cls,
+        repository_root: str,
+        branch: str,
+        base_sha: str,
+        *,
+        allow_pre_dispatch_reconcile: bool = False,
+    ) -> None:
+        """Reconcile an unbound local branch, widening only for proven pre-dispatch recovery."""
         ref = subprocess.run(
             ["git", "rev-parse", "--verify", f"refs/heads/{branch}"],
             cwd=repository_root,
@@ -1149,8 +1164,6 @@ class GreenfieldBootstrapCoordinator:
         )
         if ref.returncode != 0:
             return
-        if ref.stdout.strip() != base_sha:
-            raise GreenfieldBootstrapError("Existing local bootstrap branch has a different head")
         worktrees = subprocess.run(
             ["git", "worktree", "list", "--porcelain"],
             cwd=repository_root,
@@ -1160,6 +1173,8 @@ class GreenfieldBootstrapCoordinator:
         )
         if worktrees.returncode != 0 or f"branch refs/heads/{branch}" in worktrees.stdout:
             raise GreenfieldBootstrapError("Existing bootstrap branch is bound to a worktree")
+        if ref.stdout.strip() != base_sha and not allow_pre_dispatch_reconcile:
+            raise GreenfieldBootstrapError("Existing local bootstrap branch has a different head")
         deleted = subprocess.run(
             ["git", "branch", "-D", branch],
             cwd=repository_root,

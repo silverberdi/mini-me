@@ -785,6 +785,37 @@ def test_stale_local_bootstrap_branch_is_reconciled_only_at_exact_base(tmp_path:
     ).returncode != 0
 
 
+def test_pre_dispatch_recovery_reconciles_unbound_divergent_local_branch(tmp_path: Path):
+    subprocess.run(["git", "init", "-q", str(tmp_path)], check=True)
+    (tmp_path / "README.md").write_text("base\n", encoding="utf-8")
+    subprocess.run(["git", "-C", str(tmp_path), "add", "README.md"], check=True)
+    subprocess.run(
+        ["git", "-C", str(tmp_path), "-c", "user.email=e2e@example.invalid", "-c", "user.name=e2e", "commit", "-qm", "base"],
+        check=True,
+    )
+    base_sha = subprocess.check_output(
+        ["git", "-C", str(tmp_path), "rev-parse", "HEAD"], text=True
+    ).strip()
+    branch = "minime/bootstrap/recovery"
+    (tmp_path / "extra.txt").write_text("stale\n", encoding="utf-8")
+    subprocess.run(["git", "-C", str(tmp_path), "add", "extra.txt"], check=True)
+    subprocess.run(
+        ["git", "-C", str(tmp_path), "-c", "user.email=e2e@example.invalid", "-c", "user.name=e2e", "commit", "-qm", "stale"],
+        check=True,
+    )
+    subprocess.run(["git", "-C", str(tmp_path), "branch", branch], check=True)
+
+    GreenfieldBootstrapCoordinator._prepare_local_branch(
+        str(tmp_path), branch, base_sha, allow_pre_dispatch_reconcile=True
+    )
+
+    assert subprocess.run(
+        ["git", "-C", str(tmp_path), "show-ref", "--verify", f"refs/heads/{branch}"],
+        capture_output=True,
+        check=False,
+    ).returncode != 0
+
+
 def test_candidate_scope_rejects_staged_unrelated_file_not_just_untracked(tmp_path: Path):
     worktree = tmp_path / "repo"
     worktree.mkdir()
