@@ -2,6 +2,7 @@
 
 import hashlib
 import json
+import os
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -12,7 +13,11 @@ from minime.adapters.github import GitHubAdapter
 from minime.domain.enums import ExternalOutcome, ExternalReasonCode, OrchestrationStage, RetrySafety
 from minime.domain.models import ExternalActionResult, OrchestrationRun
 from minime.services.agent_runner import AgentExecutionResult
-from minime.services.capability_manifest import CapabilityConflictError, CapabilityManifestService
+from minime.services.capability_manifest import (
+    CapabilityConflictError,
+    CapabilityManifestService,
+    GreenfieldCapabilityAuthorization,
+)
 from minime.services.orchestration_coordinator import NativeOrchestrationCoordinator
 from minime.services.pr_preparer_service import PrPreparationInput, PrPreparerService
 from minime.services.request_normalization import (
@@ -401,6 +406,18 @@ def test_greenfield_capability_reconciliation_replaces_only_verified_predecessor
     old_hash = hashlib.sha256(target_file.read_bytes()).hexdigest()
     service = CapabilityManifestService()
     profiles = {"thinking": {"agent_id": "codex", "skills": ["minime-request-normalizer"]}}
+    authorization = GreenfieldCapabilityAuthorization(
+        project_id="greenfield-project",
+        project_type="GREENFIELD",
+        onboarding_status="PREPARED",
+        binding_project_id="greenfield-project",
+        managed_repository_root=str(target),
+        worktree_path=str(target),
+        worktree_id="worktree-1",
+        worktree_project_id="greenfield-project",
+        worktree_state="CREATED",
+        trusted_predecessor_hashes={".agents/skills/minime-request-normalizer/SKILL.md": old_hash},
+    )
 
     result = service.reconcile_greenfield(
         source,
@@ -408,6 +425,7 @@ def test_greenfield_capability_reconciliation_replaces_only_verified_predecessor
         profiles=profiles,
         expected_existing_hashes={".agents/skills/minime-request-normalizer/SKILL.md": old_hash},
         project_type="GREENFIELD",
+        authorization=authorization,
     )
 
     assert result["replacements"][0]["from_sha256"] == old_hash
@@ -418,6 +436,7 @@ def test_greenfield_capability_reconciliation_replaces_only_verified_predecessor
         profiles=profiles,
         expected_existing_hashes={".agents/skills/minime-request-normalizer/SKILL.md": old_hash},
         project_type="GREENFIELD",
+        authorization=authorization,
     )
     assert again["replacements"] == []
 
@@ -433,6 +452,18 @@ def test_greenfield_capability_reconciliation_preserves_unverified_conflict_and_
     target_file.write_text("third-party", encoding="utf-8")
     service = CapabilityManifestService()
     profiles = {"thinking": {"agent_id": "codex", "skills": ["minime-request-normalizer"]}}
+    authorization = GreenfieldCapabilityAuthorization(
+        project_id="greenfield-project",
+        project_type="GREENFIELD",
+        onboarding_status="PREPARED",
+        binding_project_id="greenfield-project",
+        managed_repository_root=str(target),
+        worktree_path=str(target),
+        worktree_id="worktree-1",
+        worktree_project_id="greenfield-project",
+        worktree_state="CREATED",
+        trusted_predecessor_hashes={".agents/skills/minime-request-normalizer/SKILL.md": "0" * 64},
+    )
 
     with pytest.raises(CapabilityConflictError):
         service.reconcile_greenfield(
@@ -441,6 +472,7 @@ def test_greenfield_capability_reconciliation_preserves_unverified_conflict_and_
             profiles=profiles,
             expected_existing_hashes={".agents/skills/minime-request-normalizer/SKILL.md": "0" * 64},
             project_type="GREENFIELD",
+            authorization=authorization,
         )
     assert target_file.read_text(encoding="utf-8") == "third-party"
     with pytest.raises(CapabilityConflictError):
@@ -450,7 +482,116 @@ def test_greenfield_capability_reconciliation_preserves_unverified_conflict_and_
             profiles=profiles,
             expected_existing_hashes={},
             project_type="BROWNFIELD",
+            authorization=authorization,
         )
+
+
+def test_greenfield_reconciliation_rejects_unbound_worktree_and_untrusted_manifest(tmp_path: Path):
+    source = tmp_path / "source"
+    target = tmp_path / "target"
+    source_file = source / ".agents/skills/minime-request-normalizer/SKILL.md"
+    source_file.parent.mkdir(parents=True)
+    target_file = target / ".agents/skills/minime-request-normalizer/SKILL.md"
+    target_file.parent.mkdir(parents=True)
+    source_file.write_text("new", encoding="utf-8")
+    target_file.write_text("old", encoding="utf-8")
+    old_hash = hashlib.sha256(target_file.read_bytes()).hexdigest()
+    authorization = GreenfieldCapabilityAuthorization(
+        project_id="project-a",
+        project_type="GREENFIELD",
+        onboarding_status="PREPARED",
+        binding_project_id="project-b",
+        managed_repository_root=str(target),
+        worktree_path=str(target),
+        worktree_id="worktree-1",
+        worktree_project_id="project-a",
+        worktree_state="CREATED",
+        trusted_predecessor_hashes={".agents/skills/minime-request-normalizer/SKILL.md": old_hash},
+    )
+    with pytest.raises(CapabilityConflictError):
+        CapabilityManifestService().reconcile_greenfield(
+            source,
+            target,
+            profiles={"thinking": {"agent_id": "codex", "skills": ["minime-request-normalizer"]}},
+            expected_existing_hashes={".agents/skills/minime-request-normalizer/SKILL.md": old_hash},
+            project_type="GREENFIELD",
+            authorization=authorization,
+        )
+    assert target_file.read_text(encoding="utf-8") == "old"
+
+
+def test_greenfield_reconciliation_rejects_predecessor_hash_not_from_authority(tmp_path: Path):
+    source = tmp_path / "source"
+    target = tmp_path / "target"
+    source_file = source / ".agents/skills/minime-request-normalizer/SKILL.md"
+    source_file.parent.mkdir(parents=True)
+    target_file = target / ".agents/skills/minime-request-normalizer/SKILL.md"
+    target_file.parent.mkdir(parents=True)
+    source_file.write_text("new", encoding="utf-8")
+    target_file.write_text("old", encoding="utf-8")
+    old_hash = hashlib.sha256(target_file.read_bytes()).hexdigest()
+    authorization = GreenfieldCapabilityAuthorization(
+        project_id="project-a",
+        project_type="GREENFIELD",
+        onboarding_status="PREPARED",
+        binding_project_id="project-a",
+        managed_repository_root=str(target),
+        worktree_path=str(target),
+        worktree_id="worktree-1",
+        worktree_project_id="project-a",
+        worktree_state="CREATED",
+        trusted_predecessor_hashes={".agents/skills/minime-request-normalizer/SKILL.md": "f" * 64},
+    )
+    with pytest.raises(CapabilityConflictError):
+        CapabilityManifestService().reconcile_greenfield(
+            source,
+            target,
+            profiles={"thinking": {"agent_id": "codex", "skills": ["minime-request-normalizer"]}},
+            expected_existing_hashes={".agents/skills/minime-request-normalizer/SKILL.md": old_hash},
+            project_type="GREENFIELD",
+            authorization=authorization,
+        )
+    assert target_file.read_text(encoding="utf-8") == "old"
+
+
+def test_greenfield_reconciliation_is_atomic_when_replace_is_interrupted(tmp_path: Path, monkeypatch):
+    source = tmp_path / "source"
+    target = tmp_path / "target"
+    source_file = source / ".agents/skills/minime-request-normalizer/SKILL.md"
+    target_file = target / ".agents/skills/minime-request-normalizer/SKILL.md"
+    source_file.parent.mkdir(parents=True)
+    target_file.parent.mkdir(parents=True)
+    source_file.write_text("new", encoding="utf-8")
+    target_file.write_text("old", encoding="utf-8")
+    old_hash = hashlib.sha256(target_file.read_bytes()).hexdigest()
+    authorization = GreenfieldCapabilityAuthorization(
+        project_id="project-a",
+        project_type="GREENFIELD",
+        onboarding_status="PREPARED",
+        binding_project_id="project-a",
+        managed_repository_root=str(target),
+        worktree_path=str(target),
+        worktree_id="worktree-1",
+        worktree_project_id="project-a",
+        worktree_state="CREATED",
+        trusted_predecessor_hashes={".agents/skills/minime-request-normalizer/SKILL.md": old_hash},
+    )
+
+    def interrupted_replace(*_args, **_kwargs):
+        raise OSError("simulated interruption before atomic replace")
+
+    monkeypatch.setattr(os, "replace", interrupted_replace)
+    with pytest.raises(OSError, match="simulated interruption"):
+        CapabilityManifestService().reconcile_greenfield(
+            source,
+            target,
+            profiles={"thinking": {"agent_id": "codex", "skills": ["minime-request-normalizer"]}},
+            expected_existing_hashes={".agents/skills/minime-request-normalizer/SKILL.md": old_hash},
+            project_type="GREENFIELD",
+            authorization=authorization,
+        )
+    assert target_file.read_text(encoding="utf-8") == "old"
+    assert list(target_file.parent.glob(f".{target_file.name}.*.minime-tmp")) == []
 
 
 def test_deterministic_greenfield_vertical_journey_uses_real_contracts(tmp_path: Path):
