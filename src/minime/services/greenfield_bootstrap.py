@@ -1424,11 +1424,13 @@ class GreenfieldBootstrapCoordinator:
 
     @staticmethod
     def _validate_repository_links(path: Path, worktree: Path) -> None:
+        relative_path = path.resolve().relative_to(worktree.resolve()).as_posix()
+        link_base = worktree if relative_path == "openspec/config.yaml" else path.parent
         for raw_target in re.findall(r"\[[^\]]*\]\(([^)]+)\)", path.read_text(encoding="utf-8")):
             target = raw_target.strip().split("#", 1)[0].split("?", 1)[0].strip("<>")
             if not target or target.startswith(("http://", "https://", "mailto:", "#")):
                 continue
-            candidate = (path.parent / target).resolve()
+            candidate = (link_base / target).resolve()
             try:
                 candidate.relative_to(worktree.resolve())
             except ValueError as exc:

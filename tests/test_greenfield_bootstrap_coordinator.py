@@ -164,7 +164,7 @@ def test_candidate_validation_rejects_unrelated_backlog_changes(tmp_path: Path):
     (worktree / "AGENTS.md").write_text("context/INDEX.md", encoding="utf-8")
     (worktree / "openspec").mkdir()
     (worktree / "openspec" / "config.yaml").write_text(
-        "context: context/INDEX.md\n", encoding="utf-8"
+        "context: |\n  Índice: [context/INDEX.md](context/INDEX.md)\n", encoding="utf-8"
     )
     (worktree / "context" / "INDEX.md").write_text("facts.md", encoding="utf-8")
     subprocess.run(["git", "init"], cwd=worktree, check=True, capture_output=True)
