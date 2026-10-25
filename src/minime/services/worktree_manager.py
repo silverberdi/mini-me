@@ -4129,7 +4129,17 @@ class WorktreeManager:
             raise RuntimeError(f"Existing request branch '{actual_branch}' does not match '{branch}'.")
         head_sha = (await self._git(["rev-parse", "HEAD"], cwd=canonical_path)).strip()
         if head_sha != source_base_sha:
-            raise RuntimeError("Existing request worktree HEAD does not match its source base.")
+            runs_repo = getattr(self.uow, "orchestration_runs", None)
+            run = runs_repo.get_by_id(run_id) if runs_repo and hasattr(runs_repo, "get_by_id") else None
+            candidate_sha = (
+                getattr(run, "candidate_sha", None) or getattr(run, "current_candidate_sha", None)
+                if run
+                else None
+            )
+            if candidate_sha != head_sha:
+                raise RuntimeError(
+                    "Existing request worktree HEAD does not match its source base or durable candidate."
+                )
         from minime.services.workspace_guard import ManagedWorkspaceGuard
 
         guard = self.workspace_guard or ManagedWorkspaceGuard(self.uow)
