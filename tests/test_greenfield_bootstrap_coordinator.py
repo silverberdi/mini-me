@@ -242,6 +242,81 @@ def test_candidate_scope_uses_exact_manifest_and_official_paths(tmp_path: Path):
         )
 
 
+def test_simulated_agent_cycle_validates_manifest_paths_and_preserves_checkpoint(
+    in_memory_uow, tmp_path: Path
+):
+    config = _configuration()
+    project = Project(
+        project_id=config.project_id,
+        display_name=config.display_name,
+        repository=config.repository,
+        project_type=ProjectType.GREENFIELD,
+        base_branch="main",
+        onboarding_checkpoint={"source_zip_sha256": "a" * 64},
+    )
+    in_memory_uow.projects.save(project)
+    worktree = tmp_path / "worktree"
+    incoming = worktree / "context" / "incoming" / ("a" * 64)
+    incoming.mkdir(parents=True)
+    package = tmp_path / "package"
+    package.mkdir()
+    (package / "request.md").write_text("Given a source\n", encoding="utf-8")
+    (incoming / "request.md").write_text("Given a source\n", encoding="utf-8")
+    (worktree / "AGENTS.md").write_text(
+        "Use context/INDEX.md as the canonical context.\n", encoding="utf-8"
+    )
+    (worktree / "openspec").mkdir()
+    (worktree / "openspec" / "config.yaml").write_text(
+        "context: context/INDEX.md\n", encoding="utf-8"
+    )
+    (worktree / "context" / "INDEX.md").write_text(
+        "# Context\n\n- [Request](01-producto/request.md)\n", encoding="utf-8"
+    )
+    (worktree / "context" / "01-producto").mkdir()
+    (worktree / "context" / "01-producto" / "request.md").write_text(
+        "Source-backed request.\n", encoding="utf-8"
+    )
+    (worktree / ".agents" / "skills" / "minime-engineering-discipline").mkdir(
+        parents=True
+    )
+    skill = worktree / ".agents" / "skills" / "minime-engineering-discipline" / "SKILL.md"
+    skill.write_text("Installed capability.\n", encoding="utf-8")
+    _initialize_test_repository(worktree)
+
+    class SimulatedAgent:
+        async def run(self, agent_worktree, instruction, timeout_seconds):
+            assert agent_worktree == worktree
+            assert "context/incoming" in instruction
+            assert timeout_seconds == 5
+            return ImplementerResult(
+                exit_code=0,
+                timed_out=False,
+                stdout=["simulated agent completed"],
+                stderr=[],
+                duration_ms=7,
+                native_workflow_evidence={"workflow": "simulated"},
+            )
+
+    coordinator = GreenfieldBootstrapCoordinator(
+        in_memory_uow, thinking_agent=SimulatedAgent(), trusted_managed_root=tmp_path
+    )
+    result = coordinator._run_thinking_agent(
+        project, worktree, config.agent_profiles["thinking"], 5
+    )
+    coordinator._validate_candidate(
+        worktree,
+        incoming,
+        ("request.md",),
+        package,
+        allowed_paths={skill.relative_to(worktree).as_posix()},
+    )
+
+    assert result.exit_code == 0
+    checkpoint = in_memory_uow.projects.get_by_id(config.project_id).onboarding_checkpoint
+    assert checkpoint["thinking_agent_attempt"]["status"] == "SUCCEEDED"
+    assert checkpoint["thinking_agent_attempt"]["exit_code"] == 0
+
+
 def test_blocked_bootstrap_without_agent_attempt_is_safe_pre_dispatch(
     in_memory_uow, tmp_path: Path, monkeypatch
 ):
