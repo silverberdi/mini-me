@@ -150,7 +150,7 @@ def test_project_github_adapter_uses_official_graphql_when_rest_keeps_draft():
                 200,
                 json={
                     "data": {
-                        "convertPullRequestToReadyForReview": {
+                        "markPullRequestReadyForReview": {
                             "pullRequest": {"isDraft": False, "headRefOid": head_sha}
                         }
                     }

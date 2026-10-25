@@ -1778,7 +1778,7 @@ class GitHubAdapter(GitHubAdapterInterface):
                 json={
                     "query": (
                         "mutation($pullRequestId:ID!){"
-                        "convertPullRequestToReadyForReview(input:{pullRequestId:$pullRequestId}){"
+                        "markPullRequestReadyForReview(input:{pullRequestId:$pullRequestId}){"
                         "pullRequest{isDraft headRefOid}}}"
                     ),
                     "variables": {"pullRequestId": node_id},
@@ -1802,7 +1802,7 @@ class GitHubAdapter(GitHubAdapterInterface):
                     retry_safety=RetrySafety.UNKNOWN,
                     error_message="GitHub GraphQL did not confirm pull-request readiness.",
                 )
-            ready = ((graph_data.get("data") or {}).get("convertPullRequestToReadyForReview") or {}).get(
+            ready = ((graph_data.get("data") or {}).get("markPullRequestReadyForReview") or {}).get(
                 "pullRequest"
             ) or {}
             if ready.get("isDraft") is not False or ready.get("headRefOid") != expected_head_sha:
