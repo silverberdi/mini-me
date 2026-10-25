@@ -151,6 +151,12 @@ class NativeOrchestrationCoordinator:
         persisted = details.get("request_normalization")
         if isinstance(persisted, dict) and persisted.get("normalized_body"):
             return persisted, str(persisted["normalized_body"])
+        prior_attempt = details.get("normalization_attempt")
+        if isinstance(prior_attempt, dict) and (
+            prior_attempt.get("dispatch_observed") is True
+            or prior_attempt.get("status") in {"IN_PROGRESS", "FAILED", "SUCCEEDED"}
+        ):
+            return None, "Normalization attempt already recorded; reconciliation or new authorization is required."
 
         service = RequestNormalizationService(self.github_adapter)
         try:
@@ -185,7 +191,25 @@ class NativeOrchestrationCoordinator:
                     change_name=f"issue-{issue_number}",
                 )
                 response_path = worktree_path / ".minime" / f"request-normalization-{active_run.run_id}.json"
-                result = await self.agent_runner.run(
+                attempt = {
+                    "attempt_id": str(uuid4()),
+                    "status": "IN_PROGRESS",
+                    "provider": provider,
+                    "workflow": workflow.dispatch_command,
+                    "workflow_sha256": workflow.workflow_sha256,
+                    "exit_code": None,
+                    "timed_out": None,
+                    "structured_output_present": False,
+                    "structured_output_missing": None,
+                    "output_truncated": None,
+                    "usage_status": "UNKNOWN",
+                    "usage": None,
+                }
+                details["normalization_attempt"] = attempt
+                active_run.stop_details = details
+                self._persist_run_stop_details(active_run, details)
+                try:
+                    result = await self.agent_runner.run(
                     worktree_path=worktree_path,
                     prompt_context=(
                         "Use the installed minime-request-normalizer skill. Return exactly one JSON object "
@@ -210,8 +234,28 @@ class NativeOrchestrationCoordinator:
                         "required": ["normalized_body", "criteria", "semantic_message"],
                         "additionalProperties": False,
                     },
-                    output_last_message_path=response_path,
+                        output_last_message_path=response_path,
+                    )
+                except Exception as exc:
+                    attempt.update({"status": "FAILED", "diagnostic": redact_secrets(str(exc))[:500]})
+                    self._persist_run_stop_details(active_run, details)
+                    return None, "Request normalization dispatch failed; retry is not automatic."
+                attempt.update(
+                    {
+                        "status": "SUCCEEDED" if result.exit_code == 0 and not result.timed_out else "FAILED",
+                        "exit_code": result.exit_code,
+                        "timed_out": result.timed_out,
+                        "preflight_error": redact_secrets(result.preflight_error or "")[:500] or None,
+                        "structured_output_present": bool(result.response_output.strip()),
+                        "structured_output_missing": result.structured_output_missing,
+                        "output_truncated": result.output_truncated,
+                        "duration_ms": result.duration_ms,
+                    }
                 )
+                usage = self.agent_runner.observed_usage(result)
+                if usage is not None:
+                    attempt.update({"usage_status": "OBSERVED", "usage": usage})
+                self._persist_run_stop_details(active_run, details)
                 if (
                     result.exit_code != 0
                     or result.timed_out
@@ -220,14 +264,23 @@ class NativeOrchestrationCoordinator:
                     or result.structured_output_missing
                 ):
                     return None, "Request normalization agent did not produce a verified result."
-                payload = json.loads(result.response_output)
+                try:
+                    payload = json.loads(result.response_output)
+                except json.JSONDecodeError:
+                    attempt["response_status"] = "INVALID"
+                    self._persist_run_stop_details(active_run, details)
+                    return None, "Request normalization response was not structured."
                 if (
                     not isinstance(payload, dict)
                     or not isinstance(payload.get("normalized_body"), str)
                     or not isinstance(payload.get("semantic_message"), str)
                     or not payload["semantic_message"].strip()
                 ):
+                    attempt["response_status"] = "INVALID"
+                    self._persist_run_stop_details(active_run, details)
                     return None, "Request normalization response was not structured."
+                attempt["response_status"] = "VALID"
+                self._persist_run_stop_details(active_run, details)
                 normalized = NormalizedRequest(
                     original_body=issue_body,
                     normalized_body=payload["normalized_body"].strip(),
@@ -235,7 +288,14 @@ class NativeOrchestrationCoordinator:
                     criteria=tuple(str(item) for item in payload.get("criteria", [])),
                     semantic_message=payload["semantic_message"].strip(),
                 )
-            evidence = service.publish(repository, issue_number, active_run.run_id, normalized)
+            try:
+                evidence = service.publish(repository, issue_number, active_run.run_id, normalized)
+            except RequestNormalizationError as exc:
+                if isinstance(details.get("normalization_attempt"), dict):
+                    details["normalization_attempt"]["publish_status"] = "FAILED"
+                    details["normalization_attempt"]["diagnostic"] = str(exc)[:500]
+                    self._persist_run_stop_details(active_run, details)
+                raise
         except (RequestNormalizationError, NativeOpenSpecWorkflowUnavailable, ValueError, json.JSONDecodeError) as exc:
             return None, str(exc)
 
@@ -252,6 +312,8 @@ class NativeOrchestrationCoordinator:
         }
         details["request_normalization"] = persisted
         active_run.stop_details = details
+        if isinstance(details.get("normalization_attempt"), dict):
+            details["normalization_attempt"]["publish_status"] = "CONFIRMED"
         uow = self.uow_factory()
         stored = uow.orchestration_runs.get_by_id(active_run.run_id)
         if stored is not None:
@@ -259,6 +321,16 @@ class NativeOrchestrationCoordinator:
             uow.orchestration_runs.save(stored)
             uow.commit()
         return persisted, normalized.normalized_body
+
+    def _persist_run_stop_details(self, active_run: OrchestrationRun, details: dict[str, Any]) -> None:
+        """Persist normalization identity and result before allowing any continuation."""
+        active_run.stop_details = details
+        uow = self.uow_factory()
+        stored = uow.orchestration_runs.get_by_id(active_run.run_id)
+        if stored is not None:
+            stored.stop_details = details
+            uow.orchestration_runs.save(stored)
+            uow.commit()
 
     def register_classification_retry_authorization(
         self,

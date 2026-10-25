@@ -7,8 +7,11 @@ version: "1.0.0"
 # Request normalization
 
 Read the Request, comments and attached source references in the authorized
-context. Produce exactly the structured response requested by the coordinator:
-`normalized_body` and `criteria`.
+context. Produce exactly one structured response with these three required fields:
+`normalized_body`, `criteria` and `semantic_message`.
+
+`semantic_message` must be a brief, concrete comment in simple Spanish describing the
+normalization result. Do not put logs, secrets or a second response object in it.
 
 Preserve every stated fact and acceptance criterion. Rephrase for complete
 Given/When/Then scenarios, but do not invent requirements, decisions, tasks,

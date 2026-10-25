@@ -331,6 +331,31 @@ class CliAgentRunner:
             raise ValueError(f"No unique verified F2 provider is configured for role '{role}'.")
         return providers[0]
 
+    @staticmethod
+    def observed_usage(result: AgentExecutionResult) -> dict[str, int] | None:
+        """Extract only an explicit Codex turn.completed usage event; never infer counters."""
+        for line in reversed(getattr(result, "diagnostic_output", None) or []):
+            try:
+                event = json.loads(line)
+            except (TypeError, json.JSONDecodeError):
+                continue
+            if not isinstance(event, dict) or event.get("type") != "turn.completed":
+                continue
+            usage = event.get("usage")
+            if not isinstance(usage, dict):
+                continue
+            if not all(
+                type(usage.get(key)) is int and usage[key] >= 0
+                for key in ("input_tokens", "output_tokens")
+            ):
+                continue
+            return {
+                key: usage[key]
+                for key in ("input_tokens", "cached_input_tokens", "output_tokens")
+                if type(usage.get(key)) is int and usage[key] >= 0
+            }
+        return None
+
     def _command_for_prompt(
         self, prompt_context: str, profile: CliInvocationProfile | None
     ) -> list[str]:

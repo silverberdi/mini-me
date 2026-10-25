@@ -1,6 +1,7 @@
 """F4 deterministic contracts: Issue provenance, semantic PRs and capabilities."""
 
 import json
+from types import SimpleNamespace
 from pathlib import Path
 
 import httpx
@@ -223,6 +224,113 @@ async def test_coordinator_requires_and_persists_structured_semantic_message(tmp
     assert any("Original Request" in str(item["body"]) for item in comments)
     assert any("Se normalizó" in str(item["body"]) for item in comments)
     assert run.current_stage is OrchestrationStage.ADMITTED
+
+
+def test_normalizer_skills_match_coordinator_schema():
+    coordinator_source = Path("src/minime/services/orchestration_coordinator.py").read_text(encoding="utf-8")
+    assert '"required": ["normalized_body", "criteria", "semantic_message"]' in coordinator_source
+    for relative in (
+        ".agents/skills/minime-request-normalizer/SKILL.md",
+        ".agent/skills/minime-request-normalizer/SKILL.md",
+    ):
+        skill = Path(relative).read_text(encoding="utf-8")
+        assert "`normalized_body`, `criteria` and `semantic_message`" in skill
+        assert "`normalized_body` and `criteria`." not in skill
+
+
+@pytest.mark.asyncio
+async def test_failed_normalization_persists_diagnostic_and_blocks_reentry(tmp_path: Path):
+    issue = {"number": 12, "body": "C1: una solicitud informal.", "repository_url": "/repos/o/r"}
+    run = OrchestrationRun(project_id="project", change_name="issue-12", base_sha="main")
+    calls = 0
+
+    def ok(data):
+        return ExternalActionResult(
+            outcome=ExternalOutcome.SUCCESS,
+            source_adapter="test",
+            reason_code=ExternalReasonCode.EXECUTION_SUCCESS,
+            retry_safety=RetrySafety.SAFE,
+            data=data,
+        )
+
+    class Github:
+        def get_issue(self, *_):
+            return ok(issue)
+
+        def list_issue_comments(self, *_):
+            return ok([])
+
+    class Runner:
+        def resolve_workflow(self, **_kwargs):
+            return SimpleNamespace(dispatch_command="$minime-request-normalizer issue-12", workflow_sha256="wf")
+
+        async def run(self, **_kwargs):
+            nonlocal calls
+            calls += 1
+            return AgentExecutionResult(
+                exit_code=7,
+                timed_out=False,
+                stdout=[],
+                stderr=["provider failure"],
+                duration_ms=12,
+                structured_output=[],
+                diagnostic_output=[],
+                structured_output_missing=True,
+            )
+
+        @staticmethod
+        def observed_usage(_result):
+            return None
+
+    class Runs:
+        def get_by_id(self, _run_id):
+            return run
+
+        def save(self, value):
+            nonlocal run
+            run = value
+
+    class Uow:
+        orchestration_runs = Runs()
+
+        def commit(self):
+            return None
+
+    coordinator = NativeOrchestrationCoordinator(
+        uow_factory=Uow,
+        github_adapter=Github(),
+        worktree_manager=object(),
+        agent_runner=Runner(),
+    )
+    first, first_error = await coordinator._normalize_request_before_explore(
+        active_run=run,
+        project_id="project",
+        repository="o/r",
+        worktree_path=tmp_path,
+        issue_number=12,
+        issue_title="Solicitud",
+        issue_body=issue["body"],
+        provider="codex",
+    )
+    second, second_error = await coordinator._normalize_request_before_explore(
+        active_run=run,
+        project_id="project",
+        repository="o/r",
+        worktree_path=tmp_path,
+        issue_number=12,
+        issue_title="Solicitud",
+        issue_body=issue["body"],
+        provider="codex",
+    )
+
+    attempt = run.stop_details["normalization_attempt"]
+    assert first is None and "verified result" in first_error
+    assert second is None and "already recorded" in second_error
+    assert calls == 1
+    assert attempt["status"] == "FAILED"
+    assert attempt["exit_code"] == 7
+    assert attempt["structured_output_missing"] is True
+    assert attempt["usage_status"] == "UNKNOWN"
 
 
 def test_semantic_pr_content_is_validated_without_auto_close():
