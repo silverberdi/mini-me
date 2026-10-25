@@ -64,6 +64,74 @@ def test_codex_capacity_missing_or_wrong_identity_is_unknown(payload):
     assert observation.account_id is None
 
 
+def test_codex_null_normal_model_requires_separate_capability_evidence():
+    now = utc_now()
+    payload = _codex_result()
+    payload["rateLimitsByLimitId"]["codex"]["normalModelSlug"] = None
+    unknown = CodexProviderAdapter.parse_rate_limits_result(
+        payload,
+        observed_at=now,
+        expires_at=now + timedelta(seconds=60),
+        selected_model="gpt-5.6-luna",
+    )
+    assert unknown.ordinary_usage_allowed is None
+
+    verified = CodexProviderAdapter.parse_rate_limits_result(
+        payload,
+        observed_at=now,
+        expires_at=now + timedelta(seconds=60),
+        selected_model="gpt-5.6-luna",
+        model_capability_verified=True,
+    )
+    assert verified.ordinary_usage_allowed is True
+    assert verified.model == "gpt-5.6-luna"
+
+
+@pytest.mark.asyncio
+async def test_codex_capacity_reads_model_catalog_before_generic_bucket(monkeypatch):
+    adapter = CodexProviderAdapter()
+    payload = _codex_result()
+    payload["rateLimitsByLimitId"]["codex"]["normalModelSlug"] = None
+
+    async def app_server(method, params=None, timeout_seconds=10.0):
+        del params, timeout_seconds
+        if method == "model/list":
+            return {
+                "data": [
+                    {
+                        "id": "gpt-5.6-luna",
+                        "supportedReasoningEfforts": [{"reasoningEffort": "medium"}],
+                    }
+                ]
+            }
+        assert method == "account/rateLimits/read"
+        return payload
+
+    monkeypatch.setattr(adapter, "_call_app_server_method", app_server)
+    observation = await adapter.read_capacity_observation(
+        selected_model="gpt-5.6-luna"
+    )
+    assert observation.ordinary_usage_allowed is True
+    assert observation.model == "gpt-5.6-luna"
+
+
+@pytest.mark.asyncio
+async def test_codex_capacity_stays_unknown_when_selected_model_is_absent(monkeypatch):
+    adapter = CodexProviderAdapter()
+
+    async def app_server(method, params=None, timeout_seconds=10.0):
+        del params, timeout_seconds
+        if method == "model/list":
+            return {"data": [{"id": "other-model"}]}
+        raise AssertionError("rate limits must not be read after failed model preflight")
+
+    monkeypatch.setattr(adapter, "_call_app_server_method", app_server)
+    observation = await adapter.read_capacity_observation(
+        selected_model="gpt-5.6-luna"
+    )
+    assert observation.ordinary_usage_allowed is None
+
+
 def test_stale_capacity_observation_is_rejected(in_memory_uow):
     service = ProviderHealthService(in_memory_uow)
     old = utc_now() - timedelta(minutes=2)

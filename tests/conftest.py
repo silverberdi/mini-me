@@ -1767,6 +1767,26 @@ class InMemoryOperatorActionRepository(OperatorActionRepositoryInterface):
                 return rec.model_copy(deep=True)
         return None
 
+    def consume_single_use(
+        self,
+        action_request_id: str,
+        *,
+        run_id: str,
+        action_type: Any,
+        expected_parameters: dict[str, Any],
+    ) -> OperatorActionRecord | None:
+        for record in self._store.values():
+            if (
+                record.action_request_id == action_request_id
+                and record.run_id == run_id
+                and record.action_type == action_type
+                and record.status.value == "ACCEPTED"
+                and all(record.parameters_json.get(k) == v for k, v in expected_parameters.items())
+            ):
+                record.status = type(record.status)("COMPLETED")
+                return record.model_copy(deep=True)
+        return None
+
     def list_by_run(self, run_id: str, limit: int = 50) -> list[OperatorActionRecord]:
         matches = [r.model_copy(deep=True) for r in self._store.values() if r.run_id == run_id]
         matches.sort(key=lambda r: r.created_at, reverse=True)
@@ -2650,6 +2670,11 @@ def setup_managed_repository_fixture(
         and uow.project_managed_repository_bindings
     ):
         uow.project_managed_repository_bindings.save(binding)
+        # Orchestration tests need the same durable project identity that
+        # production requires before a request may be admitted.
+        if hasattr(uow, "projects") and uow.projects.get_by_id(project_id) is None:
+            repository = canonical_repository_identity.removeprefix("github.com/")
+            uow.projects.save(Project(project_id=project_id, display_name=project_id, repository=repository))
 
     # Publish a real local ref so the fail-closed readiness remote-observation checks
     # can be exercised offline, and refresh any intake ownerships auto-created earlier.

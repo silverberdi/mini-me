@@ -39,19 +39,20 @@ Al configurar contexto, reutilizar e instalar skills OpenSpec preexistentes; usa
 
 Al activar proyecto: consultar directamente tickets abiertos y elegibles en el origen remoto; orden ascendente por fecha de creación, desempate estable por ID; comenzar el más antiguo. No mantener cola duplicada ni usar scoring, envejecimiento, prioridades sintéticas o roadmap como orden alternativo. Si el ticket seleccionado queda bloqueado, conservarlo; no saltar silenciosamente a otro. El siguiente empieza cuando se haya completado el cierre documental y del ticket anterior.
 
-**Propose (pensamiento):** actualizar base, crear una rama/worktree para el ticket, invocar skill nativa de propuesta, obtener artefactos del esquema, commit. Revisor independiente de solo lectura contrasta ticket/contexto/propuesta; si hay observaciones, publicar comentario y ejecutar update nativo con pensamiento, nuevo commit y nueva revisión, hasta aprobar o llegar al límite. Tras aprobar, pasar la MISMA rama a Apply.
+**Explore (pensamiento):** indagar de forma autónoma el contexto del ticket, repositorio y archivos de diseño. Emitir READY TO PROPOSE si hay suficiente información, o pausar con HUMAN REQUIRED con opciones estructuradas en español si existe ambigüedad material irresoluble.
 
-**Apply (ejecutor):** entrar al worktree recibido, invocar skill nativa apply, implementar y probar conforme a OpenSpec, registrar cambios y commit; pasar rama a Verify.
+**Propose (pensamiento):** invocar workflow nativo de propuesta, obtener artefactos (`proposal.md`, `specs/`, `design.md`, `tasks.md`), ejecutar validación estricta CLI con autocorrección. Evaluar complejidad fundamentada (`low`, `moderate`, `high`). Para complejidad alta, invocar revisión independiente de solo lectura; para complejidad baja/moderada, avanzar directamente a Apply.
 
-**Verify (pensamiento):** ejecutar workflow nativo verify, contrastar especificaciones y pruebas; fallos concretos se comentan y vuelven al ejecutor usando workflow nativo de corrección; repetir verify con límite de intentos. Al aprobar, decidir si la revisión independiente de código es obligatoria según política sencilla del proyecto y justificar decisión (sin motor de riesgo). Si no, mini me hace push y PR.
+**Apply (ejecutor):** verificar previamente que el ejecutor dispone de Verify nativo instalado (bloqueo *fail-closed* si falta); ejecutar workflow nativo apply, diseñar y ejecutar obligatoriamente pruebas unitarias/E2E reales en el proyecto (exit code 0), implementar tareas de `tasks.md` y pasar a Verify.
 
-**Revisión independiente de código (condicional):** agente distinto y de solo lectura contrasta ticket, propuesta aprobada, specs, diff y pruebas contra commit preciso. Hallazgos → comentario, Apply, Verify, nueva revisión. Aprobación → mini me publica commit/push/PR sin convertir al revisor en autor. Cualquier modificación posterior requiere revalidar aprobaciones del candidato.
+**Verify (ejecutor):** ejecutado por el mismo agente ejecutor mediante el workflow oficial OpenSpec Verify (y NO por el agente de pensamiento). Ante discrepancias, bucle de autocorrección con Apply. Al aprobar: baja/moderada pasa a preparación de PR; alta complejidad pasa a revisión independiente de código de solo lectura.
 
-**Merge humano:** PR muestra requerimiento, propuesta, verificación y revisión; operador autoriza desde UI, ligado al PR y SHA efectivamente revisados. mini me realiza merge por adaptador Git bajo protección de rama. Nadie puede autorizar su propio merge de implementación.
+**Revisión independiente de código (condicional para alta complejidad):** agente de solo lectura contrasta ticket, propuesta, specs, diff y pruebas. Hallazgos → vuelta a Apply/Verify. Aprobación → preparación de PR.
 
-**Sync/Archive (pensamiento, menor esfuerzo compatible):** tras comprobar merge humano, crear OTRA rama de cierre desde main actualizado. Agente usa workflows nativos sync y archive. mini me crea commit/push/PR exclusivamente documental y puede realizar su merge **solo cuando esté autorizado por este contrato y por las protecciones reales del repositorio**; confirmar merge, cerrar ticket remoto, iniciar siguiente ticket. Si el segundo merge no está permitido, solicitar humano; no declarar cierre ficticio.
-
-Las revisiones de propuesta siempre son independientes; la revisión de código es condicional. Todas las vueltas de corrección tienen un límite de intentos configurable. Ninguna revisión puede mutar su propio objeto de evaluación.
+**Preparación de PR y política de merge:** F3 entrega la skill mínima `minime-pr-preparer` con referencias estrictamente informativas (`Addresses #...` o `Ref #...`) excluyendo taxativamente palabras de cierre automático (`Fixes`, `Closes`, `Resolves`).
+- *Primer PR (implementación):* merge automático por mini me para baja/moderada; acuse informativo humano («Estoy enterado») para alta complejidad antes de que mini me ejecute el merge.
+- *Rama documental y segundo PR:* tras confirmar merge de PR1, crear rama fresca `doc-close-<num>-<slug>` desde `main` actualizado en la raíz administrada; agente de pensamiento ejecuta Sync y Archive nativos; PR2 documental con merge automático incondicional por mini me.
+- *Cierre remoto:* mini me cierra el Issue remoto únicamente tras verificar el merge de PR2, liberando el bloqueo y pasando al siguiente ticket FIFO.
 
 ## 5. Intervención humana asistida
 
@@ -140,5 +141,8 @@ En toda contradicción con documentación anterior manda este contrato; en toda 
 ## 12. Definición de éxito
 
 mini me procesa un ticket remoto sin cola duplicada, hace propose, revisión independiente de propuesta, apply, verify y correcciones, revisión independiente de código cuando corresponda, PR con merge humano, sync/archive nativos con segundo PR autorizado, cierra ticket y elige siguiente; resuelve preguntas con contexto y eleva decisiones humanas sin perder trabajo. Una UI operable muestra ese ciclo. F5 y F6 son ejecutadas por mini me. La aplicación final es pequeña, POO/SOLID/DRY, sin código/DB heredados superfluos.
+
+### Regla permanente de aceptación de entregas
+Una implementación no se declara completa por el número de tareas marcadas, la cantidad de tests aprobados o el informe de su ejecutor. Todo criterio que exija una integración real necesita evidencia observable de la invocación, su resultado y sus efectos. Las pruebas simuladas no pueden presentarse como E2E reales. La revisión independiente debe contrastar el código y la evidencia contra un SHA inmutable. Ante evidencia ausente, ambigua o fallida, se aplica fail-closed. Esta regla permanece disponible para las fases posteriores.
 
 **mini me debe ser una gacela, no un paquidermo: una aplicación pequeña, bien estructurada y capaz de entregar valor real.**

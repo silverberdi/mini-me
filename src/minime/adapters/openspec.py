@@ -16,6 +16,10 @@ from minime.logging import get_logger
 logger = get_logger("adapters.openspec")
 
 
+class OpenSpecConfigurationIncomplete(RuntimeError):
+    """Official CLI is present, but its configured delivery is insufficient."""
+
+
 class OpenSpecAdapter(OpenSpecAdapterInterface):
     """Adapter for interacting with OpenSpec CLI and structured files."""
 
@@ -69,8 +73,9 @@ class OpenSpecAdapter(OpenSpecAdapterInterface):
             self._initialize_official_integrations(reference_root, selected, capabilities)
             reference = self.inspect_integrations(reference_root, selected)
             if not reference["complete"]:
-                raise RuntimeError(
-                    "Official OpenSpec setup did not produce a complete compatible reference set"
+                raise OpenSpecConfigurationIncomplete(
+                    "Official OpenSpec setup is incomplete for the selected agents; configure "
+                    "delivery=both and workflows including Verify and Continue before retrying."
                 )
             self._assert_no_incompatible_official_files(root, reference_root, reference, selected)
             self._initialize_official_integrations(root, selected, capabilities)
@@ -84,7 +89,7 @@ class OpenSpecAdapter(OpenSpecAdapterInterface):
                     "Target workspace does not contain the full official OpenSpec integration "
                     "set available for the verified CLI version"
                 )
-            for relative in self._official_integration_paths(reference, selected):
+            for relative in self._official_integration_paths(reference, selected, reference_root):
                 if (root / relative).read_bytes() != (reference_root / relative).read_bytes():
                     raise RuntimeError(
                         "Target workspace integration content differs from official setup"
@@ -99,7 +104,7 @@ class OpenSpecAdapter(OpenSpecAdapterInterface):
 
     @staticmethod
     def _official_integration_paths(
-        reference: dict[str, Any], selected: list[str]
+        reference: dict[str, Any], selected: list[str], reference_root: Path | None = None
     ) -> tuple[Path, ...]:
         paths: list[Path] = []
         for agent in selected:
@@ -109,17 +114,34 @@ class OpenSpecAdapter(OpenSpecAdapterInterface):
                     Path(".agents/skills") / f"openspec-{name}" / "SKILL.md" for name in names
                 )
             else:
+                workflow_root = OpenSpecAdapter._workflow_integration_root(
+                    reference_root or Path(".")
+                )
                 paths.extend(
-                    Path(".agent/workflows") / f"opsx-{name}.md" for name in names
+                    workflow_root / f"opsx-{name}.md" for name in names
                 )
         return tuple(paths)
+
+    @staticmethod
+    def _workflow_integration_root(root: Path) -> Path:
+        """Return the workflow directory emitted by the installed OpenSpec CLI.
+
+        OpenSpec releases have used both `.agent/workflows` and
+        `.agents/workflows`.  The CLI is authoritative; this resolver accepts
+        either native location without copying or synthesizing workflows.
+        """
+        for relative in (Path(".agent/workflows"), Path(".agents/workflows")):
+            directory = root / relative
+            if directory.is_dir() and any(directory.glob("opsx-*.md")):
+                return relative
+        return Path(".agent/workflows")
 
     @classmethod
     def _assert_no_incompatible_official_files(
         cls, root: Path, reference_root: Path, reference: dict[str, Any], selected: list[str]
     ) -> None:
         """Never let official setup silently replace a modified native integration."""
-        for relative in cls._official_integration_paths(reference, selected):
+        for relative in cls._official_integration_paths(reference, selected, reference_root):
             target = root / relative
             if target.is_symlink():
                 raise ValueError("OpenSpec integration target contains a symlink")
@@ -151,6 +173,7 @@ class OpenSpecAdapter(OpenSpecAdapterInterface):
             ".agents/skills",
             ".agent",
             ".agent/workflows",
+            ".agents/workflows",
             "AGENTS.md",
             ".agents/AGENTS.md",
             ".agent/AGENTS.md",
@@ -232,7 +255,9 @@ class OpenSpecAdapter(OpenSpecAdapterInterface):
                 "update-change",
                 "archive-change",
             },
-            "antigravity": set(),
+            # A provider advertised by the CLI is not enough.  Antigravity
+            # must have native workflow files before F3 may dispatch it.
+            "antigravity": required["antigravity"],
         }
         complete = not requested_root.is_symlink()
         try:
@@ -248,7 +273,8 @@ class OpenSpecAdapter(OpenSpecAdapterInterface):
                     if path.is_file() and not path.is_symlink()
                 }
             else:
-                files = sorted((root / ".agent/workflows").glob("opsx-*.md"))
+                workflow_root = OpenSpecAdapter._workflow_integration_root(root)
+                files = sorted((root / workflow_root).glob("opsx-*.md"))
                 names = {
                     path.stem.removeprefix("opsx-")
                     for path in files
