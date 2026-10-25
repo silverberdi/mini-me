@@ -1,4 +1,6 @@
+import io
 import subprocess
+import zipfile
 from decimal import Decimal
 from pathlib import Path
 from types import SimpleNamespace
@@ -12,10 +14,12 @@ from minime.domain.enums import (
     ProjectType,
 )
 from minime.domain.models import (
+    ExternalActionResult,
     Project,
     ProjectAgentProfile,
     ProjectConfigurationInput,
     ProjectExecutionPolicy,
+    ProjectManagedRepositoryBinding,
     ProjectProviderConnection,
 )
 from minime.services.context_archive import UnsafeContextArchive
@@ -949,3 +953,150 @@ def test_failed_post_agent_candidate_is_quarantined_and_not_replayed(
     report = coordinator.reconcile_blocked_bootstrap("project")
     assert report["safe_to_resume"] is False
     assert report["reason"] == "CANDIDATE_QUARANTINED_REVIEW_REQUIRED"
+
+
+def test_quarantined_candidate_is_recovered_without_agent_replay(in_memory_uow, tmp_path: Path):
+    config = _configuration()
+    source_zip = io.BytesIO()
+    with zipfile.ZipFile(source_zip, "w") as archive:
+        archive.writestr("request.md", "Given a source\n")
+    payload = source_zip.getvalue()
+    source_sha = __import__("hashlib").sha256(payload).hexdigest()
+    branch = "minime/bootstrap/greenfield-" + source_sha[:12]
+    managed = tmp_path / "managed" / config.project_id
+    worktree = managed / ".minime" / "worktrees" / branch.replace("/", "-")
+    worktree.mkdir(parents=True)
+    incoming = worktree / "context" / "incoming" / source_sha
+    incoming.mkdir(parents=True)
+    (incoming / "request.md").write_text("Given a source\n", encoding="utf-8")
+    (worktree / "AGENTS.md").write_text(
+        "Use context/INDEX.md as the canonical context.\n", encoding="utf-8"
+    )
+    (worktree / "openspec").mkdir()
+    (worktree / "openspec" / "config.yaml").write_text(
+        "context: context/INDEX.md\n", encoding="utf-8"
+    )
+    (worktree / "context" / "INDEX.md").write_text(
+        "# Context\n\n- [Request](01-producto/request.md)\n", encoding="utf-8"
+    )
+    (worktree / "context" / "01-producto").mkdir()
+    (worktree / "context" / "01-producto" / "request.md").write_text(
+        "Source-backed request.\n", encoding="utf-8"
+    )
+    (worktree / ".agents" / "skills" / "minime-engineering-discipline").mkdir(
+        parents=True
+    )
+    (worktree / ".agents" / "skills" / "minime-engineering-discipline" / "SKILL.md").write_text(
+        "Installed capability.\n", encoding="utf-8"
+    )
+    (worktree / ".agents" / "skills" / "openspec-propose").mkdir(parents=True)
+    (worktree / ".agents" / "skills" / "openspec-propose" / "SKILL.md").write_text(
+        "Official skill.\n", encoding="utf-8"
+    )
+    (worktree / ".agents" / "workflows").mkdir(parents=True)
+    (worktree / ".agents" / "workflows" / "opsx-propose.md").write_text(
+        "Official workflow.\n", encoding="utf-8"
+    )
+    _initialize_test_repository(worktree)
+    (worktree / ".agents" / "skills" / "minime-engineering-discipline" / "SKILL.md").write_text(
+        "Installed capability updated by recovery.\n", encoding="utf-8"
+    )
+
+    project = Project(
+        project_id=config.project_id,
+        display_name=config.display_name,
+        repository=config.repository,
+        project_type=ProjectType.GREENFIELD,
+        base_branch="main",
+        provider_connections={
+            key: value.model_dump(mode="json")
+            for key, value in config.provider_connections.items()
+        },
+        agent_profiles={key: value.model_dump() for key, value in config.agent_profiles.items()},
+        execution_policy=config.execution_policy.model_dump(),
+        onboarding_status=ProjectOnboardingStatus.BLOCKED,
+        onboarding_checkpoint={
+            "source_zip_sha256": source_sha,
+            "candidate_recovery": {
+                "status": "QUARANTINED_REVIEW_REQUIRED",
+                "worktree": str(worktree),
+                "branch": branch,
+                "base_sha": subprocess.check_output(
+                    ["git", "-C", str(worktree), "rev-parse", "HEAD"], text=True
+                ).strip(),
+            },
+            "thinking_agent_attempt": {
+                "status": "SUCCEEDED",
+                "usage_status": "OBSERVED",
+                "agent": "codex",
+                "model": "gpt-5.6-luna",
+                "exit_code": 0,
+                "duration_ms": 7,
+            },
+        },
+    )
+    in_memory_uow.projects.save(project)
+    in_memory_uow.project_managed_repository_bindings.save(
+        ProjectManagedRepositoryBinding(
+            project_id=project.project_id,
+            canonical_repository_identity=project.repository,
+            managed_repository_root=str(managed),
+            worktree_parent_dir=str(managed / ".minime" / "worktrees"),
+        )
+    )
+
+    class Adapter:
+        def get_repository_branch_head(self, *_args):
+            return SimpleNamespace(outcome=ExternalOutcome.FAILURE, reason_code=ExternalReasonCode.NOT_FOUND)
+
+        def get_pull_request(self, *_args):
+            return SimpleNamespace(outcome=ExternalOutcome.FAILURE, reason_code=ExternalReasonCode.NOT_FOUND)
+
+        def push_branch(self, _worktree, _remote, _branch, head_sha):
+            return ExternalActionResult(
+                outcome=ExternalOutcome.SUCCESS,
+                source_adapter="test",
+                reason_code=ExternalReasonCode.EXECUTION_SUCCESS,
+                data=head_sha,
+            )
+
+    class Connections:
+        def require_git_pr_write(self, _project):
+            return Adapter()
+
+        def create_pull_request(self, *_args, **_kwargs):
+            return ExternalActionResult(
+                outcome=ExternalOutcome.SUCCESS,
+                source_adapter="test",
+                reason_code=ExternalReasonCode.EXECUTION_SUCCESS,
+                data={"number": 9, "url": "https://example.invalid/pull/9"},
+            )
+
+    class Manifest:
+        def install_greenfield(self, *_args, **_kwargs):
+            return {"files": [{"path": ".agents/skills/minime-engineering-discipline/SKILL.md"}]}
+
+        def validate_f5_readiness(self, *_args, **_kwargs):
+            return {"status": "READY_FOR_F5_VALIDATION"}
+
+    class OpenSpec:
+        def inspect_integrations(self, *_args):
+            return {"integrations": {"codex": ["propose"], "antigravity": ["propose"]}}
+
+        def validate_workspace(self, _worktree):
+            return {"status": "PASS"}
+
+    coordinator = GreenfieldBootstrapCoordinator(
+        in_memory_uow,
+        connection_service=Connections(),
+        openspec=OpenSpec(),
+        capability_manifest=Manifest(),
+        trusted_managed_root=tmp_path / "managed",
+    )
+    result = coordinator.recover_quarantined_candidate(project.project_id, payload)
+
+    assert result["onboarding_status"] == ProjectOnboardingStatus.PR_PENDING.value
+    saved = in_memory_uow.projects.get_by_id(project.project_id)
+    assert saved.onboarding_checkpoint["pull_request_number"] == 9
+    assert saved.onboarding_checkpoint["thinking_agent_attempt"]["usage_status"] == "OBSERVED"
+    assert saved.onboarding_checkpoint["candidate_recovery"]["status"] == "QUARANTINED_REVIEW_REQUIRED"
