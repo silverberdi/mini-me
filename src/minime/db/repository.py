@@ -4029,6 +4029,36 @@ class PostgresOperatorActionRepository(OperatorActionRepositoryInterface):
         model = self.session.scalars(stmt).first()
         return operator_action_record_model_to_domain(model) if model else None
 
+    def consume_single_use(
+        self,
+        action_request_id: str,
+        *,
+        run_id: str,
+        action_type: OperatorActionType,
+        expected_parameters: dict[str, Any],
+    ) -> OperatorActionRecord | None:
+        """Atomically consume one accepted operator authorization under row lock."""
+        stmt = (
+            select(OperatorActionRecordModel)
+            .where(OperatorActionRecordModel.action_request_id == action_request_id)
+            .with_for_update()
+        )
+        model = self.session.scalars(stmt).first()
+        expected_type = action_type.value if hasattr(action_type, "value") else str(action_type)
+        if (
+            not model
+            or model.run_id != run_id
+            or model.action_type != expected_type
+            or model.status != OperatorActionStatus.ACCEPTED.value
+        ):
+            return None
+        parameters = dict(model.parameters_json or {})
+        if any(parameters.get(key) != value for key, value in expected_parameters.items()):
+            return None
+        model.status = OperatorActionStatus.COMPLETED.value
+        model.result_payload_json = {"consumed": True}
+        return operator_action_record_model_to_domain(model)
+
     def list_by_run(self, run_id: str, limit: int = 50) -> list[OperatorActionRecord]:
         stmt = (
             select(OperatorActionRecordModel)

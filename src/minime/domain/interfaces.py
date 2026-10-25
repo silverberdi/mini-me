@@ -776,6 +776,16 @@ class OperatorActionRepositoryInterface(ABC):
     def get_by_request_id(self, action_request_id: str) -> OperatorActionRecord | None: ...
 
     @abstractmethod
+    def consume_single_use(
+        self,
+        action_request_id: str,
+        *,
+        run_id: str,
+        action_type: Any,
+        expected_parameters: dict[str, Any],
+    ) -> OperatorActionRecord | None: ...
+
+    @abstractmethod
     def list_by_run(self, run_id: str, limit: int = 50) -> list[OperatorActionRecord]: ...
 
     @abstractmethod
@@ -1080,6 +1090,22 @@ class GitHubAdapterInterface(ABC):
 
     def get_pull_request_details(
         self, repository: str, pr_number: int
+    ) -> ExternalActionResult[dict[str, Any]]:
+        return ExternalActionResult[dict[str, Any]](
+            outcome=ExternalOutcome.UNKNOWN,
+            value={},
+            source_adapter="interface",
+            reason_code=ExternalReasonCode.UNSUPPORTED,
+        )
+
+    def merge_pull_request(
+        self,
+        repository: str,
+        pr_number: int,
+        candidate_sha: str | None = None,
+        commit_title: str | None = None,
+        commit_message: str | None = None,
+        merge_method: str = "merge",
     ) -> ExternalActionResult[dict[str, Any]]:
         return ExternalActionResult[dict[str, Any]](
             outcome=ExternalOutcome.UNKNOWN,

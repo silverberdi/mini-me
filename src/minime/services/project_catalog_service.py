@@ -7,7 +7,7 @@ import shutil
 from pathlib import Path
 from typing import Any
 
-from minime.adapters.openspec import OpenSpecAdapter
+from minime.adapters.openspec import OpenSpecAdapter, OpenSpecConfigurationIncomplete
 from minime.adapters.provider_adapter import get_provider_adapter
 from minime.config import AppConfig, load_config, resolve_cli_invocation
 
@@ -176,12 +176,20 @@ class ProjectCatalogService:
                 ),
                 "models": models,
                 "native_openspec_setup": False,
+                "native_openspec_setup_status": "UNOBSERVED",
             }
             if provider_id in {"codex", "antigravity"}:
                 official: dict[str, Any] = {}
                 try:
                     official = self.openspec.discover_official_integrations([provider_id])
+                    entry["native_openspec_setup_status"] = (
+                        "OBSERVED" if official else "UNOBSERVED"
+                    )
+                except OpenSpecConfigurationIncomplete as exc:
+                    entry["native_openspec_setup_status"] = "CONFIGURATION_INCOMPLETE"
+                    entry["native_openspec_setup_error"] = str(exc)
                 except (OSError, RuntimeError, TimeoutError, ValueError):
+                    entry["native_openspec_setup_status"] = "UNAVAILABLE"
                     official = {}
                 entry["native_openspec_setup"] = bool(official)
                 entry["openspec_version"] = official.get("version")

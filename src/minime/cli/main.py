@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+from pathlib import Path
 from typing import NoReturn
 
 import typer
@@ -37,10 +38,12 @@ scheduler_app = typer.Typer(help="Retired in F1; F3 owns its replacement.")
 queue_app = typer.Typer(help="Retired in F1; F3 owns its replacement.")
 orchestrate_app = typer.Typer(help="Retired in F1; F3 owns its replacement.")
 action_app = typer.Typer(help="Retired in F1; F3 owns its replacement.")
+request_app = typer.Typer(help="F3 native OpenSpec request orchestration.")
 providers_app = typer.Typer(help="Read-only provider diagnostics.")
 budget_app = typer.Typer(help="Read-only budget diagnostics.")
 app.add_typer(project_app, name="project")
 project_app.add_typer(project_catalog_app, name="catalog")
+app.add_typer(request_app, name="request")
 app.add_typer(scheduler_app, name="scheduler")
 app.add_typer(queue_app, name="queue")
 app.add_typer(orchestrate_app, name="orchestrate")
@@ -437,6 +440,126 @@ def budget_status_cmd(project_id: str | None = typer.Option(None, "--project-id"
         typer.echo(f"budget diagnostics unavailable: {exc}", err=True)
         raise typer.Exit(code=1) from exc
     typer.echo(json.dumps({"project_id": resolved_project_id, "policy": policy.model_dump() if policy else None, "headroom": headroom.__dict__ if headroom else None}, default=str))
+
+
+@request_app.command("run")
+def request_run_cmd(
+    project_id: str = typer.Argument(..., help="Target project ID"),
+    operator_ack: bool = typer.Option(False, "--ack", help="Acknowledge high complexity changes"),
+    json_output: bool = typer.Option(False, "--json", help="Emit output as JSON"),
+) -> None:
+    """Run or resume the next eligible OpenSpec request for a project."""
+    from minime.adapters.github import GitHubAdapter
+    from minime.services.agent_runner import CliAgentRunner
+    from minime.services.budget_service import BudgetService
+    from minime.services.capacity_lifecycle_service import CapacityLifecycleService
+    from minime.services.orchestration_coordinator import NativeOrchestrationCoordinator
+    from minime.services.worktree_manager import WorktreeManager
+
+    try:
+        with db_manager.session() as session:
+            def uow_factory() -> PostgresPersistenceUnitOfWork:
+                return PostgresPersistenceUnitOfWork(session)
+            uow = uow_factory()
+            proj = uow.projects.get_by_id(project_id)
+            if not proj:
+                typer.echo(f"Project '{project_id}' not found.", err=True)
+                raise typer.Exit(code=1)
+
+            binding = None
+            if hasattr(uow, "project_managed_repository_bindings"):
+                binding = uow.project_managed_repository_bindings.get_by_project_id(project_id)
+            if binding is None or not binding.managed_repository_root:
+                typer.echo("Verified managed repository binding is required.", err=True)
+                raise typer.Exit(code=1)
+            repo_root = Path(binding.managed_repository_root)
+
+            wt_manager = WorktreeManager(project_root=repo_root, uow=uow)
+            github = GitHubAdapter()
+            try:
+                agent_runner = CliAgentRunner.for_project_profiles(
+                    proj.agent_profiles,
+                    capacity_service=CapacityLifecycleService(uow),
+                    budget_service=BudgetService(uow),
+                )
+            except (ValueError, OSError) as exc:
+                typer.echo(f"Verified F2 agent profiles unavailable: {exc}", err=True)
+                raise typer.Exit(code=1) from exc
+
+            coordinator = NativeOrchestrationCoordinator(
+                uow_factory=uow_factory,
+                github_adapter=github,
+                worktree_manager=wt_manager,
+                agent_runner=agent_runner,
+            )
+            result = asyncio.run(
+                coordinator.execute_project_request(
+                    project_id=project_id,
+                    operator_ack=operator_ack,
+                    thinker_provider=agent_runner.provider_for_role("thinker"),
+                    implementer_provider=agent_runner.provider_for_role("implementer"),
+                    reviewer_provider=agent_runner.provider_for_role("reviewer"),
+                )
+            )
+
+            payload = {
+                "status": result.status,
+                "run_id": result.run_id,
+                "current_stage": result.current_stage.value if result.current_stage else None,
+                "message": result.message,
+                "pr1_url": result.pr1_url,
+                "pr2_url": result.pr2_url,
+                "human_payload": result.human_payload,
+            }
+            if json_output:
+                typer.echo(json.dumps(payload, indent=2))
+            else:
+                typer.echo(f"Status: {result.status}")
+                typer.echo(f"Stage: {result.current_stage}")
+                typer.echo(f"Message: {result.message}")
+    except Exception as exc:
+        typer.echo(f"request run error: {exc}", err=True)
+        raise typer.Exit(code=1) from exc
+
+
+@request_app.command("list")
+def request_list_cmd(
+    project_id: str = typer.Argument(..., help="Target project ID"),
+    json_output: bool = typer.Option(False, "--json", help="Emit output as JSON"),
+) -> None:
+    """List open and eligible remote requests for a project."""
+    from minime.adapters.github import GitHubAdapter
+    from minime.services.remote_request_intake import RemoteRequestIntakeService
+
+    try:
+        with db_manager.session() as session:
+            uow = PostgresPersistenceUnitOfWork(session)
+            proj = uow.projects.get_by_id(project_id)
+            if not proj:
+                typer.echo(f"Project '{project_id}' not found.", err=True)
+                raise typer.Exit(code=1)
+
+            intake = RemoteRequestIntakeService(github_adapter=GitHubAdapter(), uow=uow)
+            eligible = intake.get_eligible_requests(proj.repository)
+
+            if json_output:
+                typer.echo(json.dumps(eligible, indent=2, default=str))
+            else:
+                typer.echo(f"Eligible requests for '{project_id}' ({len(eligible)} total):")
+                for item in eligible:
+                    typer.echo(f"  #{item.get('number')}: {item.get('title')}")
+    except Exception as exc:
+        typer.echo(f"request list error: {exc}", err=True)
+        raise typer.Exit(code=1) from exc
+
+
+@request_app.command("ack")
+def request_ack_cmd(
+    project_id: str = typer.Argument(..., help="Target project ID"),
+    json_output: bool = typer.Option(False, "--json", help="Emit output as JSON"),
+) -> None:
+    """Acknowledge («Estoy enterado») high-complexity PR merge and continue."""
+    return request_run_cmd(project_id=project_id, operator_ack=True, json_output=json_output)
 
 
 @app.command("run")

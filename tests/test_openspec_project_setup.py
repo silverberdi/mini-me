@@ -1,8 +1,25 @@
+import subprocess
 from pathlib import Path
 
 import pytest
 
 from minime.adapters.openspec import OpenSpecAdapter
+
+
+def _configure_complete_official_profile(tmp_path: Path, monkeypatch):
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "xdg-config"))
+    subprocess.run(["openspec", "config", "set", "profile", "custom"], check=True)
+    subprocess.run(["openspec", "config", "set", "delivery", "both"], check=True)
+    subprocess.run(
+        [
+            "openspec",
+            "config",
+            "set",
+            "workflows",
+            '["propose","explore","apply","update","sync","archive","verify","continue"]',
+        ],
+        check=True,
+    )
 
 
 def test_open_spec_cli_reports_version_and_native_agent_setup_support():
@@ -13,7 +30,8 @@ def test_open_spec_cli_reports_version_and_native_agent_setup_support():
     assert evidence["init_tools_supported"] is True
 
 
-def test_official_init_installs_complete_codex_and_antigravity_integrations(tmp_path):
+def test_official_init_installs_complete_codex_and_antigravity_integrations(tmp_path, monkeypatch):
+    _configure_complete_official_profile(tmp_path, monkeypatch)
     project = tmp_path / "new-project"
     project.mkdir()
 
@@ -24,9 +42,10 @@ def test_official_init_installs_complete_codex_and_antigravity_integrations(tmp_
     assert evidence["agents"] == ["antigravity", "codex"]
     assert (project / "openspec/config.yaml").is_file()
     codex_skills = list((project / ".agents/skills").glob("openspec-*/SKILL.md"))
-    agy_workflows = list((project / ".agent/workflows").glob("opsx-*.md"))
-    assert len(codex_skills) >= 12
-    assert len(agy_workflows) >= 12
+    workflow_root = OpenSpecAdapter._workflow_integration_root(project)
+    agy_workflows = list((project / workflow_root).glob("opsx-*.md"))
+    assert len(codex_skills) >= 8
+    assert len(agy_workflows) >= 8
     codex_names = {path.parent.name.removeprefix("openspec-") for path in codex_skills}
     assert {name.removesuffix("-change").removesuffix("-specs") for name in codex_names} == {
         path.stem.removeprefix("opsx-") for path in agy_workflows
@@ -40,7 +59,8 @@ def test_official_init_installs_complete_codex_and_antigravity_integrations(tmp_
     )["complete"] is True
 
 
-def test_official_init_preserves_existing_project_instructions(tmp_path):
+def test_official_init_preserves_existing_project_instructions(tmp_path, monkeypatch):
+    _configure_complete_official_profile(tmp_path, monkeypatch)
     project = tmp_path / "existing-project"
     (project / "openspec").mkdir(parents=True)
     instructions = "# Project instructions\nKeep this content.\n"
@@ -75,12 +95,13 @@ def test_official_init_fails_closed_for_unselected_or_unsupported_agents(tmp_pat
         OpenSpecAdapter().install_official_integrations(Path(tmp_path), ["openrouter"])
 
 
-def test_official_capability_discovery_uses_only_a_disposable_repository():
+def test_official_capability_discovery_uses_only_a_disposable_repository(tmp_path, monkeypatch):
+    _configure_complete_official_profile(tmp_path, monkeypatch)
     adapter = OpenSpecAdapter()
     evidence = adapter.discover_official_integrations(["codex"])
 
     assert evidence["version"]
-    assert len(evidence["integrations"]["codex"]) >= 12
+    assert len(evidence["integrations"]["codex"]) >= 8
 
 
 def test_native_integration_inspection_fails_closed_when_extended_lifecycle_is_missing(tmp_path):

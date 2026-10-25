@@ -64,6 +64,13 @@ def test_runtime_root_uses_explicit_environment_and_missing_fallback_fails_close
 
     monkeypatch.delenv("MINIME_RUNTIME_ROOT")
     monkeypatch.chdir(tmp_path)
+    real_isdir = os.path.isdir
+    monkeypatch.setattr(
+        "minime.services.agent_confinement.os.path.isdir",
+        lambda path: False
+        if path in {"/opt/minime/runtime", "/opt/minime/app/.minime"}
+        else real_isdir(path),
+    )
     fallback_confinement = AgentProcessConfinement(
         str(worktree), require_kernel_confinement=False
     )

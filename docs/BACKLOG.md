@@ -7,7 +7,7 @@ Este documento y los Issues son planificación. Ni su creación ni la aprobació
 | --- | --- | --- | --- | --- |
 | 1 | [#169](https://github.com/silverberdi/mini-me/issues/169) | gacela-01-depuracion-inicial | Eliminar emulación OpenSpec, lógica y DB obsoletas sin romper núcleo útil | Agentes externos |
 | 2 | [#170](https://github.com/silverberdi/mini-me/issues/170) | gacela-02-proyectos | Configurar proyectos, roles/modelos/contexto y GitHub inicial | Agentes externos |
-| 3 | [#171](https://github.com/silverberdi/mini-me/issues/171) | gacela-03-openspec-y-revision | E2E real ticket → propose/review → apply → verify/review → PR/merge humano → sync/archive → PR documental → cierre | Agentes externos |
+| 3 | [#171](https://github.com/silverberdi/mini-me/issues/171) | gacela-03-openspec-y-revision | E2E real ticket → explore/propose → review (alta) → apply/pruebas → verify por ejecutor → review (alta) → PR1 diferenciado → sync/archive → PR2 auto-merge → cierre | Agentes externos |
 | 4 | [#172](https://github.com/silverberdi/mini-me/issues/172) | gacela-04-skills-base | Skills mínimas reutilizables seleccionables y vinculadas | Agentes externos |
 | 5 | [#173](https://github.com/silverberdi/mini-me/issues/173) | gacela-05-ui-self-hosted | UI móvil/tablet/web diseñada y desarrollada por mini me sobre sí mismo | **mini me** |
 | 6 | [#174](https://github.com/silverberdi/mini-me/issues/174) | gacela-06-depuracion-final | Eliminar código/DB obsoleto residual; pruebas y cierre ejecutados por mini me | **mini me** |
@@ -16,7 +16,7 @@ Este documento y los Issues son planificación. Ni su creación ni la aprobació
 1. No abrir más Changes para dividir estas fases. Cada Change puede tener MUCHAS specs y tareas de implementación, pruebas, migraciones y limpieza.
 2. Solo después de cerrar la fase anterior puede ejecutarse la siguiente. No arrancar automáticamente por aprobar esta planificación.
 3. Un ticket activo por proyecto; fuente de tickets remota y más antigua elegible, sin cola DB ni algoritmo de prioridad.
-4. Revisión independiente de propuesta obligatoria; código según política. Autorización humana para merge de implementación; cierre documental nativo y PR acotado.
+4. Revisión independiente de propuesta y código obligatorias solo para alta complejidad. Merge diferenciado para primer PR (automático baja/mod, acuse informativo alta); segundo PR documental con merge automático; cierre remoto de ticket únicamente tras el segundo merge.
 5. Fase 3 debe probar recorrido funcional real; F5 y F6 deben ser efectivamente ejecutadas POR mini me, no mediante transferencia manual de prompts.
 6. POO, SOLID, DRY, KISS, YAGNI; reducción de servicios/estados/DB, no renombrado de complejidad.
 

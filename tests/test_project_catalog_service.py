@@ -129,6 +129,32 @@ def test_catalog_does_not_fabricate_models_when_discovery_fails(monkeypatch):
     assert catalog["agents"][0]["capability_status"] == "UNAVAILABLE"
 
 
+def test_catalog_distinguishes_incomplete_openspec_configuration(monkeypatch):
+    import minime.services.project_catalog_service as catalog_module
+    from minime.adapters.openspec import OpenSpecConfigurationIncomplete
+
+    monkeypatch.setattr(catalog_module.shutil, "which", lambda _: "/bin/fake-codex")
+    monkeypatch.setattr(
+        catalog_module,
+        "get_provider_adapter",
+        lambda provider_id, config: _Capabilities(
+            provider_id, {"models": {"live-codex": ["medium"]}}
+        ),
+    )
+    native = _NativeSetup()
+
+    def incomplete(_agents):
+        raise OpenSpecConfigurationIncomplete("delivery=both is required")
+
+    native.discover_official_integrations = incomplete
+    catalog = asyncio.run(ProjectCatalogService(_config(), native).agent_catalog())
+
+    agent = catalog["agents"][0]
+    assert agent["native_openspec_setup"] is False
+    assert agent["native_openspec_setup_status"] == "CONFIGURATION_INCOMPLETE"
+    assert agent["native_openspec_setup_error"] == "delivery=both is required"
+
+
 def test_target_workspace_catalog_requires_the_full_official_integration_set(monkeypatch):
     import minime.services.project_catalog_service as catalog_module
 
