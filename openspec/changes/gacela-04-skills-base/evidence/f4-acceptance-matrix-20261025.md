@@ -4,12 +4,12 @@ Fecha: 2026-10-25. La matriz cubre los 35 criterios definidos en `design.md`. `P
 
 | Criterio | Estado | Evidencia |
 |---|---|---|
-| S01_AC01 Request completo en Gherkin antes de Explore | PARCIAL | `f4-e2e-real-bootstrap-20261025.md`; pruebas de normalización en `f4-local-validation.md`; falta una traza remota del Issue controlado en esta ejecución. |
-| S01_AC02 cuerpo original literal preservado | PARCIAL | `f4-local-validation.md` demuestra el contrato; la evidencia real confirma fuentes ZIP preservadas, no un comentario remoto del Issue. |
+| S01_AC01 Request completo en Gherkin antes de Explore | PASS | `f4-normalization-e2e-issue5-recovery-20261025.md`; GET remoto del Issue #5 confirma `# language: es`, una Característica, tres Escenarios y pasos Gherkin con C1-C3 antes de Explore. |
+| S01_AC02 cuerpo original literal preservado | PASS | `f4-normalization-e2e-issue5-recovery-20261025.md`; comentario remoto `6400977375` conserva literalmente el Request original y el marcador del mismo Run. |
 | S01_AC03 criterios trazables sin invención | PASS | `f4-e2e-real-bootstrap-20261025.md`; tests focalizados de normalización. |
 | S01_AC04 ambigüedad material y fallos técnicos separados | PASS | `f4-local-validation.md`; contrato fail-closed y rutas técnicas. |
 | S01_AC05 concurrencia e idempotencia | PASS | tests focalizados de concurrencia/comentario idempotente en `f4-local-validation.md`. |
-| S02_AC01 comunicación semántica breve en español | PARCIAL | contrato y pruebas locales en `f4-local-validation.md`; no se acredita aquí comentario remoto de un Request controlado. |
+| S02_AC01 comunicación semántica breve en español | PASS | `f4-normalization-e2e-issue5-recovery-20261025.md`; comentario remoto `6400977558` contiene el mensaje semántico breve en español y el marcador del mismo Run. |
 | S02_AC02 comentarios idempotentes y sin secretos | PASS | tests de GitHub/normalización y validación de seguridad en `f4-local-validation.md`. |
 | S03_AC01 PR de implementación basado en Request y evidencia | PASS | PR1 F4: https://github.com/silverberdi/mini-me/pull/182, head `612d6c56d95b0069702c3473760d0745a3a5723c`; contenido preparado y validado por `PrPreparerService`, sin directiva de cierre automático. |
 | S03_AC02 PR documental gobernado por F3 | PENDIENTE | depende del merge humano del PR1 y Sync/Archive. |
@@ -42,4 +42,4 @@ Fecha: 2026-10-25. La matriz cubre los 35 criterios definidos en `design.md`. `P
 
 ## Estado
 
-Los criterios pendientes no se marcan como satisfechos. El ensayo autorizado del Issue #5 terminó bloqueado antes de producir evidencia remota y no cambia los tres estados `PARCIAL`; su diagnóstico está en `f4-normalization-e2e-issue5-20261025.md`. PR1 ya está fusionado, pero 6.2, 6.5 y 6.6 permanecen abiertas por esos criterios, por la falta de Verify/Sync/Archive, PR2 y cierre documental. El Issue #172 no fue reescrito.
+La publicación remota del Run existente demuestra los tres criterios antes parciales: S01_AC01, S01_AC02 y S02_AC01 pasan con evidencia del Issue #5. PR1 ya está fusionado. Las tareas 6.2, 6.5 y 6.6 permanecen abiertas hasta completar los gates documentales de Verify/Sync/Archive, PR2 y cierre del ciclo; no se marca ninguna tarea por anticipado. El Issue #172 no fue reescrito.
