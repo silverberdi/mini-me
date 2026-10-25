@@ -940,6 +940,52 @@ class GreenfieldBootstrapCoordinator:
                 "checkpoint": ProjectService.public_onboarding_state(current)["checkpoint"],
             }
 
+    def reconcile_published_bootstrap_candidate(self, project_id: str) -> dict[str, Any]:
+        """Reconcile a deterministic post-bootstrap PR update without invoking an agent."""
+        project = self.uow.projects.get_by_id(project_id)
+        if project is None:
+            raise GreenfieldBootstrapError("Project not found")
+        checkpoint = project.onboarding_checkpoint or {}
+        required = ("pull_request_number", "pull_request_url", "bootstrap_branch", "base_branch")
+        if any(not checkpoint.get(field) for field in required):
+            raise GreenfieldBootstrapError("Published bootstrap PR identity is incomplete")
+        adapter = self.connections.require_git_pr_write(project)
+        repository = project.provider_connections["git_pr"]["repository_url"]
+        observed = adapter.get_pull_request(repository, checkpoint["bootstrap_branch"], project.base_branch)
+        if observed.outcome is not ExternalOutcome.SUCCESS or not isinstance(observed.data, dict):
+            raise GreenfieldBootstrapError("Published bootstrap PR is not observable")
+        data = observed.data
+        if (
+            data.get("repository") != repository
+            or data.get("number") != int(checkpoint["pull_request_number"])
+            or data.get("url") != checkpoint["pull_request_url"]
+            or data.get("head_branch") != checkpoint["bootstrap_branch"]
+            or data.get("base_branch") != project.base_branch
+            or not data.get("head_sha")
+        ):
+            raise GreenfieldBootstrapError("Published bootstrap PR identity does not match the checkpoint")
+        current = self.uow.projects.get_by_id(project_id) or project
+        recovery = current.onboarding_checkpoint.get("candidate_recovery")
+        current.onboarding_checkpoint = {
+            **current.onboarding_checkpoint,
+            "head_sha": data["head_sha"],
+            "candidate_recovery": (
+                {**recovery, "status": "PUBLISHED", "published_head_sha": data["head_sha"]}
+                if isinstance(recovery, dict)
+                else recovery
+            ),
+        }
+        current.updated_at = utc_now()
+        self.uow.projects.save(current)
+        self.uow.commit()
+        return {
+            "project_id": project_id,
+            "pull_request_number": data["number"],
+            "head_sha": data["head_sha"],
+            "pull_request_url": data["url"],
+            "onboarding_status": current.onboarding_status.value,
+        }
+
     def _retain_candidate_for_recovery(
         self, project: Project, worktree: Path, branch: str, base_sha: str, error: Exception
     ) -> None:
