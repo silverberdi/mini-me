@@ -371,9 +371,12 @@ class GreenfieldBootstrapCoordinator:
                 worktree,
                 profiles=self._selected_profiles(project),
             )
+            official_openspec = self.openspec.inspect_integrations(
+                worktree, self._selected_agents(project)
+            )
             readiness = self.capability_manifest.validate_f5_readiness(
                 capability_evidence,
-                self.openspec.inspect_integrations(worktree, self._selected_agents(project)),
+                official_openspec,
                 project_type=project.project_type.value,
                 profiles_observed=bool(project.agent_profiles),
                 worktree_identity_verified=binding.managed_repository_root == self._configured_root(project),
@@ -391,10 +394,19 @@ class GreenfieldBootstrapCoordinator:
             # The official initializer and source import must satisfy scope
             # BEFORE any quota-bearing invocation. Never discover a predictable
             # setup artifact conflict after the agent has already consumed tokens.
-            self._validate_candidate_scope(worktree)
+            allowed_paths = self._candidate_allowed_paths(
+                worktree, capability_evidence, official_openspec
+            )
+            self._validate_candidate_scope(worktree, allowed_paths=allowed_paths)
             agent_started = True
             result = self._run_thinking_agent(project, worktree, profile, timeout_seconds)
-            self._validate_candidate(worktree, incoming, source_files, package_root)
+            self._validate_candidate(
+                worktree,
+                incoming,
+                source_files,
+                package_root,
+                allowed_paths=allowed_paths,
+            )
             self._validate_official_workspace(worktree)
             self._git(str(worktree), "add", "--all")
             self._git(str(worktree), "commit", "-m", "docs: bootstrap project context")
@@ -534,12 +546,13 @@ class GreenfieldBootstrapCoordinator:
                 "reason": "CANDIDATE_QUARANTINED_REVIEW_REQUIRED",
             }
         attempt = checkpoint.get("thinking_agent_attempt")
+        pre_dispatch = not isinstance(attempt, dict)
         if not isinstance(attempt, dict):
             attempt = {}
         authorization_error = self._retry_authorization_error(project, authorization)
         authorized_unknown = authorization is not None and authorization_error is None
-        if not isinstance(attempt, dict) and not authorized_unknown:
-            reason = "THINKING_AGENT_ATTEMPT_EVIDENCE_UNAVAILABLE"
+        if pre_dispatch and not authorized_unknown:
+            reason = "NO_AGENT_ATTEMPT_RECORDED_PRE_DISPATCH"
         elif (
             attempt.get("status") != "FAILED"
             or attempt.get("usage_status") != "OBSERVED"
@@ -628,6 +641,7 @@ class GreenfieldBootstrapCoordinator:
                     evidence["reason"] = "BOOTSTRAP_PR_EFFECT_UNCERTAIN"
                 elif (
                     evidence["reason"] == "THINKING_AGENT_RETRY_REQUIRES_EXPLICIT_AUTHORIZATION"
+                    or evidence["reason"] == "NO_AGENT_ATTEMPT_RECORDED_PRE_DISPATCH"
                     or authorized_unknown
                 ):
                     workspace = self.projects.verified_managed_workspace_root(project_id)
@@ -653,7 +667,9 @@ class GreenfieldBootstrapCoordinator:
                         else:
                             evidence["safe_to_resume"] = True
                             evidence["reason"] = (
-                                "NO_REMOTE_EFFECT_OBSERVED_EXPLICIT_AUTHORIZATION_REQUIRED"
+                                "NO_REMOTE_EFFECT_OBSERVED_PRE_DISPATCH"
+                                if evidence["reason"] == "NO_AGENT_ATTEMPT_RECORDED_PRE_DISPATCH"
+                                else "NO_REMOTE_EFFECT_OBSERVED_EXPLICIT_AUTHORIZATION_REQUIRED"
                             )
         except Exception:
             evidence["reason"] = "BOOTSTRAP_RECONCILIATION_UNOBSERVABLE"
@@ -741,7 +757,13 @@ class GreenfieldBootstrapCoordinator:
         project = self.uow.projects.get_by_id(project_id)
         if project is None:
             raise GreenfieldBootstrapError("Project not found")
-        authorization_error = self._retry_authorization_error(project, authorization)
+        pre_dispatch = not isinstance(
+            (project.onboarding_checkpoint or {}).get("thinking_agent_attempt"), dict
+        )
+        authorization_error = (
+            None if pre_dispatch and authorization is None
+            else self._retry_authorization_error(project, authorization)
+        )
         if authorization_error is not None:
             raise GreenfieldBootstrapError(authorization_error)
         reconciliation = self.reconcile_blocked_bootstrap(project_id, authorization)
@@ -1277,7 +1299,42 @@ class GreenfieldBootstrapCoordinator:
                 raise GreenfieldBootstrapError("Context reference points to a missing file")
 
     @staticmethod
-    def _validate_candidate_scope(worktree: Path) -> None:
+    def _candidate_allowed_paths(
+        worktree: Path,
+        capability_evidence: dict[str, Any],
+        official_openspec: dict[str, Any],
+    ) -> set[str]:
+        allowed = {
+            str(item["path"])
+            for item in capability_evidence.get("files", [])
+            if isinstance(item, dict) and isinstance(item.get("path"), str)
+        }
+        integrations = official_openspec.get("integrations", {})
+        codex_names = {
+            str(name) for name in integrations.get("codex", [])
+        }
+        antigravity_names = {
+            str(name) for name in integrations.get("antigravity", [])
+        }
+        for name in codex_names:
+            root = worktree / ".agents/skills" / f"openspec-{name}"
+            if root.is_dir():
+                allowed.update(
+                    path.relative_to(worktree).as_posix()
+                    for path in root.rglob("*")
+                    if path.is_file() and not path.is_symlink()
+                )
+        for workflow_root in (worktree / ".agent/workflows", worktree / ".agents/workflows"):
+            for name in antigravity_names:
+                path = workflow_root / f"opsx-{name}.md"
+                if path.is_file() and not path.is_symlink():
+                    allowed.add(path.relative_to(worktree).as_posix())
+        return allowed
+
+    @staticmethod
+    def _validate_candidate_scope(
+        worktree: Path, *, allowed_paths: set[str] | None = None
+    ) -> None:
         """Keep the organization agent inside the documentary/configuration surface."""
         changed = subprocess.run(
             ["git", "diff", "HEAD", "--name-only", "-z"],
@@ -1305,6 +1362,8 @@ class GreenfieldBootstrapCoordinator:
         }
 
         def allowed(path: str) -> bool:
+            if allowed_paths is not None and path in allowed_paths:
+                return True
             return (
                 path == "AGENTS.md"
                 or path

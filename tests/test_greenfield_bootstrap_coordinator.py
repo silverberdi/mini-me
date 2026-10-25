@@ -195,6 +195,120 @@ def test_candidate_scope_allows_official_openspec_scaffolds(tmp_path: Path):
     GreenfieldBootstrapCoordinator._validate_candidate_scope(worktree)
 
 
+def test_candidate_scope_uses_exact_manifest_and_official_paths(tmp_path: Path):
+    worktree = tmp_path / "worktree"
+    worktree.mkdir()
+    subprocess.run(["git", "init"], cwd=worktree, check=True, capture_output=True)
+    subprocess.run(["git", "config", "user.name", "test"], cwd=worktree, check=True)
+    subprocess.run(["git", "config", "user.email", "test@example.com"], cwd=worktree, check=True)
+    (worktree / ".agents/skills/minime-engineering-discipline").mkdir(parents=True)
+    (worktree / ".agents/skills/minime-engineering-discipline/SKILL.md").write_text(
+        "guidance", encoding="utf-8"
+    )
+    (worktree / ".agents/skills/openspec-verify-change").mkdir(parents=True)
+    (worktree / ".agents/skills/openspec-verify-change/SKILL.md").write_text(
+        "official", encoding="utf-8"
+    )
+    (worktree / ".agents/workflows").mkdir(parents=True)
+    (worktree / ".agents/workflows/opsx-verify.md").write_text(
+        "official", encoding="utf-8"
+    )
+    subprocess.run(["git", "add", "."], cwd=worktree, check=True, capture_output=True)
+    subprocess.run(
+        ["git", "commit", "-m", "baseline"], cwd=worktree, check=True, capture_output=True
+    )
+
+    (worktree / ".agents/skills/minime-engineering-discipline/SKILL.md").write_text(
+        "updated", encoding="utf-8"
+    )
+    GreenfieldBootstrapCoordinator._validate_candidate_scope(
+        worktree,
+        allowed_paths={
+            ".agents/skills/minime-engineering-discipline/SKILL.md",
+            ".agents/skills/openspec-verify-change/SKILL.md",
+            ".agents/workflows/opsx-verify.md",
+        },
+    )
+
+    (worktree / ".agents/skills/unselected.txt").write_text("reject", encoding="utf-8")
+    with pytest.raises(GreenfieldBootstrapError, match="unrelated"):
+        GreenfieldBootstrapCoordinator._validate_candidate_scope(
+            worktree,
+            allowed_paths={
+                ".agents/skills/minime-engineering-discipline/SKILL.md",
+                ".agents/skills/openspec-verify-change/SKILL.md",
+                ".agents/workflows/opsx-verify.md",
+            },
+        )
+
+
+def test_blocked_bootstrap_without_agent_attempt_is_safe_pre_dispatch(
+    in_memory_uow, tmp_path: Path, monkeypatch
+):
+    config = _configuration()
+    project = Project(
+        project_id=config.project_id,
+        display_name=config.display_name,
+        repository=config.repository,
+        project_type=ProjectType.GREENFIELD,
+        base_branch="main",
+        provider_connections={
+            key: value.model_dump(mode="json")
+            for key, value in config.provider_connections.items()
+        },
+        agent_profiles={key: value.model_dump() for key, value in config.agent_profiles.items()},
+        onboarding_status=ProjectOnboardingStatus.BLOCKED,
+        onboarding_checkpoint={"source_zip_sha256": "a" * 64},
+    )
+    in_memory_uow.projects.save(project)
+    managed_root = tmp_path / "managed" / config.project_id
+    managed_root.mkdir(parents=True)
+    subprocess.run(["git", "init"], cwd=managed_root, check=True, capture_output=True)
+    monkeypatch.setattr(
+        ProjectService,
+        "verified_managed_workspace_root",
+        lambda self, project_id: str(managed_root) if project_id == config.project_id else None,
+    )
+
+    class ReadOnlyAdapter:
+        def get_remote_branch_head(self, repository, branch):
+            if branch == "main":
+                return SimpleNamespace(
+                    outcome=ExternalOutcome.SUCCESS,
+                    reason_code=ExternalReasonCode.EXECUTION_SUCCESS,
+                    data="b" * 40,
+                )
+            return SimpleNamespace(
+                outcome=ExternalOutcome.FAILURE,
+                reason_code=ExternalReasonCode.NOT_FOUND,
+                data=None,
+            )
+
+        def get_pull_request(self, repository, branch, base_branch):
+            return SimpleNamespace(
+                outcome=ExternalOutcome.FAILURE,
+                reason_code=ExternalReasonCode.NOT_FOUND,
+                data=None,
+            )
+
+    class Connections:
+        def require_git_pr_write(self, project):
+            return ReadOnlyAdapter()
+
+    coordinator = GreenfieldBootstrapCoordinator(
+        in_memory_uow,
+        connection_service=Connections(),
+        trusted_managed_root=tmp_path / "managed",
+    )
+    report = coordinator.reconcile_blocked_bootstrap(config.project_id)
+
+    assert report["safe_to_resume"] is True
+    assert report["reason"] == "NO_REMOTE_EFFECT_OBSERVED_PRE_DISPATCH"
+    assert "thinking_agent_attempt" not in in_memory_uow.projects.get_by_id(
+        config.project_id
+    ).onboarding_checkpoint
+
+
 def test_candidate_validation_allows_documentary_contradictions_with_provenance(tmp_path: Path):
     worktree = tmp_path / "worktree"
     incoming = worktree / "context" / "incoming" / "sha"
