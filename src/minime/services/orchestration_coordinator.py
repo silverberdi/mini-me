@@ -22,11 +22,22 @@ from minime.domain.enums import (
     OrchestrationStopOutcome,
 )
 from minime.domain.interfaces import PersistenceUnitOfWork
-from minime.domain.models import OperatorActionRecord, OrchestrationRun, utc_now
+from minime.domain.models import (
+    ExternalActionResult,
+    OperatorActionRecord,
+    OrchestrationRun,
+    utc_now,
+)
 from minime.logging import get_logger, redact_secrets
 from minime.services.agent_runner import CliAgentRunner, NativeOpenSpecWorkflowUnavailable
 from minime.services.pr_preparer_service import PrPreparationInput, PrPreparerService
 from minime.services.remote_request_intake import RemoteRequestIntakeService
+from minime.services.request_normalization import (
+    NormalizedRequest,
+    RequestNormalizationError,
+    RequestNormalizationService,
+    looks_like_complete_gherkin,
+)
 from minime.services.review_verdict_parser import MalformedReviewOutputError, parse_review_verdict
 from minime.services.worktree_manager import WorktreeManager
 
@@ -119,6 +130,108 @@ class NativeOrchestrationCoordinator:
         self.openspec_adapter = openspec_adapter or OpenSpecAdapter()
         self.pr_preparer = pr_preparer or PrPreparerService()
         self.max_correction_attempts = max_correction_attempts
+
+    async def _normalize_request_before_explore(
+        self,
+        *,
+        active_run: OrchestrationRun,
+        project_id: str,
+        repository: str,
+        worktree_path: Path,
+        issue_number: int,
+        issue_title: str,
+        issue_body: str,
+        provider: str,
+    ) -> tuple[dict[str, Any] | None, str | None]:
+        """Normalize once before Explore while retaining the same Run and Worktree."""
+        details = dict(active_run.stop_details or {})
+        persisted = details.get("request_normalization")
+        if isinstance(persisted, dict) and persisted.get("normalized_body"):
+            return persisted, str(persisted["normalized_body"])
+
+        service = RequestNormalizationService(self.github_adapter)
+        try:
+            # Older deterministic coordinator doubles do not implement the
+            # ticket adapter contract. They cannot claim normalization; keep
+            # their lifecycle tests focused on the stage under test.
+            observed = self.github_adapter.get_issue(repository, issue_number)
+            if not isinstance(observed, ExternalActionResult):
+                return {"normalized_body": issue_body, "legacy_adapter": True}, None
+            initial = (
+                NormalizedRequest(issue_body, issue_body, True)
+                if looks_like_complete_gherkin(issue_body)
+                else None
+            )
+            if initial is not None and initial.already_normalized:
+                normalized = initial
+            else:
+                workflow = self.agent_runner.resolve_workflow(
+                    worktree_path=worktree_path,
+                    provider=provider,
+                    operation="normalize",
+                    change_name=f"issue-{issue_number}",
+                )
+                response_path = worktree_path / ".minime" / f"request-normalization-{active_run.run_id}.json"
+                result = await self.agent_runner.run(
+                    worktree_path=worktree_path,
+                    prompt_context=(
+                        "Use the installed minime-request-normalizer skill. Return exactly one JSON object "
+                        "with normalized_body containing complete Gherkin and criteria as an array. "
+                        "Preserve every fact and do not invent requirements, decisions, or tasks.\n"
+                        f"Request title: {issue_title}\nRequest body:\n{issue_body}\n"
+                    ),
+                    project_id=project_id,
+                    role="thinker",
+                    provider=provider,
+                    workflow=workflow,
+                    output_schema={
+                        "type": "object",
+                        "properties": {
+                            "normalized_body": {"type": "string", "minLength": 1},
+                            "criteria": {"type": "array", "items": {"type": "string"}},
+                        },
+                        "required": ["normalized_body", "criteria"],
+                        "additionalProperties": False,
+                    },
+                    output_last_message_path=response_path,
+                )
+                if (
+                    result.exit_code != 0
+                    or result.timed_out
+                    or result.preflight_error
+                    or result.output_truncated
+                    or result.structured_output_missing
+                ):
+                    return None, "Request normalization agent did not produce a verified result."
+                payload = json.loads(result.response_output)
+                if not isinstance(payload, dict) or not isinstance(payload.get("normalized_body"), str):
+                    return None, "Request normalization response was not structured."
+                normalized = NormalizedRequest(
+                    original_body=issue_body,
+                    normalized_body=payload["normalized_body"].strip(),
+                    already_normalized=False,
+                    criteria=tuple(str(item) for item in payload.get("criteria", [])),
+                )
+            evidence = service.publish(repository, issue_number, active_run.run_id, normalized)
+        except (RequestNormalizationError, NativeOpenSpecWorkflowUnavailable, ValueError, json.JSONDecodeError) as exc:
+            return None, str(exc)
+
+        persisted = {
+            **evidence,
+            "original_body": issue_body,
+            "normalized_body": normalized.normalized_body,
+            "already_normalized": normalized.already_normalized,
+            "criteria": list(normalized.criteria),
+        }
+        details["request_normalization"] = persisted
+        active_run.stop_details = details
+        uow = self.uow_factory()
+        stored = uow.orchestration_runs.get_by_id(active_run.run_id)
+        if stored is not None:
+            stored.stop_details = details
+            uow.orchestration_runs.save(stored)
+            uow.commit()
+        return persisted, normalized.normalized_body
 
     def register_classification_retry_authorization(
         self,
@@ -439,7 +552,33 @@ class NativeOrchestrationCoordinator:
         )
         worktree_path = worktree_info.path
 
-        # Step 4: Explore Stage
+        # Step 4: Request normalization must complete before Explore while
+        # retaining the same durable Run and authorized Worktree.
+        if active_run.current_stage in (
+            OrchestrationStage.ADMITTED,
+            OrchestrationStage.PREPARING_EXECUTION,
+            OrchestrationStage.EXPLORING,
+        ):
+            normalization, normalization_error = await self._normalize_request_before_explore(
+                active_run=active_run,
+                project_id=project_id,
+                repository=repository,
+                worktree_path=worktree_path,
+                issue_number=issue_number,
+                issue_title=issue_title,
+                issue_body=issue_body,
+                provider=thinker_provider,
+            )
+            if normalization is None:
+                return OrchestrationCoordinationResult(
+                    status="PAUSED",
+                    run_id=active_run.run_id,
+                    current_stage=active_run.current_stage,
+                    message=normalization_error or "Request normalization was not verified.",
+                )
+            issue_body = str(normalization.get("normalized_body") or issue_body)
+
+        # Step 5: Explore Stage
         if active_run.current_stage in (OrchestrationStage.ADMITTED, OrchestrationStage.PREPARING_EXECUTION, OrchestrationStage.EXPLORING):
             self._update_stage(uow, active_run, OrchestrationStage.EXPLORING)
             explore_result = await self._run_explore(
@@ -467,7 +606,7 @@ class NativeOrchestrationCoordinator:
                     message=explore_result.get("message", "Explore failed; proposal cannot start."),
                 )
 
-        # Step 5: Propose and Strict Validation Loop
+        # Step 6: Propose and Strict Validation Loop
         if active_run.current_stage in (OrchestrationStage.EXPLORING, OrchestrationStage.PROPOSING, OrchestrationStage.VALIDATING):
             existing_proposal = (
                 active_run.current_stage == OrchestrationStage.VALIDATING
@@ -933,18 +1072,18 @@ class NativeOrchestrationCoordinator:
             repository=repository,
             issue_number=issue_number,
             comment=(
-                f"Completed by mini me F3 orchestration.\n\n"
-                f"- Implementation PR: #{pr1_number} ({pr1_url})\n"
-                f"- Documentation PR: #{pr2_number} ({pr2_url})\n"
-                f"- OpenSpec Change: `{change_name}` archived."
+                f"Ciclo completado por mini me.\n\n"
+                f"- PR de implementación: #{pr1_number} ({pr1_url})\n"
+                f"- PR documental: #{pr2_number} ({pr2_url})\n"
+                f"- Change OpenSpec: `{change_name}` archivado."
             ),
         ) if hasattr(self.github_adapter, "_repo") else self.github_adapter.close_issue(
             issue_number=issue_number,
             comment=(
-                f"Completed by mini me F3 orchestration.\n\n"
-                f"- Implementation PR: #{pr1_number} ({pr1_url})\n"
-                f"- Documentation PR: #{pr2_number} ({pr2_url})\n"
-                f"- OpenSpec Change: `{change_name}` archived."
+                f"Ciclo completado por mini me.\n\n"
+                f"- PR de implementación: #{pr1_number} ({pr1_url})\n"
+                f"- PR documental: #{pr2_number} ({pr2_url})\n"
+                f"- Change OpenSpec: `{change_name}` archivado."
             ),
         )
         close_res = await close_call if inspect.isawaitable(close_call) else close_call

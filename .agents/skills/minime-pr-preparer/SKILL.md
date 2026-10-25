@@ -6,7 +6,7 @@ version: "1.0.0"
 
 # minime-pr-preparer
 
-This skill produces structured pull request content for both Phase 1 (implementation) and Phase 2 (documentation closure) in the mini me orchestration lifecycle.
+This skill drafts semantic pull request content for both Phase 1 (implementation) and Phase 2 (documentation closure) in the mini me orchestration lifecycle. `PrPreparerService` remains responsible for deterministic identity, SHA, non-closing references, validation and publication.
 
 ## Contract & Rules
 

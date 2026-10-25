@@ -167,35 +167,56 @@ class CliAgentRunner:
                 "sync": "openspec-sync-specs",
                 "archive": "openspec-archive-change",
             }
-            skill_folder = op_to_skill.get(op, f"openspec-{op}")
-            rel_path = Path(".agents/skills") / skill_folder / "SKILL.md"
-            dispatch_cmd = f"${skill_folder} {change_name}"
-            check_parts = (".agents", ".agents/skills", f".agents/skills/{skill_folder}")
+            if op == "normalize":
+                rel_path = Path(".agents/skills/minime-request-normalizer/SKILL.md")
+                dispatch_cmd = f"$minime-request-normalizer {change_name}"
+                check_parts = (".agents", ".agents/skills", ".agents/skills/minime-request-normalizer")
+            else:
+                skill_folder = op_to_skill.get(op, f"openspec-{op}")
+                rel_path = Path(".agents/skills") / skill_folder / "SKILL.md"
+                dispatch_cmd = f"${skill_folder} {change_name}"
+                check_parts = (".agents", ".agents/skills", f".agents/skills/{skill_folder}")
         elif prov in ("antigravity", "agy"):
-            op_to_file = {
-                "explore": "opsx-explore.md",
-                "propose": "opsx-propose.md",
-                "apply": "opsx-apply.md",
-                "verify": "opsx-verify.md",
-                "sync": "opsx-sync.md",
-                "archive": "opsx-archive.md",
-            }
-            workflow_file = op_to_file.get(op, f"opsx-{op}.md")
-            dispatch_cmd = f"/opsx-{op} {change_name}"
-            workflow_candidates = (
-                Path(".agent/workflows") / workflow_file,
-                Path(".agents/workflows") / workflow_file,
-            )
-            for candidate in workflow_candidates:
-                if candidate.is_symlink():
+            if op == "normalize":
+                skill_candidates = (
+                    Path(".agent/skills/minime-request-normalizer/SKILL.md"),
+                    Path(".agents/skills/minime-request-normalizer/SKILL.md"),
+                )
+                rel_path = next(
+                    (candidate for candidate in skill_candidates if (root / candidate).is_file()),
+                    None,
+                )
+                dispatch_cmd = f"/minime-request-normalizer {change_name}"
+                check_parts = (".agent", ".agent/skills", ".agents", ".agents/skills")
+                if rel_path is None:
                     raise NativeOpenSpecWorkflowUnavailable(
-                        f"Installed OpenSpec workflow path contains a symlink: {candidate}"
+                        "Installed minime-request-normalizer skill is missing for Antigravity."
                     )
-            rel_path = next(
-                (candidate for candidate in workflow_candidates if (root / candidate).is_file()),
-                None,
-            )
-            check_parts = (".agent", ".agent/workflows", ".agents", ".agents/workflows")
+            else:
+                op_to_file = {
+                    "explore": "opsx-explore.md",
+                    "propose": "opsx-propose.md",
+                    "apply": "opsx-apply.md",
+                    "verify": "opsx-verify.md",
+                    "sync": "opsx-sync.md",
+                    "archive": "opsx-archive.md",
+                }
+                workflow_file = op_to_file.get(op, f"opsx-{op}.md")
+                dispatch_cmd = f"/opsx-{op} {change_name}"
+                workflow_candidates = (
+                    Path(".agent/workflows") / workflow_file,
+                    Path(".agents/workflows") / workflow_file,
+                )
+                for candidate in workflow_candidates:
+                    if candidate.is_symlink():
+                        raise NativeOpenSpecWorkflowUnavailable(
+                            f"Installed OpenSpec workflow path contains a symlink: {candidate}"
+                        )
+                rel_path = next(
+                    (candidate for candidate in workflow_candidates if (root / candidate).is_file()),
+                    None,
+                )
+                check_parts = (".agent", ".agent/workflows", ".agents", ".agents/workflows")
         else:
             raise NativeOpenSpecWorkflowUnavailable(
                 f"Dynamic OpenSpec resolution is not supported for provider '{provider}'."

@@ -27,6 +27,7 @@ from minime.domain.enums import (
 from minime.domain.models import Project, ProjectConfigurationInput, utc_now
 from minime.logging import redact_secrets
 from minime.services.agent_confinement import AgentProcessConfinement
+from minime.services.capability_manifest import CapabilityManifestService
 from minime.services.context_archive import ContextArchiveExtractor
 from minime.services.implementer_runner import CliImplementerRunner, ImplementerResult
 from minime.services.project_catalog_service import ProjectCatalogService
@@ -100,6 +101,7 @@ class GreenfieldBootstrapCoordinator:
         archive_extractor: ContextArchiveExtractor | None = None,
         openspec: OpenSpecAdapter | None = None,
         thinking_agent: ThinkingAgent | None = None,
+        capability_manifest: CapabilityManifestService | None = None,
         project_root: str | Path = ".",
         trusted_managed_root: str | Path | None = None,
     ) -> None:
@@ -112,6 +114,7 @@ class GreenfieldBootstrapCoordinator:
         self.extractor = archive_extractor or ContextArchiveExtractor()
         self.openspec = openspec or OpenSpecAdapter()
         self.thinking_agent = thinking_agent
+        self.capability_manifest = capability_manifest or CapabilityManifestService()
         self.project_root = Path(project_root).resolve()
         self.trusted_managed_root = (
             Path(trusted_managed_root).resolve() if trusted_managed_root else None
@@ -361,7 +364,15 @@ class GreenfieldBootstrapCoordinator:
         try:
             self._git(str(worktree), "checkout", "-b", branch)
             self.openspec.install_official_integrations(
-                worktree, self._selected_agents(project, roles=("thinking",))
+                worktree, self._selected_agents(project)
+            )
+            capability_evidence = self.capability_manifest.install_greenfield(
+                self.project_root, worktree
+            )
+            readiness = self.capability_manifest.validate_f5_readiness(
+                capability_evidence,
+                self.openspec.inspect_integrations(worktree, self._selected_agents(project)),
+                project_type=project.project_type.value,
             )
             incoming = worktree / "context" / "incoming" / project.onboarding_checkpoint["source_zip_sha256"]
             incoming.mkdir(parents=True, mode=0o700)
@@ -406,6 +417,8 @@ class GreenfieldBootstrapCoordinator:
                 "agent_exit_code": result.exit_code,
                 "agent_duration_ms": result.duration_ms,
                 "agent_workflow_evidence": result.native_workflow_evidence or {},
+                "f4_capability_manifest": capability_evidence,
+                "f5_readiness": readiness,
             }
             current.onboarding_checkpoint = checkpoint
             current.onboarding_status = ProjectOnboardingStatus.PR_PENDING
