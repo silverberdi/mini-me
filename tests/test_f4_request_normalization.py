@@ -163,7 +163,7 @@ async def test_coordinator_requires_and_persists_structured_semantic_message(tmp
 
     class Runner:
         def resolve_workflow(self, **_kwargs):
-            return object()
+            return SimpleNamespace(dispatch_command="$minime-request-normalizer issue-11", workflow_sha256="wf")
 
         async def run(self, **_kwargs):
             payload = {
