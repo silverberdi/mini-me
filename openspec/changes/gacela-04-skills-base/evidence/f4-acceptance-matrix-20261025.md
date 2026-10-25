@@ -35,11 +35,11 @@ Fecha: 2026-10-25. La matriz cubre los 35 criterios definidos en `design.md`. `P
 | H03_AC01 ausencia de despliegue/scheduler | PASS | evidencias E2E y reconciliación confirman no despliegue, no scheduler. |
 | F3_AC01 normalización y contexto entregados al coordinador | PASS | integración F4/F3 y evidencia de contexto real. |
 | F3_AC02 PRs conservan identidad y SHA | PASS | PR #4 y PR1 #182 tienen repositorio, base, branch y head SHA verificados; el PR1 sigue sin fusionar. |
-| F3_AC03 merges y cierre bajo autoridad F3 | PENDIENTE | requiere PR1 F4 y su aprobación humana; Sync/Archive no ejecutados. |
+| F3_AC03 merges y cierre bajo autoridad F3 | PENDIENTE | PR1 F4 ya tiene merge humano confirmado; todavía faltan Sync/Archive, PR2 y cierre remoto del Issue. |
 | F3_AC04 recuperación sin consumo duplicado | PASS | intento único, recuperación post-inferencia y reconciliación durable. |
 | DONE_AC01 aceptación remota completa | PENDIENTE | falta PR1, merge humano, Sync/Archive y PR2. |
 | DONE_AC02 F5 preparado sin ejecutar F5 | PASS | Greenfield aislado validado; no se instaló Brownfield ni se ejecutó F5. |
 
 ## Estado
 
-Los criterios pendientes no se marcan como satisfechos. En particular, 6.2, 6.5 y 6.6 permanecen abiertas hasta fusionar humanamente el PR1, ejecutar Sync/Archive y publicar el PR documental. El Issue #172 no fue reescrito.
+Los criterios pendientes no se marcan como satisfechos. PR1 ya está fusionado, pero 6.2, 6.5 y 6.6 permanecen abiertas por los tres criterios parciales S01/S02 y por la falta de Verify/Sync/Archive, PR2 y cierre documental. El Issue #172 no fue reescrito.
