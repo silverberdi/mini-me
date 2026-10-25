@@ -6,7 +6,9 @@ Fecha: 2026-10-24
 
 `WAITING_SERVICE_RUNTIME`
 
-La sesión de ejecución está en macOS (`Darwin`, usuario del operador). No se observó un servidor Ubuntu ni un runtime de aplicación ejecutándose bajo la identidad `minime`. Tampoco existe un usuario local `minime` o `silverman`, un alias SSH configurado o una conexión de servicio que permita verificar el entorno remoto.
+La autorización económica fue verificada en el comentario del Issue #172 (`6392370102`): un único recorrido, techo acumulado de USD 1,00, cero reintentos, fallback y OpenRouter.
+
+La sesión de ejecución está en macOS (`Darwin`, usuario del operador). No se observó un servidor Ubuntu ni un runtime de aplicación ejecutándose bajo la identidad `minime`. Tampoco existe un usuario local `minime`, un alias SSH configurado o una conexión de servicio que permita verificar el entorno remoto.
 
 Se observaron únicamente contenedores PostgreSQL locales desechables; no se utilizaron para sustituir el PostgreSQL del servicio ni se hicieron migraciones o escrituras.
 
