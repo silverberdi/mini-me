@@ -578,7 +578,10 @@ class GreenfieldBootstrapCoordinator:
         try:
             adapter = self.connections.require_git_pr_write(project)
             repository = project.provider_connections["git_pr"]["repository_url"]
-            base_result = adapter.get_remote_branch_head(repository, project.base_branch)
+            remote_branch_head = getattr(adapter, "get_repository_branch_head", None)
+            if not callable(remote_branch_head):
+                remote_branch_head = adapter.get_remote_branch_head
+            base_result = remote_branch_head(repository, project.base_branch)
             if base_result.outcome in {ExternalOutcome.UNKNOWN, ExternalOutcome.AMBIGUOUS}:
                 evidence["reason"] = "BOOTSTRAP_BASE_UNOBSERVABLE"
             elif base_result.outcome is not ExternalOutcome.SUCCESS or not base_result.data:
@@ -589,7 +592,7 @@ class GreenfieldBootstrapCoordinator:
                     expected_base = authorization.get("base_sha") if authorization else None
                     if expected_base != base_result.data:
                         evidence["reason"] = "BOOTSTRAP_BASE_SHA_MISMATCH"
-            branch_result = adapter.get_remote_branch_head(repository, branch) if branch else None
+            branch_result = remote_branch_head(repository, branch) if branch else None
             if evidence["reason"] not in {
                 "BOOTSTRAP_BASE_UNOBSERVABLE",
                 "BOOTSTRAP_BASE_UNAVAILABLE",
