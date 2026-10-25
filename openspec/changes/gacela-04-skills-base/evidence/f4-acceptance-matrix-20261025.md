@@ -42,4 +42,4 @@ Fecha: 2026-10-25. La matriz cubre los 35 criterios definidos en `design.md`. `P
 
 ## Estado
 
-Los criterios pendientes no se marcan como satisfechos. PR1 ya está fusionado, pero 6.2, 6.5 y 6.6 permanecen abiertas por los tres criterios parciales S01/S02 y por la falta de Verify/Sync/Archive, PR2 y cierre documental. El Issue #172 no fue reescrito.
+Los criterios pendientes no se marcan como satisfechos. El ensayo autorizado del Issue #5 terminó bloqueado antes de producir evidencia remota y no cambia los tres estados `PARCIAL`; su diagnóstico está en `f4-normalization-e2e-issue5-20261025.md`. PR1 ya está fusionado, pero 6.2, 6.5 y 6.6 permanecen abiertas por esos criterios, por la falta de Verify/Sync/Archive, PR2 y cierre documental. El Issue #172 no fue reescrito.
