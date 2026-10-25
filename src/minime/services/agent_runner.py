@@ -167,26 +167,28 @@ class CliAgentRunner:
                 "sync": "openspec-sync-specs",
                 "archive": "openspec-archive-change",
             }
-            if op == "normalize":
-                rel_path = Path(".agents/skills/minime-request-normalizer/SKILL.md")
-                dispatch_cmd = f"$minime-request-normalizer {change_name}"
-                check_parts = (".agents", ".agents/skills", ".agents/skills/minime-request-normalizer")
+            if op in {"normalize", "pr_prepare"}:
+                skill_name = "minime-request-normalizer" if op == "normalize" else "minime-pr-preparer"
+                rel_path = Path(".agents/skills") / skill_name / "SKILL.md"
+                dispatch_cmd = f"${skill_name} {change_name}"
+                check_parts = (".agents", ".agents/skills", f".agents/skills/{skill_name}")
             else:
                 skill_folder = op_to_skill.get(op, f"openspec-{op}")
                 rel_path = Path(".agents/skills") / skill_folder / "SKILL.md"
                 dispatch_cmd = f"${skill_folder} {change_name}"
                 check_parts = (".agents", ".agents/skills", f".agents/skills/{skill_folder}")
         elif prov in ("antigravity", "agy"):
-            if op == "normalize":
+            if op in {"normalize", "pr_prepare"}:
+                skill_name = "minime-request-normalizer" if op == "normalize" else "minime-pr-preparer"
                 skill_candidates = (
-                    Path(".agent/skills/minime-request-normalizer/SKILL.md"),
-                    Path(".agents/skills/minime-request-normalizer/SKILL.md"),
+                    Path(".agent/skills") / skill_name / "SKILL.md",
+                    Path(".agents/skills") / skill_name / "SKILL.md",
                 )
                 rel_path = next(
                     (candidate for candidate in skill_candidates if (root / candidate).is_file()),
                     None,
                 )
-                dispatch_cmd = f"/minime-request-normalizer {change_name}"
+                dispatch_cmd = f"/{skill_name} {change_name}"
                 check_parts = (".agent", ".agent/skills", ".agents", ".agents/skills")
                 if rel_path is None:
                     raise NativeOpenSpecWorkflowUnavailable(

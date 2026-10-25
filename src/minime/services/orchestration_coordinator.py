@@ -8,6 +8,7 @@ import inspect
 import json
 import re
 from dataclasses import dataclass
+from dataclasses import replace as dataclass_replace
 from pathlib import Path
 from typing import Any
 from uuid import uuid4
@@ -121,6 +122,7 @@ class NativeOrchestrationCoordinator:
         agent_runner: CliAgentRunner,
         openspec_adapter: OpenSpecAdapter | None = None,
         pr_preparer: PrPreparerService | None = None,
+        semantic_pr_agent: bool = False,
         max_correction_attempts: int = 3,
     ) -> None:
         self.uow_factory = uow_factory
@@ -129,6 +131,7 @@ class NativeOrchestrationCoordinator:
         self.agent_runner = agent_runner
         self.openspec_adapter = openspec_adapter or OpenSpecAdapter()
         self.pr_preparer = pr_preparer or PrPreparerService()
+        self.semantic_pr_agent = semantic_pr_agent
         self.max_correction_attempts = max_correction_attempts
 
     async def _normalize_request_before_explore(
@@ -157,6 +160,16 @@ class NativeOrchestrationCoordinator:
             observed = self.github_adapter.get_issue(repository, issue_number)
             if not isinstance(observed, ExternalActionResult):
                 return {"normalized_body": issue_body, "legacy_adapter": True}, None
+            source_context: dict[str, Any] = {
+                "issue": observed.data if isinstance(observed.data, dict) else {"body": issue_body},
+                "comments": [],
+            }
+            list_comments = getattr(self.github_adapter, "list_issue_comments", None)
+            if callable(list_comments):
+                comments_result = list_comments(repository, issue_number)
+                if not isinstance(comments_result, ExternalActionResult) or comments_result.outcome is not ExternalOutcome.SUCCESS:
+                    return None, "Request normalization source comments were not verified."
+                source_context["comments"] = comments_result.data if isinstance(comments_result.data, list) else []
             initial = (
                 NormalizedRequest(issue_body, issue_body, True)
                 if looks_like_complete_gherkin(issue_body)
@@ -179,6 +192,8 @@ class NativeOrchestrationCoordinator:
                         "with normalized_body containing complete Gherkin and criteria as an array. "
                         "Preserve every fact and do not invent requirements, decisions, or tasks.\n"
                         f"Request title: {issue_title}\nRequest body:\n{issue_body}\n"
+                        "Authoritative Issue context (including comments and any declared attachments):\n"
+                        f"{json.dumps(source_context, ensure_ascii=False, default=str)}\n"
                     ),
                     project_id=project_id,
                     role="thinker",
@@ -222,6 +237,9 @@ class NativeOrchestrationCoordinator:
             "normalized_body": normalized.normalized_body,
             "already_normalized": normalized.already_normalized,
             "criteria": list(normalized.criteria),
+            "source_context_sha256": hashlib.sha256(
+                json.dumps(source_context, sort_keys=True, ensure_ascii=False, default=str).encode("utf-8")
+            ).hexdigest(),
         }
         details["request_normalization"] = persisted
         active_run.stop_details = details
@@ -825,6 +843,14 @@ class NativeOrchestrationCoordinator:
 
         if not pr1_number:
             self._update_stage(uow, active_run, OrchestrationStage.PR1_PENDING)
+            test_evidence = str(active_run.stop_details.get("test_evidence") or "").strip()
+            if not test_evidence:
+                return OrchestrationCoordinationResult(
+                    status="PAUSED",
+                    run_id=active_run.run_id,
+                    current_stage=OrchestrationStage.PR1_PENDING,
+                    message="Verified test evidence is required before preparing PR1. Worktree preserved.",
+                )
             prep_input = PrPreparationInput(
                 project_id=project_id,
                 repository=repository,
@@ -836,9 +862,29 @@ class NativeOrchestrationCoordinator:
                 candidate_sha=candidate_sha,
                 change_name=change_name,
                 change_summary=f"Implementation of request #{issue_number}: {issue_title}",
-                test_evidence=active_run.stop_details.get("test_evidence", "All tests passed (exit code 0)."),
+                test_evidence=test_evidence,
                 complexity=complexity,
             )
+            if self.semantic_pr_agent:
+                try:
+                    semantic_title, semantic_body = await self._prepare_semantic_pr_content(
+                        worktree_path=worktree_path,
+                        provider=thinker_provider,
+                        project_id=project_id,
+                        run_id=active_run.run_id,
+                        pr_input=prep_input,
+                        request_body=issue_body,
+                    )
+                except (NativeOpenSpecWorkflowUnavailable, ValueError, OSError) as exc:
+                    return OrchestrationCoordinationResult(
+                        status="PAUSED",
+                        run_id=active_run.run_id,
+                        current_stage=OrchestrationStage.PR1_PENDING,
+                        message=f"Semantic PR1 content was not verified: {exc}. Worktree preserved.",
+                    )
+                prep_input = dataclass_replace(
+                    prep_input, semantic_title=semantic_title, semantic_body=semantic_body
+                )
             prepared_pr = self.pr_preparer.prepare_pull_request(prep_input)
 
             # Push branch
@@ -990,6 +1036,27 @@ class NativeOrchestrationCoordinator:
             change_summary=f"Documentation sync and archive for request #{issue_number}",
             test_evidence="OpenSpec native sync and archive completed successfully.",
         )
+        if self.semantic_pr_agent:
+            try:
+                semantic_title, semantic_body = await self._prepare_semantic_pr_content(
+                    worktree_path=doc_path,
+                    provider=thinker_provider,
+                    project_id=project_id,
+                    run_id=active_run.run_id,
+                    pr_input=doc_prep_input,
+                    request_body=issue_body,
+                )
+            except (NativeOpenSpecWorkflowUnavailable, ValueError, OSError) as exc:
+                return OrchestrationCoordinationResult(
+                    status="PAUSED",
+                    run_id=active_run.run_id,
+                    current_stage=OrchestrationStage.PR2_PENDING,
+                    pr1_url=pr1_url,
+                    message=f"Semantic PR2 content was not verified: {exc}. Worktree preserved.",
+                )
+            doc_prep_input = dataclass_replace(
+                doc_prep_input, semantic_title=semantic_title, semantic_body=semantic_body
+            )
         prepared_doc_pr = self.pr_preparer.prepare_pull_request(doc_prep_input)
 
         try:
@@ -1384,6 +1451,64 @@ class NativeOrchestrationCoordinator:
         except json.JSONDecodeError:
             return None
         return value if isinstance(value, dict) else None
+
+    async def _prepare_semantic_pr_content(
+        self,
+        *,
+        worktree_path: Path,
+        provider: str,
+        project_id: str,
+        run_id: str,
+        pr_input: PrPreparationInput,
+        request_body: str,
+    ) -> tuple[str, str]:
+        """Ask the configured agent for PR prose; never manufacture success prose."""
+        workflow = self.agent_runner.resolve_workflow(
+            worktree_path=worktree_path,
+            provider=provider,
+            operation="pr_prepare",
+            change_name=pr_input.change_name,
+        )
+        response_path = worktree_path / ".minime" / f"pr-preparer-{pr_input.pr_type}-{run_id}.json"
+        result = await self.agent_runner.run(
+            worktree_path=worktree_path,
+            prompt_context=(
+                "Use the installed minime-pr-preparer skill. Return exactly one JSON object with "
+                "title and body strings. Draft semantic content from the Request and verified evidence; "
+                "do not invent tests, merges, capabilities, or decisions and never emit auto-closing directives.\n"
+                f"Input: {json.dumps({**pr_input.__dict__, 'request_body': request_body}, ensure_ascii=False, default=str)}"
+            ),
+            project_id=project_id,
+            role="thinker",
+            provider=provider,
+            workflow=workflow,
+            output_schema={
+                "type": "object",
+                "properties": {
+                    "title": {"type": "string", "minLength": 1},
+                    "body": {"type": "string", "minLength": 1},
+                },
+                "required": ["title", "body"],
+                "additionalProperties": False,
+            },
+            output_last_message_path=response_path,
+        )
+        if (
+            result.exit_code != 0
+            or result.timed_out
+            or result.preflight_error
+            or result.output_truncated
+            or result.structured_output_missing
+        ):
+            raise ValueError("PR semantic agent did not produce verified content")
+        payload = self._parse_json_object(result.response_output)
+        if not payload or not isinstance(payload.get("title"), str) or not isinstance(payload.get("body"), str):
+            raise ValueError("PR semantic agent response was not a single structured title/body object")
+        title = payload["title"].strip()
+        body = payload["body"].strip()
+        if not title or not body:
+            raise ValueError("PR semantic agent returned empty content")
+        return title, body
 
     @classmethod
     def _recover_persisted_complexity(

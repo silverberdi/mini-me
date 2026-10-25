@@ -367,12 +367,18 @@ class GreenfieldBootstrapCoordinator:
                 worktree, self._selected_agents(project)
             )
             capability_evidence = self.capability_manifest.install_greenfield(
-                self.project_root, worktree
+                self.project_root,
+                worktree,
+                profiles=self._selected_profiles(project),
             )
             readiness = self.capability_manifest.validate_f5_readiness(
                 capability_evidence,
                 self.openspec.inspect_integrations(worktree, self._selected_agents(project)),
                 project_type=project.project_type.value,
+                profiles_observed=bool(project.agent_profiles),
+                worktree_identity_verified=binding.managed_repository_root == self._configured_root(project),
+                confinement_verified=True,
+                github_binding_verified=bool(binding.canonical_repository_identity),
             )
             incoming = worktree / "context" / "incoming" / project.onboarding_checkpoint["source_zip_sha256"]
             incoming.mkdir(parents=True, mode=0o700)
@@ -1058,10 +1064,23 @@ class GreenfieldBootstrapCoordinator:
             raise GreenfieldBootstrapError("Greenfield thinking requires a supported file-capable CLI agent")
 
     @staticmethod
+    def _selected_profiles(project: Project) -> dict[str, Any]:
+        profiles = project.agent_profiles
+        if project.execution_policy.get("fallback_authorized", False):
+            return dict(profiles)
+        return {role: value for role, value in profiles.items() if role != "fallback"}
+
+    @staticmethod
     def _selected_agents(project: Project, *, roles: tuple[str, ...] | None = None) -> list[str]:
         profiles = project.agent_profiles
         if roles is not None:
             profiles = {role: profiles[role] for role in roles}
+        elif not project.execution_policy.get("fallback_authorized", False):
+            profiles = {
+                role: value
+                for role, value in profiles.items()
+                if role != "fallback"
+            }
         return sorted({str(value.get("agent_id", "")).lower() for value in profiles.values() if isinstance(value, dict) and value.get("agent_id")})
 
     def _configured_root(self, project: Project) -> str | None:

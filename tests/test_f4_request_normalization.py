@@ -8,7 +8,9 @@ import pytest
 
 from minime.adapters.github import GitHubAdapter
 from minime.domain.enums import ExternalOutcome
+from minime.services.agent_runner import AgentExecutionResult
 from minime.services.capability_manifest import CapabilityConflictError, CapabilityManifestService
+from minime.services.orchestration_coordinator import NativeOrchestrationCoordinator
 from minime.services.pr_preparer_service import PrPreparationInput, PrPreparerService
 from minime.services.request_normalization import (
     NormalizedRequest,
@@ -116,7 +118,13 @@ def test_greenfield_capability_manifest_is_idempotent_and_preserves_conflicts(tm
     second = service.install_greenfield(source, target)
     assert first["count"] == second["count"] == 2
     assert service.validate_f5_readiness(
-        second, {"complete": True}, project_type="GREENFIELD"
+        second,
+        {"complete": True},
+        project_type="GREENFIELD",
+        profiles_observed=True,
+        worktree_identity_verified=True,
+        confinement_verified=True,
+        github_binding_verified=True,
     )["status"] == "READY_FOR_F5_PREPARATION"
 
     (target / ".agents/skills/minime-example/SKILL.md").write_text("changed", encoding="utf-8")
@@ -183,3 +191,76 @@ def test_deterministic_greenfield_vertical_journey_uses_real_contracts(tmp_path:
     assert evidence["normalized"] is True
     assert issue["body"] == normalized.normalized_body
     assert pr.candidate_sha == "b" * 40
+
+
+def test_capability_manifest_selects_resources_by_configured_provider(tmp_path: Path):
+    source = tmp_path / "source"
+    target = tmp_path / "target"
+    for root in (".agents", ".agent"):
+        for name in ("minime-request-normalizer", "minime-pr-preparer"):
+            path = source / root / "skills" / name
+            path.mkdir(parents=True)
+            (path / "SKILL.md").write_text(f"{root}:{name}", encoding="utf-8")
+    target.mkdir()
+    manifest = CapabilityManifestService().install_greenfield(
+        source,
+        target,
+        profiles={
+            "thinking": {"agent_id": "codex", "skills": ["minime-request-normalizer"]},
+            "execution": {"agent_id": "antigravity", "skills": ["minime-pr-preparer"]},
+        },
+    )
+    assert set(manifest["selected_paths"]) == {
+        ".agents/skills/minime-request-normalizer/SKILL.md",
+        ".agent/skills/minime-pr-preparer/SKILL.md",
+    }
+    assert not (target / ".agents/skills/minime-pr-preparer").exists()
+    assert not (target / ".agent/skills/minime-request-normalizer").exists()
+
+
+def test_semantic_pr_agent_contract_is_structured_and_fail_closed(tmp_path: Path):
+    class FakeRunner:
+        def resolve_workflow(self, **kwargs):
+            return object()
+
+        async def run(self, **kwargs):
+            return AgentExecutionResult(
+                exit_code=0,
+                timed_out=False,
+                stdout=['{"title":"feat(req-7): semantic (Addresses #7)","body":"## Evidence\\n\\nAddresses #7"}'],
+                stderr=[],
+                duration_ms=1,
+                structured_output=['{"title":"feat(req-7): semantic (Addresses #7)","body":"## Evidence\\n\\nAddresses #7"}'],
+                diagnostic_output=[],
+            )
+
+    coordinator = NativeOrchestrationCoordinator(
+        uow_factory=lambda: None,
+        github_adapter=object(),
+        worktree_manager=object(),
+        agent_runner=FakeRunner(),
+        semantic_pr_agent=True,
+    )
+    prepared = __import__("asyncio").run(
+        coordinator._prepare_semantic_pr_content(
+            worktree_path=tmp_path,
+            provider="codex",
+            project_id="project",
+            run_id="run-1",
+            pr_input=PrPreparationInput(
+                project_id="project",
+                repository="o/r",
+                pr_type="implementation",
+                issue_number=7,
+                issue_title="Sorter",
+                base_branch="main",
+                candidate_branch="request-7-sorter",
+                candidate_sha="a" * 40,
+                change_name="req-7-sorter",
+                change_summary="summary",
+                test_evidence="pytest exit code 0",
+            ),
+            request_body="Feature: Sorter",
+        )
+    )
+    assert prepared[0].startswith("feat(req-7)")

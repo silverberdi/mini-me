@@ -29,13 +29,8 @@ This skill drafts semantic pull request content for both Phase 1 (implementation
    - `test_evidence`: Unit / E2E test execution output summary or confirmation.
 
 3. **Output Format**:
-   The skill returns a markdown payload with clearly identifiable sections:
-   - `## TITLE`: The proposed PR title.
-     - Implementation format: `feat(<change-name>): <concise title> (Addresses #<num>)`
-     - Documentation format: `docs(<change-name>): close and sync OpenSpec specs (Ref #<num>)`
-   - `## BODY`: The complete markdown description including:
-     - Summary of changes
-     - Issue reference (e.g. `Addresses #<num>`)
-     - OpenSpec change reference
-     - Test and verification evidence
-     - Complexity and review notes (if applicable)
+   Return exactly one JSON object, with no prose or diagnostic text:
+   `{"title":"...","body":"..."}`.
+   The title and body are semantic drafts derived only from the Request and
+   verified evidence. The coordinator and `PrPreparerService` reject missing,
+   ambiguous, or non-structured output before publication.
