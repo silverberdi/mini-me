@@ -1001,6 +1001,8 @@ def test_quarantined_candidate_is_recovered_without_agent_replay(in_memory_uow, 
     (worktree / ".agents" / "skills" / "minime-engineering-discipline" / "SKILL.md").write_text(
         "Installed capability updated by recovery.\n", encoding="utf-8"
     )
+    subprocess.run(["git", "-C", str(worktree), "branch", branch], check=True)
+    subprocess.run(["git", "-C", str(worktree), "checkout", "--detach", "-q"], check=True)
 
     project = Project(
         project_id=config.project_id,

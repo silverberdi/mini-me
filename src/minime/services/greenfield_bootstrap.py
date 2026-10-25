@@ -883,7 +883,16 @@ class GreenfieldBootstrapCoordinator:
                 worktree, incoming, extracted.files, Path(package_dir), allowed_paths=allowed_paths
             )
             self._validate_official_workspace(worktree)
-            self._git(str(worktree), "checkout", "-b", branch)
+            existing_branch = subprocess.run(
+                ["git", "show-ref", "--verify", f"refs/heads/{branch}"],
+                cwd=worktree,
+                capture_output=True,
+                check=False,
+            ).returncode == 0
+            if existing_branch:
+                self._git(str(worktree), "checkout", branch)
+            else:
+                self._git(str(worktree), "checkout", "-b", branch)
             self._git(str(worktree), "add", "--all")
             self._git(str(worktree), "commit", "-m", "docs: bootstrap project context")
             head_sha = self._git(str(worktree), "rev-parse", "HEAD")
