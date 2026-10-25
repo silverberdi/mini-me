@@ -2,12 +2,14 @@
 
 import json
 from pathlib import Path
+from types import SimpleNamespace
 
 import httpx
 import pytest
 
 from minime.adapters.github import GitHubAdapter
-from minime.domain.enums import ExternalOutcome
+from minime.domain.enums import ExternalOutcome, ExternalReasonCode, OrchestrationStage, RetrySafety
+from minime.domain.models import ExternalActionResult, OrchestrationRun
 from minime.services.agent_runner import AgentExecutionResult
 from minime.services.capability_manifest import CapabilityConflictError, CapabilityManifestService
 from minime.services.orchestration_coordinator import NativeOrchestrationCoordinator
@@ -80,6 +82,259 @@ def test_normalization_fails_closed_when_remote_issue_changed():
     service = RequestNormalizationService(ChangedIssue())
     with pytest.raises(RequestNormalizationError, match="changed concurrently"):
         service.publish("o/r", 7, "run-1", NormalizedRequest("original", "normalized", False))
+
+
+def test_semantic_normalization_comment_is_idempotent_and_confirmed():
+    original = "Necesitamos ordenar la salida y conservar tres criterios: C1, C2 y C3."
+    normalized = """Feature: Ordenación de consola
+
+Scenario: Salida estable
+  Given una entrada válida
+  When se ordena la salida
+  Then se conserva el orden definido
+"""
+    issue = {"number": 8, "body": original, "repository_url": "/repos/o/r"}
+    comments: list[dict[str, object]] = []
+
+    def handler(request):
+        if request.method == "GET" and request.url.path.endswith("/issues/8"):
+            return httpx.Response(200, json=issue, headers={"etag": '"v1"'})
+        if request.method == "GET" and request.url.path.endswith("/issues/8/comments"):
+            return httpx.Response(200, json=comments)
+        if request.method == "POST" and request.url.path.endswith("/issues/8/comments"):
+            payload = json.loads(request.content)
+            item = {"id": len(comments) + 1, "body": payload["body"]}
+            comments.append(item)
+            return httpx.Response(201, json=item)
+        if request.method == "PATCH" and request.url.path.endswith("/issues/8"):
+            issue["body"] = json.loads(request.content)["body"]
+            return httpx.Response(200, json=issue)
+        return httpx.Response(404)
+
+    service = RequestNormalizationService(GitHubAdapter(auth=StaticAuth(handler)))
+    request = NormalizedRequest(
+        original,
+        normalized,
+        False,
+        ("C1", "C2", "C3"),
+        "Se normalizó el Request y se conservaron C1, C2 y C3.",
+    )
+    first = service.publish("o/r", 8, "run-semantic", request)
+    second = service.publish("o/r", 8, "run-semantic", request)
+
+    assert first["semantic_message"] == request.semantic_message
+    assert second["provenance_key"] == "run-semantic:8"
+    assert len(comments) == 2
+    assert sum("Original Request" in str(item["body"]) for item in comments) == 1
+    assert sum("minime-request-normalization-semantic" in str(item["body"]) for item in comments) == 1
+
+
+@pytest.mark.asyncio
+async def test_coordinator_requires_and_persists_structured_semantic_message(tmp_path: Path):
+    issue = {"number": 11, "body": "C1: ordenar. C2: conservar. C3: explicar.", "repository_url": "/repos/o/r"}
+    comments: list[dict[str, object]] = []
+
+    class Github:
+        @staticmethod
+        def ok(data, evidence=None):
+            return ExternalActionResult(
+                outcome=ExternalOutcome.SUCCESS,
+                source_adapter="test",
+                reason_code=ExternalReasonCode.EXECUTION_SUCCESS,
+                retry_safety=RetrySafety.SAFE,
+                data=data,
+                observed_evidence=evidence or {},
+            )
+
+        def get_issue(self, *_):
+            return self.ok(issue, {"etag": '"v1"'})
+
+        def list_issue_comments(self, *_):
+            return self.ok(comments)
+
+        def comment_issue(self, _repo, _number, body, _key):
+            if not any(item["body"] == body for item in comments):
+                comments.append({"id": len(comments) + 1, "body": body})
+            return self.ok(comments[-1])
+
+        def update_issue_body(self, _repo, _number, body, expected_version=None):
+            issue["body"] = body
+            return self.ok(issue)
+
+    class Runner:
+        def resolve_workflow(self, **_kwargs):
+            return SimpleNamespace(dispatch_command="$minime-request-normalizer issue-11", workflow_sha256="wf")
+
+        async def run(self, **_kwargs):
+            payload = {
+                "normalized_body": (
+                    "Feature: Ordenación\n\nScenario: Criterios\n"
+                    "  Given una entrada\n  When se ordena\n  Then C1 C2 y C3 permanecen trazables"
+                ),
+                "criteria": ["C1", "C2", "C3"],
+                "semantic_message": "Se normalizó el Request y se conservaron C1, C2 y C3.",
+            }
+            encoded = json.dumps(payload, ensure_ascii=False)
+            return AgentExecutionResult(
+                exit_code=0,
+                timed_out=False,
+                stdout=[],
+                stderr=[],
+                duration_ms=1,
+                structured_output=[encoded],
+                diagnostic_output=[],
+            )
+
+        @staticmethod
+        def observed_usage(_result):
+            return None
+
+    run = OrchestrationRun(project_id="project", change_name="issue-11", base_sha="main")
+
+    class Runs:
+        def get_by_id(self, _run_id):
+            return run
+
+        def save(self, value):
+            nonlocal run
+            run = value
+
+    class Uow:
+        orchestration_runs = Runs()
+
+        def commit(self):
+            return None
+
+    coordinator = NativeOrchestrationCoordinator(
+        uow_factory=Uow,
+        github_adapter=Github(),
+        worktree_manager=object(),
+        agent_runner=Runner(),
+    )
+    persisted, normalized_body = await coordinator._normalize_request_before_explore(
+        active_run=run,
+        project_id="project",
+        repository="o/r",
+        worktree_path=tmp_path,
+        issue_number=11,
+        issue_title="Criterios",
+        issue_body=issue["body"],
+        provider="codex",
+    )
+
+    assert normalized_body.startswith("Feature: Ordenación")
+    assert persisted["criteria"] == ["C1", "C2", "C3"]
+    assert persisted["semantic_message"].startswith("Se normalizó")
+    assert any("Original Request" in str(item["body"]) for item in comments)
+    assert any("Se normalizó" in str(item["body"]) for item in comments)
+    assert run.current_stage is OrchestrationStage.ADMITTED
+
+
+def test_normalizer_skills_match_coordinator_schema():
+    coordinator_source = Path("src/minime/services/orchestration_coordinator.py").read_text(encoding="utf-8")
+    assert '"required": ["normalized_body", "criteria", "semantic_message"]' in coordinator_source
+    for relative in (
+        ".agents/skills/minime-request-normalizer/SKILL.md",
+        ".agent/skills/minime-request-normalizer/SKILL.md",
+    ):
+        skill = Path(relative).read_text(encoding="utf-8")
+        assert "`normalized_body`, `criteria` and `semantic_message`" in skill
+        assert "`normalized_body` and `criteria`." not in skill
+
+
+@pytest.mark.asyncio
+async def test_failed_normalization_persists_diagnostic_and_blocks_reentry(tmp_path: Path):
+    issue = {"number": 12, "body": "C1: una solicitud informal.", "repository_url": "/repos/o/r"}
+    run = OrchestrationRun(project_id="project", change_name="issue-12", base_sha="main")
+    calls = 0
+
+    def ok(data):
+        return ExternalActionResult(
+            outcome=ExternalOutcome.SUCCESS,
+            source_adapter="test",
+            reason_code=ExternalReasonCode.EXECUTION_SUCCESS,
+            retry_safety=RetrySafety.SAFE,
+            data=data,
+        )
+
+    class Github:
+        def get_issue(self, *_):
+            return ok(issue)
+
+        def list_issue_comments(self, *_):
+            return ok([])
+
+    class Runner:
+        def resolve_workflow(self, **_kwargs):
+            return SimpleNamespace(dispatch_command="$minime-request-normalizer issue-12", workflow_sha256="wf")
+
+        async def run(self, **_kwargs):
+            nonlocal calls
+            calls += 1
+            return AgentExecutionResult(
+                exit_code=7,
+                timed_out=False,
+                stdout=[],
+                stderr=["provider failure"],
+                duration_ms=12,
+                structured_output=[],
+                diagnostic_output=[],
+                structured_output_missing=True,
+            )
+
+        @staticmethod
+        def observed_usage(_result):
+            return None
+
+    class Runs:
+        def get_by_id(self, _run_id):
+            return run
+
+        def save(self, value):
+            nonlocal run
+            run = value
+
+    class Uow:
+        orchestration_runs = Runs()
+
+        def commit(self):
+            return None
+
+    coordinator = NativeOrchestrationCoordinator(
+        uow_factory=Uow,
+        github_adapter=Github(),
+        worktree_manager=object(),
+        agent_runner=Runner(),
+    )
+    first, first_error = await coordinator._normalize_request_before_explore(
+        active_run=run,
+        project_id="project",
+        repository="o/r",
+        worktree_path=tmp_path,
+        issue_number=12,
+        issue_title="Solicitud",
+        issue_body=issue["body"],
+        provider="codex",
+    )
+    second, second_error = await coordinator._normalize_request_before_explore(
+        active_run=run,
+        project_id="project",
+        repository="o/r",
+        worktree_path=tmp_path,
+        issue_number=12,
+        issue_title="Solicitud",
+        issue_body=issue["body"],
+        provider="codex",
+    )
+
+    attempt = run.stop_details["normalization_attempt"]
+    assert first is None and "verified result" in first_error
+    assert second is None and "already recorded" in second_error
+    assert calls == 1
+    assert attempt["status"] == "FAILED"
+    assert attempt["exit_code"] == 7
+    assert attempt["structured_output_missing"] is True
+    assert attempt["usage_status"] == "UNKNOWN"
 
 
 def test_semantic_pr_content_is_validated_without_auto_close():
