@@ -185,6 +185,10 @@ async def test_coordinator_requires_and_persists_structured_semantic_message(tmp
                 diagnostic_output=[],
             )
 
+        @staticmethod
+        def observed_usage(_result):
+            return None
+
     run = OrchestrationRun(project_id="project", change_name="issue-11", base_sha="main")
 
     class Runs:
