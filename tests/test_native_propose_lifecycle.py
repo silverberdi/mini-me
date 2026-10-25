@@ -342,7 +342,7 @@ async def test_complexity_rejects_ambiguous_response_channel(mock_env, stdout, e
 
 
 @pytest.mark.asyncio
-async def test_complexity_rejects_truncated_response(mock_env):
+async def test_complexity_accepts_structured_response_when_diagnostics_truncated(mock_env):
     coordinator, _, _, repo_dir = mock_env
     coordinator.agent_runner.run = AsyncMock(return_value=AgentExecutionResult(
         exit_code=0,
@@ -350,6 +350,8 @@ async def test_complexity_rejects_truncated_response(mock_env):
         stdout=['{"complexity":"moderate","evidence":"bounded change"}'],
         stderr=[],
         duration_ms=1,
+        structured_output=['{"complexity":"moderate","evidence":"bounded change"}'],
+        diagnostic_output=["diagnostic output was truncated"],
         output_truncated=True,
     ))
 
@@ -357,7 +359,8 @@ async def test_complexity_rejects_truncated_response(mock_env):
         repo_dir, "antigravity", "Issue", "Body", "proj-1"
     )
 
-    assert result.status == "MISSING_EVIDENCE"
+    assert result.status == "VALID"
+    assert result.complexity == "moderate"
 
 
 @pytest.mark.asyncio

@@ -210,6 +210,10 @@ async def test_invalid_gherkin_is_rejected_before_remote_writes(tmp_path):
             writes.append("update")
 
     class Runner:
+        @staticmethod
+        def observed_usage(_result):
+            return None
+
         def resolve_workflow(self, **_kwargs):
             return SimpleNamespace(dispatch_command="$minime-request-normalizer issue-6", workflow_sha256="wf")
 
