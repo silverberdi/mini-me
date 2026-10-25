@@ -1664,6 +1664,7 @@ class GitHubAdapter(GitHubAdapterInterface):
             pr_details = {
                 "repository": repo,
                 "number": data.get("number"),
+                "node_id": data.get("node_id"),
                 "url": data.get("html_url"),
                 "state": data.get("state"),
                 "is_merged": bool(data.get("merged", False)),
@@ -1753,17 +1754,68 @@ class GitHubAdapter(GitHubAdapterInterface):
                 )
             data = response.json()
             returned_sha = (data.get("head") or {}).get("sha")
-            if data.get("draft") is not False or returned_sha != expected_head_sha:
+            if data.get("draft") is False and returned_sha == expected_head_sha:
+                return ExternalActionResult(
+                    outcome=ExternalOutcome.SUCCESS,
+                    source_adapter="github_rest",
+                    reason_code=ExternalReasonCode.EXECUTION_SUCCESS,
+                    retry_safety=RetrySafety.UNSAFE,
+                    data={**current.data, "is_draft": False, "head_sha": returned_sha},
+                    external_id=str(pr_number),
+                )
+            node_id = current.data.get("node_id")
+            if not node_id:
                 return ExternalActionResult(
                     outcome=ExternalOutcome.UNKNOWN,
                     source_adapter="github_rest",
                     reason_code=ExternalReasonCode.UNOBSERVABLE,
                     retry_safety=RetrySafety.UNKNOWN,
-                    error_message="GitHub readiness response did not match the candidate.",
+                    error_message="GitHub readiness response did not match the candidate and has no PR identity.",
+                )
+            graphql = self._request(
+                "POST",
+                "/graphql",
+                json={
+                    "query": (
+                        "mutation($pullRequestId:ID!){"
+                        "convertPullRequestToReadyForReview(input:{pullRequestId:$pullRequestId}){"
+                        "pullRequest{isDraft headRefOid}}}"
+                    ),
+                    "variables": {"pullRequestId": node_id},
+                },
+            )
+            if graphql.status_code not in (200, 201):
+                return ExternalActionResult(
+                    outcome=ExternalOutcome.UNKNOWN,
+                    source_adapter="github_graphql",
+                    reason_code=ExternalReasonCode.UNOBSERVABLE,
+                    retry_safety=RetrySafety.UNKNOWN,
+                    provider_detail=f"HTTP {graphql.status_code}",
+                    error_message="GitHub did not confirm pull-request readiness.",
+                )
+            graph_data = graphql.json()
+            if graph_data.get("errors"):
+                return ExternalActionResult(
+                    outcome=ExternalOutcome.UNKNOWN,
+                    source_adapter="github_graphql",
+                    reason_code=ExternalReasonCode.UNOBSERVABLE,
+                    retry_safety=RetrySafety.UNKNOWN,
+                    error_message="GitHub GraphQL did not confirm pull-request readiness.",
+                )
+            ready = ((graph_data.get("data") or {}).get("convertPullRequestToReadyForReview") or {}).get(
+                "pullRequest"
+            ) or {}
+            if ready.get("isDraft") is not False or ready.get("headRefOid") != expected_head_sha:
+                return ExternalActionResult(
+                    outcome=ExternalOutcome.UNKNOWN,
+                    source_adapter="github_graphql",
+                    reason_code=ExternalReasonCode.UNOBSERVABLE,
+                    retry_safety=RetrySafety.UNKNOWN,
+                    error_message="GitHub GraphQL readiness response did not match the candidate.",
                 )
             return ExternalActionResult(
                 outcome=ExternalOutcome.SUCCESS,
-                source_adapter="github_rest",
+                source_adapter="github_graphql",
                 reason_code=ExternalReasonCode.EXECUTION_SUCCESS,
                 retry_safety=RetrySafety.UNSAFE,
                 data={**current.data, "is_draft": False, "head_sha": returned_sha},

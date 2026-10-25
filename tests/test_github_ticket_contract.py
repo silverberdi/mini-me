@@ -121,6 +121,52 @@ def test_project_github_adapter_reports_provider_default_branch_only_for_exact_r
     assert requested == ["/repos/example/demo"]
 
 
+def test_project_github_adapter_uses_official_graphql_when_rest_keeps_draft():
+    head_sha = "c" * 40
+    calls = []
+
+    def handler(request):
+        calls.append(request)
+        if request.method == "GET" and request.url.path.endswith("/pulls/4"):
+            return httpx.Response(
+                200,
+                json={
+                    "node_id": "PR_node",
+                    "number": 4,
+                    "html_url": "https://github.test/pull/4",
+                    "state": "open",
+                    "draft": True,
+                    "merged": False,
+                    "head": {"sha": head_sha, "ref": "topic"},
+                    "base": {"sha": "b" * 40, "ref": "main"},
+                },
+            )
+        if request.method == "PATCH" and request.url.path.endswith("/pulls/4"):
+            return httpx.Response(200, json={"draft": True, "head": {"sha": head_sha}})
+        if request.method == "POST" and request.url.path == "/graphql":
+            payload = json.loads(request.content)
+            assert payload["variables"] == {"pullRequestId": "PR_node"}
+            return httpx.Response(
+                200,
+                json={
+                    "data": {
+                        "convertPullRequestToReadyForReview": {
+                            "pullRequest": {"isDraft": False, "headRefOid": head_sha}
+                        }
+                    }
+                },
+            )
+        return httpx.Response(404)
+
+    result = GitHubAdapter(auth=_StaticAuth(handler)).mark_pull_request_ready(
+        "example/demo", 4, head_sha
+    )
+
+    assert result.outcome == ExternalOutcome.SUCCESS
+    assert result.data["is_draft"] is False
+    assert [request.method for request in calls] == ["GET", "PATCH", "POST"]
+
+
 def test_issue_comment_reconciles_by_operation_key_without_duplicate_post():
     comments = []
     posts = []
