@@ -1,8 +1,8 @@
 """F4 deterministic contracts: Issue provenance, semantic PRs and capabilities."""
 
 import json
-from types import SimpleNamespace
 from pathlib import Path
+from types import SimpleNamespace
 
 import httpx
 import pytest
