@@ -699,6 +699,7 @@ async def run_project_request(
         github_adapter=github,
         worktree_manager=wt_manager,
         agent_runner=agent_runner,
+        semantic_pr_agent=True,
     )
     clarification = body.operator_clarification or body.operator_response
     res = await coordinator.execute_project_request(
@@ -757,6 +758,7 @@ async def ack_project_request(
         github_adapter=github,
         worktree_manager=wt_manager,
         agent_runner=agent_runner,
+        semantic_pr_agent=True,
     )
     res = await coordinator.execute_project_request(
         project_id,

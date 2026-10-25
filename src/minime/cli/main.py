@@ -491,6 +491,7 @@ def request_run_cmd(
                 github_adapter=github,
                 worktree_manager=wt_manager,
                 agent_runner=agent_runner,
+                semantic_pr_agent=True,
             )
             result = asyncio.run(
                 coordinator.execute_project_request(

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass
-from typing import Any
+from typing import Callable
 
 from minime.logging import get_logger
 
@@ -30,6 +30,8 @@ class PrPreparationInput:
     change_summary: str
     test_evidence: str
     complexity: str = "moderate"
+    semantic_title: str | None = None
+    semantic_body: str | None = None
 
 
 @dataclass(frozen=True)
@@ -44,9 +46,27 @@ class PreparedPullRequest:
 class PrPreparerService:
     """Service to format and prepare Pull Request title and description conforming to F3 rules."""
 
+    def __init__(
+        self,
+        semantic_provider: Callable[[PrPreparationInput], tuple[str, str]] | None = None,
+    ) -> None:
+        self.semantic_provider = semantic_provider
+
     def prepare_pull_request(self, pr_input: PrPreparationInput) -> PreparedPullRequest:
-        """Generate structured PR content ensuring strict omission of auto-closing keywords."""
-        if pr_input.pr_type == "implementation":
+        """Validate agent-authored content, with F3-compatible fallback for old callers."""
+        self._validate_identity(pr_input)
+        if self.semantic_provider is not None:
+            semantic_title, semantic_body = self.semantic_provider(pr_input)
+            title = semantic_title.strip() if isinstance(semantic_title, str) else ""
+            body = semantic_body.strip() if isinstance(semantic_body, str) else ""
+            if not title or not body:
+                raise ValueError("Semantic provider returned incomplete PR content")
+        elif pr_input.semantic_title is not None or pr_input.semantic_body is not None:
+            if not pr_input.semantic_title or not pr_input.semantic_body:
+                raise ValueError("Semantic PR content must contain both title and body")
+            title = pr_input.semantic_title.strip()
+            body = pr_input.semantic_body.strip()
+        elif pr_input.pr_type == "implementation":
             title = f"feat({pr_input.change_name}): {pr_input.issue_title} (Addresses #{pr_input.issue_number})"
             body = (
                 f"## Summary of Implementation\n\n"
@@ -86,6 +106,17 @@ class PrPreparerService:
             candidate_sha=pr_input.candidate_sha,
             issue_number=pr_input.issue_number,
         )
+
+    @staticmethod
+    def _validate_identity(pr_input: PrPreparationInput) -> None:
+        if not pr_input.project_id.strip() or not pr_input.repository.strip():
+            raise ValueError("PR identity requires project and repository")
+        if not pr_input.base_branch.strip() or not pr_input.candidate_branch.strip():
+            raise ValueError("PR identity requires base and candidate branches")
+        if not re.fullmatch(r"[0-9a-fA-F]{7,64}", pr_input.candidate_sha):
+            raise ValueError("PR identity requires a verified candidate SHA")
+        if pr_input.issue_number < 1 or not pr_input.change_name.strip():
+            raise ValueError("PR identity requires a valid Issue and Change")
 
     @staticmethod
     def validate_no_auto_closing_keywords(content: str) -> None:

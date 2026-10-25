@@ -905,6 +905,19 @@ class TicketSourceAdapter(Protocol):
 
     def get_issue(self, repository: str, issue_number: int) -> ExternalActionResult[dict[str, Any]]: ...
 
+    def list_issue_comments(
+        self, repository: str, issue_number: int
+    ) -> ExternalActionResult[list[dict[str, Any]]]: ...
+
+    def update_issue_body(
+        self,
+        repository: str,
+        issue_number: int,
+        body: str,
+        *,
+        expected_version: str | None = None,
+    ) -> ExternalActionResult[dict[str, Any]]: ...
+
     def create_issue(
         self,
         repository: str,

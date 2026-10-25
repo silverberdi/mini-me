@@ -251,7 +251,11 @@ class GitHubAdapter(GitHubAdapterInterface):
 
     def _request(self, method: str, path: str, **kwargs: Any) -> httpx.Response:
         try:
-            return self.auth.client.request(method, path, headers=self._headers(), **kwargs)
+            headers = self._headers()
+            extra_headers = kwargs.pop("headers", None)
+            if isinstance(extra_headers, dict):
+                headers.update({str(key): str(value) for key, value in extra_headers.items()})
+            return self.auth.client.request(method, path, headers=headers, **kwargs)
         except (httpx.HTTPError, OSError):
             raise GitHubRemoteError("GitHub API is unobservable.") from None
 
@@ -1660,6 +1664,7 @@ class GitHubAdapter(GitHubAdapterInterface):
             pr_details = {
                 "repository": repo,
                 "number": data.get("number"),
+                "node_id": data.get("node_id"),
                 "url": data.get("html_url"),
                 "state": data.get("state"),
                 "is_merged": bool(data.get("merged", False)),
@@ -1672,6 +1677,7 @@ class GitHubAdapter(GitHubAdapterInterface):
                 "base_sha": base_data.get("sha"),
                 "base_branch": base_data.get("ref"),
                 "title": data.get("title"),
+                "is_draft": bool(data.get("draft", False)),
             }
             return ExternalActionResult(
                 outcome=ExternalOutcome.SUCCESS,
@@ -1700,6 +1706,130 @@ class GitHubAdapter(GitHubAdapterInterface):
                 error_message=str(exc),
             )
 
+    def mark_pull_request_ready(
+        self, repository: str, pr_number: int, expected_head_sha: str
+    ) -> ExternalActionResult[dict[str, Any]]:
+        """Convert an exact open draft PR to ready-for-review and verify it remotely."""
+        current = self.get_pull_request_details(repository, pr_number)
+        if current.outcome is not ExternalOutcome.SUCCESS or not isinstance(current.data, dict):
+            return current
+        if current.data.get("is_merged") or current.data.get("state") != "open":
+            return ExternalActionResult(
+                outcome=ExternalOutcome.FAILURE,
+                source_adapter="github_rest",
+                reason_code=ExternalReasonCode.CONFLICT,
+                retry_safety=RetrySafety.UNSAFE,
+                error_message="Pull request is not open and cannot be made ready.",
+            )
+        if current.data.get("head_sha") != expected_head_sha:
+            return ExternalActionResult(
+                outcome=ExternalOutcome.FAILURE,
+                source_adapter="github_rest",
+                reason_code=ExternalReasonCode.CONFLICT,
+                retry_safety=RetrySafety.UNSAFE,
+                error_message="Pull request head SHA differs from the reconciled candidate.",
+            )
+        if not current.data.get("is_draft"):
+            return current
+        repo = self._repo(repository)
+        try:
+            response = self._request("PATCH", f"/repos/{repo}/pulls/{pr_number}", json={"draft": False})
+            if response.status_code in (401, 403):
+                return ExternalActionResult(
+                    outcome=ExternalOutcome.FAILURE,
+                    source_adapter="github_rest",
+                    reason_code=ExternalReasonCode.AUTH_REQUIRED,
+                    retry_safety=RetrySafety.UNSAFE,
+                    provider_detail=f"HTTP {response.status_code}",
+                    error_message="GitHub App is unauthorized to update pull requests.",
+                )
+            if response.status_code not in (200, 201):
+                return ExternalActionResult(
+                    outcome=ExternalOutcome.UNKNOWN,
+                    source_adapter="github_rest",
+                    reason_code=ExternalReasonCode.UNOBSERVABLE,
+                    retry_safety=RetrySafety.UNKNOWN,
+                    provider_detail=f"HTTP {response.status_code}",
+                    error_message="GitHub did not confirm pull-request readiness.",
+                )
+            data = response.json()
+            returned_sha = (data.get("head") or {}).get("sha")
+            if data.get("draft") is False and returned_sha == expected_head_sha:
+                return ExternalActionResult(
+                    outcome=ExternalOutcome.SUCCESS,
+                    source_adapter="github_rest",
+                    reason_code=ExternalReasonCode.EXECUTION_SUCCESS,
+                    retry_safety=RetrySafety.UNSAFE,
+                    data={**current.data, "is_draft": False, "head_sha": returned_sha},
+                    external_id=str(pr_number),
+                )
+            node_id = current.data.get("node_id")
+            if not node_id:
+                return ExternalActionResult(
+                    outcome=ExternalOutcome.UNKNOWN,
+                    source_adapter="github_rest",
+                    reason_code=ExternalReasonCode.UNOBSERVABLE,
+                    retry_safety=RetrySafety.UNKNOWN,
+                    error_message="GitHub readiness response did not match the candidate and has no PR identity.",
+                )
+            graphql = self._request(
+                "POST",
+                "/graphql",
+                json={
+                    "query": (
+                        "mutation($pullRequestId:ID!){"
+                        "markPullRequestReadyForReview(input:{pullRequestId:$pullRequestId}){"
+                        "pullRequest{isDraft headRefOid}}}"
+                    ),
+                    "variables": {"pullRequestId": node_id},
+                },
+            )
+            if graphql.status_code not in (200, 201):
+                return ExternalActionResult(
+                    outcome=ExternalOutcome.UNKNOWN,
+                    source_adapter="github_graphql",
+                    reason_code=ExternalReasonCode.UNOBSERVABLE,
+                    retry_safety=RetrySafety.UNKNOWN,
+                    provider_detail=f"HTTP {graphql.status_code}",
+                    error_message="GitHub did not confirm pull-request readiness.",
+                )
+            graph_data = graphql.json()
+            if graph_data.get("errors"):
+                return ExternalActionResult(
+                    outcome=ExternalOutcome.UNKNOWN,
+                    source_adapter="github_graphql",
+                    reason_code=ExternalReasonCode.UNOBSERVABLE,
+                    retry_safety=RetrySafety.UNKNOWN,
+                    error_message="GitHub GraphQL did not confirm pull-request readiness.",
+                )
+            ready = ((graph_data.get("data") or {}).get("markPullRequestReadyForReview") or {}).get(
+                "pullRequest"
+            ) or {}
+            if ready.get("isDraft") is not False or ready.get("headRefOid") != expected_head_sha:
+                return ExternalActionResult(
+                    outcome=ExternalOutcome.UNKNOWN,
+                    source_adapter="github_graphql",
+                    reason_code=ExternalReasonCode.UNOBSERVABLE,
+                    retry_safety=RetrySafety.UNKNOWN,
+                    error_message="GitHub GraphQL readiness response did not match the candidate.",
+                )
+            return ExternalActionResult(
+                outcome=ExternalOutcome.SUCCESS,
+                source_adapter="github_graphql",
+                reason_code=ExternalReasonCode.EXECUTION_SUCCESS,
+                retry_safety=RetrySafety.UNSAFE,
+                data={**current.data, "is_draft": False, "head_sha": returned_sha},
+                external_id=str(pr_number),
+            )
+        except (GitHubAuthorizationError, GitHubRemoteError, httpx.HTTPError) as exc:
+            return ExternalActionResult(
+                outcome=ExternalOutcome.UNKNOWN,
+                source_adapter="github_rest",
+                reason_code=ExternalReasonCode.UNOBSERVABLE,
+                retry_safety=RetrySafety.UNKNOWN,
+                error_message="GitHub readiness result is unobservable.",
+                provider_detail=_safe_error(str(exc)),
+            )
     def merge_pull_request(
         self,
         repository: str,
@@ -1814,6 +1944,14 @@ class GitHubAdapter(GitHubAdapterInterface):
                     reason_code=ExternalReasonCode.EXECUTION_SUCCESS,
                     retry_safety=RetrySafety.SAFE,
                     data=data,
+                    observed_evidence={
+                        "etag": response.headers.get("etag"),
+                        "updated_at": data.get("updated_at"),
+                        "issue_number": data.get("number"),
+                        "repository": data.get("repository_url", "").rsplit("/repos/", 1)[-1]
+                        if isinstance(data.get("repository_url"), str)
+                        else repo,
+                    },
                 )
         except Exception as exc:
             logger.debug(f"Failed to get issue #{issue_number}: {exc}")
@@ -1825,6 +1963,153 @@ class GitHubAdapter(GitHubAdapterInterface):
             retry_safety=RetrySafety.SAFE,
             data={},
             error_message=f"Failed to get issue #{issue_number} from remote GitHub.",
+        )
+
+    def list_issue_comments(
+        self, repository: str, issue_number: int
+    ) -> ExternalActionResult[list[dict[str, Any]]]:
+        """Read all comments needed for provenance reconciliation, without posting."""
+        repo = self._repo(repository)
+        if issue_number < 1:
+            raise ValueError("Issue number must be positive")
+        comments: list[dict[str, Any]] = []
+        for page in range(1, 21):
+            try:
+                response = self._request(
+                    "GET",
+                    f"/repos/{repo}/issues/{issue_number}/comments",
+                    params={"per_page": 100, "page": page},
+                )
+            except (GitHubAuthorizationError, GitHubRemoteError) as exc:
+                return ExternalActionResult(
+                    outcome=ExternalOutcome.UNKNOWN,
+                    source_adapter="github_rest",
+                    reason_code=ExternalReasonCode.UNOBSERVABLE,
+                    retry_safety=RetrySafety.UNKNOWN,
+                    error_message=str(exc),
+                )
+            if response.status_code in (401, 403):
+                return ExternalActionResult(
+                    outcome=ExternalOutcome.FAILURE,
+                    source_adapter="github_rest",
+                    reason_code=ExternalReasonCode.AUTH_REQUIRED,
+                    retry_safety=RetrySafety.SAFE,
+                    error_message="GitHub App is unauthorized to inspect Issue comments.",
+                )
+            if response.status_code != 200:
+                return ExternalActionResult(
+                    outcome=ExternalOutcome.UNKNOWN,
+                    source_adapter="github_rest",
+                    reason_code=ExternalReasonCode.UNOBSERVABLE,
+                    retry_safety=RetrySafety.UNKNOWN,
+                    provider_detail=f"HTTP {response.status_code}",
+                    error_message="Issue comments are unobservable.",
+                )
+            try:
+                page_items = response.json()
+            except ValueError:
+                page_items = None
+            if not isinstance(page_items, list):
+                return ExternalActionResult(
+                    outcome=ExternalOutcome.UNKNOWN,
+                    source_adapter="github_rest",
+                    reason_code=ExternalReasonCode.MALFORMED_RESPONSE,
+                    retry_safety=RetrySafety.UNKNOWN,
+                    error_message="Issue comments response was invalid.",
+                )
+            comments.extend(item for item in page_items if isinstance(item, dict))
+            if len(page_items) < 100:
+                return ExternalActionResult(
+                    outcome=ExternalOutcome.SUCCESS,
+                    source_adapter="github_rest",
+                    reason_code=ExternalReasonCode.EXECUTION_SUCCESS,
+                    retry_safety=RetrySafety.SAFE,
+                    data=comments,
+                )
+        return ExternalActionResult(
+            outcome=ExternalOutcome.UNKNOWN,
+            source_adapter="github_rest",
+            reason_code=ExternalReasonCode.UNOBSERVABLE,
+            retry_safety=RetrySafety.UNKNOWN,
+            error_message="Issue comment history exceeds safe reconciliation limit.",
+        )
+
+    def update_issue_body(
+        self,
+        repository: str,
+        issue_number: int,
+        body: str,
+        *,
+        expected_version: str | None = None,
+    ) -> ExternalActionResult[dict[str, Any]]:
+        """Update an Issue body with an optional ETag concurrency precondition."""
+        repo = self._repo(repository)
+        if issue_number < 1 or not isinstance(body, str) or not body.strip():
+            raise ValueError("Issue body requires a positive number and non-empty text")
+        headers: dict[str, str] = {}
+        if expected_version:
+            headers["If-Match"] = expected_version
+        try:
+            response = self._request(
+                "PATCH",
+                f"/repos/{repo}/issues/{issue_number}",
+                json={"body": body},
+                headers=headers,
+            )
+        except GitHubAuthorizationError as exc:
+            return ExternalActionResult(
+                outcome=ExternalOutcome.FAILURE,
+                source_adapter="github_rest",
+                reason_code=ExternalReasonCode.AUTH_REQUIRED,
+                retry_safety=RetrySafety.UNSAFE,
+                error_message=str(exc),
+            )
+        except GitHubRemoteError:
+            return ExternalActionResult(
+                outcome=ExternalOutcome.AMBIGUOUS,
+                source_adapter="github_rest",
+                reason_code=ExternalReasonCode.UNOBSERVABLE,
+                retry_safety=RetrySafety.UNKNOWN,
+                error_message="Issue body update result is unobservable.",
+            )
+        if response.status_code in (409, 412):
+            return ExternalActionResult(
+                outcome=ExternalOutcome.FAILURE,
+                source_adapter="github_rest",
+                reason_code=ExternalReasonCode.CONFLICT,
+                retry_safety=RetrySafety.SAFE,
+                provider_detail=f"HTTP {response.status_code}",
+                error_message="Issue changed concurrently; normalization must reconcile before retrying.",
+            )
+        if response.status_code in (401, 403):
+            return ExternalActionResult(
+                outcome=ExternalOutcome.FAILURE,
+                source_adapter="github_rest",
+                reason_code=ExternalReasonCode.AUTH_REQUIRED,
+                retry_safety=RetrySafety.UNSAFE,
+                error_message="GitHub App is unauthorized to update Issue body.",
+            )
+        if response.status_code == 200:
+            try:
+                payload = response.json()
+            except ValueError:
+                payload = None
+            if isinstance(payload, dict) and payload.get("number") == issue_number:
+                return ExternalActionResult(
+                    outcome=ExternalOutcome.SUCCESS,
+                    source_adapter="github_rest",
+                    reason_code=ExternalReasonCode.EXECUTION_SUCCESS,
+                    retry_safety=RetrySafety.UNSAFE,
+                    data=payload,
+                    observed_evidence={"etag": response.headers.get("etag")},
+                )
+        return ExternalActionResult(
+            outcome=ExternalOutcome.UNKNOWN,
+            source_adapter="github_rest",
+            reason_code=ExternalReasonCode.UNOBSERVABLE,
+            retry_safety=RetrySafety.UNKNOWN,
+            provider_detail=f"HTTP {response.status_code}",
+            error_message="GitHub did not confirm the Issue body update.",
         )
 
     def comment_issue(

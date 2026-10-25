@@ -77,7 +77,7 @@ def base_coordinator_env(tmp_path: Path):
         data={
             "number": pr_number,
             "state": "open",
-            "head_sha": "commit_sha_901",
+            "head_sha": "a" * 40,
             "head_branch": "request-901-negative-test-feature",
             "base_branch": "main",
             "is_merged": False,
@@ -128,7 +128,7 @@ def base_coordinator_env(tmp_path: Path):
         openspec_adapter=openspec_mock,
     )
     coordinator._push_branch = AsyncMock()
-    coordinator._get_git_head_sha = AsyncMock(return_value="commit_sha_901")
+    coordinator._get_git_head_sha = AsyncMock(return_value="a" * 40)
     coordinator._git_run = AsyncMock(return_value="")
 
     return coordinator, uow, github_mock, candidate_wt, agent_runner, openspec_mock

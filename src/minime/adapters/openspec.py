@@ -190,11 +190,11 @@ class OpenSpecAdapter(OpenSpecAdapterInterface):
                     if skill.is_symlink() or (skill / "SKILL.md").is_symlink():
                         raise ValueError("OpenSpec integration target contains a symlink")
         if "antigravity" in selected:
-            workflows = root / ".agent/workflows"
-            if workflows.is_dir() and any(
-                workflow.is_symlink() for workflow in workflows.glob("opsx-*.md")
-            ):
-                raise ValueError("OpenSpec integration target contains a symlink")
+            for workflow_root in (root / ".agent/workflows", root / ".agents/workflows"):
+                if workflow_root.is_dir() and any(
+                    workflow.is_symlink() for workflow in workflow_root.glob("opsx-*.md")
+                ):
+                    raise ValueError("OpenSpec integration target contains a symlink")
 
     def discover_official_integrations(self, agents: list[str]) -> dict[str, Any]:
         """Observe the complete native set by running official setup in a disposable repo."""

@@ -27,6 +27,7 @@ from minime.domain.enums import (
 from minime.domain.models import Project, ProjectConfigurationInput, utc_now
 from minime.logging import redact_secrets
 from minime.services.agent_confinement import AgentProcessConfinement
+from minime.services.capability_manifest import CapabilityManifestService
 from minime.services.context_archive import ContextArchiveExtractor
 from minime.services.implementer_runner import CliImplementerRunner, ImplementerResult
 from minime.services.project_catalog_service import ProjectCatalogService
@@ -100,6 +101,7 @@ class GreenfieldBootstrapCoordinator:
         archive_extractor: ContextArchiveExtractor | None = None,
         openspec: OpenSpecAdapter | None = None,
         thinking_agent: ThinkingAgent | None = None,
+        capability_manifest: CapabilityManifestService | None = None,
         project_root: str | Path = ".",
         trusted_managed_root: str | Path | None = None,
     ) -> None:
@@ -112,6 +114,7 @@ class GreenfieldBootstrapCoordinator:
         self.extractor = archive_extractor or ContextArchiveExtractor()
         self.openspec = openspec or OpenSpecAdapter()
         self.thinking_agent = thinking_agent
+        self.capability_manifest = capability_manifest or CapabilityManifestService()
         self.project_root = Path(project_root).resolve()
         self.trusted_managed_root = (
             Path(trusted_managed_root).resolve() if trusted_managed_root else None
@@ -353,7 +356,14 @@ class GreenfieldBootstrapCoordinator:
         base_sha = self._git(
             binding.managed_repository_root, "rev-parse", f"origin/{project.base_branch}"
         )
-        self._prepare_local_branch(binding.managed_repository_root, branch, base_sha)
+        self._prepare_local_branch(
+            binding.managed_repository_root,
+            branch,
+            base_sha,
+            allow_pre_dispatch_reconcile=bool(
+                project.onboarding_checkpoint.get("pre_dispatch_recovery")
+            ),
+        )
         self._git(binding.managed_repository_root, "worktree", "add", "--detach", self._worktree_path(binding, branch), base_sha)
         worktree = Path(self._worktree_path(binding, branch))
         agent_started = False
@@ -361,7 +371,24 @@ class GreenfieldBootstrapCoordinator:
         try:
             self._git(str(worktree), "checkout", "-b", branch)
             self.openspec.install_official_integrations(
-                worktree, self._selected_agents(project, roles=("thinking",))
+                worktree, self._selected_agents(project)
+            )
+            capability_evidence = self.capability_manifest.install_greenfield(
+                self.project_root,
+                worktree,
+                profiles=self._selected_profiles(project),
+            )
+            official_openspec = self.openspec.inspect_integrations(
+                worktree, self._selected_agents(project)
+            )
+            readiness = self.capability_manifest.validate_f5_readiness(
+                capability_evidence,
+                official_openspec,
+                project_type=project.project_type.value,
+                profiles_observed=bool(project.agent_profiles),
+                worktree_identity_verified=binding.managed_repository_root == self._configured_root(project),
+                confinement_verified=True,
+                github_binding_verified=bool(binding.canonical_repository_identity),
             )
             incoming = worktree / "context" / "incoming" / project.onboarding_checkpoint["source_zip_sha256"]
             incoming.mkdir(parents=True, mode=0o700)
@@ -374,10 +401,19 @@ class GreenfieldBootstrapCoordinator:
             # The official initializer and source import must satisfy scope
             # BEFORE any quota-bearing invocation. Never discover a predictable
             # setup artifact conflict after the agent has already consumed tokens.
-            self._validate_candidate_scope(worktree)
+            allowed_paths = self._candidate_allowed_paths(
+                worktree, capability_evidence, official_openspec
+            )
+            self._validate_candidate_scope(worktree, allowed_paths=allowed_paths)
             agent_started = True
             result = self._run_thinking_agent(project, worktree, profile, timeout_seconds)
-            self._validate_candidate(worktree, incoming, source_files, package_root)
+            self._validate_candidate(
+                worktree,
+                incoming,
+                source_files,
+                package_root,
+                allowed_paths=allowed_paths,
+            )
             self._validate_official_workspace(worktree)
             self._git(str(worktree), "add", "--all")
             self._git(str(worktree), "commit", "-m", "docs: bootstrap project context")
@@ -406,6 +442,8 @@ class GreenfieldBootstrapCoordinator:
                 "agent_exit_code": result.exit_code,
                 "agent_duration_ms": result.duration_ms,
                 "agent_workflow_evidence": result.native_workflow_evidence or {},
+                "f4_capability_manifest": capability_evidence,
+                "f5_readiness": readiness,
             }
             current.onboarding_checkpoint = checkpoint
             current.onboarding_status = ProjectOnboardingStatus.PR_PENDING
@@ -515,12 +553,13 @@ class GreenfieldBootstrapCoordinator:
                 "reason": "CANDIDATE_QUARANTINED_REVIEW_REQUIRED",
             }
         attempt = checkpoint.get("thinking_agent_attempt")
+        pre_dispatch = not isinstance(attempt, dict)
         if not isinstance(attempt, dict):
             attempt = {}
         authorization_error = self._retry_authorization_error(project, authorization)
         authorized_unknown = authorization is not None and authorization_error is None
-        if not isinstance(attempt, dict) and not authorized_unknown:
-            reason = "THINKING_AGENT_ATTEMPT_EVIDENCE_UNAVAILABLE"
+        if pre_dispatch and not authorized_unknown:
+            reason = "NO_AGENT_ATTEMPT_RECORDED_PRE_DISPATCH"
         elif (
             attempt.get("status") != "FAILED"
             or attempt.get("usage_status") != "OBSERVED"
@@ -546,7 +585,10 @@ class GreenfieldBootstrapCoordinator:
         try:
             adapter = self.connections.require_git_pr_write(project)
             repository = project.provider_connections["git_pr"]["repository_url"]
-            base_result = adapter.get_remote_branch_head(repository, project.base_branch)
+            remote_branch_head = getattr(adapter, "get_repository_branch_head", None)
+            if not callable(remote_branch_head):
+                remote_branch_head = adapter.get_remote_branch_head
+            base_result = remote_branch_head(repository, project.base_branch)
             if base_result.outcome in {ExternalOutcome.UNKNOWN, ExternalOutcome.AMBIGUOUS}:
                 evidence["reason"] = "BOOTSTRAP_BASE_UNOBSERVABLE"
             elif base_result.outcome is not ExternalOutcome.SUCCESS or not base_result.data:
@@ -557,7 +599,7 @@ class GreenfieldBootstrapCoordinator:
                     expected_base = authorization.get("base_sha") if authorization else None
                     if expected_base != base_result.data:
                         evidence["reason"] = "BOOTSTRAP_BASE_SHA_MISMATCH"
-            branch_result = adapter.get_remote_branch_head(repository, branch) if branch else None
+            branch_result = remote_branch_head(repository, branch) if branch else None
             if evidence["reason"] not in {
                 "BOOTSTRAP_BASE_UNOBSERVABLE",
                 "BOOTSTRAP_BASE_UNAVAILABLE",
@@ -609,6 +651,7 @@ class GreenfieldBootstrapCoordinator:
                     evidence["reason"] = "BOOTSTRAP_PR_EFFECT_UNCERTAIN"
                 elif (
                     evidence["reason"] == "THINKING_AGENT_RETRY_REQUIRES_EXPLICIT_AUTHORIZATION"
+                    or evidence["reason"] == "NO_AGENT_ATTEMPT_RECORDED_PRE_DISPATCH"
                     or authorized_unknown
                 ):
                     workspace = self.projects.verified_managed_workspace_root(project_id)
@@ -634,7 +677,9 @@ class GreenfieldBootstrapCoordinator:
                         else:
                             evidence["safe_to_resume"] = True
                             evidence["reason"] = (
-                                "NO_REMOTE_EFFECT_OBSERVED_EXPLICIT_AUTHORIZATION_REQUIRED"
+                                "NO_REMOTE_EFFECT_OBSERVED_PRE_DISPATCH"
+                                if evidence["reason"] == "NO_AGENT_ATTEMPT_RECORDED_PRE_DISPATCH"
+                                else "NO_REMOTE_EFFECT_OBSERVED_EXPLICIT_AUTHORIZATION_REQUIRED"
                             )
         except Exception:
             evidence["reason"] = "BOOTSTRAP_RECONCILIATION_UNOBSERVABLE"
@@ -722,7 +767,13 @@ class GreenfieldBootstrapCoordinator:
         project = self.uow.projects.get_by_id(project_id)
         if project is None:
             raise GreenfieldBootstrapError("Project not found")
-        authorization_error = self._retry_authorization_error(project, authorization)
+        pre_dispatch = not isinstance(
+            (project.onboarding_checkpoint or {}).get("thinking_agent_attempt"), dict
+        )
+        authorization_error = (
+            None if pre_dispatch and authorization is None
+            else self._retry_authorization_error(project, authorization)
+        )
         if authorization_error is not None:
             raise GreenfieldBootstrapError(authorization_error)
         reconciliation = self.reconcile_blocked_bootstrap(project_id, authorization)
@@ -742,6 +793,7 @@ class GreenfieldBootstrapCoordinator:
                     "thinking_agent_attempt"
                 ),
                 "pending_thinking_agent_retry_authorization": authorization,
+                "pre_dispatch_recovery": pre_dispatch,
             }
             project.onboarding_status = ProjectOnboardingStatus.BOOTSTRAPPING
             project.onboarding_reasons = [
@@ -761,6 +813,178 @@ class GreenfieldBootstrapCoordinator:
             except Exception as exc:
                 self._block(project, f"GREENFIELD_BOOTSTRAP_FAILED:{type(exc).__name__}")
                 raise
+
+    def recover_quarantined_candidate(
+        self, project_id: str, archive: bytes
+    ) -> dict[str, Any]:
+        """Validate and publish a preserved post-agent candidate without replaying the agent."""
+        project = self.uow.projects.get_by_id(project_id)
+        if project is None:
+            raise GreenfieldBootstrapError("Project not found")
+        checkpoint = project.onboarding_checkpoint or {}
+        recovery = checkpoint.get("candidate_recovery")
+        attempt = checkpoint.get("thinking_agent_attempt")
+        if project.onboarding_status is not ProjectOnboardingStatus.BLOCKED:
+            raise GreenfieldBootstrapError("Candidate recovery requires a blocked project")
+        if not isinstance(recovery, dict) or recovery.get("status") != "QUARANTINED_REVIEW_REQUIRED":
+            raise GreenfieldBootstrapError("No quarantined candidate is available")
+        if not isinstance(attempt, dict) or attempt.get("status") != "SUCCEEDED":
+            raise GreenfieldBootstrapError("Candidate agent result is not a proven success")
+        if attempt.get("usage_status") != "OBSERVED":
+            raise GreenfieldBootstrapError("Candidate agent consumption is not observable")
+        source_sha = checkpoint.get("source_zip_sha256")
+        if not isinstance(source_sha, str) or hashlib.sha256(archive).hexdigest() != source_sha:
+            raise GreenfieldBootstrapError("Recovery ZIP does not match the candidate")
+        worktree = Path(str(recovery.get("worktree", ""))).resolve()
+        branch = str(recovery.get("branch", ""))
+        base_sha = str(recovery.get("base_sha", ""))
+        if not branch or not base_sha:
+            raise GreenfieldBootstrapError("Candidate recovery identity is incomplete")
+        if self.trusted_managed_root is None:
+            raise GreenfieldBootstrapError("Trusted managed root is required for candidate recovery")
+        try:
+            worktree.relative_to(self.trusted_managed_root.resolve(strict=True))
+        except (OSError, ValueError) as exc:
+            raise GreenfieldBootstrapError("Candidate worktree is outside the trusted root") from exc
+        if not worktree.is_dir() or worktree.is_symlink():
+            raise GreenfieldBootstrapError("Candidate worktree is unavailable")
+        binding = self.uow.project_managed_repository_bindings.get_by_project_id(project_id)
+        if binding is None or Path(binding.managed_repository_root).resolve() not in worktree.parents:
+            raise GreenfieldBootstrapError("Candidate worktree binding is not verified")
+        if self._git(str(worktree), "rev-parse", "HEAD") != base_sha:
+            raise GreenfieldBootstrapError("Candidate base SHA changed")
+
+        adapter = self.connections.require_git_pr_write(project)
+        repository = project.provider_connections["git_pr"]["repository_url"]
+        branch_head = adapter.get_repository_branch_head(repository, branch)
+        if branch_head.outcome in {ExternalOutcome.UNKNOWN, ExternalOutcome.AMBIGUOUS}:
+            raise GreenfieldBootstrapError("Candidate remote branch effect is unobservable")
+        if branch_head.outcome is ExternalOutcome.SUCCESS:
+            raise GreenfieldBootstrapError("Candidate remote branch already exists")
+        pull_request = adapter.get_pull_request(repository, branch, project.base_branch)
+        if pull_request.outcome in {ExternalOutcome.UNKNOWN, ExternalOutcome.AMBIGUOUS}:
+            raise GreenfieldBootstrapError("Candidate remote PR effect is unobservable")
+        if pull_request.outcome is ExternalOutcome.SUCCESS:
+            raise GreenfieldBootstrapError("Candidate remote PR already exists")
+
+        with tempfile.TemporaryDirectory(prefix="minime-context-recovery-", dir=tempfile.gettempdir()) as package_dir:
+            extracted = self.extractor.extract(archive, package_dir)
+            capability_evidence = self.capability_manifest.install_greenfield(
+                self.project_root, worktree, profiles=self._selected_profiles(project)
+            )
+            official_openspec = self.openspec.inspect_integrations(
+                worktree, self._selected_agents(project)
+            )
+            allowed_paths = self._candidate_allowed_paths(
+                worktree, capability_evidence, official_openspec
+            )
+            incoming = worktree / "context" / "incoming" / extracted.sha256
+            self._validate_candidate(
+                worktree, incoming, extracted.files, Path(package_dir), allowed_paths=allowed_paths
+            )
+            self._validate_official_workspace(worktree)
+            existing_branch = subprocess.run(
+                ["git", "show-ref", "--verify", f"refs/heads/{branch}"],
+                cwd=worktree,
+                capture_output=True,
+                check=False,
+            ).returncode == 0
+            if existing_branch:
+                self._git(str(worktree), "checkout", branch)
+            else:
+                self._git(str(worktree), "checkout", "-b", branch)
+            self._git(str(worktree), "add", "--all")
+            self._git(str(worktree), "commit", "-m", "docs: bootstrap project context")
+            head_sha = self._git(str(worktree), "rev-parse", "HEAD")
+            pushed = adapter.push_branch(str(worktree), "origin", branch, head_sha)
+            if pushed.outcome is not ExternalOutcome.SUCCESS:
+                raise GreenfieldBootstrapError("Recovered bootstrap branch push was not proven successful")
+            pr = self.connections.create_pull_request(
+                project, branch, "docs: bootstrap project context", self._pr_body(project, base_sha, head_sha), head_sha
+            )
+            if pr.outcome is not ExternalOutcome.SUCCESS or not isinstance(pr.data, dict):
+                raise GreenfieldBootstrapError("Recovered bootstrap PR was not proven successful")
+            current = self.uow.projects.get_by_id(project_id) or project
+            current.onboarding_checkpoint = {
+                **checkpoint,
+                "bootstrap_branch": branch,
+                "base_branch": project.base_branch,
+                "base_sha": base_sha,
+                "expected_base_sha": base_sha,
+                "head_sha": head_sha,
+                "pull_request_number": pr.data.get("number"),
+                "pull_request_url": pr.data.get("url"),
+                "agent": attempt.get("agent"),
+                "agent_model": attempt.get("model"),
+                "agent_exit_code": attempt.get("exit_code"),
+                "agent_duration_ms": attempt.get("duration_ms"),
+                "f4_capability_manifest": capability_evidence,
+                "f5_readiness": self.capability_manifest.validate_f5_readiness(
+                    capability_evidence,
+                    official_openspec,
+                    project_type=project.project_type.value,
+                    profiles_observed=bool(project.agent_profiles),
+                    worktree_identity_verified=binding.managed_repository_root == self._configured_root(project),
+                    confinement_verified=True,
+                    github_binding_verified=bool(binding.canonical_repository_identity),
+                ),
+            }
+            current.onboarding_status = ProjectOnboardingStatus.PR_PENDING
+            current.onboarding_reasons = ["Bootstrap PR awaits human review and merge."]
+            current.updated_at = utc_now()
+            self.uow.projects.save(current)
+            self.uow.commit()
+            return {
+                "project_id": project_id,
+                "onboarding_status": current.onboarding_status.value,
+                "checkpoint": ProjectService.public_onboarding_state(current)["checkpoint"],
+            }
+
+    def reconcile_published_bootstrap_candidate(self, project_id: str) -> dict[str, Any]:
+        """Reconcile a deterministic post-bootstrap PR update without invoking an agent."""
+        project = self.uow.projects.get_by_id(project_id)
+        if project is None:
+            raise GreenfieldBootstrapError("Project not found")
+        checkpoint = project.onboarding_checkpoint or {}
+        required = ("pull_request_number", "pull_request_url", "bootstrap_branch", "base_branch")
+        if any(not checkpoint.get(field) for field in required):
+            raise GreenfieldBootstrapError("Published bootstrap PR identity is incomplete")
+        adapter = self.connections.require_git_pr_write(project)
+        repository = project.provider_connections["git_pr"]["repository_url"]
+        observed = adapter.get_pull_request(repository, checkpoint["bootstrap_branch"], project.base_branch)
+        if observed.outcome is not ExternalOutcome.SUCCESS or not isinstance(observed.data, dict):
+            raise GreenfieldBootstrapError("Published bootstrap PR is not observable")
+        data = observed.data
+        if (
+            data.get("repository") != repository
+            or data.get("number") != int(checkpoint["pull_request_number"])
+            or data.get("url") != checkpoint["pull_request_url"]
+            or data.get("head_branch") != checkpoint["bootstrap_branch"]
+            or data.get("base_branch") != project.base_branch
+            or not data.get("head_sha")
+        ):
+            raise GreenfieldBootstrapError("Published bootstrap PR identity does not match the checkpoint")
+        current = self.uow.projects.get_by_id(project_id) or project
+        recovery = current.onboarding_checkpoint.get("candidate_recovery")
+        current.onboarding_checkpoint = {
+            **current.onboarding_checkpoint,
+            "head_sha": data["head_sha"],
+            "candidate_recovery": (
+                {**recovery, "status": "PUBLISHED", "published_head_sha": data["head_sha"]}
+                if isinstance(recovery, dict)
+                else recovery
+            ),
+        }
+        current.updated_at = utc_now()
+        self.uow.projects.save(current)
+        self.uow.commit()
+        return {
+            "project_id": project_id,
+            "pull_request_number": data["number"],
+            "head_sha": data["head_sha"],
+            "pull_request_url": data["url"],
+            "onboarding_status": current.onboarding_status.value,
+        }
 
     def _retain_candidate_for_recovery(
         self, project: Project, worktree: Path, branch: str, base_sha: str, error: Exception
@@ -1045,10 +1269,23 @@ class GreenfieldBootstrapCoordinator:
             raise GreenfieldBootstrapError("Greenfield thinking requires a supported file-capable CLI agent")
 
     @staticmethod
+    def _selected_profiles(project: Project) -> dict[str, Any]:
+        profiles = project.agent_profiles
+        if project.execution_policy.get("fallback_authorized", False):
+            return dict(profiles)
+        return {role: value for role, value in profiles.items() if role != "fallback"}
+
+    @staticmethod
     def _selected_agents(project: Project, *, roles: tuple[str, ...] | None = None) -> list[str]:
         profiles = project.agent_profiles
         if roles is not None:
             profiles = {role: profiles[role] for role in roles}
+        elif not project.execution_policy.get("fallback_authorized", False):
+            profiles = {
+                role: value
+                for role, value in profiles.items()
+                if role != "fallback"
+            }
         return sorted({str(value.get("agent_id", "")).lower() for value in profiles.values() if isinstance(value, dict) and value.get("agent_id")})
 
     def _configured_root(self, project: Project) -> str | None:
@@ -1081,8 +1318,15 @@ class GreenfieldBootstrapCoordinator:
         return result.stdout.strip()
 
     @classmethod
-    def _prepare_local_branch(cls, repository_root: str, branch: str, base_sha: str) -> None:
-        """Reconcile only an unbound stale local branch at the exact base SHA."""
+    def _prepare_local_branch(
+        cls,
+        repository_root: str,
+        branch: str,
+        base_sha: str,
+        *,
+        allow_pre_dispatch_reconcile: bool = False,
+    ) -> None:
+        """Reconcile an unbound local branch, widening only for proven pre-dispatch recovery."""
         ref = subprocess.run(
             ["git", "rev-parse", "--verify", f"refs/heads/{branch}"],
             cwd=repository_root,
@@ -1092,8 +1336,6 @@ class GreenfieldBootstrapCoordinator:
         )
         if ref.returncode != 0:
             return
-        if ref.stdout.strip() != base_sha:
-            raise GreenfieldBootstrapError("Existing local bootstrap branch has a different head")
         worktrees = subprocess.run(
             ["git", "worktree", "list", "--porcelain"],
             cwd=repository_root,
@@ -1103,6 +1345,8 @@ class GreenfieldBootstrapCoordinator:
         )
         if worktrees.returncode != 0 or f"branch refs/heads/{branch}" in worktrees.stdout:
             raise GreenfieldBootstrapError("Existing bootstrap branch is bound to a worktree")
+        if ref.stdout.strip() != base_sha and not allow_pre_dispatch_reconcile:
+            raise GreenfieldBootstrapError("Existing local bootstrap branch has a different head")
         deleted = subprocess.run(
             ["git", "branch", "-D", branch],
             cwd=repository_root,
@@ -1129,6 +1373,7 @@ class GreenfieldBootstrapCoordinator:
         incoming: Path,
         source_files: tuple[str, ...] = (),
         package_root: Path | None = None,
+        allowed_paths: set[str] | None = None,
     ) -> None:
         if not incoming.is_dir() or not any(incoming.rglob("*")):
             raise GreenfieldBootstrapError("Validated context package produced no candidate source")
@@ -1160,7 +1405,9 @@ class GreenfieldBootstrapCoordinator:
         context_index = worktree / "context" / "INDEX.md"
         if package_root is not None and not context_index.is_file():
             raise GreenfieldBootstrapError("Thinking agent context index is missing")
-        GreenfieldBootstrapCoordinator._validate_candidate_scope(worktree)
+        GreenfieldBootstrapCoordinator._validate_candidate_scope(
+            worktree, allowed_paths=allowed_paths
+        )
         for path in worktree.rglob("*"):
             if path.is_symlink():
                 try:
@@ -1232,11 +1479,13 @@ class GreenfieldBootstrapCoordinator:
 
     @staticmethod
     def _validate_repository_links(path: Path, worktree: Path) -> None:
+        relative_path = path.resolve().relative_to(worktree.resolve()).as_posix()
+        link_base = worktree if relative_path == "openspec/config.yaml" else path.parent
         for raw_target in re.findall(r"\[[^\]]*\]\(([^)]+)\)", path.read_text(encoding="utf-8")):
             target = raw_target.strip().split("#", 1)[0].split("?", 1)[0].strip("<>")
             if not target or target.startswith(("http://", "https://", "mailto:", "#")):
                 continue
-            candidate = (path.parent / target).resolve()
+            candidate = (link_base / target).resolve()
             try:
                 candidate.relative_to(worktree.resolve())
             except ValueError as exc:
@@ -1245,7 +1494,42 @@ class GreenfieldBootstrapCoordinator:
                 raise GreenfieldBootstrapError("Context reference points to a missing file")
 
     @staticmethod
-    def _validate_candidate_scope(worktree: Path) -> None:
+    def _candidate_allowed_paths(
+        worktree: Path,
+        capability_evidence: dict[str, Any],
+        official_openspec: dict[str, Any],
+    ) -> set[str]:
+        allowed = {
+            str(item["path"])
+            for item in capability_evidence.get("files", [])
+            if isinstance(item, dict) and isinstance(item.get("path"), str)
+        }
+        integrations = official_openspec.get("integrations", {})
+        codex_names = {
+            str(name) for name in integrations.get("codex", [])
+        }
+        antigravity_names = {
+            str(name) for name in integrations.get("antigravity", [])
+        }
+        for name in codex_names:
+            root = worktree / ".agents/skills" / f"openspec-{name}"
+            if root.is_dir():
+                allowed.update(
+                    path.relative_to(worktree).as_posix()
+                    for path in root.rglob("*")
+                    if path.is_file() and not path.is_symlink()
+                )
+        for workflow_root in (worktree / ".agent/workflows", worktree / ".agents/workflows"):
+            for name in antigravity_names:
+                path = workflow_root / f"opsx-{name}.md"
+                if path.is_file() and not path.is_symlink():
+                    allowed.add(path.relative_to(worktree).as_posix())
+        return allowed
+
+    @staticmethod
+    def _validate_candidate_scope(
+        worktree: Path, *, allowed_paths: set[str] | None = None
+    ) -> None:
         """Keep the organization agent inside the documentary/configuration surface."""
         changed = subprocess.run(
             ["git", "diff", "HEAD", "--name-only", "-z"],
@@ -1273,6 +1557,8 @@ class GreenfieldBootstrapCoordinator:
         }
 
         def allowed(path: str) -> bool:
+            if allowed_paths is not None and path in allowed_paths:
+                return True
             return (
                 path == "AGENTS.md"
                 or path
