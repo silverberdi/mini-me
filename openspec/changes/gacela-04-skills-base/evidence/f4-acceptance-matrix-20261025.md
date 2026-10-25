@@ -42,4 +42,4 @@ Fecha: 2026-10-25. La matriz cubre los 35 criterios definidos en `design.md`. `P
 
 ## Estado
 
-La publicación remota del Run existente demuestra los tres criterios antes parciales: S01_AC01, S01_AC02 y S02_AC01 pasan con evidencia del Issue #5. PR1 ya está fusionado. Las tareas 6.2, 6.5 y 6.6 permanecen abiertas hasta completar los gates documentales de Verify/Sync/Archive, PR2 y cierre del ciclo; no se marca ninguna tarea por anticipado. El Issue #172 no fue reescrito.
+La publicación remota del Run existente demuestra los tres criterios antes parciales: S01_AC01, S01_AC02 y S02_AC01 pasan con evidencia del Issue #5. PR1 ya está fusionado y las specs F4 están sincronizadas. Las tareas 6.2, 6.5 y 6.6 tienen evidencia `PRE_MERGE_VERIFIED`, pero permanecen abiertas hasta completar Archive nativo, PR2 fusionado y cierre remoto del ciclo; no se marca ninguna postcondición por anticipado. El Issue #172 no fue reescrito. Ver `f4-closure-gates-20261025.md`.
