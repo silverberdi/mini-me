@@ -41,3 +41,29 @@ Fecha: 2026-10-24
 - No se repitieron Explore, Propose ni clasificación del Issue #5.
 - No se tocaron producción, PostgreSQL operativo, scheduler, PR históricos #2/#4 ni Issues #1/#3.
 - El PR #180 de implementación no fue fusionado.
+
+## Issue #6 — continuación tras acuse humano
+
+- Acuse durable verificado: comentario `6391198620`, asociado al head exacto de PR1.
+- PR1: [#10](https://github.com/silverberdi/mini-me-r01-e2e-20261014/pull/10).
+  - candidato: `3e25db13a7b136c2bd7e297c5a8aaf3a97ddd6a7`
+  - merge remoto confirmado: `1b619b880864fce383c55ee073319cdc88b88c00`
+- PR2: [#11](https://github.com/silverberdi/mini-me-r01-e2e-20261014/pull/11).
+  - candidato: `0c9afda771a7e59ce5085d4ac23808c5963ba01e`
+  - merge remoto confirmado: `ecf47871afc14c6ecc379b91938086cb403c2b90`
+- Issue #6 cerrado remotamente después de ambos merges.
+- La revisión independiente de propuesta y código, Verify y los tests reales quedaron asociados al Run `d070a12a-29d3-4f34-a365-9cac4072e42`.
+
+## FIFO posterior a #6
+
+- Issue #7 fue seleccionado remotamente como siguiente elegible por fecha/ID.
+- Run admitido: `fcd205c1-cece-4547-badc-2d1c99b38bce`.
+- Estado durable: `ADMITTED`, `active=true`.
+- La admisión no ejecutó agentes (`agents_dispatched=0`), no creó PR ni cerró #7.
+- Los Issues #1/#3, PR históricos #2/#4 y producción permanecieron sin cambios.
+
+## Aceptación 6.5
+
+- El Run #6 conservó worktree y checkpoint durante `HUMAN_REQUIRED`; no hubo reintentos ni duplicados.
+- Los PR remotos #10/#11 son únicos por rama y cada SHA fue confirmado antes del siguiente paso.
+- No se habilitó scheduler productivo, no se desplegó y no se modificó PostgreSQL operativo; todo ocurrió en runtime y base desechables.
