@@ -25,25 +25,63 @@ class NormalizedRequest:
     semantic_message: str = ""
 
 
-def looks_like_complete_gherkin(body: str) -> bool:
-    """Apply only a conservative syntax signal; meaning remains agent-owned."""
+_GHERKIN_DIALECTS: dict[str, dict[str, tuple[str, ...]]] = {
+    "en": {
+        "feature": ("feature",),
+        "scenario": ("scenario",),
+        "given": ("given",),
+        "when": ("when",),
+        "then": ("then",),
+    },
+    "es": {
+        "feature": ("característica", "caracteristica"),
+        "scenario": ("escenario",),
+        "given": ("dado", "dada", "dados", "dadas"),
+        "when": ("cuando",),
+        "then": ("entonces",),
+    },
+}
+
+
+def gherkin_validation_errors(body: str) -> tuple[str, ...]:
+    """Return concrete syntax errors for the supported official Gherkin dialects."""
     if not body or not body.strip():
-        return False
-    lowered = body.lower()
-    return bool(re.search(r"(?m)^\s*feature\s*:", lowered)) and all(
-        re.search(pattern, lowered)
-        for pattern in (
-            r"(?m)^\s*scenario\s*:",
-            r"(?m)^\s*given\b",
-            r"(?m)^\s*when\b",
-            r"(?m)^\s*then\b",
-        )
-    )
+        return ("normalized_body is empty",)
+    lines = body.splitlines()
+    language = "en"
+    for line in lines:
+        match = re.match(r"^\s*#\s*language\s*:\s*([A-Za-z_-]+)\s*$", line)
+        if match:
+            language = match.group(1).lower().split("-")[0].split("_")[0]
+            break
+    if language not in _GHERKIN_DIALECTS:
+        return (f"unsupported Gherkin dialect '{language}'; supported dialects are en and es",)
+    dialect = _GHERKIN_DIALECTS[language]
+    errors: list[str] = []
+
+    def has_keyword(name: str, require_colon: bool = False) -> bool:
+        alternatives = "|".join(re.escape(value) for value in dialect[name])
+        suffix = r"\s*:" if require_colon else r"(?:\s+|$)"
+        return bool(re.search(rf"(?im)^\s*(?:{alternatives}){suffix}", body))
+
+    for name in ("feature", "scenario"):
+        if not has_keyword(name, require_colon=True):
+            errors.append(f"missing {language} Gherkin '{name.title()}:' header")
+    for name in ("given", "when", "then"):
+        if not has_keyword(name):
+            errors.append(f"missing {language} Gherkin '{name.title()}' step")
+    return tuple(errors)
+
+
+def looks_like_complete_gherkin(body: str) -> bool:
+    """Recognize complete English or Spanish official Gherkin syntax."""
+    return not gherkin_validation_errors(body)
 
 
 def validate_normalized_body(body: str) -> None:
-    if not looks_like_complete_gherkin(body):
-        raise RequestNormalizationError("Agent normalization is not complete Gherkin.")
+    errors = gherkin_validation_errors(body)
+    if errors:
+        raise RequestNormalizationError("Invalid Gherkin: " + "; ".join(errors))
 
 
 class RequestNormalizationService:

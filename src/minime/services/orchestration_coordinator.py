@@ -235,7 +235,9 @@ class NativeOrchestrationCoordinator:
                     worktree_path=worktree_path,
                     prompt_context=(
                         "Use the installed minime-request-normalizer skill. Return exactly one JSON object "
-                        "with normalized_body containing complete Gherkin, criteria as an array, and "
+                        "with normalized_body containing complete Gherkin: Feature:/Scenario:/Given/When/Then "
+                        "in English, or # language: es with Característica:/Escenario:/Dado/Cuando/Entonces; "
+                        "criteria as an array, and "
                         "semantic_message containing a brief concrete Spanish comment about the result. "
                         "Preserve every fact and do not invent requirements, decisions, or tasks.\n"
                         f"Request title: {issue_title}\nRequest body:\n{issue_body}\n"
@@ -287,10 +289,22 @@ class NativeOrchestrationCoordinator:
                     or result.structured_output_too_large
                 ):
                     return None, "Request normalization agent did not produce a verified result."
+                raw_response = result.response_output or ""
+                response_bytes = raw_response.encode("utf-8")
+                details["rejected_response"] = {
+                    "status": "QUARANTINED",
+                    "attempt_id": attempt["attempt_id"],
+                    "sha256": hashlib.sha256(response_bytes).hexdigest(),
+                    "byte_length": len(response_bytes),
+                    "content": redact_secrets(raw_response)[: CliAgentRunner.MAX_STRUCTURED_OUTPUT_BYTES],
+                    "content_truncated": len(response_bytes) > CliAgentRunner.MAX_STRUCTURED_OUTPUT_BYTES,
+                }
+                self._persist_run_stop_details(active_run, details)
                 try:
                     payload = json.loads(result.response_output)
                 except json.JSONDecodeError:
                     attempt["response_status"] = "INVALID"
+                    attempt["diagnostic"] = "structured response is not valid JSON"
                     self._persist_run_stop_details(active_run, details)
                     return None, "Request normalization response was not structured."
                 if (
@@ -303,6 +317,7 @@ class NativeOrchestrationCoordinator:
                     or not payload["semantic_message"].strip()
                 ):
                     attempt["response_status"] = "INVALID"
+                    attempt["diagnostic"] = "structured response must contain exactly normalized_body, criteria and semantic_message"
                     self._persist_run_stop_details(active_run, details)
                     return None, "Request normalization response was not structured."
                 attempt["response_status"] = "VALIDATED"
@@ -327,6 +342,8 @@ class NativeOrchestrationCoordinator:
                 if isinstance(details.get("normalization_attempt"), dict):
                     details["normalization_attempt"]["response_status"] = "INVALID"
                     details["normalization_attempt"]["diagnostic"] = str(exc)[:500]
+                    if isinstance(details.get("rejected_response"), dict):
+                        details["rejected_response"]["validation_error"] = str(exc)[:500]
                     self._persist_run_stop_details(active_run, details)
                 return None, str(exc)
             if isinstance(details.get("normalization_attempt"), dict):
