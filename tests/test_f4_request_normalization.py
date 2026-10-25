@@ -1,16 +1,15 @@
 """F4 deterministic contracts: Issue provenance, semantic PRs and capabilities."""
 
 import json
-from types import SimpleNamespace
 from pathlib import Path
 
 import httpx
 import pytest
 
 from minime.adapters.github import GitHubAdapter
-from minime.domain.enums import ExternalOutcome
+from minime.domain.enums import ExternalOutcome, ExternalReasonCode, RetrySafety
 from minime.domain.enums import OrchestrationStage
-from minime.domain.models import OrchestrationRun
+from minime.domain.models import ExternalActionResult, OrchestrationRun
 from minime.services.agent_runner import AgentExecutionResult
 from minime.services.capability_manifest import CapabilityConflictError, CapabilityManifestService
 from minime.services.orchestration_coordinator import NativeOrchestrationCoordinator
@@ -136,24 +135,31 @@ async def test_coordinator_requires_and_persists_structured_semantic_message(tmp
     comments: list[dict[str, object]] = []
 
     class Github:
-        def get_issue(self, *_):
-            return SimpleNamespace(
+        @staticmethod
+        def ok(data, evidence=None):
+            return ExternalActionResult(
                 outcome=ExternalOutcome.SUCCESS,
-                data=issue,
-                observed_evidence={"etag": '"v1"'},
+                source_adapter="test",
+                reason_code=ExternalReasonCode.EXECUTION_SUCCESS,
+                retry_safety=RetrySafety.SAFE,
+                data=data,
+                observed_evidence=evidence or {},
             )
 
+        def get_issue(self, *_):
+            return self.ok(issue, {"etag": '"v1"'})
+
         def list_issue_comments(self, *_):
-            return SimpleNamespace(outcome=ExternalOutcome.SUCCESS, data=comments)
+            return self.ok(comments)
 
         def comment_issue(self, _repo, _number, body, _key):
             if not any(item["body"] == body for item in comments):
                 comments.append({"id": len(comments) + 1, "body": body})
-            return SimpleNamespace(outcome=ExternalOutcome.SUCCESS, data=comments[-1])
+            return self.ok(comments[-1])
 
         def update_issue_body(self, _repo, _number, body, expected_version=None):
             issue["body"] = body
-            return SimpleNamespace(outcome=ExternalOutcome.SUCCESS, data=issue)
+            return self.ok(issue)
 
     class Runner:
         def resolve_workflow(self, **_kwargs):
