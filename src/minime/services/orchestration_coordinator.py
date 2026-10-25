@@ -38,6 +38,7 @@ from minime.services.request_normalization import (
     RequestNormalizationError,
     RequestNormalizationService,
     looks_like_complete_gherkin,
+    validate_normalized_body,
 )
 from minime.services.review_verdict_parser import MalformedReviewOutputError, parse_review_verdict
 from minime.services.worktree_manager import WorktreeManager
@@ -84,6 +85,7 @@ class ComplexityAssessment:
     diagnostic_output: str = ""
     output_truncated: bool = False
     structured_output_missing: bool = False
+    structured_output_too_large: bool = False
 
     @property
     def is_valid(self) -> bool:
@@ -152,10 +154,28 @@ class NativeOrchestrationCoordinator:
         if isinstance(persisted, dict) and persisted.get("normalized_body"):
             return persisted, str(persisted["normalized_body"])
         prior_attempt = details.get("normalization_attempt")
+        validated_response = details.get("validated_normalization_response")
+        normalized: NormalizedRequest | None = None
+        if (
+            isinstance(prior_attempt, dict)
+            and prior_attempt.get("response_status") == "VALIDATED"
+            and isinstance(validated_response, dict)
+            and prior_attempt.get("publish_status") != "CONFIRMED"
+        ):
+            try:
+                normalized = NormalizedRequest(
+                    original_body=str(validated_response["original_body"]),
+                    normalized_body=str(validated_response["normalized_body"]),
+                    already_normalized=False,
+                    criteria=tuple(str(item) for item in validated_response["criteria"]),
+                    semantic_message=str(validated_response["semantic_message"]),
+                )
+            except (KeyError, TypeError, ValueError):
+                return None, "Validated normalization checkpoint is incomplete; retry is not automatic."
         if isinstance(prior_attempt, dict) and (
             prior_attempt.get("dispatch_observed") is True
             or prior_attempt.get("status") in {"IN_PROGRESS", "FAILED", "SUCCEEDED"}
-        ):
+        ) and normalized is None:
             return None, "Normalization attempt already recorded; reconciliation or new authorization is required."
 
         service = RequestNormalizationService(self.github_adapter)
@@ -176,14 +196,15 @@ class NativeOrchestrationCoordinator:
                 if not isinstance(comments_result, ExternalActionResult) or comments_result.outcome is not ExternalOutcome.SUCCESS:
                     return None, "Request normalization source comments were not verified."
                 source_context["comments"] = comments_result.data if isinstance(comments_result.data, list) else []
-            initial = (
-                NormalizedRequest(issue_body, issue_body, True)
-                if looks_like_complete_gherkin(issue_body)
-                else None
-            )
-            if initial is not None and initial.already_normalized:
-                normalized = initial
-            else:
+            if normalized is None:
+                initial = (
+                    NormalizedRequest(issue_body, issue_body, True)
+                    if looks_like_complete_gherkin(issue_body)
+                    else None
+                )
+                if initial is not None and initial.already_normalized:
+                    normalized = initial
+            if normalized is None:
                 workflow = self.agent_runner.resolve_workflow(
                     worktree_path=worktree_path,
                     provider=provider,
@@ -201,6 +222,7 @@ class NativeOrchestrationCoordinator:
                     "timed_out": None,
                     "structured_output_present": False,
                     "structured_output_missing": None,
+                    "structured_output_too_large": None,
                     "output_truncated": None,
                     "usage_status": "UNKNOWN",
                     "usage": None,
@@ -248,6 +270,7 @@ class NativeOrchestrationCoordinator:
                         "preflight_error": redact_secrets(result.preflight_error or "")[:500] or None,
                         "structured_output_present": bool(result.response_output.strip()),
                         "structured_output_missing": result.structured_output_missing,
+                        "structured_output_too_large": result.structured_output_too_large,
                         "output_truncated": result.output_truncated,
                         "duration_ms": result.duration_ms,
                     }
@@ -260,8 +283,8 @@ class NativeOrchestrationCoordinator:
                     result.exit_code != 0
                     or result.timed_out
                     or result.preflight_error
-                    or result.output_truncated
                     or result.structured_output_missing
+                    or result.structured_output_too_large
                 ):
                     return None, "Request normalization agent did not produce a verified result."
                 try:
@@ -272,15 +295,17 @@ class NativeOrchestrationCoordinator:
                     return None, "Request normalization response was not structured."
                 if (
                     not isinstance(payload, dict)
+                    or set(payload) != {"normalized_body", "criteria", "semantic_message"}
                     or not isinstance(payload.get("normalized_body"), str)
+                    or not isinstance(payload.get("criteria"), list)
+                    or not all(isinstance(item, str) and item.strip() for item in payload["criteria"])
                     or not isinstance(payload.get("semantic_message"), str)
                     or not payload["semantic_message"].strip()
                 ):
                     attempt["response_status"] = "INVALID"
                     self._persist_run_stop_details(active_run, details)
                     return None, "Request normalization response was not structured."
-                attempt["response_status"] = "VALID"
-                self._persist_run_stop_details(active_run, details)
+                attempt["response_status"] = "VALIDATED"
                 normalized = NormalizedRequest(
                     original_body=issue_body,
                     normalized_body=payload["normalized_body"].strip(),
@@ -288,6 +313,39 @@ class NativeOrchestrationCoordinator:
                     criteria=tuple(str(item) for item in payload.get("criteria", [])),
                     semantic_message=payload["semantic_message"].strip(),
                 )
+                details["_normalization_response_sha256"] = hashlib.sha256(
+                    result.response_output.encode("utf-8")
+                ).hexdigest()
+            try:
+                validate_normalized_body(normalized.normalized_body)
+                if normalized.semantic_message.strip():
+                    service.semantic_comment(
+                        normalized.semantic_message,
+                        service.provenance_key(active_run.run_id, issue_number),
+                    )
+            except RequestNormalizationError as exc:
+                if isinstance(details.get("normalization_attempt"), dict):
+                    details["normalization_attempt"]["response_status"] = "INVALID"
+                    details["normalization_attempt"]["diagnostic"] = str(exc)[:500]
+                    self._persist_run_stop_details(active_run, details)
+                return None, str(exc)
+            if isinstance(details.get("normalization_attempt"), dict):
+                details["normalization_attempt"]["response_status"] = "VALIDATED"
+                previous_validated = details.get("validated_normalization_response")
+                response_sha256 = details.pop("_normalization_response_sha256", None)
+                details["validated_normalization_response"] = {
+                    "original_body": normalized.original_body,
+                    "normalized_body": normalized.normalized_body,
+                    "criteria": list(normalized.criteria),
+                    "semantic_message": normalized.semantic_message,
+                    "response_sha256": response_sha256
+                    or (
+                        previous_validated.get("response_sha256")
+                        if isinstance(previous_validated, dict)
+                        else None
+                    ),
+                }
+                self._persist_run_stop_details(active_run, details)
             try:
                 evidence = service.publish(repository, issue_number, active_run.run_id, normalized)
             except RequestNormalizationError as exc:
@@ -1379,7 +1437,9 @@ class NativeOrchestrationCoordinator:
             return False
         if getattr(result, "environment_error", False):
             return False
-        return bool(getattr(result, "full_output", "").strip())
+        structured = getattr(result, "structured_output", None)
+        evidence = getattr(result, "response_output", "") if structured is not None else getattr(result, "full_output", "")
+        return bool(evidence.strip())
 
     @staticmethod
     def _proposal_artifacts_present(worktree_path: Path, change_name: str) -> bool:
@@ -1473,6 +1533,7 @@ class NativeOrchestrationCoordinator:
             diagnostic_output=payload.get("diagnostic_output", ""),
             output_truncated=bool(payload.get("output_truncated")),
             structured_output_missing=bool(payload.get("structured_output_missing")),
+            structured_output_too_large=bool(payload.get("structured_output_too_large")),
         )
 
     @staticmethod
@@ -1503,6 +1564,7 @@ class NativeOrchestrationCoordinator:
             "diagnostic_output": assessment.diagnostic_output,
             "output_truncated": assessment.output_truncated,
             "structured_output_missing": assessment.structured_output_missing,
+            "structured_output_too_large": assessment.structured_output_too_large,
         }
         details = dict(run.stop_details or {})
         attempts = list(details.get("complexity_attempts") or [])
@@ -1578,8 +1640,8 @@ class NativeOrchestrationCoordinator:
             result.exit_code != 0
             or result.timed_out
             or result.preflight_error
-            or result.output_truncated
             or result.structured_output_missing
+            or result.structured_output_too_large
         ):
             raise ValueError("PR semantic agent did not produce verified content")
         payload = self._parse_json_object(result.response_output)
@@ -1598,8 +1660,8 @@ class NativeOrchestrationCoordinator:
         """Recover only an explicitly separated, complete provider response."""
         if (
             payload.get("exit_code") != 0
-            or payload.get("output_truncated")
             or payload.get("structured_output_missing")
+            or payload.get("structured_output_too_large")
             or not isinstance(payload.get("attempt_id"), str)
             or not payload.get("attempt_id")
             or not isinstance(payload.get("artifact_hashes"), dict)
@@ -1623,7 +1685,7 @@ class NativeOrchestrationCoordinator:
             reason="Recovered from the original separated response channel.",
             exit_code=0,
             output=redact_secrets(payload.get("output", ""))[:4000],
-            structured_output=redact_secrets(structured)[:4000],
+            structured_output=redact_secrets(structured),
             diagnostic_output=redact_secrets(diagnostics)[:4000],
         )
 
@@ -1668,12 +1730,14 @@ class NativeOrchestrationCoordinator:
             output_last_message_path=response_path,
         )
         output = redact_secrets(getattr(result, "full_output", ""))[:4000]
-        structured_output = redact_secrets(getattr(result, "response_output", ""))[:4000]
+        structured_output_raw = getattr(result, "response_output", "")
+        structured_output = redact_secrets(structured_output_raw)
         diagnostic_output = redact_secrets(
             "\n".join(getattr(result, "diagnostic_output", None) or getattr(result, "stderr", []))
         )[:4000]
         output_truncated = bool(getattr(result, "output_truncated", False))
         structured_output_missing = bool(getattr(result, "structured_output_missing", False))
+        structured_output_too_large = bool(getattr(result, "structured_output_too_large", False))
         if getattr(result, "preflight_error", None):
             return ComplexityAssessment(
                 status="PREFLIGHT_FAILED",
@@ -1699,12 +1763,12 @@ class NativeOrchestrationCoordinator:
                 output_truncated=output_truncated,
                 structured_output_missing=structured_output_missing,
             )
-        if output_truncated or structured_output_missing:
+        if structured_output_missing or structured_output_too_large:
             return ComplexityAssessment(
                 status="MISSING_EVIDENCE",
                 reason=(
-                    "provider response or diagnostics were truncated"
-                    if output_truncated
+                    "provider structured response exceeded its safe size limit"
+                    if structured_output_too_large
                     else "provider did not produce the authorized last-message file"
                 ),
                 exit_code=result.exit_code,
@@ -1714,7 +1778,7 @@ class NativeOrchestrationCoordinator:
                 output_truncated=output_truncated,
                 structured_output_missing=structured_output_missing,
             )
-        payload = self._parse_json_object(structured_output)
+        payload = self._parse_json_object(structured_output_raw)
         if not payload or payload.get("complexity") not in {"low", "moderate", "high"}:
             return ComplexityAssessment(
                 status="INVALID_OUTPUT",
@@ -2026,7 +2090,10 @@ class NativeOrchestrationCoordinator:
         )
         if not self._execution_is_successful(res):
             return False
-        if getattr(res, "output_truncated", False) or getattr(res, "structured_output_missing", False):
+        if (
+            getattr(res, "structured_output_missing", False)
+            or getattr(res, "structured_output_too_large", False)
+        ):
             return False
         try:
             return parse_review_verdict(res.response_output).verdict.value == "READY_TO_MERGE"

@@ -183,6 +183,7 @@ async def test_coordinator_requires_and_persists_structured_semantic_message(tmp
                 duration_ms=1,
                 structured_output=[encoded],
                 diagnostic_output=[],
+                output_truncated=True,
             )
 
         @staticmethod
