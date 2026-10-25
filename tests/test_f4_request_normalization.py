@@ -24,6 +24,8 @@ from minime.services.request_normalization import (
     NormalizedRequest,
     RequestNormalizationError,
     RequestNormalizationService,
+    gherkin_validation_errors,
+    validate_normalized_body,
 )
 
 
@@ -35,6 +37,26 @@ class StaticAuth:
 
     def get_installation_token(self):
         return "test-token"
+
+
+def test_gherkin_validator_reports_supported_dialects_and_concrete_errors():
+    validate_normalized_body(
+        "Feature: Ordenación\n\nScenario: Criterios\n"
+        "  Given una entrada\n  When se ordena\n  Then C1 se conserva"
+    )
+    validate_normalized_body(
+        "# language: es\nCaracterística: Ordenación\n\n"
+        "Escenario: Criterios\n Dado una entrada\n Cuando se ordena\n Entonces C1 se conserva"
+    )
+    assert gherkin_validation_errors("Feature: incompleta") == (
+        "missing en Gherkin 'Scenario:' header",
+        "missing en Gherkin 'Given' step",
+        "missing en Gherkin 'When' step",
+        "missing en Gherkin 'Then' step",
+    )
+    assert gherkin_validation_errors("# language: fr\nFonctionnalité: X") == (
+        "unsupported Gherkin dialect 'fr'; supported dialects are en and es",
+    )
 
 
 def test_normalization_preserves_original_and_reconciles_idempotently():
@@ -232,6 +254,7 @@ async def test_coordinator_requires_and_persists_structured_semantic_message(tmp
     assert normalized_body.startswith("Feature: Ordenación")
     assert persisted["criteria"] == ["C1", "C2", "C3"]
     assert persisted["semantic_message"].startswith("Se normalizó")
+    assert "rejected_response" not in run.stop_details
     assert any("Original Request" in str(item["body"]) for item in comments)
     assert any("Se normalizó" in str(item["body"]) for item in comments)
     assert run.current_stage is OrchestrationStage.ADMITTED
@@ -342,6 +365,104 @@ async def test_failed_normalization_persists_diagnostic_and_blocks_reentry(tmp_p
     assert attempt["exit_code"] == 7
     assert attempt["structured_output_missing"] is True
     assert attempt["usage_status"] == "UNKNOWN"
+
+
+@pytest.mark.asyncio
+async def test_invalid_gherkin_is_quarantined_and_never_published(tmp_path: Path):
+    issue = {"number": 13, "body": "C1: ordenar.", "repository_url": "/repos/o/r"}
+    writes: list[str] = []
+    run = OrchestrationRun(project_id="project", change_name="issue-13", base_sha="main")
+
+    def ok(data):
+        return ExternalActionResult(
+            outcome=ExternalOutcome.SUCCESS,
+            source_adapter="test",
+            reason_code=ExternalReasonCode.EXECUTION_SUCCESS,
+            retry_safety=RetrySafety.SAFE,
+            data=data,
+        )
+
+    class Github:
+        def get_issue(self, *_):
+            return ok(issue)
+
+        def list_issue_comments(self, *_):
+            return ok([])
+
+        def comment_issue(self, *_args):
+            writes.append("comment")
+            return ok({})
+
+        def update_issue_body(self, *_args, **_kwargs):
+            writes.append("update")
+            return ok(issue)
+
+    class Runner:
+        def resolve_workflow(self, **_kwargs):
+            return SimpleNamespace(dispatch_command="$minime-request-normalizer issue-13", workflow_sha256="wf")
+
+        async def run(self, **_kwargs):
+            payload = {
+                "normalized_body": "Feature: incompleta\n\nScenario: Sin pasos",
+                "criteria": ["C1"],
+                "semantic_message": "La respuesta no cumple el formato requerido.",
+                "api_key": "do-not-persist-this-secret",
+            }
+            return AgentExecutionResult(
+                exit_code=0,
+                timed_out=False,
+                stdout=[],
+                stderr=[],
+                duration_ms=1,
+                structured_output=[json.dumps(payload)],
+                diagnostic_output=[],
+            )
+
+        @staticmethod
+        def observed_usage(_result):
+            return None
+
+    class Runs:
+        def get_by_id(self, _run_id):
+            return run
+
+        def save(self, value):
+            nonlocal run
+            run = value
+
+    class Uow:
+        orchestration_runs = Runs()
+
+        def commit(self):
+            return None
+
+    coordinator = NativeOrchestrationCoordinator(
+        uow_factory=Uow,
+        github_adapter=Github(),
+        worktree_manager=object(),
+        agent_runner=Runner(),
+    )
+    result, error = await coordinator._normalize_request_before_explore(
+        active_run=run,
+        project_id="project",
+        repository="o/r",
+        worktree_path=tmp_path,
+        issue_number=13,
+        issue_title="Solicitud",
+        issue_body=issue["body"],
+        provider="codex",
+    )
+
+    assert result is None
+    assert error == "Request normalization response was not structured."
+    assert writes == []
+    quarantine = run.stop_details["rejected_response"]
+    assert quarantine["status"] == "QUARANTINED"
+    assert quarantine["byte_length"] > 0
+    assert quarantine["content"].startswith("{")
+    assert "do-not-persist-this-secret" not in quarantine["content"]
+    assert "[REDACTED]" in quarantine["content"]
+    assert run.stop_details["normalization_attempt"]["response_status"] == "INVALID"
 
 
 def test_semantic_pr_content_is_validated_without_auto_close():
