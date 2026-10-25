@@ -46,6 +46,6 @@
 - [x] 6.1 Ejecutar pruebas focalizadas, integración, regresión, Ruff, validación OpenSpec estricta y comprobación de diff, corrigiendo únicamente defectos atribuibles a F4.
 - [ ] 6.2 Verificar el recorrido Greenfield completo: normalización Gherkin antes de Explore, instalación, disponibilidad Codex/Antigravity, preservación del cuerpo original y comentarios, PR de implementación, merge conforme a F3, Sync/Archive nativos y PR documental, reutilizando evidencia F3 vigente por identidad exacta.
 - [x] 6.3 Confirmar que no se modificó Brownfield, main, producción, PostgreSQL productivo, scheduler ni workflows oficiales OpenSpec.
-- [ ] 6.4 Publicar el PR de implementación de F4 con evidencias y mantener las autorizaciones de merge bajo las reglas de F3.
+- [x] 6.4 Publicar el PR de implementación de F4 con evidencias y mantener las autorizaciones de merge bajo las reglas de F3.
 - [ ] 6.5 Tras el merge autorizado, ejecutar Sync/Archive nativos y publicar el PR documental de F4 sin inventar resultados ni cerrar el Issue antes del segundo merge confirmado.
 - [ ] 6.6 Verificar los 35 criterios S01-S07, GF, HA, H, F3 y DONE del Issue #172 mediante una matriz de evidencia contra el Issue de prueba controlado; conservar #172 como fuente ya normalizada sin reescribirlo, limitar sus cambios a comentarios/cierre legítimos de F3, reutilizar evidencia F3 válida y dejar evidencia de perfiles, workflows, coordinación y preparación aislada lista para que mini me pueda ejecutar F5 sin implementar F5.

@@ -11,7 +11,7 @@ Fecha: 2026-10-25. La matriz cubre los 35 criterios definidos en `design.md`. `P
 | S01_AC05 concurrencia e idempotencia | PASS | tests focalizados de concurrencia/comentario idempotente en `f4-local-validation.md`. |
 | S02_AC01 comunicación semántica breve en español | PARCIAL | contrato y pruebas locales en `f4-local-validation.md`; no se acredita aquí comentario remoto de un Request controlado. |
 | S02_AC02 comentarios idempotentes y sin secretos | PASS | tests de GitHub/normalización y validación de seguridad en `f4-local-validation.md`. |
-| S03_AC01 PR de implementación basado en Request y evidencia | PENDIENTE | se publicará el PR1 F4 después de esta matriz. |
+| S03_AC01 PR de implementación basado en Request y evidencia | PASS | PR1 F4: https://github.com/silverberdi/mini-me/pull/182, head `612d6c56d95b0069702c3473760d0745a3a5723c`; contenido preparado y validado por `PrPreparerService`, sin directiva de cierre automático. |
 | S03_AC02 PR documental gobernado por F3 | PENDIENTE | depende del merge humano del PR1 y Sync/Archive. |
 | S05_AC01 disciplina contextual | PASS | skills portables en ambas instalaciones y `f4-local-validation.md`. |
 | S05_AC02 asistencia no convertida en gate | PASS | contratos de hooks/harnesses y pruebas focalizadas. |
@@ -34,7 +34,7 @@ Fecha: 2026-10-25. La matriz cubre los 35 criterios definidos en `design.md`. `P
 | H02_AC01 fallos técnicos no escalados como decisiones | PASS | rutas de recuperación y fail-closed en tests focalizados. |
 | H03_AC01 ausencia de despliegue/scheduler | PASS | evidencias E2E y reconciliación confirman no despliegue, no scheduler. |
 | F3_AC01 normalización y contexto entregados al coordinador | PASS | integración F4/F3 y evidencia de contexto real. |
-| F3_AC02 PRs conservan identidad y SHA | PARCIAL | PR #4 tiene base/head/merge verificados; PR1 F4 aún pendiente. |
+| F3_AC02 PRs conservan identidad y SHA | PASS | PR #4 y PR1 #182 tienen repositorio, base, branch y head SHA verificados; el PR1 sigue sin fusionar. |
 | F3_AC03 merges y cierre bajo autoridad F3 | PENDIENTE | requiere PR1 F4 y su aprobación humana; Sync/Archive no ejecutados. |
 | F3_AC04 recuperación sin consumo duplicado | PASS | intento único, recuperación post-inferencia y reconciliación durable. |
 | DONE_AC01 aceptación remota completa | PENDIENTE | falta PR1, merge humano, Sync/Archive y PR2. |
@@ -42,4 +42,4 @@ Fecha: 2026-10-25. La matriz cubre los 35 criterios definidos en `design.md`. `P
 
 ## Estado
 
-Los criterios pendientes no se marcan como satisfechos. En particular, 6.2, 6.4, 6.5 y 6.6 permanecen abiertas hasta publicar y fusionar humanamente el PR1, ejecutar Sync/Archive y publicar el PR documental. El Issue #172 no fue reescrito.
+Los criterios pendientes no se marcan como satisfechos. En particular, 6.2, 6.5 y 6.6 permanecen abiertas hasta fusionar humanamente el PR1, ejecutar Sync/Archive y publicar el PR documental. El Issue #172 no fue reescrito.
