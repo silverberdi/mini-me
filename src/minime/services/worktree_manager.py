@@ -4154,8 +4154,12 @@ class WorktreeManager:
         actual_branch = (await self._git(["branch", "--show-current"], cwd=canonical_path)).strip()
         if actual_branch != branch:
             raise RuntimeError(f"Existing request branch '{actual_branch}' does not match '{branch}'.")
+        ownership = ownership_repo.get_by_canonical_path(str(canonical_path))
+        # An existing Run is bound to its original durable base, not to a
+        # newly fetched origin/main that may have advanced since admission.
+        frozen_base_sha = ownership.source_base_sha if ownership else source_base_sha
         head_sha = (await self._git(["rev-parse", "HEAD"], cwd=canonical_path)).strip()
-        if head_sha != source_base_sha:
+        if head_sha != frozen_base_sha:
             runs_repo = getattr(self.uow, "orchestration_runs", None)
             run = runs_repo.get_by_id(run_id) if runs_repo and hasattr(runs_repo, "get_by_id") else None
             candidate_sha = (
@@ -4175,7 +4179,6 @@ class WorktreeManager:
         )
         if not valid_git:
             raise RuntimeError(f"Existing request Git identity is not verified: {git_reason}")
-        ownership = ownership_repo.get_by_canonical_path(str(canonical_path))
         if ownership is not None:
             await self._verify_worktree_adoption_proof(
                 path=canonical_path,
@@ -4184,7 +4187,7 @@ class WorktreeManager:
                 eff_run_id=run_id,
                 eff_change_name=change_name,
                 expected_branch=branch,
-                expected_base_sha=source_base_sha,
+                expected_base_sha=frozen_base_sha,
                 require_clean=False,
                 worktree_kind="request worktree",
             )
@@ -4248,11 +4251,41 @@ class WorktreeManager:
                 branch=branch_name,
                 source_base_sha=base_sha_str,
             )
+            existing_repo = getattr(self.uow, "orchestration_worktree_ownerships", None)
+            existing_owner = (
+                existing_repo.get_by_canonical_path(str(worktree_path)) if existing_repo else None
+            )
             return WorktreeInfo(
                 path=worktree_path,
                 branch_name=branch_name,
-                base_sha=base_sha_str,
+                base_sha=existing_owner.source_base_sha if existing_owner else base_sha_str,
             )
+
+        # A self-hosted Request must have a durable owner before any
+        # filesystem side effect. Do not treat a flush as a committed record.
+        ownership = None
+        if run_id:
+            ownership = self._persist_pending_ownership(
+                job_id=run_id,
+                project_id=project_id,
+                path=worktree_path,
+                branch=branch_name,
+                run_id=run_id,
+                change_name=change_name or f"req-{issue_number}-{self.slugify_request_title(issue_title)}",
+                source_base_sha=base_sha_str,
+            )
+            commit = getattr(self.uow, "commit", None)
+            if not callable(commit):
+                raise RuntimeError("Durable ownership requires a committing persistence unit.")
+            commit()
+            ownership_repo = self.uow.orchestration_worktree_ownerships
+            persisted = ownership_repo.get_by_canonical_path(str(worktree_path))
+            if (
+                persisted is None
+                or persisted.worktree_id != ownership.worktree_id
+                or persisted.creation_state != WorktreeCreationState.PENDING
+            ):
+                raise RuntimeError("Request Worktree PENDING ownership could not be confirmed.")
 
         branch_exists = False
         try:
@@ -4267,31 +4300,15 @@ class WorktreeManager:
         else:
             await self._git(["worktree", "add", "-b", branch_name, str(worktree_path), base_sha_str], project_id=project_id)
 
-        ownership_repo = getattr(self.uow, "orchestration_worktree_ownerships", None)
-        if run_id:
-            binding_repo = getattr(self.uow, "project_managed_repository_bindings", None)
-            binding = binding_repo.get_by_project_id(project_id) if binding_repo else None
-            if ownership_repo is None or binding is None:
-                raise RuntimeError("Cannot publish request Worktree without durable ownership and binding")
-            ownership = OrchestrationWorktreeOwnership(
-                job_id=run_id,
-                run_id=run_id,
-                project_id=project_id,
-                change_name=change_name or f"req-{issue_number}-{self.slugify_request_title(issue_title)}",
-                canonical_worktree_path=str(worktree_path),
-                source_repository_identity=binding.canonical_repository_identity,
-                source_base_sha=base_sha_str,
-                branch=branch_name,
-                creation_state=WorktreeCreationState.PENDING,
-            )
-            # An ownership failure must block agent dispatch, never be swallowed.
-            ownership_repo.save(ownership)
-            self._flush_uow()
+        if ownership is not None:
+            # Fail closed on an incomplete Git worktree, missing ownership
+            # marker, unexpected branch/HEAD, or repository identity mismatch.
             self._write_ownership_marker(worktree_path, ownership)
-            ownership.creation_state = WorktreeCreationState.CREATED
-            ownership.updated_at = utc_now()
-            ownership_repo.save(ownership)
-            self._flush_uow()
+            await self._verify_creation_postconditions(
+                worktree_path, ownership, expected_branch=branch_name, expected_base_sha=base_sha_str
+            )
+            self._finalize_created_ownership(ownership)
+            self.uow.commit()
 
         return WorktreeInfo(
             path=worktree_path,
