@@ -277,6 +277,12 @@ async def test_worktree_ownership_failure_blocks_request_instead_of_silent_succe
         uow, "mini-me", repo_dir, managed_root,
         canonical_repository_identity="github.com/silverberdi/mini-me",
     )
+    uow.orchestration_runs.save(
+        OrchestrationRun(
+            run_id="f5-run-denied", project_id="mini-me",
+            change_name="gacela-05-ui-self-hosted", base_sha="main",
+        )
+    )
     manager = WorktreeManager(repo_dir, uow=uow)
     manager._git = AsyncMock(side_effect=lambda args, project_id=None: (
         (_ for _ in ()).throw(RuntimeError("new branch"))
