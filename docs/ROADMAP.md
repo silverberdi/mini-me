@@ -1,16 +1,24 @@
-# Roadmap vigente — seis fases, seis Changes
+# Roadmap vigente — F1–F6 reconstrucción original; F7–F8 evolución posterior
 
-**Contrato rector:** [CONTRATO_RECTOR.md](CONTRATO_RECTOR.md). La secuencia 001–022, los MM-R01–R10 y N01–N05 son **historia**, no fases adicionales.
+**Autoridad:** [CONTRATO_RECTOR.md](CONTRATO_RECTOR.md) v1.3; diseño operativo concreto de F5 en [F5_UX_CONTRATO.md](F5_UX_CONTRATO.md). 001–022, MM-R01–R10 y N01–N05 son **historia**, no fases alternativas.
 
-1. **F1 [#169](https://github.com/silverberdi/mini-me/issues/169)** — limpiar emulaciones de OpenSpec, lógica y DB obsoletas; preservar núcleo útil y migrar datos de forma segura. Change: gacela-01-depuracion-inicial.
-2. **F2 [#170](https://github.com/silverberdi/mini-me/issues/170)** — proyecto configurable: ticket GitHub inicial, adapter strategy extensible, Git aparte, cuatro roles/modelos, contexto, skills seleccionadas. Change: gacela-02-proyectos.
-3. **F3 [#171](https://github.com/silverberdi/mini-me/issues/171)** — ciclo nativo real y revisión independiente, atención humana, merge humano, sync/archive y cierre. Change: gacela-03-openspec-y-revision.
-4. **F4 [#172](https://github.com/silverberdi/mini-me/issues/172)** — skills base preexistentes o complementadas donde falten. Change: gacela-04-skills-base.
-5. **F5 [#173](https://github.com/silverberdi/mini-me/issues/173)** — UI responsive española; **mini me debe ejecutar autónomamente su propio Change**. Change: gacela-05-ui-self-hosted.
-6. **F6 [#174](https://github.com/silverberdi/mini-me/issues/174)** — segunda depuración de lógica/DB, también **ejecutada por mini me**. Change: gacela-06-depuracion-final.
+| Fase | Issue | Identidad OpenSpec | Objetivo | Situación planificada |
+| --- | --- | --- | --- | --- |
+| **F1** | [#169](https://github.com/silverberdi/mini-me/issues/169) | `gacela-01-depuracion-inicial` | Retiro seguro de emulaciones y código/DB obsoletos | Fase histórica cerrada |
+| **F2** | [#170](https://github.com/silverberdi/mini-me/issues/170) | `gacela-02-proyectos` | Proyectos, contextos, proveedores de tickets y Git/PR separados, agentes configurables | Fase histórica cerrada |
+| **F3** | [#171](https://github.com/silverberdi/mini-me/issues/171) | `gacela-03-openspec-y-revision` | Ciclo OpenSpec nativo con E2E, atención humana y cierre de dos PRs | Fase histórica cerrada |
+| **F4** | [#172](https://github.com/silverberdi/mini-me/issues/172) | `gacela-04-skills-base` | Skills y bootstrap complementarios | Fase histórica cerrada |
+| **F5** | [#173](https://github.com/silverberdi/mini-me/issues/173) | `gacela-05-ui-self-hosted` (reservado) | **UI MVP** HTML/JS nativo/Tailwind; 5 vistas, 2 accesos primarios, E2E y primera ejecución autónoma de mini me | Siguiente, aún no iniciada |
+| **F6** | [#174](https://github.com/silverberdi/mini-me/issues/174) | `gacela-06-depuracion-final` (reservado) | Depuración final después de F5, ejecutada por mini me, sin nuevas funcionalidades | Después del cierre F5 |
+| **F7** | [#189](https://github.com/silverberdi/mini-me/issues/189) | **sin Change creado** | Conectar funciones faltantes: pausa diferida, único proyecto ejecutor, gestión de Requests, normalización F4 y métricas/contexto faltantes | **disabled**, solo planificación |
+| **F8** | [#190](https://github.com/silverberdi/mini-me/issues/190) | **sin Change creado** | Migrar exclusivamente la capa frontend a **Angular + TypeScript + Tailwind** | **disabled**, solo planificación |
 
-**Reglas:** exactamente un Change por fase (una o varias specs). No crear ni iniciar Changes desde este documento. Cada fase se cierra antes de iniciar la siguiente. Cada entrega tiene pruebas reales apropiadas, PR de implementación con merge humano, y cierre OpenSpec con PR documental según la fase posible. Sin microchanges, sin ejecución adelantada de fases, sin despliegue por mini me.
+**Reglas invariables:**
+- Las seis fases de reconstrucción **originales F1–F6** no se reescriben, fragmentan ni alteran; F7/F8 son extensión posterior decidida expresamente. Una fase autorizada usa un único Change OpenSpec con las specs que necesite, sin micro-Changes.
+- Las Issues F7/F8 llevan `disabled` y dependencia formal; **crear Issues/documentación no autoriza** OpenSpec Propose/Apply, modelos, scheduler, PR/merge ni despliegue.
+- F5 puede funcionar sobre CLI/API actuales hasta que su propia UI esté construida; **debe autoejecutarse materialmente por mini me**. F6 también. PR [#188](https://github.com/silverberdi/mini-me/pull/188) es bootstrap excepcional separado y Draft hasta superar sus gates.
+- Frontend F5: Tailwind y JS nativo; las futuras funciones de F7 deben tener controles visuales honestamente deshabilitados en F5. Angular se reserva expresamente para F8.
+- Fuente autoritativa de tickets: proveedor configurable (GitHub actual, reemplazable). No hay backlog PostgreSQL duplicado. Gherkin es normalización F4, no requisito de entrada del humano.
+- Secuencia gobernada, E2E real, no gasto/despliegues no autorizados; ningún Change F7/F8 arranca automáticamente tras cerrar F6.
 
-La aprobación del roadmap/contexto NO inicia scheduler ni permisos de gasto y NO declara resuelta la brecha entre el código actual y el contrato.
-
-Véase [BACKLOG.md](BACKLOG.md) para Issues y [RECONCILIACION_LEGADO.md](RECONCILIACION_LEGADO.md) para tratamiento del historial.
+Véanse [BACKLOG.md](BACKLOG.md), [F5_UX_CONTRATO.md](F5_UX_CONTRATO.md), [RECONCILIACION_LEGADO.md](RECONCILIACION_LEGADO.md) y [CHANGE_DELIVERY_CONTRACT.md](CHANGE_DELIVERY_CONTRACT.md).
