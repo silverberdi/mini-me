@@ -125,12 +125,20 @@ async def test_request_initialization_uses_reserved_identity_without_dispatching
     runner.run.assert_not_awaited()
 
 
-def _prepare_offline_real_git(repo_dir: Path, uow: InMemoryPersistenceUnitOfWork) -> str:
-    """Use a real disposable repository and local tracking ref; no network/model calls."""
+def _prepare_offline_real_git(
+    repo_dir: Path, uow: InMemoryPersistenceUnitOfWork, run_id: str = "f5-run-173"
+) -> str:
+    """Use a real disposable repository and Run; no network/model calls."""
     setup_managed_repository_fixture(
         uow, "mini-me", repo_dir, repo_dir.parent / "worktrees",
         canonical_repository_identity="github.com/silverberdi/mini-me",
         local_remote=False,
+    )
+    uow.orchestration_runs.save(
+        OrchestrationRun(
+            run_id=run_id, project_id="mini-me",
+            change_name="gacela-05-ui-self-hosted", base_sha="main",
+        )
     )
     sha = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=repo_dir, text=True).strip()
     subprocess.run(
@@ -234,7 +242,7 @@ async def test_request_worktree_resumes_after_main_advances_without_rebasing_run
 async def test_pending_ownership_commit_failure_prevents_git_worktree_add(tmp_path: Path):
     repo_dir = tmp_path / "repo"
     uow = InMemoryPersistenceUnitOfWork()
-    _prepare_offline_real_git(repo_dir, uow)
+    _prepare_offline_real_git(repo_dir, uow, run_id="f5-run-commit-fail")
     manager = WorktreeManager(repo_dir, uow=uow)
     real_git = manager._git
     calls = []
