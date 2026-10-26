@@ -183,3 +183,30 @@ async def test_worktree_ownership_failure_blocks_request_instead_of_silent_succe
             project_id="mini-me", issue_number=173, issue_title="Fase 5 UI",
             run_id="f5-run-denied", change_name="gacela-05-ui-self-hosted",
         )
+
+def test_reentry_recovers_immutable_reserved_change_from_durable_run():
+    from minime.domain.models import OrchestrationRun
+    from minime.services.remote_request_intake import RemoteRequestIntakeService
+
+    uow = InMemoryPersistenceUnitOfWork()
+    run = OrchestrationRun(
+        project_id="mini-me",
+        change_name="gacela-05-ui-self-hosted",
+        base_sha="main",
+        stop_details={
+            "issue_number": 173,
+            "issue_title": "Fase 5/6 — UI y primera ejecución autónoma de mini me",
+        },
+    )
+    uow.orchestration_runs.save(run)
+    github = MagicMock()
+    selected = RemoteRequestIntakeService(github, uow).select_next_request(
+        "mini-me", "silverberdi/mini-me"
+    )
+
+    assert selected is not None and selected["re_entrant"] is True
+    assert selected["run_id"] == run.run_id
+    assert selected["issue_number"] == 173
+    assert selected["change_name"] == "gacela-05-ui-self-hosted"
+    assert selected["title"] == run.stop_details["issue_title"]
+    github.list_issues.assert_not_called()
