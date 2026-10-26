@@ -5,6 +5,7 @@ from unittest.mock import MagicMock
 import pytest
 from tests.conftest import InMemoryPersistenceUnitOfWork, setup_managed_repository_fixture
 
+from minime.services.budget_service import BudgetService
 from minime.services.agent_runner import (
     CapacityExhaustedError,
     CliAgentRunner,
@@ -198,3 +199,17 @@ def test_openrouter_requires_positive_budget_and_capacity():
         budget_service=budget_service,
     ).check_capacity_preflight("mini-me", "openrouter", "implementer")
     budget_service.get_headroom.assert_called_once_with("mini-me")
+
+def test_codex_preflight_with_real_budget_service_and_no_openrouter_policy():
+    """Regression for the exact missing policy row that paused F5 Run #173."""
+    uow = InMemoryPersistenceUnitOfWork()
+    budget_service = BudgetService(uow)
+    assert budget_service.get_headroom("mini-me") == (None, None)
+
+    runner = CliAgentRunner(budget_service=budget_service)
+    runner.check_capacity_preflight("mini-me", "codex", "thinker")
+    runner.check_capacity_preflight("mini-me", "antigravity", "reviewer")
+
+    with pytest.raises(CapacityExhaustedError, match="OpenRouter budget policy"):
+        runner.check_capacity_preflight("mini-me", "openrouter", "implementer")
+
