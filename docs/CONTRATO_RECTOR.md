@@ -1,9 +1,9 @@
 # mini me — Contrato rector de producto y arquitectura
 
-**Versión 1.2 — 21 de octubre de 2026.**
+**Versión 1.3 — 26 de octubre de 2026.**
 **Autoridad:** este documento es la dirección funcional y arquitectónica de mini me; sustituye las decisiones incompatibles de planes, specs, fichas y contratos históricos. La implementación existente NO se considera conforme por la sola publicación de este documento.
-**Naturaleza:** instalación personal única, no producto comercial. Plan de reconstrucción de **exactamente seis fases, un Change OpenSpec por fase**, con una o varias specs dentro de cada Change.
-**Estado:** contrato propuesto en PR; su aprobación no autoriza despliegues, migraciones, reinicio de scheduler, consumo de agentes ni merge de PR ajenos.
+**Naturaleza:** instalación personal única, no producto comercial. El **programa original de reconstrucción F1–F6 mantiene exactamente seis fases y un Change OpenSpec por fase**. Por decisión posterior del operador se agregan **F7 (capacidades funcionales diferidas) y F8 (migración visual a Angular)** como extensión **futura, deshabilitada y no ejecutable aún**. Una fase futura requerirá su propio Change OpenSpec autorizado en su momento, sin micro-Changes.
+**Estado:** actualización contractual documental sobre el contrato base aprobado. F1–F4 forman el historial de entregas; F5 es el siguiente Change. Esta actualización no autoriza crear Changes, desplegar, migrar, iniciar scheduler, consumir agentes, fusionar PRs ni ejecutar F7/F8.
 
 ## 1. La gacela, no el paquidermo
 
@@ -15,7 +15,7 @@ Principios no negociables: simplicidad; reutilización antes de crear; una respo
 
 ## 2. Responsabilidades y fronteras
 
-- **Proveedor de tickets:** fuente autoritativa de requerimientos, fechas, comentarios y cierre; GitHub Issues inicialmente.
+- **Proveedor de tickets:** fuente autoritativa de requerimientos, fechas, comentarios y cierre; GitHub Issues inicialmente; el frontend y el núcleo dependen de un contrato de tickets agnóstico al proveedor.
 - **Git y proveedor de PR:** repositorios, ramas, worktrees, commits, diffs, PR y merges.
 - **OpenSpec:** autoridad de comportamiento/diseño/tareas y de los workflows nativos usados por agentes.
 - **Agentes:** pensamiento/propuesta/verify, ejecución/apply/correcciones, revisión independiente de solo lectura y respaldo compatible.
@@ -27,7 +27,7 @@ Una única API FastAPI, modular y con la UI consumiéndola. No segunda API ni mi
 
 ## 3. Módulo de proyectos
 
-Cada proyecto configura: nombre/id; repositorio y rama base (main por defecto); origen de tickets; ubicación/contexto OpenSpec; agente y modelo de pensamiento, ejecución, revisión independiente y respaldo; capacidad compatible con CLI/workflows por rol; skills existentes; esfuerzo; límite de correcciones; política sencilla de revisión de código; política de costo y estado activo/pausado.
+Cada proyecto configura: nombre/id; repositorio y rama base (main por defecto); origen de tickets; ubicación/contexto OpenSpec; agente y modelo de pensamiento, ejecución, revisión independiente y respaldo; capacidad compatible con CLI/workflows por rol; skills existentes; esfuerzo; límite de correcciones; política sencilla de revisión de código; política de costo y estado activo/pausado. **La activación/pausa administrativa de F2 no significa que exista pausa diferida del Run ni selección de un único proyecto ejecutor.** Ambas capacidades adicionales se asignan a F7, y no se pueden anunciar como funcionales antes de tener autoridad real.
 
 **Contratos distintos para fuente de tickets y proveedor Git/PR** (pueden diferir). Fuente de tickets intercambiable mediante una interfaz mínima para listar/leer/crear/comentar/cerrar, pero SOLO GitHub se implementa inicialmente. NO construir ADO ni framework de plugins hasta existir necesidad.
 
@@ -37,7 +37,7 @@ Al configurar contexto, reutilizar e instalar skills OpenSpec preexistentes; usa
 
 ## 4. Flujo OpenSpec (una unidad de trabajo activa por proyecto)
 
-Al activar proyecto: consultar directamente tickets abiertos y elegibles en el origen remoto; orden ascendente por fecha de creación, desempate estable por ID; comenzar el más antiguo. No mantener cola duplicada ni usar scoring, envejecimiento, prioridades sintéticas o roadmap como orden alternativo. Si el ticket seleccionado queda bloqueado, conservarlo; no saltar silenciosamente a otro. El siguiente empieza cuando se haya completado el cierre documental y del ticket anterior.
+Para un proyecto habilitado y **cuando exista admisión de trabajo autorizada**, consultar directamente tickets abiertos y elegibles en el origen remoto; **activar administrativamente un proyecto en F2 no dispara agentes, scheduler ni ticket alguno**. Una futura selección de un único proyecto ejecutor global, con transición segura tras cerrar el Change en curso, corresponde a F7. En esa admisión autorizada: orden ascendente por fecha de creación, desempate estable por ID; comenzar el más antiguo. No mantener cola duplicada ni usar scoring, envejecimiento, prioridades sintéticas o roadmap como orden alternativo. Si el ticket seleccionado queda bloqueado, conservarlo; no saltar silenciosamente a otro. El siguiente empieza cuando se haya completado el cierre documental y del ticket anterior.
 
 **Explore (pensamiento):** indagar de forma autónoma el contexto del ticket, repositorio y archivos de diseño. Emitir READY TO PROPOSE si hay suficiente información, o pausar con HUMAN REQUIRED con opciones estructuradas en español si existe ambigüedad material irresoluble.
 
@@ -85,17 +85,27 @@ Fallos: preservar artefactos, mostrar causa; esperar capacidad sin quemar cuota;
 
 Por cada Change: censar consumidores; retirar lógica y pruebas obsoletas del alcance; pruebas enfocadas y E2E real para flujos de agentes; no presentar mocks o health 200 como prueba de valor; ninguna acumulación de compatibilidad muerta. Una versión con más código pero misma incapacidad funcional NO es progreso.
 
-## 8. UI (se mantienen los criterios previamente acordados)
+## 8. UI — Contrato de F5 y evolución controlada
 
-Español, densidad informativa útil, jerarquía clara, uso consciente del espacio, componentes coherentes. **Mobile** observa qué hace/terminó/sigue y permite atender preguntas sencillas; **Tablet** permite operar con master-detail/drawers; **Web** es centro de control con paneles redimensionables/colapsables y persistencia de layout cuando útil. Ver ticket, etapa, agentes, pruebas, revisión, preguntas con opciones originales vs propuestas, autorizaciones, PR, bloqueos y cierre. Diseño de calidad desde primer prototipo; no construir UI alrededor de estados accidentales de la implementación.
+La especificación de producto aprobada durante el refinamiento del 26 de octubre está registrada en **[F5_UX_CONTRATO.md](F5_UX_CONTRATO.md)** y prevalece para la composición/navegación de F5 frente a la UX histórica #162 donde exista contradicción.
+
+**F5 = HTML + JavaScript nativo modular + Tailwind CSS, servido localmente mediante FastAPI/PWA**, sin Angular, React ni funciones adicionales de orquestación. Solo dos destinos principales: **Dashboard** y **Proyectos**. Permanecen cinco pantallas/rutas independientes: Dashboard; Trabajo (acceso Dashboard); Trabajo actual (acceso Dashboard/Trabajo); Proyectos; Backlog (acceso Proyectos). No apilar las cinco pantallas en Home. F8 adopta **Angular + TypeScript + Tailwind** exclusivamente para migrar el frontend, sin reescribir FastAPI ni el proceso de negocio.
+
+**Dashboard:** medidores analógicos de progreso del proyecto en foco, del Request/tarea actual y de cuota por modelo *solo con denominadores medidos*; gráfica de líneas de efectividad con tres dimensiones independientes (calidad/autonomía, tiempo efectivo/total/espera, tokens/costo por Request). Cuando faltan datos no mostrar porcentajes, límites ni gráficos inventados. Atención real y salud operativa compactas. Un proyecto configurado `ACTIVE` no implica que sea el ejecutor global ni que esté corriendo.
+
+**Trabajo:** último terminado → en ejecución → siguiente. **Trabajo actual:** avances verificables por stage/tarea, resultados, agentes/modelos y tiempos reales; `HUMAN_REQUIRED` persistente, visible y respondible aquí, con Dashboard notificando y enlazando. **Proyectos:** lista+detalle, configuración F2/contexto y acceso a Backlog. **Backlog:** Pendiente/Terminado, FIFO y resultado autoritativos, formulario de Request con título, descripción y criterios de aceptación en lenguaje natural; operaciones visuales crear/editar/desactivar/reactivar/eliminar lógicamente.
+
+**Frontera estricta:** toda funcionalidad cuya API/autoridad no exista se representa en F5 solo como control visual **deshabilitado con motivo claro y destino F7**, sin confirmar mutaciones simuladas. F7 incorpora pausa **diferida** de proyecto y mini me después de terminar Change completo (no se mata Run), selección de un único proyecto ejecutor a la vez y cambios seguros de proyecto, CRUD lógico de Requests nunca físicos (solo edición/desactivación/baja de no iniciados; en curso exclusivamente aclaración vía `HUMAN_REQUIRED`; finalizados inmutables), instrumentación faltante y edición documental versionada/gobernada cuando no exista. **Reusar la normalización F4** de tickets humanos a Given/When/Then y el contrato remoto de proveedor de tickets: no se obliga al operador a escribir Gherkin.
+
+En escritorio, centro de control legible; tablet operable por panel maestro/detalle; móvil con las cinco vistas enfocadas, observabilidad y decisiones humanas sencillas. Autenticación, permisos y reglas permanecen bajo backend; cliente sin Git/CLI/agentes/secretos. Sin cachear datos operativos autenticados ni métricas ficticias. Los criterios visuales históricos de #162 se preservan salvo las decisiones más recientes y explícitas de jerarquía, alcance y framework.
 
 ## 9. CI/CD y término de responsabilidad
 
 mini me llega hasta PR de implementación fusionado, sync/archive nativos, PR documental fusionado y ticket cerrado. NO despliega ni verifica despliegue productivo: cada proyecto lo hace mediante CI/CD independiente. Sí exige pruebas pertinentes antes del merge y puede utilizar previews temporales para validar UI.
 
-## 10. Plan obligatorio: EXACTAMENTE seis fases
+## 10. Plan obligatorio: seis fases originales + F7/F8 posteriores
 
-Una fase = **un Change OpenSpec**, que puede contener una o varias especificaciones; tareas de migración, limpieza, pruebas y documentación permanecen dentro de ese Change. No trocear en micro-Changes. No comenzar siguiente fase hasta cierre de la anterior. La actualización de contexto/backlog NO crea ni activa los seis Changes. Los Change slugs son identificadores planeados, no pruebas de creación.
+Las **seis fases del programa original F1–F6** y sus Changes se preservan. F7/F8 **extienden** el plan por decisión expresa posterior, no reabren F1–F4 ni cambian la función de F6. Una fase = **un Change OpenSpec** con las specs necesarias, creado solo cuando corresponda y esté autorizado; no trocear en micro-Changes. No ejecutar la siguiente fase hasta el cierre gobernado de la anterior. Documentar o crear Issues F7/F8 con etiqueta `disabled` no habilita sus Changes ni autoriza recursos.
 
 | Fase | Issue | Change planificado | Entrega |
 | --- | --- | --- | --- |
@@ -105,6 +115,8 @@ Una fase = **un Change OpenSpec**, que puede contener una o varias especificacio
 | 4 | [#172](https://github.com/silverberdi/mini-me/issues/172) | gacela-04-skills-base | Catálogo mínimo de skills existentes/complementos faltantes |
 | 5 | [#173](https://github.com/silverberdi/mini-me/issues/173) | gacela-05-ui-self-hosted | UI web/tablet/mobile ejecutada por **mini me** sobre sí mismo |
 | 6 | [#174](https://github.com/silverberdi/mini-me/issues/174) | gacela-06-depuracion-final | Eliminar código y DB obsoletos restantes, ejecutado por **mini me** |
+| 7 — futuro, disabled | [#189](https://github.com/silverberdi/mini-me/issues/189) | **por autorizar/crear** | Integrar funciones UI pendientes, pausa diferida, único proyecto ejecutor, gestión segura de Requests y métricas faltantes |
+| 8 — futuro, disabled | [#190](https://github.com/silverberdi/mini-me/issues/190) | **por autorizar/crear** | Migrar frontend a Angular + TypeScript + Tailwind conservando contratos y E2E |
 
 ### Fase 1 — Depuración inicial
 
@@ -124,23 +136,31 @@ Inventario, selección, vinculación y, SOLO si faltan, construcción de skills 
 
 ### Fase 5 — UI, primera ejecución por mini me
 
-UI española con las tres modalidades, proyectos/roles, progreso, bandeja humana, opciones y merge autorizado. **mini me debe coordinar y ejecutar su propio Change F5**, con agentes reales, propuesta/verify/revisión, PR, autorización humana, sync/archive y cierre. Se opera desde CLI/API existente hasta que la UI funcione; el desarrollo no depende circularmente de la UI terminada. Prueba E2E navegador y autonomía real, no transferencia manual de prompts.
+UI española con **cinco pantallas independientes y dos accesos primarios**, medidores de avance/cuota y efectividad, seguimiento y gates reales, formulario/controles F7 visualmente presentes pero deshabilitados hasta su implementación, con **Tailwind + JavaScript nativo**. Ver [contrato UX detallado](F5_UX_CONTRATO.md). **mini me debe coordinar y ejecutar su propio Change F5**, con agentes reales, propuesta/verify/revisión, PR, autorización humana, sync/archive y cierre. Se opera desde CLI/API existente hasta que la UI funcione; el desarrollo no depende circularmente de la UI terminada. Prueba E2E navegador y autonomía real, no transferencia manual de prompts. No convertir la fase visual en desarrollo de funciones F7.
 
 ### Fase 6 — Redepuración final por mini me
 
 Segunda limpieza de código muerto, consumidores, interfaces, dependencias, tests y DB obsoletos tras fases previas. Alembic seguro, preservación de datos y pruebas de regresión/E2E. NO introducir funcionalidades. **mini me debe coordinar y ejecutar su propio Change F6** hasta cierre documental y de ticket. La limpieza final no se limita a números de líneas: responsabilidades claras y operación real.
 
+### Fase 7 — Capacidades funcionales diferidas (no autorizada)
+
+Tras F6, implementar bajo el contrato de [#189](https://github.com/silverberdi/mini-me/issues/189) las operaciones ausentes de F5: un único proyecto ejecutor global, transición tras cierre limpio del Change, pausas diferidas global y por proyecto, gestión de Requests desde proveedor configurado con edición restringida a no iniciados y eliminación exclusivamente lógica, conexión con normalizador F4 para criterios humanos, métricas de efectividad/tiempo/cuota que aún carezcan de fuente y persistencia documental gobernada si falta. **F7 permanece disabled; no existe Change F7 autorizado.** No implementar un segundo backlog, scheduler ni motor OpenSpec.
+
+### Fase 8 — Migración frontend Angular (no autorizada)
+
+Migrar la capa visual de F5/F7 a **Angular + TypeScript + Tailwind**; garantizar paridad visual/funcional/seguridad/responsive con E2E auténticos antes de retirar el frontend modular anterior. FastAPI, APIs, control de permisos, OpenSpec y reglas de negocio permanecen. [#190](https://github.com/silverberdi/mini-me/issues/190) está **disabled; no existe Change F8 autorizado**.
+
 Criterio común de cierre: cumplimiento funcional, pruebas pertinentes reales, PR de implementación revisado y merge humano, sync/archive nativos, PR documental fusionado y ticket cerrado (respetando la transición desde la infraestructura existente en F1–F2). Las fases 5–6 añaden **prueba material de autoejecución**. El usuario no es mensajero entre agentes. No habilitar scheduler ni gastar cuota al aprobar documentos.
 
 ## 11. Reconciliación del legado
 
-Los planes 001–022, MM-R01–R10, N01–N05, expedientes, skills/harness y specs históricas son evidencia e historial técnico, **no una segunda cartera vigente** ni permiso para mantener flujos incompatibles. Solo un hallazgo auditado y pertinente puede trasladarse a una de las seis fases. No borrar historial. Los nueve Issues antiguos abiertos (#15, #57, #133–#138, #162) fueron revisados y cerrados individualmente como trabajo no planificado por separado o duplicado, dejando comentario y preservando la información; solo #169–#174 permanecen abiertos. Se cerraron SIN MERGE los PR #140 (motor de quality hooks) y #152 (continuación auth del orquestador heredado), también con comentarios; se conservan como evidencia histórica, no como código autorizado para incorporar automáticamente. El único PR abierto es #175, el presente contrato. Los requisitos UX de #162 siguen como entrada de F5 y sus conflictos deben resolverse explícitamente; ver docs/RECONCILIACION_LEGADO.md.
+Los planes 001–022, MM-R01–R10, N01–N05, expedientes, skills/harness y specs históricas son evidencia e historial técnico, **no una segunda cartera vigente** ni permiso para mantener flujos incompatibles. Solo un hallazgo auditado y pertinente puede trasladarse a una fase autorizada. La extensión F7/F8 responde a decisiones expresas del operador y no revive el backlog histórico. No borrar historial. Los nueve Issues antiguos abiertos (#15, #57, #133–#138, #162) fueron revisados y cerrados individualmente como trabajo no planificado por separado o duplicado, dejando comentario y preservando la información; en el ciclo original solo #169–#174 eran Issues de fases; desde 2026-10-26 también existen #189 y #190 **disabled** como planificación posterior. Se cerraron SIN MERGE los PR #140 (motor de quality hooks) y #152 (continuación auth del orquestador heredado), también con comentarios; se conservan como evidencia histórica, no como código autorizado para incorporar automáticamente. La referencia al PR #175 describe la instantánea histórica de adopción v1.2; no es un inventario de PRs abiertos hoy. El arranque F5 además tiene el bootstrap separado [PR #188](https://github.com/silverberdi/mini-me/pull/188) en Draft, sin autorización de merge/deploy/modelos. Los requisitos UX de #162 son antecedente, pero las decisiones explícitas posteriores de F5 sobre cinco rutas/dos menús, controles visuales diferidos y Tailwind constan en [F5_UX_CONTRATO.md](F5_UX_CONTRATO.md); ver [RECONCILIACION_LEGADO.md](RECONCILIACION_LEGADO.md).
 
 En toda contradicción con documentación anterior manda este contrato; en toda contradicción con código aún no migrado se describe la brecha, NO se considera la implementación conforme. La adopción de este contrato por GitHub no autoriza ejecutarlo sin Change OpenSpec y gates humanos.
 
 ## 12. Definición de éxito
 
-mini me procesa un ticket remoto sin cola duplicada, hace propose, revisión independiente de propuesta, apply, verify y correcciones, revisión independiente de código cuando corresponda, PR con merge humano, sync/archive nativos con segundo PR autorizado, cierra ticket y elige siguiente; resuelve preguntas con contexto y eleva decisiones humanas sin perder trabajo. Una UI operable muestra ese ciclo. F5 y F6 son ejecutadas por mini me. La aplicación final es pequeña, POO/SOLID/DRY, sin código/DB heredados superfluos.
+mini me procesa un ticket remoto sin cola duplicada, hace propose, revisión independiente de propuesta, apply, verify y correcciones, revisión independiente de código cuando corresponda, PR con merge humano, sync/archive nativos con segundo PR autorizado, cierra ticket y elige siguiente; resuelve preguntas con contexto y eleva decisiones humanas sin perder trabajo. Una UI operable muestra ese ciclo. F5 y F6 son ejecutadas por mini me. La reconstrucción F1–F6 deja una aplicación pequeña, POO/SOLID/DRY; F7 y F8 son evolución futura explícita y deshabilitada hasta decisión y Change independientes.
 
 ### Regla permanente de aceptación de entregas
 Una implementación no se declara completa por el número de tareas marcadas, la cantidad de tests aprobados o el informe de su ejecutor. Todo criterio que exija una integración real necesita evidencia observable de la invocación, su resultado y sus efectos. Las pruebas simuladas no pueden presentarse como E2E reales. La revisión independiente debe contrastar el código y la evidencia contra un SHA inmutable. Ante evidencia ausente, ambigua o fallida, se aplica fail-closed. Esta regla permanece disponible para las fases posteriores.
