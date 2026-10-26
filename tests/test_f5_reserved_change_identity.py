@@ -69,7 +69,7 @@ def test_next_fifo_admission_uses_same_reservation():
     assert admitted.stop_details["issue_number"] == 173
     assert admitted.stop_details["admission_only"] is True
     assert uow.orchestration_runs.get_active_run("mini-me", "gacela-05-ui-self-hosted") is not None
-    assert uow.orchestration_runs.get_active_run("mini-me", "req-173-fase-56-ui-y-primera-ejecución-autón") is None
+    assert [r.change_name for r in uow.orchestration_runs.list_runs(project_id="mini-me", is_active=True)] == ["gacela-05-ui-self-hosted"]
 
 
 @pytest.mark.asyncio
