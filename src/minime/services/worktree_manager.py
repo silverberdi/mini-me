@@ -4071,6 +4071,33 @@ class WorktreeManager:
             provider_detail=f"Successfully removed review worktree at '{path}'.",
         )
 
+    @classmethod
+    def resolve_request_change_name(
+        cls, issue_number: int, issue_title: str, issue_body: str | None
+    ) -> str:
+        """Use a ticket's explicit OpenSpec reservation or the ordinary request name.
+
+        The remote Issue is the authority for an explicitly reserved Change.
+        Do not infer reserved names from titles, project identity, or phase numbers.
+        Invalid/duplicate reservations fail closed before a Run is created.
+        """
+        reservation = re.compile(
+            r"^[ \\t]*\\*\\*Change reservado(?:[ \\t]*\\([^\\r\\n)]*\\))?:\\*\\*[ \\t]*(.*)$",
+            re.MULTILINE,
+        )
+        declared = reservation.findall(issue_body or "")
+        if declared:
+            if len(declared) != 1:
+                raise ValueError("Issue contains multiple explicit OpenSpec Change reservations")
+            match = re.fullmatch(
+                r"`([a-z][a-z0-9]*(?:-[a-z0-9]+)*)`(?:[ \\t]+[—-].*)?",
+                declared[0].strip(),
+            )
+            if match is None or len(match.group(1)) > 128:
+                raise ValueError("Issue has an invalid explicit OpenSpec Change reservation")
+            return match.group(1)
+        return f"req-{issue_number}-{cls.slugify_request_title(issue_title)}"
+
     @staticmethod
     def slugify_request_title(title: str, max_length: int = 40) -> str:
         """Convert an issue title to a clean kebab-case slug."""
@@ -4189,6 +4216,7 @@ class WorktreeManager:
         remote: str = "origin",
         reuse_existing: bool = True,
         run_id: str | None = None,
+        change_name: str | None = None,
     ) -> WorktreeInfo:
         """Create and track candidate branch and isolated worktree under managed root."""
         branch_name = self.format_request_branch_name(issue_number, issue_title)
@@ -4215,7 +4243,7 @@ class WorktreeManager:
             await self._reconcile_existing_request_worktree(
                 project_id=project_id,
                 run_id=run_id,
-                change_name=f"req-{issue_number}-{self.slugify_request_title(issue_title)}",
+                change_name=change_name or f"req-{issue_number}-{self.slugify_request_title(issue_title)}",
                 path=worktree_path,
                 branch=branch_name,
                 source_base_sha=base_sha_str,
