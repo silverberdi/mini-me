@@ -119,7 +119,8 @@ async def test_validated_checkpoint_reconciles_without_dispatch(tmp_path):
             comments.append({"body": body})
             return ok(comments[-1])
 
-        def update_issue_body(self, _repo, _number, body, expected_version=None):
+        def update_issue_body(self, _repo, _number, body, expected_body=None):
+            assert expected_body == original
             issue["body"] = body
             return ok(issue)
 
