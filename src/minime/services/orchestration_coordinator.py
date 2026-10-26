@@ -187,6 +187,68 @@ class NativeOrchestrationCoordinator:
         prior_attempt = details.get("normalization_attempt")
         validated_response = details.get("validated_normalization_response")
         normalized: NormalizedRequest | None = None
+
+        # F5 bootstrap compatibility: the legacy OpenRouter budget guard could
+        # reject a direct Codex call BEFORE any subprocess was started. Only
+        # that exact, evidence-bound pre-dispatch denial can be reconciled when
+        # the operator explicitly re-invokes the request CLI. Preserve the
+        # original attempt; all ambiguous/actually dispatched failures remain
+        # fail-closed and require a separate operator decision.
+        if isinstance(prior_attempt, dict) and normalized is None:
+            known_pre_dispatch_denial = (
+                prior_attempt.get("status") == "FAILED"
+                and prior_attempt.get("diagnostic")
+                == f"Budget policy/headroom is unavailable for project '{project_id}'."
+                and prior_attempt.get("provider") == provider
+                and prior_attempt.get("workflow") == f"$minime-request-normalizer issue-{issue_number}"
+                and isinstance(prior_attempt.get("workflow_sha256"), str)
+                and bool(prior_attempt.get("workflow_sha256"))
+                and bool(prior_attempt.get("attempt_id"))
+                and prior_attempt.get("dispatch_observed") is not True
+                and prior_attempt.get("exit_code") is None
+                and prior_attempt.get("timed_out") is None
+                and prior_attempt.get("structured_output_present") is False
+                and prior_attempt.get("structured_output_missing") is None
+                and prior_attempt.get("usage_status") == "UNKNOWN"
+                and prior_attempt.get("usage") is None
+                and prior_attempt.get("response_status") is None
+                and prior_attempt.get("publish_status") is None
+                and not validated_response
+            )
+            if known_pre_dispatch_denial:
+                try:
+                    current_workflow = self.agent_runner.resolve_workflow(
+                        worktree_path=worktree_path,
+                        provider=provider,
+                        operation="normalize",
+                        change_name=f"issue-{issue_number}",
+                    )
+                except (NativeOpenSpecWorkflowUnavailable, ValueError, OSError):
+                    return None, "Previous normalization preflight cannot be reconciled: workflow unavailable."
+                response_path = (
+                    worktree_path / ".minime" / f"request-normalization-{active_run.run_id}.json"
+                )
+                if (
+                    current_workflow.workflow_sha256 != prior_attempt["workflow_sha256"]
+                    or current_workflow.dispatch_command != prior_attempt["workflow"]
+                    or response_path.exists()
+                    or response_path.with_name("response.schema.json").exists()
+                ):
+                    return None, "Previous normalization preflight has mismatched evidence; retry denied."
+                history = details.get("normalization_attempt_history", [])
+                if not isinstance(history, list) or any(
+                    not isinstance(item, dict)
+                    or item.get("attempt_id") == prior_attempt["attempt_id"]
+                    for item in history
+                ):
+                    return None, "Previous normalization preflight history is ambiguous."
+                details["normalization_attempt_history"] = [
+                    *history,
+                    {**prior_attempt, "reconciliation": "CONFIRMED_PRE_DISPATCH_BUDGET_DENIAL"},
+                ]
+                details.pop("normalization_attempt", None)
+                self._persist_run_stop_details(active_run, details)
+                prior_attempt = None
         if (
             isinstance(prior_attempt, dict)
             and prior_attempt.get("response_status") == "VALIDATED"
