@@ -83,7 +83,7 @@ Scenario: Stable output
             comments.append(comment)
             return httpx.Response(201, json=comment)
         if request.method == "PATCH" and request.url.path.endswith("/issues/7"):
-            assert request.headers["if-match"] == '"v1"'
+            assert "if-match" not in request.headers
             issue["body"] = json.loads(request.content)["body"]
             return httpx.Response(200, json=issue, headers={"etag": '"v2"'})
         return httpx.Response(404)
@@ -194,7 +194,8 @@ async def test_coordinator_requires_and_persists_structured_semantic_message(tmp
                 comments.append({"id": len(comments) + 1, "body": body})
             return self.ok(comments[-1])
 
-        def update_issue_body(self, _repo, _number, body, expected_version=None):
+        def update_issue_body(self, _repo, _number, body, expected_body=None):
+            assert expected_body == issue["body"]
             issue["body"] = body
             return self.ok(issue)
 
