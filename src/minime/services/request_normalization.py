@@ -167,12 +167,11 @@ class RequestNormalizationService:
                     "Semantic normalization comment was not confirmed remotely."
                 )
         if remote_body != normalized.normalized_body:
-            version = (current.observed_evidence or {}).get("etag")
             update_result = self.github.update_issue_body(
                 repository,
                 issue_number,
                 normalized.normalized_body,
-                expected_version=version,
+                expected_body=remote_body,
             )
             if update_result.outcome != ExternalOutcome.SUCCESS:
                 raise RequestNormalizationError(
