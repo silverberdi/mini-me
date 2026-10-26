@@ -69,7 +69,9 @@ class AgentExecutionResult:
     @property
     def response_output(self) -> str:
         """Return only the provider response channel, excluding diagnostics."""
-        return "\n".join(self.structured_output if self.structured_output is not None else self.stdout)
+        return "\n".join(
+            self.structured_output if self.structured_output is not None else self.stdout
+        )
 
     def contains_token(self, token: str) -> bool:
         return token in self.full_output
@@ -131,7 +133,9 @@ class CliAgentRunner:
                 raise ValueError(f"Project profile '{profile_name}' is missing or invalid.")
             provider = str(raw.get("agent_id") or "").strip().lower()
             if not provider:
-                raise ValueError(f"Project profile '{profile_name}' has no verified agent identity.")
+                raise ValueError(
+                    f"Project profile '{profile_name}' has no verified agent identity."
+                )
             provider = "antigravity" if provider == "agy" else provider
             profile = resolve_cli_invocation(
                 provider,
@@ -170,7 +174,9 @@ class CliAgentRunner:
                 "archive": "openspec-archive-change",
             }
             if op in {"normalize", "pr_prepare"}:
-                skill_name = "minime-request-normalizer" if op == "normalize" else "minime-pr-preparer"
+                skill_name = (
+                    "minime-request-normalizer" if op == "normalize" else "minime-pr-preparer"
+                )
                 rel_path = Path(".agents/skills") / skill_name / "SKILL.md"
                 dispatch_cmd = f"${skill_name} {change_name}"
                 check_parts = (".agents", ".agents/skills", f".agents/skills/{skill_name}")
@@ -181,7 +187,9 @@ class CliAgentRunner:
                 check_parts = (".agents", ".agents/skills", f".agents/skills/{skill_folder}")
         elif prov in ("antigravity", "agy"):
             if op in {"normalize", "pr_prepare"}:
-                skill_name = "minime-request-normalizer" if op == "normalize" else "minime-pr-preparer"
+                skill_name = (
+                    "minime-request-normalizer" if op == "normalize" else "minime-pr-preparer"
+                )
                 skill_candidates = (
                     Path(".agent/skills") / skill_name / "SKILL.md",
                     Path(".agents/skills") / skill_name / "SKILL.md",
@@ -217,7 +225,11 @@ class CliAgentRunner:
                             f"Installed OpenSpec workflow path contains a symlink: {candidate}"
                         )
                 rel_path = next(
-                    (candidate for candidate in workflow_candidates if (root / candidate).is_file()),
+                    (
+                        candidate
+                        for candidate in workflow_candidates
+                        if (root / candidate).is_file()
+                    ),
                     None,
                 )
                 check_parts = (".agent", ".agent/workflows", ".agents", ".agents/workflows")
@@ -287,34 +299,32 @@ class CliAgentRunner:
                         message=f"Capacity service rejected admission for project '{project_id}'.",
                     )
 
-        if self.budget_service is not None and project_id:
-            if hasattr(self.budget_service, "get_headroom"):
-                budget_result = self.budget_service.get_headroom(project_id)
-                if isinstance(budget_result, tuple):
-                    policy, headroom = budget_result
-                else:
-                    policy, headroom = True, budget_result
-                # BudgetService governs the optional OpenRouter drain path. A
-                # project that explicitly disables that fallback must not be
-                # forced to create a meaningless positive OpenRouter allowance
-                # before a direct primary-provider invocation can start.
-                if (
-                    str(provider_id).strip().lower() != "openrouter"
-                    and getattr(policy, "enabled", True) is False
-                ):
-                    return
-                if policy is None or headroom is None:
-                    raise CapacityExhaustedError(
-                        provider_id=provider_id,
-                        message=f"Budget policy/headroom is unavailable for project '{project_id}'.",
-                    )
-                daily = getattr(headroom, "daily_headroom_usd", headroom)
-                monthly = getattr(headroom, "monthly_headroom_usd", daily)
-                if daily <= 0 or monthly <= 0:
-                    raise CapacityExhaustedError(
-                        provider_id=provider_id,
-                        message=f"Budget headroom exhausted for provider '{provider_id}' on project '{project_id}'.",
-                    )
+        # BudgetService is exclusively an OpenRouter fallback authority.
+        # Subscription-based Codex/Antigravity dispatch must not depend on
+        # an OpenRouter policy row, even when the row is absent or enabled.
+        # Provider capacity and per-role authorization are enforced separately.
+        if (
+            self.budget_service is not None
+            and project_id
+            and str(provider_id).strip().lower() == "openrouter"
+        ):
+            budget_result = self.budget_service.get_headroom(project_id)
+            if isinstance(budget_result, tuple):
+                policy, headroom = budget_result
+            else:
+                policy, headroom = None, budget_result
+            if policy is None or not getattr(policy, "enabled", False) or headroom is None:
+                raise CapacityExhaustedError(
+                    provider_id=provider_id,
+                    message=f"OpenRouter budget policy/headroom is unavailable or disabled for project '{project_id}'.",
+                )
+            daily = getattr(headroom, "daily_headroom_usd", headroom)
+            monthly = getattr(headroom, "monthly_headroom_usd", daily)
+            if daily <= 0 or monthly <= 0:
+                raise CapacityExhaustedError(
+                    provider_id=provider_id,
+                    message=f"Budget headroom exhausted for provider '{provider_id}' on project '{project_id}'.",
+                )
 
     def _profile_for(self, role: str, provider: str) -> CliInvocationProfile | None:
         normalized_provider = "antigravity" if provider.lower() == "agy" else provider.lower()
@@ -327,7 +337,11 @@ class CliAgentRunner:
 
     def provider_for_role(self, role: str) -> str:
         """Return the provider selected by the verified persisted F2 profile."""
-        profile_name = {"thinker": "thinking", "implementer": "execution", "reviewer": "independent_review"}.get(role, role)
+        profile_name = {
+            "thinker": "thinking",
+            "implementer": "execution",
+            "reviewer": "independent_review",
+        }.get(role, role)
         providers = [provider for name, provider in self.profiles if name == profile_name]
         if len(providers) != 1:
             raise ValueError(f"No unique verified F2 provider is configured for role '{role}'.")
@@ -398,7 +412,9 @@ class CliAgentRunner:
         confinement = AgentProcessConfinement(allowed_worktree_path=str(worktree_path))
         preflight_check = confinement.validate_command_preflight(cwd=str(worktree_path))
         if preflight_check.outcome != ExternalOutcome.SUCCESS:
-            env_err = confinement.is_local_environment_preflight_error(preflight_check.error_message)
+            env_err = confinement.is_local_environment_preflight_error(
+                preflight_check.error_message
+            )
             return AgentExecutionResult(
                 exit_code=-2,
                 timed_out=False,
@@ -416,20 +432,26 @@ class CliAgentRunner:
                 exit_code=-1,
                 timed_out=False,
                 stdout=[],
-                stderr=[f"No verified executor configured for role '{role}' and provider '{provider}'."],
+                stderr=[
+                    f"No verified executor configured for role '{role}' and provider '{provider}'."
+                ],
                 duration_ms=0,
                 preflight_error="missing_verified_executor",
                 workflow=workflow,
             )
 
-        response_path = Path(output_last_message_path).resolve() if output_last_message_path else None
+        response_path = (
+            Path(output_last_message_path).resolve() if output_last_message_path else None
+        )
         schema_path = response_path.with_name("response.schema.json") if response_path else None
         if response_path:
             root = Path(worktree_path).resolve(strict=True)
             try:
                 response_path.relative_to(root)
             except ValueError as exc:
-                raise ValueError("Structured response path must remain inside the authorized worktree.") from exc
+                raise ValueError(
+                    "Structured response path must remain inside the authorized worktree."
+                ) from exc
             relative_parts = response_path.relative_to(root).parts
             cursor = root
             for part in relative_parts[:-1]:
@@ -469,7 +491,14 @@ class CliAgentRunner:
 
         try:
             if response_path and schema_path:
-                cmd.extend(["--output-schema", str(schema_path), "--output-last-message", str(response_path)])
+                cmd.extend(
+                    [
+                        "--output-schema",
+                        str(schema_path),
+                        "--output-last-message",
+                        str(response_path),
+                    ]
+                )
             auth_kwargs: dict[str, str] = {}
             normalized_provider = provider.lower()
             if normalized_provider == "agy":
@@ -519,14 +548,12 @@ class CliAgentRunner:
             or len(raw_stderr_lines) > self.MAX_OUTPUT_LINES
             or any(len(line) > self.MAX_LINE_CHARS for line in raw_stdout_lines + raw_stderr_lines)
         )
-        stdout_lines = [
-            redact_secrets(line[: self.MAX_LINE_CHARS])
-            for line in raw_stdout_lines
-        ][: self.MAX_OUTPUT_LINES]
-        stderr_lines = [
-            redact_secrets(line[: self.MAX_LINE_CHARS])
-            for line in raw_stderr_lines
-        ][: self.MAX_OUTPUT_LINES]
+        stdout_lines = [redact_secrets(line[: self.MAX_LINE_CHARS]) for line in raw_stdout_lines][
+            : self.MAX_OUTPUT_LINES
+        ]
+        stderr_lines = [redact_secrets(line[: self.MAX_LINE_CHARS]) for line in raw_stderr_lines][
+            : self.MAX_OUTPUT_LINES
+        ]
         structured_output_missing = bool(response_path and not response_path.is_file())
         structured_output_too_large = False
         structured_output: list[str] | None = [] if response_path else None
@@ -537,9 +564,7 @@ class CliAgentRunner:
                 # The last-message file is the structured response channel,
                 # not diagnostic output. Preserve it intact so valid JSON is
                 # never cut at the diagnostic line/character limits.
-                structured_output = [
-                    response_path.read_text(encoding="utf-8", errors="replace")
-                ]
+                structured_output = [response_path.read_text(encoding="utf-8", errors="replace")]
         if structured_output_missing:
             stdout_lines = []
         rotation_error = (
@@ -558,10 +583,9 @@ class CliAgentRunner:
                 workflow=workflow,
                 structured_output=structured_output,
                 diagnostic_output=[
-                    *[
-                        redact_secrets(line[: self.MAX_LINE_CHARS])
-                        for line in raw_stdout_lines
-                    ][: self.MAX_OUTPUT_LINES],
+                    *[redact_secrets(line[: self.MAX_LINE_CHARS]) for line in raw_stdout_lines][
+                        : self.MAX_OUTPUT_LINES
+                    ],
                     *stderr_lines,
                 ],
                 output_truncated=output_truncated,

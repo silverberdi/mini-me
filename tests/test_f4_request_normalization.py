@@ -5,6 +5,7 @@ import json
 import os
 from pathlib import Path
 from types import SimpleNamespace
+from unittest.mock import AsyncMock, MagicMock
 
 import httpx
 import pytest
@@ -105,7 +106,9 @@ Scenario: Stable output
 def test_normalization_fails_closed_when_remote_issue_changed():
     class ChangedIssue:
         def get_issue(self, *_):
-            return type("Result", (), {"outcome": ExternalOutcome.SUCCESS, "data": {"body": "other"}})()
+            return type(
+                "Result", (), {"outcome": ExternalOutcome.SUCCESS, "data": {"body": "other"}}
+            )()
 
     service = RequestNormalizationService(ChangedIssue())
     with pytest.raises(RequestNormalizationError, match="changed concurrently"):
@@ -154,12 +157,18 @@ Scenario: Salida estable
     assert second["provenance_key"] == "run-semantic:8"
     assert len(comments) == 2
     assert sum("Original Request" in str(item["body"]) for item in comments) == 1
-    assert sum("minime-request-normalization-semantic" in str(item["body"]) for item in comments) == 1
+    assert (
+        sum("minime-request-normalization-semantic" in str(item["body"]) for item in comments) == 1
+    )
 
 
 @pytest.mark.asyncio
 async def test_coordinator_requires_and_persists_structured_semantic_message(tmp_path: Path):
-    issue = {"number": 11, "body": "C1: ordenar. C2: conservar. C3: explicar.", "repository_url": "/repos/o/r"}
+    issue = {
+        "number": 11,
+        "body": "C1: ordenar. C2: conservar. C3: explicar.",
+        "repository_url": "/repos/o/r",
+    }
     comments: list[dict[str, object]] = []
 
     class Github:
@@ -191,7 +200,9 @@ async def test_coordinator_requires_and_persists_structured_semantic_message(tmp
 
     class Runner:
         def resolve_workflow(self, **_kwargs):
-            return SimpleNamespace(dispatch_command="$minime-request-normalizer issue-11", workflow_sha256="wf")
+            return SimpleNamespace(
+                dispatch_command="$minime-request-normalizer issue-11", workflow_sha256="wf"
+            )
 
         async def run(self, **_kwargs):
             payload = {
@@ -261,7 +272,9 @@ async def test_coordinator_requires_and_persists_structured_semantic_message(tmp
 
 
 def test_normalizer_skills_match_coordinator_schema():
-    coordinator_source = Path("src/minime/services/orchestration_coordinator.py").read_text(encoding="utf-8")
+    coordinator_source = Path("src/minime/services/orchestration_coordinator.py").read_text(
+        encoding="utf-8"
+    )
     assert '"required": ["normalized_body", "criteria", "semantic_message"]' in coordinator_source
     for relative in (
         ".agents/skills/minime-request-normalizer/SKILL.md",
@@ -296,7 +309,9 @@ async def test_failed_normalization_persists_diagnostic_and_blocks_reentry(tmp_p
 
     class Runner:
         def resolve_workflow(self, **_kwargs):
-            return SimpleNamespace(dispatch_command="$minime-request-normalizer issue-12", workflow_sha256="wf")
+            return SimpleNamespace(
+                dispatch_command="$minime-request-normalizer issue-12", workflow_sha256="wf"
+            )
 
         async def run(self, **_kwargs):
             nonlocal calls
@@ -399,7 +414,9 @@ async def test_invalid_gherkin_is_quarantined_and_never_published(tmp_path: Path
 
     class Runner:
         def resolve_workflow(self, **_kwargs):
-            return SimpleNamespace(dispatch_command="$minime-request-normalizer issue-13", workflow_sha256="wf")
+            return SimpleNamespace(
+                dispatch_command="$minime-request-normalizer issue-13", workflow_sha256="wf"
+            )
 
         async def run(self, **_kwargs):
             payload = {
@@ -500,15 +517,18 @@ def test_greenfield_capability_manifest_is_idempotent_and_preserves_conflicts(tm
     first = service.install_greenfield(source, target)
     second = service.install_greenfield(source, target)
     assert first["count"] == second["count"] == 2
-    assert service.validate_f5_readiness(
-        second,
-        {"complete": True},
-        project_type="GREENFIELD",
-        profiles_observed=True,
-        worktree_identity_verified=True,
-        confinement_verified=True,
-        github_binding_verified=True,
-    )["status"] == "READY_FOR_F5_PREPARATION"
+    assert (
+        service.validate_f5_readiness(
+            second,
+            {"complete": True},
+            project_type="GREENFIELD",
+            profiles_observed=True,
+            worktree_identity_verified=True,
+            confinement_verified=True,
+            github_binding_verified=True,
+        )["status"]
+        == "READY_FOR_F5_PREPARATION"
+    )
 
     (target / ".agents/skills/minime-example/SKILL.md").write_text("changed", encoding="utf-8")
     with pytest.raises(CapabilityConflictError):
@@ -562,7 +582,9 @@ def test_greenfield_capability_reconciliation_replaces_only_verified_predecessor
     assert again["replacements"] == []
 
 
-def test_greenfield_capability_reconciliation_preserves_unverified_conflict_and_brownfield(tmp_path: Path):
+def test_greenfield_capability_reconciliation_preserves_unverified_conflict_and_brownfield(
+    tmp_path: Path,
+):
     source = tmp_path / "source"
     target = tmp_path / "target"
     source_file = source / ".agents/skills/minime-request-normalizer/SKILL.md"
@@ -591,7 +613,9 @@ def test_greenfield_capability_reconciliation_preserves_unverified_conflict_and_
             source,
             target,
             profiles=profiles,
-            expected_existing_hashes={".agents/skills/minime-request-normalizer/SKILL.md": "0" * 64},
+            expected_existing_hashes={
+                ".agents/skills/minime-request-normalizer/SKILL.md": "0" * 64
+            },
             project_type="GREENFIELD",
             authorization=authorization,
         )
@@ -634,7 +658,9 @@ def test_greenfield_reconciliation_rejects_unbound_worktree_and_untrusted_manife
             source,
             target,
             profiles={"thinking": {"agent_id": "codex", "skills": ["minime-request-normalizer"]}},
-            expected_existing_hashes={".agents/skills/minime-request-normalizer/SKILL.md": old_hash},
+            expected_existing_hashes={
+                ".agents/skills/minime-request-normalizer/SKILL.md": old_hash
+            },
             project_type="GREENFIELD",
             authorization=authorization,
         )
@@ -668,14 +694,18 @@ def test_greenfield_reconciliation_rejects_predecessor_hash_not_from_authority(t
             source,
             target,
             profiles={"thinking": {"agent_id": "codex", "skills": ["minime-request-normalizer"]}},
-            expected_existing_hashes={".agents/skills/minime-request-normalizer/SKILL.md": old_hash},
+            expected_existing_hashes={
+                ".agents/skills/minime-request-normalizer/SKILL.md": old_hash
+            },
             project_type="GREENFIELD",
             authorization=authorization,
         )
     assert target_file.read_text(encoding="utf-8") == "old"
 
 
-def test_greenfield_reconciliation_is_atomic_when_replace_is_interrupted(tmp_path: Path, monkeypatch):
+def test_greenfield_reconciliation_is_atomic_when_replace_is_interrupted(
+    tmp_path: Path, monkeypatch
+):
     source = tmp_path / "source"
     target = tmp_path / "target"
     source_file = source / ".agents/skills/minime-request-normalizer/SKILL.md"
@@ -707,7 +737,9 @@ def test_greenfield_reconciliation_is_atomic_when_replace_is_interrupted(tmp_pat
             source,
             target,
             profiles={"thinking": {"agent_id": "codex", "skills": ["minime-request-normalizer"]}},
-            expected_existing_hashes={".agents/skills/minime-request-normalizer/SKILL.md": old_hash},
+            expected_existing_hashes={
+                ".agents/skills/minime-request-normalizer/SKILL.md": old_hash
+            },
             project_type="GREENFIELD",
             authorization=authorization,
         )
@@ -810,10 +842,14 @@ def test_semantic_pr_agent_contract_is_structured_and_fail_closed(tmp_path: Path
             return AgentExecutionResult(
                 exit_code=0,
                 timed_out=False,
-                stdout=['{"title":"feat(req-7): semantic (Addresses #7)","body":"## Evidence\\n\\nAddresses #7"}'],
+                stdout=[
+                    '{"title":"feat(req-7): semantic (Addresses #7)","body":"## Evidence\\n\\nAddresses #7"}'
+                ],
                 stderr=[],
                 duration_ms=1,
-                structured_output=['{"title":"feat(req-7): semantic (Addresses #7)","body":"## Evidence\\n\\nAddresses #7"}'],
+                structured_output=[
+                    '{"title":"feat(req-7): semantic (Addresses #7)","body":"## Evidence\\n\\nAddresses #7"}'
+                ],
                 diagnostic_output=[],
             )
 
@@ -847,3 +883,146 @@ def test_semantic_pr_agent_contract_is_structured_and_fail_closed(tmp_path: Path
         )
     )
     assert prepared[0].startswith("feat(req-7)")
+
+
+@pytest.mark.asyncio
+async def test_legacy_f5_budget_preflight_denial_is_archived_before_explicit_resume(tmp_path: Path):
+    """A known pre-subprocess exception can be reconciled, never silently erased."""
+    from tests.conftest import InMemoryPersistenceUnitOfWork
+
+    previous = {
+        "attempt_id": "0affa934-1bb7-4461-8af0-c9822b5d4772",
+        "status": "FAILED",
+        "provider": "codex",
+        "workflow": "$minime-request-normalizer issue-173",
+        "workflow_sha256": "verified-workflow-sha",
+        "exit_code": None,
+        "timed_out": None,
+        "structured_output_present": False,
+        "usage_status": "UNKNOWN",
+        "usage": None,
+        "diagnostic": "Budget policy/headroom is unavailable for project 'mini-me'.",
+    }
+    uow = InMemoryPersistenceUnitOfWork()
+    run = OrchestrationRun(
+        project_id="mini-me",
+        change_name="gacela-05-ui-self-hosted",
+        base_sha="main",
+        stop_details={"issue_number": 173, "normalization_attempt": dict(previous)},
+    )
+    uow.orchestration_runs.save(run)
+
+    github = MagicMock()
+    github.get_issue.return_value = ExternalActionResult(
+        outcome=ExternalOutcome.SUCCESS,
+        source_adapter="test",
+        reason_code=ExternalReasonCode.EXECUTION_SUCCESS,
+        retry_safety=RetrySafety.SAFE,
+        data={"number": 173, "body": "Implement the F5 control center."},
+    )
+    github.list_issue_comments.return_value = ExternalActionResult(
+        outcome=ExternalOutcome.SUCCESS,
+        source_adapter="test",
+        reason_code=ExternalReasonCode.EXECUTION_SUCCESS,
+        retry_safety=RetrySafety.SAFE,
+        data=[],
+    )
+    runner = MagicMock()
+    runner.resolve_workflow.return_value = SimpleNamespace(
+        workflow_sha256="verified-workflow-sha",
+        dispatch_command="$minime-request-normalizer issue-173",
+    )
+    runner.run = AsyncMock(side_effect=RuntimeError("test-only no-model stop"))
+    coordinator = NativeOrchestrationCoordinator(
+        uow_factory=lambda: uow,
+        github_adapter=github,
+        worktree_manager=object(),
+        agent_runner=runner,
+    )
+
+    result, message = await coordinator._normalize_request_before_explore(
+        active_run=run,
+        project_id="mini-me",
+        repository="silverberdi/mini-me",
+        worktree_path=tmp_path,
+        issue_number=173,
+        issue_title="F5",
+        issue_body="Implement the F5 control center.",
+        provider="codex",
+    )
+
+    assert result is None and "dispatch failed" in message
+    assert run.stop_details["normalization_attempt_history"] == [
+        {**previous, "reconciliation": "CONFIRMED_PRE_DISPATCH_BUDGET_DENIAL"}
+    ]
+    assert run.stop_details["normalization_attempt"]["attempt_id"] != previous["attempt_id"]
+    assert run.stop_details["normalization_attempt"]["status"] == "FAILED"
+    assert run.run_id == uow.orchestration_runs.get_by_id(run.run_id).run_id
+    runner.run.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("tamper", ["dispatch", "exit", "workflow", "output"])
+async def test_f5_ambiguous_normalization_failure_cannot_reenter(tmp_path: Path, tamper: str):
+    from tests.conftest import InMemoryPersistenceUnitOfWork
+
+    previous = {
+        "attempt_id": "prior",
+        "status": "FAILED",
+        "provider": "codex",
+        "workflow": "$minime-request-normalizer issue-173",
+        "workflow_sha256": "verified-workflow-sha",
+        "exit_code": None,
+        "timed_out": None,
+        "structured_output_present": False,
+        "usage_status": "UNKNOWN",
+        "usage": None,
+        "diagnostic": "Budget policy/headroom is unavailable for project 'mini-me'.",
+    }
+    if tamper == "dispatch":
+        previous["dispatch_observed"] = True
+    elif tamper == "exit":
+        previous["exit_code"] = 1
+    elif tamper == "workflow":
+        previous["workflow_sha256"] = "wrong-hash"
+    else:
+        response = tmp_path / ".minime" / "request-normalization-fixed-run.json"
+        response.parent.mkdir(parents=True)
+        response.write_text("ambiguous output", encoding="utf-8")
+
+    uow = InMemoryPersistenceUnitOfWork()
+    run = OrchestrationRun(
+        run_id="fixed-run",
+        project_id="mini-me",
+        change_name="gacela-05-ui-self-hosted",
+        base_sha="main",
+        stop_details={"normalization_attempt": previous},
+    )
+    uow.orchestration_runs.save(run)
+    runner = MagicMock()
+    runner.resolve_workflow.return_value = SimpleNamespace(
+        workflow_sha256="verified-workflow-sha",
+        dispatch_command="$minime-request-normalizer issue-173",
+    )
+    runner.run = AsyncMock()
+    coordinator = NativeOrchestrationCoordinator(
+        uow_factory=lambda: uow,
+        github_adapter=MagicMock(),
+        worktree_manager=object(),
+        agent_runner=runner,
+    )
+    result, message = await coordinator._normalize_request_before_explore(
+        active_run=run,
+        project_id="mini-me",
+        repository="silverberdi/mini-me",
+        worktree_path=tmp_path,
+        issue_number=173,
+        issue_title="F5",
+        issue_body="F5 body",
+        provider="codex",
+    )
+    assert result is None
+    assert "already recorded" in message or "mismatched evidence" in message
+    assert run.stop_details["normalization_attempt"] == previous
+    assert "normalization_attempt_history" not in run.stop_details
+    runner.run.assert_not_awaited()
