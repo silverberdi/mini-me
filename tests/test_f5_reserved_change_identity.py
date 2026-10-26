@@ -3,16 +3,16 @@
 No CLI agent, inference or network request is dispatched by these tests.
 """
 
-from pathlib import Path
 import subprocess
+from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
 from tests.conftest import InMemoryPersistenceUnitOfWork, setup_managed_repository_fixture
 
-from minime.domain.enums import ExternalOutcome, ExternalReasonCode, RetrySafety, OrchestrationStage
-from minime.domain.models import ExternalActionResult, OrchestrationRun, WorktreeCreationState
+from minime.domain.enums import ExternalOutcome, ExternalReasonCode, OrchestrationStage, RetrySafety, WorktreeCreationState
+from minime.domain.models import ExternalActionResult, OrchestrationRun
 from minime.services.agent_runner import CliAgentRunner
 from minime.services.orchestration_coordinator import NativeOrchestrationCoordinator
 from minime.services.worktree_manager import WorktreeInfo, WorktreeManager
@@ -123,6 +123,7 @@ async def test_request_initialization_uses_reserved_identity_without_dispatching
     assert active.stop_details["issue_number"] == 173
     assert worktrees.create_request_worktree.await_args.kwargs["change_name"] == "gacela-05-ui-self-hosted"
     runner.run.assert_not_awaited()
+
 
 def _prepare_offline_real_git(repo_dir: Path, uow: InMemoryPersistenceUnitOfWork) -> str:
     """Use a real disposable repository and local tracking ref; no network/model calls."""
