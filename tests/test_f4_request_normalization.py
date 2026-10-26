@@ -5,6 +5,7 @@ import json
 import os
 from pathlib import Path
 from types import SimpleNamespace
+from unittest.mock import AsyncMock, MagicMock
 
 import httpx
 import pytest
@@ -847,3 +848,146 @@ def test_semantic_pr_agent_contract_is_structured_and_fail_closed(tmp_path: Path
         )
     )
     assert prepared[0].startswith("feat(req-7)")
+
+@pytest.mark.asyncio
+async def test_legacy_f5_budget_preflight_denial_is_archived_before_explicit_resume(tmp_path: Path):
+    """A known pre-subprocess exception can be reconciled, never silently erased."""
+    from tests.conftest import InMemoryPersistenceUnitOfWork
+
+    previous = {
+        "attempt_id": "0affa934-1bb7-4461-8af0-c9822b5d4772",
+        "status": "FAILED",
+        "provider": "codex",
+        "workflow": "$minime-request-normalizer issue-173",
+        "workflow_sha256": "verified-workflow-sha",
+        "exit_code": None,
+        "timed_out": None,
+        "structured_output_present": False,
+        "usage_status": "UNKNOWN",
+        "usage": None,
+        "diagnostic": "Budget policy/headroom is unavailable for project 'mini-me'.",
+    }
+    uow = InMemoryPersistenceUnitOfWork()
+    run = OrchestrationRun(
+        project_id="mini-me",
+        change_name="gacela-05-ui-self-hosted",
+        base_sha="main",
+        stop_details={"issue_number": 173, "normalization_attempt": dict(previous)},
+    )
+    uow.orchestration_runs.save(run)
+
+    github = MagicMock()
+    github.get_issue.return_value = ExternalActionResult(
+        outcome=ExternalOutcome.SUCCESS,
+        source_adapter="test",
+        reason_code=ExternalReasonCode.EXECUTION_SUCCESS,
+        retry_safety=RetrySafety.SAFE,
+        data={"number": 173, "body": "Implement the F5 control center."},
+    )
+    github.list_issue_comments.return_value = ExternalActionResult(
+        outcome=ExternalOutcome.SUCCESS,
+        source_adapter="test",
+        reason_code=ExternalReasonCode.EXECUTION_SUCCESS,
+        retry_safety=RetrySafety.SAFE,
+        data=[],
+    )
+    runner = MagicMock()
+    runner.resolve_workflow.return_value = SimpleNamespace(
+        workflow_sha256="verified-workflow-sha",
+        dispatch_command="$minime-request-normalizer issue-173",
+    )
+    runner.run = AsyncMock(side_effect=RuntimeError("test-only no-model stop"))
+    coordinator = NativeOrchestrationCoordinator(
+        uow_factory=lambda: uow,
+        github_adapter=github,
+        worktree_manager=object(),
+        agent_runner=runner,
+    )
+
+    result, message = await coordinator._normalize_request_before_explore(
+        active_run=run,
+        project_id="mini-me",
+        repository="silverberdi/mini-me",
+        worktree_path=tmp_path,
+        issue_number=173,
+        issue_title="F5",
+        issue_body="Implement the F5 control center.",
+        provider="codex",
+    )
+
+    assert result is None and "dispatch failed" in message
+    assert run.stop_details["normalization_attempt_history"] == [
+        {**previous, "reconciliation": "CONFIRMED_PRE_DISPATCH_BUDGET_DENIAL"}
+    ]
+    assert run.stop_details["normalization_attempt"]["attempt_id"] != previous["attempt_id"]
+    assert run.stop_details["normalization_attempt"]["status"] == "FAILED"
+    assert run.run_id == uow.orchestration_runs.get_by_id(run.run_id).run_id
+    runner.run.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("tamper", ["dispatch", "exit", "workflow", "output"])
+async def test_f5_ambiguous_normalization_failure_cannot_reenter(tmp_path: Path, tamper: str):
+    from tests.conftest import InMemoryPersistenceUnitOfWork
+
+    previous = {
+        "attempt_id": "prior",
+        "status": "FAILED",
+        "provider": "codex",
+        "workflow": "$minime-request-normalizer issue-173",
+        "workflow_sha256": "verified-workflow-sha",
+        "exit_code": None,
+        "timed_out": None,
+        "structured_output_present": False,
+        "usage_status": "UNKNOWN",
+        "usage": None,
+        "diagnostic": "Budget policy/headroom is unavailable for project 'mini-me'.",
+    }
+    if tamper == "dispatch":
+        previous["dispatch_observed"] = True
+    elif tamper == "exit":
+        previous["exit_code"] = 1
+    elif tamper == "workflow":
+        previous["workflow_sha256"] = "wrong-hash"
+    else:
+        response = tmp_path / ".minime" / f"request-normalization-fixed-run.json"
+        response.parent.mkdir(parents=True)
+        response.write_text("ambiguous output", encoding="utf-8")
+
+    uow = InMemoryPersistenceUnitOfWork()
+    run = OrchestrationRun(
+        run_id="fixed-run",
+        project_id="mini-me",
+        change_name="gacela-05-ui-self-hosted",
+        base_sha="main",
+        stop_details={"normalization_attempt": previous},
+    )
+    uow.orchestration_runs.save(run)
+    runner = MagicMock()
+    runner.resolve_workflow.return_value = SimpleNamespace(
+        workflow_sha256="verified-workflow-sha",
+        dispatch_command="$minime-request-normalizer issue-173",
+    )
+    runner.run = AsyncMock()
+    coordinator = NativeOrchestrationCoordinator(
+        uow_factory=lambda: uow,
+        github_adapter=MagicMock(),
+        worktree_manager=object(),
+        agent_runner=runner,
+    )
+    result, message = await coordinator._normalize_request_before_explore(
+        active_run=run,
+        project_id="mini-me",
+        repository="silverberdi/mini-me",
+        worktree_path=tmp_path,
+        issue_number=173,
+        issue_title="F5",
+        issue_body="F5 body",
+        provider="codex",
+    )
+    assert result is None
+    assert "already recorded" in message or "mismatched evidence" in message
+    assert run.stop_details["normalization_attempt"] == previous
+    assert "normalization_attempt_history" not in run.stop_details
+    runner.run.assert_not_awaited()
+
