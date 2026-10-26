@@ -122,3 +122,64 @@ async def test_request_initialization_uses_reserved_identity_without_dispatching
     assert active.stop_details["issue_number"] == 173
     assert worktrees.create_request_worktree.await_args.kwargs["change_name"] == "gacela-05-ui-self-hosted"
     runner.run.assert_not_awaited()
+
+@pytest.mark.asyncio
+async def test_new_request_worktree_persists_authoritative_change_and_ownership(tmp_path: Path):
+    repo_dir = tmp_path / "repo"
+    managed_root = tmp_path / "worktrees"
+    uow = InMemoryPersistenceUnitOfWork()
+    setup_managed_repository_fixture(
+        uow, "mini-me", repo_dir, managed_root,
+        canonical_repository_identity="github.com/silverberdi/mini-me",
+    )
+    manager = WorktreeManager(repo_dir, uow=uow)
+    manager._write_ownership_marker = MagicMock()
+
+    async def git_command(args, project_id=None):
+        if args[:2] == ["rev-parse", "--verify"]:
+            raise RuntimeError("new branch")
+        if args and args[0] == "rev-parse":
+            return "a" * 40
+        return ""
+
+    manager._git = AsyncMock(side_effect=git_command)
+    info = await manager.create_request_worktree(
+        project_id="mini-me",
+        issue_number=173,
+        issue_title="Fase 5 UI",
+        run_id="f5-run-173",
+        change_name="gacela-05-ui-self-hosted",
+    )
+
+    ownership = uow.orchestration_worktree_ownerships.get_by_job_id("f5-run-173")
+    assert ownership is not None
+    assert ownership.change_name == "gacela-05-ui-self-hosted"
+    assert ownership.run_id == "f5-run-173"
+    assert ownership.canonical_worktree_path == str(info.path)
+    assert ownership.source_repository_identity == "github.com/silverberdi/mini-me"
+    assert ownership.source_base_sha == "a" * 40
+    assert ownership.branch == info.branch_name
+    assert ownership.creation_state.value == "CREATED"
+    manager._write_ownership_marker.assert_called_once()
+
+
+@pytest.mark.asyncio
+async def test_worktree_ownership_failure_blocks_request_instead_of_silent_success(tmp_path: Path):
+    repo_dir = tmp_path / "repo"
+    managed_root = tmp_path / "worktrees"
+    uow = InMemoryPersistenceUnitOfWork()
+    setup_managed_repository_fixture(
+        uow, "mini-me", repo_dir, managed_root,
+        canonical_repository_identity="github.com/silverberdi/mini-me",
+    )
+    manager = WorktreeManager(repo_dir, uow=uow)
+    manager._git = AsyncMock(side_effect=lambda args, project_id=None: (
+        (_ for _ in ()).throw(RuntimeError("new branch"))
+        if args[:2] == ["rev-parse", "--verify"] else "b" * 40
+    ))
+    manager._write_ownership_marker = MagicMock(side_effect=RuntimeError("marker denied"))
+    with pytest.raises(RuntimeError, match="marker denied"):
+        await manager.create_request_worktree(
+            project_id="mini-me", issue_number=173, issue_title="Fase 5 UI",
+            run_id="f5-run-denied", change_name="gacela-05-ui-self-hosted",
+        )
