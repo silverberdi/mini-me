@@ -903,7 +903,9 @@ class TicketSourceAdapter(Protocol):
         self, repository: str, state: str = "open", limit: int = 50
     ) -> ExternalActionResult[list[dict[str, Any]]]: ...
 
-    def get_issue(self, repository: str, issue_number: int) -> ExternalActionResult[dict[str, Any]]: ...
+    def get_issue(
+        self, repository: str, issue_number: int
+    ) -> ExternalActionResult[dict[str, Any]]: ...
 
     def list_issue_comments(
         self, repository: str, issue_number: int

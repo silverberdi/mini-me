@@ -174,9 +174,7 @@ class RequestNormalizationService:
                 expected_body=remote_body,
             )
             if update_result.outcome != ExternalOutcome.SUCCESS:
-                raise RequestNormalizationError(
-                    "Normalized Issue body was not confirmed remotely."
-                )
+                raise RequestNormalizationError("Normalized Issue body was not confirmed remotely.")
         confirmed = self.github.get_issue(repository, issue_number)
         if confirmed.outcome != ExternalOutcome.SUCCESS or not isinstance(confirmed.data, dict):
             raise RequestNormalizationError("Normalized Issue confirmation was unobservable.")
@@ -197,9 +195,7 @@ class RequestNormalizationService:
             isinstance(item, dict) and semantic_key in str(item.get("body", ""))
             for item in (comments.data or [])
         ):
-            raise RequestNormalizationError(
-                "Semantic normalization comment was not confirmed."
-            )
+            raise RequestNormalizationError("Semantic normalization comment was not confirmed.")
         return {
             "issue_number": issue_number,
             "run_id": run_id,

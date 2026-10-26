@@ -1028,6 +1028,7 @@ async def test_f5_ambiguous_normalization_failure_cannot_reenter(tmp_path: Path,
     assert "normalization_attempt_history" not in run.stop_details
     runner.run.assert_not_awaited()
 
+
 def test_issue_patch_rejects_if_match_and_succeeds_with_read_verify():
     """GitHub REST rejects conditional unsafe PATCH; our adapter must omit it."""
     original = "F5 original body"
@@ -1044,9 +1045,7 @@ def test_issue_patch_rejects_if_match_and_succeeds_with_read_verify():
                 return httpx.Response(
                     400,
                     json={
-                        "errors": [
-                            "Conditional request headers are not allowed in unsafe requests"
-                        ]
+                        "errors": ["Conditional request headers are not allowed in unsafe requests"]
                     },
                 )
             issue["body"] = json.loads(request.content)["body"]
@@ -1079,9 +1078,7 @@ def test_issue_patch_refuses_changed_body_without_remote_write():
         return httpx.Response(404)
 
     adapter = GitHubAdapter(auth=StaticAuth(handler))
-    result = adapter.update_issue_body(
-        "o/r", 173, "Feature: F5", expected_body=original
-    )
+    result = adapter.update_issue_body("o/r", 173, "Feature: F5", expected_body=original)
 
     assert result.outcome is ExternalOutcome.FAILURE
     assert result.reason_code is ExternalReasonCode.CONFLICT
@@ -1117,9 +1114,7 @@ def test_issue_patch_requires_verifiable_response_body():
             return httpx.Response(200, json=issue)
         if request.method == "PATCH" and request.url.path.endswith("/issues/173"):
             patch_attempts.append(request)
-            return httpx.Response(
-                200, json={"number": 173, "body": "Unexpected remote result"}
-            )
+            return httpx.Response(200, json={"number": 173, "body": "Unexpected remote result"})
         return httpx.Response(404)
 
     result = GitHubAdapter(auth=StaticAuth(handler)).update_issue_body(
