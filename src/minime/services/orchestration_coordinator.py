@@ -731,6 +731,25 @@ class NativeOrchestrationCoordinator:
                     current_stage=OrchestrationStage.ADMITTED,
                     message="Active Request lacks immutable Change or Issue identity.",
                 )
+            # Do not send an empty or subsequently edited remote Issue body to
+            # Propose on re-entry. Normalization is a durable, immutable
+            # checkpoint for the accepted Request.
+            normalized = active_details.get("request_normalization")
+            normalized_body = (
+                normalized.get("normalized_body") if isinstance(normalized, dict) else None
+            )
+            if isinstance(normalized_body, str) and normalized_body.strip():
+                issue_body = normalized_body
+            elif getattr(selected.get("run"), "current_stage", None) not in (
+                OrchestrationStage.ADMITTED,
+                OrchestrationStage.PREPARING_EXECUTION,
+                OrchestrationStage.EXPLORING,
+            ):
+                return OrchestrationCoordinationResult(
+                    status="PAUSED", run_id=selected.get("run_id"),
+                    current_stage=selected["run"].current_stage,
+                    message="Active Request has no verified durable normalized body; Propose cannot resume.",
+                )
         else:
             try:
                 change_name = WorktreeManager.resolve_request_change_name(
