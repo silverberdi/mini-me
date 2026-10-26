@@ -4268,24 +4268,30 @@ class WorktreeManager:
             await self._git(["worktree", "add", "-b", branch_name, str(worktree_path), base_sha_str], project_id=project_id)
 
         ownership_repo = getattr(self.uow, "orchestration_worktree_ownerships", None)
-        if ownership_repo and run_id:
-            try:
-                ownership = OrchestrationWorktreeOwnership(
-                    id=str(uuid.uuid4()),
-                    job_id=run_id,
-                    project_id=project_id,
-                    canonical_worktree_path=str(worktree_path),
-                    worktree_parent_dir=str(parent_dir),
-                    candidate_branch_name=branch_name,
-                    creation_state=WorktreeCreationState.CREATED,
-                    is_active=True,
-                    created_at=utc_now(),
-                    updated_at=utc_now(),
-                )
-                ownership_repo.save(ownership)
-                self._flush_uow()
-            except Exception as exc:
-                logger.debug(f"Failed to record worktree ownership: {exc}")
+        if run_id:
+            binding_repo = getattr(self.uow, "project_managed_repository_bindings", None)
+            binding = binding_repo.get_by_project_id(project_id) if binding_repo else None
+            if ownership_repo is None or binding is None:
+                raise RuntimeError("Cannot publish request Worktree without durable ownership and binding")
+            ownership = OrchestrationWorktreeOwnership(
+                job_id=run_id,
+                run_id=run_id,
+                project_id=project_id,
+                change_name=change_name or f"req-{issue_number}-{self.slugify_request_title(issue_title)}",
+                canonical_worktree_path=str(worktree_path),
+                source_repository_identity=binding.canonical_repository_identity,
+                source_base_sha=base_sha_str,
+                branch=branch_name,
+                creation_state=WorktreeCreationState.PENDING,
+            )
+            # An ownership failure must block agent dispatch, never be swallowed.
+            ownership_repo.save(ownership)
+            self._flush_uow()
+            self._write_ownership_marker(worktree_path, ownership)
+            ownership.creation_state = WorktreeCreationState.CREATED
+            ownership.updated_at = utc_now()
+            ownership_repo.save(ownership)
+            self._flush_uow()
 
         return WorktreeInfo(
             path=worktree_path,
