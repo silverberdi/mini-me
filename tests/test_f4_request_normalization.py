@@ -106,7 +106,9 @@ Scenario: Stable output
 def test_normalization_fails_closed_when_remote_issue_changed():
     class ChangedIssue:
         def get_issue(self, *_):
-            return type("Result", (), {"outcome": ExternalOutcome.SUCCESS, "data": {"body": "other"}})()
+            return type(
+                "Result", (), {"outcome": ExternalOutcome.SUCCESS, "data": {"body": "other"}}
+            )()
 
     service = RequestNormalizationService(ChangedIssue())
     with pytest.raises(RequestNormalizationError, match="changed concurrently"):
@@ -155,12 +157,18 @@ Scenario: Salida estable
     assert second["provenance_key"] == "run-semantic:8"
     assert len(comments) == 2
     assert sum("Original Request" in str(item["body"]) for item in comments) == 1
-    assert sum("minime-request-normalization-semantic" in str(item["body"]) for item in comments) == 1
+    assert (
+        sum("minime-request-normalization-semantic" in str(item["body"]) for item in comments) == 1
+    )
 
 
 @pytest.mark.asyncio
 async def test_coordinator_requires_and_persists_structured_semantic_message(tmp_path: Path):
-    issue = {"number": 11, "body": "C1: ordenar. C2: conservar. C3: explicar.", "repository_url": "/repos/o/r"}
+    issue = {
+        "number": 11,
+        "body": "C1: ordenar. C2: conservar. C3: explicar.",
+        "repository_url": "/repos/o/r",
+    }
     comments: list[dict[str, object]] = []
 
     class Github:
@@ -192,7 +200,9 @@ async def test_coordinator_requires_and_persists_structured_semantic_message(tmp
 
     class Runner:
         def resolve_workflow(self, **_kwargs):
-            return SimpleNamespace(dispatch_command="$minime-request-normalizer issue-11", workflow_sha256="wf")
+            return SimpleNamespace(
+                dispatch_command="$minime-request-normalizer issue-11", workflow_sha256="wf"
+            )
 
         async def run(self, **_kwargs):
             payload = {
@@ -262,7 +272,9 @@ async def test_coordinator_requires_and_persists_structured_semantic_message(tmp
 
 
 def test_normalizer_skills_match_coordinator_schema():
-    coordinator_source = Path("src/minime/services/orchestration_coordinator.py").read_text(encoding="utf-8")
+    coordinator_source = Path("src/minime/services/orchestration_coordinator.py").read_text(
+        encoding="utf-8"
+    )
     assert '"required": ["normalized_body", "criteria", "semantic_message"]' in coordinator_source
     for relative in (
         ".agents/skills/minime-request-normalizer/SKILL.md",
@@ -297,7 +309,9 @@ async def test_failed_normalization_persists_diagnostic_and_blocks_reentry(tmp_p
 
     class Runner:
         def resolve_workflow(self, **_kwargs):
-            return SimpleNamespace(dispatch_command="$minime-request-normalizer issue-12", workflow_sha256="wf")
+            return SimpleNamespace(
+                dispatch_command="$minime-request-normalizer issue-12", workflow_sha256="wf"
+            )
 
         async def run(self, **_kwargs):
             nonlocal calls
@@ -400,7 +414,9 @@ async def test_invalid_gherkin_is_quarantined_and_never_published(tmp_path: Path
 
     class Runner:
         def resolve_workflow(self, **_kwargs):
-            return SimpleNamespace(dispatch_command="$minime-request-normalizer issue-13", workflow_sha256="wf")
+            return SimpleNamespace(
+                dispatch_command="$minime-request-normalizer issue-13", workflow_sha256="wf"
+            )
 
         async def run(self, **_kwargs):
             payload = {
@@ -501,15 +517,18 @@ def test_greenfield_capability_manifest_is_idempotent_and_preserves_conflicts(tm
     first = service.install_greenfield(source, target)
     second = service.install_greenfield(source, target)
     assert first["count"] == second["count"] == 2
-    assert service.validate_f5_readiness(
-        second,
-        {"complete": True},
-        project_type="GREENFIELD",
-        profiles_observed=True,
-        worktree_identity_verified=True,
-        confinement_verified=True,
-        github_binding_verified=True,
-    )["status"] == "READY_FOR_F5_PREPARATION"
+    assert (
+        service.validate_f5_readiness(
+            second,
+            {"complete": True},
+            project_type="GREENFIELD",
+            profiles_observed=True,
+            worktree_identity_verified=True,
+            confinement_verified=True,
+            github_binding_verified=True,
+        )["status"]
+        == "READY_FOR_F5_PREPARATION"
+    )
 
     (target / ".agents/skills/minime-example/SKILL.md").write_text("changed", encoding="utf-8")
     with pytest.raises(CapabilityConflictError):
@@ -563,7 +582,9 @@ def test_greenfield_capability_reconciliation_replaces_only_verified_predecessor
     assert again["replacements"] == []
 
 
-def test_greenfield_capability_reconciliation_preserves_unverified_conflict_and_brownfield(tmp_path: Path):
+def test_greenfield_capability_reconciliation_preserves_unverified_conflict_and_brownfield(
+    tmp_path: Path,
+):
     source = tmp_path / "source"
     target = tmp_path / "target"
     source_file = source / ".agents/skills/minime-request-normalizer/SKILL.md"
@@ -592,7 +613,9 @@ def test_greenfield_capability_reconciliation_preserves_unverified_conflict_and_
             source,
             target,
             profiles=profiles,
-            expected_existing_hashes={".agents/skills/minime-request-normalizer/SKILL.md": "0" * 64},
+            expected_existing_hashes={
+                ".agents/skills/minime-request-normalizer/SKILL.md": "0" * 64
+            },
             project_type="GREENFIELD",
             authorization=authorization,
         )
@@ -635,7 +658,9 @@ def test_greenfield_reconciliation_rejects_unbound_worktree_and_untrusted_manife
             source,
             target,
             profiles={"thinking": {"agent_id": "codex", "skills": ["minime-request-normalizer"]}},
-            expected_existing_hashes={".agents/skills/minime-request-normalizer/SKILL.md": old_hash},
+            expected_existing_hashes={
+                ".agents/skills/minime-request-normalizer/SKILL.md": old_hash
+            },
             project_type="GREENFIELD",
             authorization=authorization,
         )
@@ -669,14 +694,18 @@ def test_greenfield_reconciliation_rejects_predecessor_hash_not_from_authority(t
             source,
             target,
             profiles={"thinking": {"agent_id": "codex", "skills": ["minime-request-normalizer"]}},
-            expected_existing_hashes={".agents/skills/minime-request-normalizer/SKILL.md": old_hash},
+            expected_existing_hashes={
+                ".agents/skills/minime-request-normalizer/SKILL.md": old_hash
+            },
             project_type="GREENFIELD",
             authorization=authorization,
         )
     assert target_file.read_text(encoding="utf-8") == "old"
 
 
-def test_greenfield_reconciliation_is_atomic_when_replace_is_interrupted(tmp_path: Path, monkeypatch):
+def test_greenfield_reconciliation_is_atomic_when_replace_is_interrupted(
+    tmp_path: Path, monkeypatch
+):
     source = tmp_path / "source"
     target = tmp_path / "target"
     source_file = source / ".agents/skills/minime-request-normalizer/SKILL.md"
@@ -708,7 +737,9 @@ def test_greenfield_reconciliation_is_atomic_when_replace_is_interrupted(tmp_pat
             source,
             target,
             profiles={"thinking": {"agent_id": "codex", "skills": ["minime-request-normalizer"]}},
-            expected_existing_hashes={".agents/skills/minime-request-normalizer/SKILL.md": old_hash},
+            expected_existing_hashes={
+                ".agents/skills/minime-request-normalizer/SKILL.md": old_hash
+            },
             project_type="GREENFIELD",
             authorization=authorization,
         )
@@ -811,10 +842,14 @@ def test_semantic_pr_agent_contract_is_structured_and_fail_closed(tmp_path: Path
             return AgentExecutionResult(
                 exit_code=0,
                 timed_out=False,
-                stdout=['{"title":"feat(req-7): semantic (Addresses #7)","body":"## Evidence\\n\\nAddresses #7"}'],
+                stdout=[
+                    '{"title":"feat(req-7): semantic (Addresses #7)","body":"## Evidence\\n\\nAddresses #7"}'
+                ],
                 stderr=[],
                 duration_ms=1,
-                structured_output=['{"title":"feat(req-7): semantic (Addresses #7)","body":"## Evidence\\n\\nAddresses #7"}'],
+                structured_output=[
+                    '{"title":"feat(req-7): semantic (Addresses #7)","body":"## Evidence\\n\\nAddresses #7"}'
+                ],
                 diagnostic_output=[],
             )
 
@@ -951,7 +986,7 @@ async def test_f5_ambiguous_normalization_failure_cannot_reenter(tmp_path: Path,
     elif tamper == "workflow":
         previous["workflow_sha256"] = "wrong-hash"
     else:
-        response = tmp_path / ".minime" / f"request-normalization-fixed-run.json"
+        response = tmp_path / ".minime" / "request-normalization-fixed-run.json"
         response.parent.mkdir(parents=True)
         response.write_text("ambiguous output", encoding="utf-8")
 
@@ -991,4 +1026,3 @@ async def test_f5_ambiguous_normalization_failure_cannot_reenter(tmp_path: Path,
     assert run.stop_details["normalization_attempt"] == previous
     assert "normalization_attempt_history" not in run.stop_details
     runner.run.assert_not_awaited()
-

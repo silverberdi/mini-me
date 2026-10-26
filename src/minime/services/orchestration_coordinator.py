@@ -69,7 +69,10 @@ def _quarantine_response_content(raw_response: str) -> str:
         if any(marker in normalized_key for marker in _SENSITIVE_RESPONSE_KEYS):
             return "[REDACTED]"
         if isinstance(value, dict):
-            return {str(item_key): scrub(item_value, str(item_key)) for item_key, item_value in value.items()}
+            return {
+                str(item_key): scrub(item_value, str(item_key))
+                for item_key, item_value in value.items()
+            }
         if isinstance(value, list):
             return [scrub(item) for item in value]
         return redact_secrets(value)
@@ -140,7 +143,9 @@ class GitOperationError(RuntimeError):
     """A git operation failed and must be recoverable without advancing the run."""
 
     def __init__(self, result: GitCommandResult) -> None:
-        super().__init__(f"git {' '.join(result.args)} failed ({result.returncode}): {result.stderr.strip()}")
+        super().__init__(
+            f"git {' '.join(result.args)} failed ({result.returncode}): {result.stderr.strip()}"
+        )
         self.result = result
 
 
@@ -200,7 +205,8 @@ class NativeOrchestrationCoordinator:
                 and prior_attempt.get("diagnostic")
                 == f"Budget policy/headroom is unavailable for project '{project_id}'."
                 and prior_attempt.get("provider") == provider
-                and prior_attempt.get("workflow") == f"$minime-request-normalizer issue-{issue_number}"
+                and prior_attempt.get("workflow")
+                == f"$minime-request-normalizer issue-{issue_number}"
                 and isinstance(prior_attempt.get("workflow_sha256"), str)
                 and bool(prior_attempt.get("workflow_sha256"))
                 and bool(prior_attempt.get("attempt_id"))
@@ -224,7 +230,10 @@ class NativeOrchestrationCoordinator:
                         change_name=f"issue-{issue_number}",
                     )
                 except (NativeOpenSpecWorkflowUnavailable, ValueError, OSError):
-                    return None, "Previous normalization preflight cannot be reconciled: workflow unavailable."
+                    return (
+                        None,
+                        "Previous normalization preflight cannot be reconciled: workflow unavailable.",
+                    )
                 response_path = (
                     worktree_path / ".minime" / f"request-normalization-{active_run.run_id}.json"
                 )
@@ -234,7 +243,10 @@ class NativeOrchestrationCoordinator:
                     or response_path.exists()
                     or response_path.with_name("response.schema.json").exists()
                 ):
-                    return None, "Previous normalization preflight has mismatched evidence; retry denied."
+                    return (
+                        None,
+                        "Previous normalization preflight has mismatched evidence; retry denied.",
+                    )
                 history = details.get("normalization_attempt_history", [])
                 if not isinstance(history, list) or any(
                     not isinstance(item, dict)
@@ -264,12 +276,22 @@ class NativeOrchestrationCoordinator:
                     semantic_message=str(validated_response["semantic_message"]),
                 )
             except (KeyError, TypeError, ValueError):
-                return None, "Validated normalization checkpoint is incomplete; retry is not automatic."
-        if isinstance(prior_attempt, dict) and (
-            prior_attempt.get("dispatch_observed") is True
-            or prior_attempt.get("status") in {"IN_PROGRESS", "FAILED", "SUCCEEDED"}
-        ) and normalized is None:
-            return None, "Normalization attempt already recorded; reconciliation or new authorization is required."
+                return (
+                    None,
+                    "Validated normalization checkpoint is incomplete; retry is not automatic.",
+                )
+        if (
+            isinstance(prior_attempt, dict)
+            and (
+                prior_attempt.get("dispatch_observed") is True
+                or prior_attempt.get("status") in {"IN_PROGRESS", "FAILED", "SUCCEEDED"}
+            )
+            and normalized is None
+        ):
+            return (
+                None,
+                "Normalization attempt already recorded; reconciliation or new authorization is required.",
+            )
 
         service = RequestNormalizationService(self.github_adapter)
         try:
@@ -286,9 +308,14 @@ class NativeOrchestrationCoordinator:
             list_comments = getattr(self.github_adapter, "list_issue_comments", None)
             if callable(list_comments):
                 comments_result = list_comments(repository, issue_number)
-                if not isinstance(comments_result, ExternalActionResult) or comments_result.outcome is not ExternalOutcome.SUCCESS:
+                if (
+                    not isinstance(comments_result, ExternalActionResult)
+                    or comments_result.outcome is not ExternalOutcome.SUCCESS
+                ):
                     return None, "Request normalization source comments were not verified."
-                source_context["comments"] = comments_result.data if isinstance(comments_result.data, list) else []
+                source_context["comments"] = (
+                    comments_result.data if isinstance(comments_result.data, list) else []
+                )
             if normalized is None:
                 initial = (
                     NormalizedRequest(issue_body, issue_body, True)
@@ -304,7 +331,9 @@ class NativeOrchestrationCoordinator:
                     operation="normalize",
                     change_name=f"issue-{issue_number}",
                 )
-                response_path = worktree_path / ".minime" / f"request-normalization-{active_run.run_id}.json"
+                response_path = (
+                    worktree_path / ".minime" / f"request-normalization-{active_run.run_id}.json"
+                )
                 attempt = {
                     "attempt_id": str(uuid4()),
                     "status": "IN_PROGRESS",
@@ -325,44 +354,53 @@ class NativeOrchestrationCoordinator:
                 self._persist_run_stop_details(active_run, details)
                 try:
                     result = await self.agent_runner.run(
-                    worktree_path=worktree_path,
-                    prompt_context=(
-                        "Use the installed minime-request-normalizer skill. Return exactly one JSON object "
-                        "with normalized_body containing complete Gherkin: Feature:/Scenario:/Given/When/Then "
-                        "in English, or # language: es with Característica:/Escenario:/Dado/Cuando/Entonces; "
-                        "criteria as an array, and "
-                        "semantic_message containing a brief concrete Spanish comment about the result. "
-                        "Preserve every fact and do not invent requirements, decisions, or tasks.\n"
-                        f"Request title: {issue_title}\nRequest body:\n{issue_body}\n"
-                        "Authoritative Issue context (including comments and any declared attachments):\n"
-                        f"{json.dumps(source_context, ensure_ascii=False, default=str)}\n"
-                    ),
-                    project_id=project_id,
-                    role="thinker",
-                    provider=provider,
-                    workflow=workflow,
-                    output_schema={
-                        "type": "object",
-                        "properties": {
-                            "normalized_body": {"type": "string", "minLength": 1},
-                            "criteria": {"type": "array", "items": {"type": "string"}},
-                            "semantic_message": {"type": "string", "minLength": 1, "maxLength": 2000},
+                        worktree_path=worktree_path,
+                        prompt_context=(
+                            "Use the installed minime-request-normalizer skill. Return exactly one JSON object "
+                            "with normalized_body containing complete Gherkin: Feature:/Scenario:/Given/When/Then "
+                            "in English, or # language: es with Característica:/Escenario:/Dado/Cuando/Entonces; "
+                            "criteria as an array, and "
+                            "semantic_message containing a brief concrete Spanish comment about the result. "
+                            "Preserve every fact and do not invent requirements, decisions, or tasks.\n"
+                            f"Request title: {issue_title}\nRequest body:\n{issue_body}\n"
+                            "Authoritative Issue context (including comments and any declared attachments):\n"
+                            f"{json.dumps(source_context, ensure_ascii=False, default=str)}\n"
+                        ),
+                        project_id=project_id,
+                        role="thinker",
+                        provider=provider,
+                        workflow=workflow,
+                        output_schema={
+                            "type": "object",
+                            "properties": {
+                                "normalized_body": {"type": "string", "minLength": 1},
+                                "criteria": {"type": "array", "items": {"type": "string"}},
+                                "semantic_message": {
+                                    "type": "string",
+                                    "minLength": 1,
+                                    "maxLength": 2000,
+                                },
+                            },
+                            "required": ["normalized_body", "criteria", "semantic_message"],
+                            "additionalProperties": False,
                         },
-                        "required": ["normalized_body", "criteria", "semantic_message"],
-                        "additionalProperties": False,
-                    },
                         output_last_message_path=response_path,
                     )
                 except Exception as exc:
-                    attempt.update({"status": "FAILED", "diagnostic": redact_secrets(str(exc))[:500]})
+                    attempt.update(
+                        {"status": "FAILED", "diagnostic": redact_secrets(str(exc))[:500]}
+                    )
                     self._persist_run_stop_details(active_run, details)
                     return None, "Request normalization dispatch failed; retry is not automatic."
                 attempt.update(
                     {
-                        "status": "SUCCEEDED" if result.exit_code == 0 and not result.timed_out else "FAILED",
+                        "status": "SUCCEEDED"
+                        if result.exit_code == 0 and not result.timed_out
+                        else "FAILED",
                         "exit_code": result.exit_code,
                         "timed_out": result.timed_out,
-                        "preflight_error": redact_secrets(result.preflight_error or "")[:500] or None,
+                        "preflight_error": redact_secrets(result.preflight_error or "")[:500]
+                        or None,
                         "structured_output_present": bool(result.response_output.strip()),
                         "structured_output_missing": result.structured_output_missing,
                         "structured_output_too_large": result.structured_output_too_large,
@@ -389,8 +427,11 @@ class NativeOrchestrationCoordinator:
                     "attempt_id": attempt["attempt_id"],
                     "sha256": hashlib.sha256(response_bytes).hexdigest(),
                     "byte_length": len(response_bytes),
-                    "content": _quarantine_response_content(raw_response)[: CliAgentRunner.MAX_STRUCTURED_OUTPUT_BYTES],
-                    "content_truncated": len(response_bytes) > CliAgentRunner.MAX_STRUCTURED_OUTPUT_BYTES,
+                    "content": _quarantine_response_content(raw_response)[
+                        : CliAgentRunner.MAX_STRUCTURED_OUTPUT_BYTES
+                    ],
+                    "content_truncated": len(response_bytes)
+                    > CliAgentRunner.MAX_STRUCTURED_OUTPUT_BYTES,
                 }
                 self._persist_run_stop_details(active_run, details)
                 try:
@@ -405,12 +446,16 @@ class NativeOrchestrationCoordinator:
                     or set(payload) != {"normalized_body", "criteria", "semantic_message"}
                     or not isinstance(payload.get("normalized_body"), str)
                     or not isinstance(payload.get("criteria"), list)
-                    or not all(isinstance(item, str) and item.strip() for item in payload["criteria"])
+                    or not all(
+                        isinstance(item, str) and item.strip() for item in payload["criteria"]
+                    )
                     or not isinstance(payload.get("semantic_message"), str)
                     or not payload["semantic_message"].strip()
                 ):
                     attempt["response_status"] = "INVALID"
-                    attempt["diagnostic"] = "structured response must contain exactly normalized_body, criteria and semantic_message"
+                    attempt["diagnostic"] = (
+                        "structured response must contain exactly normalized_body, criteria and semantic_message"
+                    )
                     self._persist_run_stop_details(active_run, details)
                     return None, "Request normalization response was not structured."
                 attempt["response_status"] = "VALIDATED"
@@ -465,7 +510,12 @@ class NativeOrchestrationCoordinator:
                     details["normalization_attempt"]["diagnostic"] = str(exc)[:500]
                     self._persist_run_stop_details(active_run, details)
                 raise
-        except (RequestNormalizationError, NativeOpenSpecWorkflowUnavailable, ValueError, json.JSONDecodeError) as exc:
+        except (
+            RequestNormalizationError,
+            NativeOpenSpecWorkflowUnavailable,
+            ValueError,
+            json.JSONDecodeError,
+        ) as exc:
             return None, str(exc)
 
         persisted = {
@@ -476,7 +526,9 @@ class NativeOrchestrationCoordinator:
             "criteria": list(normalized.criteria),
             "semantic_message": normalized.semantic_message,
             "source_context_sha256": hashlib.sha256(
-                json.dumps(source_context, sort_keys=True, ensure_ascii=False, default=str).encode("utf-8")
+                json.dumps(source_context, sort_keys=True, ensure_ascii=False, default=str).encode(
+                    "utf-8"
+                )
             ).hexdigest(),
         }
         details["request_normalization"] = persisted
@@ -491,7 +543,9 @@ class NativeOrchestrationCoordinator:
             uow.commit()
         return persisted, normalized.normalized_body
 
-    def _persist_run_stop_details(self, active_run: OrchestrationRun, details: dict[str, Any]) -> None:
+    def _persist_run_stop_details(
+        self, active_run: OrchestrationRun, details: dict[str, Any]
+    ) -> None:
         """Persist normalization identity and result before allowing any continuation."""
         active_run.stop_details = details
         uow = self.uow_factory()
@@ -579,25 +633,45 @@ class NativeOrchestrationCoordinator:
             )
         if run.current_stage != OrchestrationStage.VALIDATING:
             return ClassificationCheckpointResult(
-                "BLOCKED", run_id, None, None, {}, empty,
+                "BLOCKED",
+                run_id,
+                None,
+                None,
+                {},
+                empty,
                 f"Run is not in VALIDATING (found {run.current_stage.value}).",
             )
         persisted_issue_number = (run.stop_details or {}).get("issue_number")
         if issue_number is not None and persisted_issue_number != issue_number:
             return ClassificationCheckpointResult(
-                "BLOCKED", run_id, None, None, {}, empty,
+                "BLOCKED",
+                run_id,
+                None,
+                None,
+                {},
+                empty,
                 "Checkpoint issue does not match the original run.",
             )
         hashes = self._proposal_artifact_hashes(worktree_path, run.change_name)
         if not self._proposal_artifacts_present(worktree_path, run.change_name):
             return ClassificationCheckpointResult(
-                "BLOCKED", run_id, None, None, hashes, empty,
+                "BLOCKED",
+                run_id,
+                None,
+                None,
+                hashes,
+                empty,
                 "Preserved proposal artifacts are incomplete.",
             )
         validation = self.openspec_adapter.validate_change_strict(run.change_name, worktree_path)
         if validation.get("status") != "PASS":
             return ClassificationCheckpointResult(
-                "BLOCKED", run_id, None, None, hashes, empty,
+                "BLOCKED",
+                run_id,
+                None,
+                None,
+                hashes,
+                empty,
                 "Preserved proposal failed strict OpenSpec validation.",
             )
         project = uow.projects.get_by_id(project_id)
@@ -605,14 +679,23 @@ class NativeOrchestrationCoordinator:
         model_identity = self._configured_model(uow, project_id, "thinking")
         if configured != thinker_provider.strip().lower():
             return ClassificationCheckpointResult(
-                "BLOCKED", run_id, None, model_identity, hashes, empty,
+                "BLOCKED",
+                run_id,
+                None,
+                model_identity,
+                hashes,
+                empty,
                 "Checkpoint provider does not match the persisted thinking profile.",
             )
-        issue_title = issue_title if issue_title is not None else str(
-            (run.stop_details or {}).get("issue_title") or ""
+        issue_title = (
+            issue_title
+            if issue_title is not None
+            else str((run.stop_details or {}).get("issue_title") or "")
         )
-        issue_body = issue_body if issue_body is not None else str(
-            (run.stop_details or {}).get("issue_body") or ""
+        issue_body = (
+            issue_body
+            if issue_body is not None
+            else str((run.stop_details or {}).get("issue_body") or "")
         )
         context_hashes = self._classification_context_hashes(
             run, issue_number, issue_title, issue_body
@@ -620,7 +703,12 @@ class NativeOrchestrationCoordinator:
         stored = self._stored_complexity_assessment(run, hashes, context_hashes)
         if stored is not None:
             return ClassificationCheckpointResult(
-                "REUSED", run_id, None, model_identity, hashes, stored,
+                "REUSED",
+                run_id,
+                None,
+                model_identity,
+                hashes,
+                stored,
                 "A valid persisted classification was reused without invocation.",
             )
         persisted = (run.stop_details or {}).get("complexity_assessment")
@@ -662,13 +750,23 @@ class NativeOrchestrationCoordinator:
             prior_attempt_id = str(attempts[-1].get("attempt_id") or "")
             if not authorization_reference:
                 return ClassificationCheckpointResult(
-                    "BLOCKED", run_id, None, model_identity, hashes, empty,
+                    "BLOCKED",
+                    run_id,
+                    None,
+                    model_identity,
+                    hashes,
+                    empty,
                     "A prior classification attempt exists; a new invocation requires explicit authorization.",
                 )
             actions = getattr(uow, "operator_actions", None)
             if actions is None:
                 return ClassificationCheckpointResult(
-                    "BLOCKED", run_id, None, model_identity, hashes, empty,
+                    "BLOCKED",
+                    run_id,
+                    None,
+                    model_identity,
+                    hashes,
+                    empty,
                     "Single-use authorization storage is unavailable.",
                 )
             consumed = actions.consume_single_use(
@@ -688,7 +786,12 @@ class NativeOrchestrationCoordinator:
             )
             if consumed is None:
                 return ClassificationCheckpointResult(
-                    "BLOCKED", run_id, None, model_identity, hashes, empty,
+                    "BLOCKED",
+                    run_id,
+                    None,
+                    model_identity,
+                    hashes,
+                    empty,
                     "Classification authorization is missing, mismatched, or already consumed.",
                 )
         attempt_id = str(uuid4())
@@ -754,17 +857,27 @@ class NativeOrchestrationCoordinator:
         binding = None
         if hasattr(uow, "project_managed_repository_bindings"):
             binding = uow.project_managed_repository_bindings.get_by_project_id(project_id)
-        if not repository or binding is None or not getattr(binding, "managed_repository_root", None):
+        if (
+            not repository
+            or binding is None
+            or not getattr(binding, "managed_repository_root", None)
+        ):
             return OrchestrationCoordinationResult(
-                status="PAUSED", run_id=None, current_stage=OrchestrationStage.ADMITTED,
+                status="PAUSED",
+                run_id=None,
+                current_stage=OrchestrationStage.ADMITTED,
                 message="Project has no verified repository binding; work was not started.",
             )
         canonical = str(getattr(binding, "canonical_repository_identity", ""))
         expected = f"github.com/{repository}".lower().removeprefix("https://")
-        if (canonical.lower().startswith(("github.com/", "https://"))
-                and canonical.lower().removeprefix("https://") != expected):
+        if (
+            canonical.lower().startswith(("github.com/", "https://"))
+            and canonical.lower().removeprefix("https://") != expected
+        ):
             return OrchestrationCoordinationResult(
-                status="PAUSED", run_id=None, current_stage=OrchestrationStage.ADMITTED,
+                status="PAUSED",
+                run_id=None,
+                current_stage=OrchestrationStage.ADMITTED,
                 message="Project repository does not match its verified managed binding.",
             )
 
@@ -789,7 +902,8 @@ class NativeOrchestrationCoordinator:
             change_name = selected.get("change_name")
             if not change_name or not isinstance(issue_number, int):
                 return OrchestrationCoordinationResult(
-                    status="PAUSED", run_id=selected.get("run_id"),
+                    status="PAUSED",
+                    run_id=selected.get("run_id"),
                     current_stage=OrchestrationStage.ADMITTED,
                     message="Active Request lacks immutable Change or Issue identity.",
                 )
@@ -811,11 +925,15 @@ class NativeOrchestrationCoordinator:
                 # source body. Re-read the authoritative remote Request, never
                 # dispatch an empty prompt or silently switch Change identity.
                 observed = self.github_adapter.get_issue(repository, issue_number)
-                remote_issue = observed.data if (
-                    isinstance(observed, ExternalActionResult)
-                    and observed.outcome is ExternalOutcome.SUCCESS
-                    and isinstance(observed.data, dict)
-                ) else None
+                remote_issue = (
+                    observed.data
+                    if (
+                        isinstance(observed, ExternalActionResult)
+                        and observed.outcome is ExternalOutcome.SUCCESS
+                        and isinstance(observed.data, dict)
+                    )
+                    else None
+                )
                 remote_body = remote_issue.get("body") if remote_issue else None
                 if (
                     not remote_issue
@@ -825,7 +943,8 @@ class NativeOrchestrationCoordinator:
                     or not remote_body.strip()
                 ):
                     return OrchestrationCoordinationResult(
-                        status="PAUSED", run_id=selected.get("run_id"),
+                        status="PAUSED",
+                        run_id=selected.get("run_id"),
                         current_stage=selected["run"].current_stage,
                         message="Admitted Request source body or identity cannot be verified.",
                     )
@@ -837,14 +956,16 @@ class NativeOrchestrationCoordinator:
                     remote_change = None
                 if remote_change != change_name:
                     return OrchestrationCoordinationResult(
-                        status="PAUSED", run_id=selected.get("run_id"),
+                        status="PAUSED",
+                        run_id=selected.get("run_id"),
                         current_stage=selected["run"].current_stage,
                         message="Admitted Request Change reservation does not match the durable Run.",
                     )
                 issue_body = remote_body
             else:
                 return OrchestrationCoordinationResult(
-                    status="PAUSED", run_id=selected.get("run_id"),
+                    status="PAUSED",
+                    run_id=selected.get("run_id"),
                     current_stage=selected["run"].current_stage,
                     message="Active Request has no verified durable normalized body; Propose cannot resume.",
                 )
@@ -855,7 +976,8 @@ class NativeOrchestrationCoordinator:
                 )
             except ValueError as exc:
                 return OrchestrationCoordinationResult(
-                    status="PAUSED", run_id=None,
+                    status="PAUSED",
+                    run_id=None,
                     current_stage=OrchestrationStage.ADMITTED,
                     message=f"Request Change identity is invalid: {exc}",
                 )
@@ -866,7 +988,9 @@ class NativeOrchestrationCoordinator:
             if hasattr(uow.orchestration_runs, "get_active_run"):
                 active_run = uow.orchestration_runs.get_active_run(project_id, change_name)
             if not active_run and hasattr(uow.orchestration_runs, "list_runs"):
-                active_runs = uow.orchestration_runs.list_runs(project_id=project_id, is_active=True)
+                active_runs = uow.orchestration_runs.list_runs(
+                    project_id=project_id, is_active=True
+                )
                 if active_runs:
                     active_run = active_runs[0]
 
@@ -923,7 +1047,11 @@ class NativeOrchestrationCoordinator:
             issue_body = str(normalization.get("normalized_body") or issue_body)
 
         # Step 5: Explore Stage
-        if active_run.current_stage in (OrchestrationStage.ADMITTED, OrchestrationStage.PREPARING_EXECUTION, OrchestrationStage.EXPLORING):
+        if active_run.current_stage in (
+            OrchestrationStage.ADMITTED,
+            OrchestrationStage.PREPARING_EXECUTION,
+            OrchestrationStage.EXPLORING,
+        ):
             self._update_stage(uow, active_run, OrchestrationStage.EXPLORING)
             explore_result = await self._run_explore(
                 worktree_path=worktree_path,
@@ -951,7 +1079,11 @@ class NativeOrchestrationCoordinator:
                 )
 
         # Step 6: Propose and Strict Validation Loop
-        if active_run.current_stage in (OrchestrationStage.EXPLORING, OrchestrationStage.PROPOSING, OrchestrationStage.VALIDATING):
+        if active_run.current_stage in (
+            OrchestrationStage.EXPLORING,
+            OrchestrationStage.PROPOSING,
+            OrchestrationStage.VALIDATING,
+        ):
             existing_proposal = (
                 active_run.current_stage == OrchestrationStage.VALIDATING
                 and self._proposal_artifacts_present(worktree_path, change_name)
@@ -969,9 +1101,12 @@ class NativeOrchestrationCoordinator:
                 )
                 if propose_result.get("status") != "READY_TO_VALIDATE":
                     return OrchestrationCoordinationResult(
-                        status="PAUSED", run_id=active_run.run_id,
+                        status="PAUSED",
+                        run_id=active_run.run_id,
                         current_stage=OrchestrationStage.PROPOSING,
-                        message=propose_result.get("message", "Native Propose did not produce a valid result."),
+                        message=propose_result.get(
+                            "message", "Native Propose did not produce a valid result."
+                        ),
                     )
 
                 self._update_stage(uow, active_run, OrchestrationStage.VALIDATING)
@@ -984,9 +1119,15 @@ class NativeOrchestrationCoordinator:
                 if existing_proposal:
                     break
                 # Correction pass
-                logger.info(f"OpenSpec strict validation failed on attempt {attempt + 1}. Running correction pass...")
+                logger.info(
+                    f"OpenSpec strict validation failed on attempt {attempt + 1}. Running correction pass..."
+                )
                 correction_ok = await self._run_propose_correction(
-                    worktree_path, thinker_provider, change_name, val_res.get("stderr", ""), project_id=project_id
+                    worktree_path,
+                    thinker_provider,
+                    change_name,
+                    val_res.get("stderr", ""),
+                    project_id=project_id,
                 )
                 if not correction_ok:
                     break
@@ -1047,7 +1188,8 @@ class NativeOrchestrationCoordinator:
                     if hasattr(uow, "commit"):
                         uow.commit()
                 return OrchestrationCoordinationResult(
-                    status="PAUSED", run_id=active_run.run_id,
+                    status="PAUSED",
+                    run_id=active_run.run_id,
                     current_stage=OrchestrationStage.VALIDATING,
                     message=f"Thinking agent complexity assessment failed: {complexity_result.reason or complexity_result.status}.",
                 )
@@ -1062,7 +1204,9 @@ class NativeOrchestrationCoordinator:
             # Proposal Review for High Complexity
             if complexity == "high":
                 self._update_stage(uow, active_run, OrchestrationStage.PROPOSAL_REVIEW)
-                review_ok = await self._run_proposal_review(worktree_path, reviewer_provider, change_name, project_id=project_id)
+                review_ok = await self._run_proposal_review(
+                    worktree_path, reviewer_provider, change_name, project_id=project_id
+                )
                 if not review_ok:
                     return OrchestrationCoordinationResult(
                         status="PAUSED",
@@ -1082,7 +1226,9 @@ class NativeOrchestrationCoordinator:
                 change_name=change_name,
             )
         except NativeOpenSpecWorkflowUnavailable as exc:
-            logger.error(f"Missing native Verify workflow for implementer {implementer_provider}: {exc}")
+            logger.error(
+                f"Missing native Verify workflow for implementer {implementer_provider}: {exc}"
+            )
             return OrchestrationCoordinationResult(
                 status="PAUSED",
                 run_id=active_run.run_id,
@@ -1091,12 +1237,18 @@ class NativeOrchestrationCoordinator:
             )
 
         # Step 7: Apply Stage and Test Execution
-        if active_run.current_stage in (OrchestrationStage.READY_TO_APPLY, OrchestrationStage.IMPLEMENTING):
+        if active_run.current_stage in (
+            OrchestrationStage.READY_TO_APPLY,
+            OrchestrationStage.IMPLEMENTING,
+        ):
             self._update_stage(uow, active_run, OrchestrationStage.IMPLEMENTING)
-            apply_ok = await self._run_apply(worktree_path, implementer_provider, change_name, project_id=project_id)
+            apply_ok = await self._run_apply(
+                worktree_path, implementer_provider, change_name, project_id=project_id
+            )
             if not apply_ok:
                 return OrchestrationCoordinationResult(
-                    status="PAUSED", run_id=active_run.run_id,
+                    status="PAUSED",
+                    run_id=active_run.run_id,
                     current_stage=OrchestrationStage.IMPLEMENTING,
                     message="Native Apply failed or produced no authoritative evidence. Worktree preserved.",
                 )
@@ -1121,7 +1273,9 @@ class NativeOrchestrationCoordinator:
 
         if active_run.current_stage == OrchestrationStage.VERIFYING:
             # Step 8: Verify Stage (Executed by implementer)
-            verify_ok = await self._run_verify(worktree_path, implementer_provider, change_name, project_id=project_id)
+            verify_ok = await self._run_verify(
+                worktree_path, implementer_provider, change_name, project_id=project_id
+            )
             if not verify_ok:
                 return OrchestrationCoordinationResult(
                     status="PAUSED",
@@ -1134,7 +1288,9 @@ class NativeOrchestrationCoordinator:
             complexity = active_run.stop_details.get("complexity", "moderate")
             if complexity == "high":
                 self._update_stage(uow, active_run, OrchestrationStage.CODE_REVIEW)
-                code_review_ok = await self._run_code_review(worktree_path, reviewer_provider, change_name, project_id=project_id)
+                code_review_ok = await self._run_code_review(
+                    worktree_path, reviewer_provider, change_name, project_id=project_id
+                )
                 if not code_review_ok:
                     return OrchestrationCoordinationResult(
                         status="PAUSED",
@@ -1153,7 +1309,8 @@ class NativeOrchestrationCoordinator:
             await self._ensure_candidate_commit(worktree_path, issue_number)
         except GitOperationError as exc:
             return OrchestrationCoordinationResult(
-                status="PAUSED", run_id=active_run.run_id,
+                status="PAUSED",
+                run_id=active_run.run_id,
                 current_stage=OrchestrationStage.READY_FOR_PR,
                 message=f"Unable to persist candidate Git state: {exc}. Worktree preserved.",
             )
@@ -1161,7 +1318,8 @@ class NativeOrchestrationCoordinator:
             candidate_sha = await self._get_git_head_sha(worktree_path)
         except GitOperationError as exc:
             return OrchestrationCoordinationResult(
-                status="PAUSED", run_id=active_run.run_id,
+                status="PAUSED",
+                run_id=active_run.run_id,
                 current_stage=OrchestrationStage.READY_FOR_PR,
                 message=f"Unable to observe candidate Git state: {exc}. Worktree preserved.",
             )
@@ -1218,42 +1376,62 @@ class NativeOrchestrationCoordinator:
                 await self._push_branch(worktree_path, worktree_info.branch_name)
             except GitOperationError as exc:
                 return OrchestrationCoordinationResult(
-                    status="PAUSED", run_id=active_run.run_id,
+                    status="PAUSED",
+                    run_id=active_run.run_id,
                     current_stage=OrchestrationStage.PR1_PENDING,
                     message=f"Unable to publish PR1 branch: {exc}. Worktree preserved.",
                 )
 
             # Open PR via GitHubAdapter
-            opened_pr_call = self.github_adapter.create_pull_request(
-                repository=repository,
-                branch=worktree_info.branch_name,
-                base=base_branch,
-                title=prepared_pr.title,
-                body=prepared_pr.body,
-                head_sha=candidate_sha,
-                draft=False,
-            ) if hasattr(self.github_adapter, "_repo") else self.github_adapter.create_pull_request(
-                base=base_branch,
-                head=worktree_info.branch_name,
-                title=prepared_pr.title,
-                body=prepared_pr.body,
+            opened_pr_call = (
+                self.github_adapter.create_pull_request(
+                    repository=repository,
+                    branch=worktree_info.branch_name,
+                    base=base_branch,
+                    title=prepared_pr.title,
+                    body=prepared_pr.body,
+                    head_sha=candidate_sha,
+                    draft=False,
+                )
+                if hasattr(self.github_adapter, "_repo")
+                else self.github_adapter.create_pull_request(
+                    base=base_branch,
+                    head=worktree_info.branch_name,
+                    title=prepared_pr.title,
+                    body=prepared_pr.body,
+                )
             )
-            opened_pr_res = await opened_pr_call if inspect.isawaitable(opened_pr_call) else opened_pr_call
+            opened_pr_res = (
+                await opened_pr_call if inspect.isawaitable(opened_pr_call) else opened_pr_call
+            )
             if not self._external_success(opened_pr_res):
-                pr_error = getattr(opened_pr_res, "error_message", None) or "remote response was not successful"
+                pr_error = (
+                    getattr(opened_pr_res, "error_message", None)
+                    or "remote response was not successful"
+                )
                 return OrchestrationCoordinationResult(
-                    status="PAUSED", run_id=active_run.run_id,
+                    status="PAUSED",
+                    run_id=active_run.run_id,
                     current_stage=OrchestrationStage.PR1_PENDING,
                     message=f"GitHub did not confirm creation of PR1: {pr_error}. Worktree preserved.",
                 )
             opened_data = opened_pr_res.data if hasattr(opened_pr_res, "data") else opened_pr_res
-            pr1_number = opened_data.get("number") if isinstance(opened_data, dict) else getattr(opened_data, "number", None)
-            pr1_url = opened_data.get("html_url") if isinstance(opened_data, dict) else getattr(opened_data, "html_url", None)
+            pr1_number = (
+                opened_data.get("number")
+                if isinstance(opened_data, dict)
+                else getattr(opened_data, "number", None)
+            )
+            pr1_url = (
+                opened_data.get("html_url")
+                if isinstance(opened_data, dict)
+                else getattr(opened_data, "html_url", None)
+            )
             if not pr1_number or not await self._confirm_pr_open(
                 repository, pr1_number, worktree_info.branch_name, base_branch, candidate_sha
             ):
                 return OrchestrationCoordinationResult(
-                    status="PAUSED", run_id=active_run.run_id,
+                    status="PAUSED",
+                    run_id=active_run.run_id,
                     current_stage=OrchestrationStage.PR1_PENDING,
                     pr1_url=pr1_url,
                     message="PR1 identity or remote head/base state was not confirmed.",
@@ -1282,15 +1460,19 @@ class NativeOrchestrationCoordinator:
                 )
 
             # Merge PR1
-            merge_call = self.github_adapter.merge_pull_request(
-                repository=repository,
-                pr_number=pr1_number,
-                candidate_sha=candidate_sha,
-                merge_method="merge",
-            ) if hasattr(self.github_adapter, "_repo") else self.github_adapter.merge_pull_request(
-                pull_number=pr1_number,
-                expected_head_sha=candidate_sha,
-                merge_method="merge",
+            merge_call = (
+                self.github_adapter.merge_pull_request(
+                    repository=repository,
+                    pr_number=pr1_number,
+                    candidate_sha=candidate_sha,
+                    merge_method="merge",
+                )
+                if hasattr(self.github_adapter, "_repo")
+                else self.github_adapter.merge_pull_request(
+                    pull_number=pr1_number,
+                    expected_head_sha=candidate_sha,
+                    merge_method="merge",
+                )
             )
             merge_res = await merge_call if inspect.isawaitable(merge_call) else merge_call
             if not self._external_success(merge_res):
@@ -1322,17 +1504,21 @@ class NativeOrchestrationCoordinator:
 
         # Run native Sync & Archive
         try:
-            sync_archive_ok = await self._run_sync_and_archive(doc_path, thinker_provider, change_name, project_id=project_id)
+            sync_archive_ok = await self._run_sync_and_archive(
+                doc_path, thinker_provider, change_name, project_id=project_id
+            )
         except GitOperationError as exc:
             return OrchestrationCoordinationResult(
-                status="PAUSED", run_id=active_run.run_id,
+                status="PAUSED",
+                run_id=active_run.run_id,
                 current_stage=OrchestrationStage.DOC_CLOSING,
                 pr1_url=pr1_url,
                 message=f"Documentation Git operation failed: {exc}. Worktree preserved.",
             )
         if not sync_archive_ok:
             return OrchestrationCoordinationResult(
-                status="PAUSED", run_id=active_run.run_id,
+                status="PAUSED",
+                run_id=active_run.run_id,
                 current_stage=OrchestrationStage.DOC_CLOSING,
                 pr1_url=pr1_url,
                 message="Native Sync or Archive failed. Documentation worktree preserved.",
@@ -1341,7 +1527,8 @@ class NativeOrchestrationCoordinator:
             doc_head_sha = await self._get_git_head_sha(doc_path)
         except GitOperationError as exc:
             return OrchestrationCoordinationResult(
-                status="PAUSED", run_id=active_run.run_id,
+                status="PAUSED",
+                run_id=active_run.run_id,
                 current_stage=OrchestrationStage.DOC_CLOSING,
                 pr1_url=pr1_url,
                 message=f"Unable to observe documentation Git state: {exc}. Worktree preserved.",
@@ -1389,60 +1576,84 @@ class NativeOrchestrationCoordinator:
             await self._push_branch(doc_path, doc_worktree_info.branch_name)
         except GitOperationError as exc:
             return OrchestrationCoordinationResult(
-                status="PAUSED", run_id=active_run.run_id,
+                status="PAUSED",
+                run_id=active_run.run_id,
                 current_stage=OrchestrationStage.PR2_PENDING,
                 pr1_url=pr1_url,
                 message=f"Unable to publish PR2 branch: {exc}. Worktree preserved.",
             )
-        opened_doc_call = self.github_adapter.create_pull_request(
-            repository=repository,
-            branch=doc_worktree_info.branch_name,
-            base=base_branch,
-            title=prepared_doc_pr.title,
-            body=prepared_doc_pr.body,
-            head_sha=doc_head_sha,
-            draft=False,
-        ) if hasattr(self.github_adapter, "_repo") else self.github_adapter.create_pull_request(
-            base=base_branch,
-            head=doc_worktree_info.branch_name,
-            title=prepared_doc_pr.title,
-            body=prepared_doc_pr.body,
+        opened_doc_call = (
+            self.github_adapter.create_pull_request(
+                repository=repository,
+                branch=doc_worktree_info.branch_name,
+                base=base_branch,
+                title=prepared_doc_pr.title,
+                body=prepared_doc_pr.body,
+                head_sha=doc_head_sha,
+                draft=False,
+            )
+            if hasattr(self.github_adapter, "_repo")
+            else self.github_adapter.create_pull_request(
+                base=base_branch,
+                head=doc_worktree_info.branch_name,
+                title=prepared_doc_pr.title,
+                body=prepared_doc_pr.body,
+            )
         )
-        opened_doc_res = await opened_doc_call if inspect.isawaitable(opened_doc_call) else opened_doc_call
+        opened_doc_res = (
+            await opened_doc_call if inspect.isawaitable(opened_doc_call) else opened_doc_call
+        )
         if not self._external_success(opened_doc_res):
             return OrchestrationCoordinationResult(
-                status="PAUSED", run_id=active_run.run_id,
+                status="PAUSED",
+                run_id=active_run.run_id,
                 current_stage=OrchestrationStage.PR2_PENDING,
                 pr1_url=pr1_url,
                 message="GitHub did not confirm creation of PR2. Worktree preserved.",
             )
         opened_doc_data = opened_doc_res.data if hasattr(opened_doc_res, "data") else opened_doc_res
-        pr2_number = opened_doc_data.get("number") if isinstance(opened_doc_data, dict) else getattr(opened_doc_data, "number", None)
-        pr2_url = opened_doc_data.get("html_url") if isinstance(opened_doc_data, dict) else getattr(opened_doc_data, "html_url", None)
+        pr2_number = (
+            opened_doc_data.get("number")
+            if isinstance(opened_doc_data, dict)
+            else getattr(opened_doc_data, "number", None)
+        )
+        pr2_url = (
+            opened_doc_data.get("html_url")
+            if isinstance(opened_doc_data, dict)
+            else getattr(opened_doc_data, "html_url", None)
+        )
         if not pr2_number or not await self._confirm_pr_open(
             repository, pr2_number, doc_worktree_info.branch_name, base_branch, doc_head_sha
         ):
             return OrchestrationCoordinationResult(
-                status="PAUSED", run_id=active_run.run_id,
+                status="PAUSED",
+                run_id=active_run.run_id,
                 current_stage=OrchestrationStage.PR2_PENDING,
-                pr1_url=pr1_url, pr2_url=pr2_url,
+                pr1_url=pr1_url,
+                pr2_url=pr2_url,
                 message="PR2 identity or remote head/base state was not confirmed.",
             )
         active_run.stop_details["pr2_number"] = pr2_number
         active_run.stop_details["pr2_url"] = pr2_url
 
         # PR2 Auto-merge (always automatic)
-        merge_doc_call = self.github_adapter.merge_pull_request(
-            repository=repository,
-            pr_number=pr2_number,
-            candidate_sha=doc_head_sha,
-            merge_method="merge",
-        ) if hasattr(self.github_adapter, "_repo") else self.github_adapter.merge_pull_request(
-            pull_number=pr2_number,
-            expected_head_sha=doc_head_sha,
-            merge_method="merge",
+        merge_doc_call = (
+            self.github_adapter.merge_pull_request(
+                repository=repository,
+                pr_number=pr2_number,
+                candidate_sha=doc_head_sha,
+                merge_method="merge",
+            )
+            if hasattr(self.github_adapter, "_repo")
+            else self.github_adapter.merge_pull_request(
+                pull_number=pr2_number,
+                expected_head_sha=doc_head_sha,
+                merge_method="merge",
+            )
         )
-        merge_doc_res = await merge_doc_call if inspect.isawaitable(merge_doc_call) else merge_doc_call
+        merge_doc_res = (
+            await merge_doc_call if inspect.isawaitable(merge_doc_call) else merge_doc_call
+        )
         doc_merged = self._external_success(merge_doc_res) and await self._confirm_pr_merged(
             repository, pr2_number, doc_head_sha
         )
@@ -1461,30 +1672,38 @@ class NativeOrchestrationCoordinator:
         self._update_stage(uow, active_run, OrchestrationStage.PR2_MERGED)
 
         # Step 13: Remote Issue Closure and Lock Release
-        close_call = self.github_adapter.close_issue(
-            repository=repository,
-            issue_number=issue_number,
-            comment=(
-                f"Ciclo completado por mini me.\n\n"
-                f"- PR de implementación: #{pr1_number} ({pr1_url})\n"
-                f"- PR documental: #{pr2_number} ({pr2_url})\n"
-                f"- Change OpenSpec: `{change_name}` archivado."
-            ),
-        ) if hasattr(self.github_adapter, "_repo") else self.github_adapter.close_issue(
-            issue_number=issue_number,
-            comment=(
-                f"Ciclo completado por mini me.\n\n"
-                f"- PR de implementación: #{pr1_number} ({pr1_url})\n"
-                f"- PR documental: #{pr2_number} ({pr2_url})\n"
-                f"- Change OpenSpec: `{change_name}` archivado."
-            ),
+        close_call = (
+            self.github_adapter.close_issue(
+                repository=repository,
+                issue_number=issue_number,
+                comment=(
+                    f"Ciclo completado por mini me.\n\n"
+                    f"- PR de implementación: #{pr1_number} ({pr1_url})\n"
+                    f"- PR documental: #{pr2_number} ({pr2_url})\n"
+                    f"- Change OpenSpec: `{change_name}` archivado."
+                ),
+            )
+            if hasattr(self.github_adapter, "_repo")
+            else self.github_adapter.close_issue(
+                issue_number=issue_number,
+                comment=(
+                    f"Ciclo completado por mini me.\n\n"
+                    f"- PR de implementación: #{pr1_number} ({pr1_url})\n"
+                    f"- PR documental: #{pr2_number} ({pr2_url})\n"
+                    f"- Change OpenSpec: `{change_name}` archivado."
+                ),
+            )
         )
         close_res = await close_call if inspect.isawaitable(close_call) else close_call
-        if not self._external_success(close_res) or not await self._confirm_issue_closed(repository, issue_number):
+        if not self._external_success(close_res) or not await self._confirm_issue_closed(
+            repository, issue_number
+        ):
             return OrchestrationCoordinationResult(
-                status="PAUSED", run_id=active_run.run_id,
+                status="PAUSED",
+                run_id=active_run.run_id,
                 current_stage=OrchestrationStage.PR2_MERGED,
-                pr1_url=pr1_url, pr2_url=pr2_url,
+                pr1_url=pr1_url,
+                pr2_url=pr2_url,
                 message="Remote issue closure was not confirmed; lock remains held.",
             )
 
@@ -1547,7 +1766,11 @@ class NativeOrchestrationCoordinator:
         runs = getattr(uow, "orchestration_runs", None)
         if runs is None:
             raise RuntimeError("Durable orchestration run repository is unavailable.")
-        existing = runs.get_active_run(project_id, change_name) if hasattr(runs, "get_active_run") else None
+        existing = (
+            runs.get_active_run(project_id, change_name)
+            if hasattr(runs, "get_active_run")
+            else None
+        )
         if existing:
             return existing
         admitted = OrchestrationRun(
@@ -1581,12 +1804,19 @@ class NativeOrchestrationCoordinator:
         data = result.data if hasattr(result, "data") else result
         if not isinstance(data, dict):
             return False
-        return bool(data.get("is_merged") or data.get("merged")) and data.get("merge_commit_sha") is not None and (
-            not data.get("head_sha") or data.get("head_sha") == candidate_sha
+        return (
+            bool(data.get("is_merged") or data.get("merged"))
+            and data.get("merge_commit_sha") is not None
+            and (not data.get("head_sha") or data.get("head_sha") == candidate_sha)
         )
 
     async def _confirm_pr_open(
-        self, repository: str, pr_number: int, head_branch: str, base_branch: str, candidate_sha: str
+        self,
+        repository: str,
+        pr_number: int,
+        head_branch: str,
+        base_branch: str,
+        candidate_sha: str,
     ) -> bool:
         getter = getattr(self.github_adapter, "get_pull_request_details", None)
         if not getter:
@@ -1596,8 +1826,11 @@ class NativeOrchestrationCoordinator:
         if not self._external_success(result):
             return False
         data = result.data if hasattr(result, "data") else result
-        return isinstance(data, dict) and data.get("state") == "open" and data.get("head_sha") == candidate_sha and (
-            data.get("head_branch") == head_branch and data.get("base_branch") == base_branch
+        return (
+            isinstance(data, dict)
+            and data.get("state") == "open"
+            and data.get("head_sha") == candidate_sha
+            and (data.get("head_branch") == head_branch and data.get("base_branch") == base_branch)
         )
 
     async def _confirm_issue_closed(self, repository: str, issue_number: int) -> bool:
@@ -1630,7 +1863,11 @@ class NativeOrchestrationCoordinator:
         if getattr(result, "environment_error", False):
             return False
         structured = getattr(result, "structured_output", None)
-        evidence = getattr(result, "response_output", "") if structured is not None else getattr(result, "full_output", "")
+        evidence = (
+            getattr(result, "response_output", "")
+            if structured is not None
+            else getattr(result, "full_output", "")
+        )
         return bool(evidence.strip())
 
     @staticmethod
@@ -1639,17 +1876,20 @@ class NativeOrchestrationCoordinator:
         change_dir = worktree_path / "openspec" / "changes" / change_name
         required = (change_dir / "proposal.md", change_dir / "design.md", change_dir / "tasks.md")
         specs_dir = change_dir / "specs"
-        return all(path.is_file() for path in required) and specs_dir.is_dir() and any(
-            path.is_file() and path.suffix == ".md" for path in specs_dir.rglob("*.md")
+        return (
+            all(path.is_file() for path in required)
+            and specs_dir.is_dir()
+            and any(path.is_file() and path.suffix == ".md" for path in specs_dir.rglob("*.md"))
         )
 
     @staticmethod
     def _proposal_artifact_hashes(worktree_path: Path, change_name: str) -> dict[str, str]:
         change_dir = worktree_path / "openspec" / "changes" / change_name
-        paths = [
-            path for path in change_dir.rglob("*")
-            if path.is_file() and path.suffix == ".md"
-        ] if change_dir.is_dir() else []
+        paths = (
+            [path for path in change_dir.rglob("*") if path.is_file() and path.suffix == ".md"]
+            if change_dir.is_dir()
+            else []
+        )
         return {
             str(path.relative_to(worktree_path)): hashlib.sha256(path.read_bytes()).hexdigest()
             for path in sorted(paths)
@@ -1837,8 +2077,14 @@ class NativeOrchestrationCoordinator:
         ):
             raise ValueError("PR semantic agent did not produce verified content")
         payload = self._parse_json_object(result.response_output)
-        if not payload or not isinstance(payload.get("title"), str) or not isinstance(payload.get("body"), str):
-            raise ValueError("PR semantic agent response was not a single structured title/body object")
+        if (
+            not payload
+            or not isinstance(payload.get("title"), str)
+            or not isinstance(payload.get("body"), str)
+        ):
+            raise ValueError(
+                "PR semantic agent response was not a single structured title/body object"
+            )
         title = payload["title"].strip()
         body = payload["body"].strip()
         if not title or not body:
@@ -1846,9 +2092,7 @@ class NativeOrchestrationCoordinator:
         return title, body
 
     @classmethod
-    def _recover_persisted_complexity(
-        cls, payload: dict[str, Any]
-    ) -> ComplexityAssessment | None:
+    def _recover_persisted_complexity(cls, payload: dict[str, Any]) -> ComplexityAssessment | None:
         """Recover only an explicitly separated, complete provider response."""
         if (
             payload.get("exit_code") != 0
@@ -1891,7 +2135,10 @@ class NativeOrchestrationCoordinator:
         attempt_id: str | None = None,
     ) -> ComplexityAssessment:
         wf = self.agent_runner.resolve_workflow(
-            worktree_path=worktree_path, provider=provider, operation="propose", change_name="complexity-assessment"
+            worktree_path=worktree_path,
+            provider=provider,
+            operation="propose",
+            change_name="complexity-assessment",
         )
         response_path = (
             worktree_path / ".minime" / "classification-attempts" / attempt_id / "last-message.json"
@@ -1902,8 +2149,8 @@ class NativeOrchestrationCoordinator:
             worktree_path=worktree_path,
             prompt_context=(
                 "Assess this Request's implementation complexity using the configured thinking agent. "
-                "Return exactly one JSON object: {\"complexity\": \"low|moderate|high\", "
-                "\"evidence\": \"brief concrete rationale\"}. Do not infer from keywords alone.\n"
+                'Return exactly one JSON object: {"complexity": "low|moderate|high", '
+                '"evidence": "brief concrete rationale"}. Do not infer from keywords alone.\n'
                 f"Title: {title}\nBody:\n{body}"
             ),
             project_id=project_id,
@@ -1918,7 +2165,9 @@ class NativeOrchestrationCoordinator:
                 },
                 "required": ["complexity", "evidence"],
                 "additionalProperties": False,
-            } if response_path else None,
+            }
+            if response_path
+            else None,
             output_last_message_path=response_path,
         )
         output = redact_secrets(getattr(result, "full_output", ""))[:4000]
@@ -2035,12 +2284,22 @@ class NativeOrchestrationCoordinator:
         )
 
         if not self._execution_is_successful(res):
-            return {"status": "FAILED", "message": "Explore agent execution was not successful or evidenced."}
+            return {
+                "status": "FAILED",
+                "message": "Explore agent execution was not successful or evidenced.",
+            }
         full_out = res.full_output
         if "HUMAN REQUIRED" in full_out:
-            options = [line.strip(" -*") for line in full_out.splitlines() if line.strip().startswith(("-", "•"))]
+            options = [
+                line.strip(" -*")
+                for line in full_out.splitlines()
+                if line.strip().startswith(("-", "•"))
+            ]
             if not options:
-                return {"status": "FAILED", "message": "Explore requested human input without concrete options."}
+                return {
+                    "status": "FAILED",
+                    "message": "Explore requested human input without concrete options.",
+                }
             return {
                 "status": "HUMAN_REQUIRED",
                 "human_payload": {
@@ -2085,7 +2344,10 @@ class NativeOrchestrationCoordinator:
             workflow=wf,
         )
         if not self._execution_is_successful(res):
-            return {"status": "FAILED", "message": "Propose agent execution was not successful or evidenced."}
+            return {
+                "status": "FAILED",
+                "message": "Propose agent execution was not successful or evidenced.",
+            }
         return {"status": "READY_TO_VALIDATE", "workflow": wf, "execution": res}
 
     async def _run_propose_correction(
@@ -2128,7 +2390,11 @@ class NativeOrchestrationCoordinator:
     ) -> bool:
         """Execute independent read-only proposal review for high complexity changes."""
         change_dir = worktree_path / "openspec" / "changes" / change_name
-        proposal_text = (change_dir / "proposal.md").read_text(errors="ignore") if (change_dir / "proposal.md").exists() else ""
+        proposal_text = (
+            (change_dir / "proposal.md").read_text(errors="ignore")
+            if (change_dir / "proposal.md").exists()
+            else ""
+        )
         prompt = (
             f"You are the independent reviewer agent (read-only). Perform independent review on OpenSpec change '{change_name}'.\n\n"
             f"Proposal Artifacts:\n{proposal_text[:3000]}\n\n"
@@ -2184,6 +2450,7 @@ class NativeOrchestrationCoordinator:
     async def _run_automated_tests(self, worktree_path: Path) -> tuple[bool, str]:
         """Execute project automated tests and verify exit code 0."""
         import sys
+
         # Use the runtime interpreter that launched mini me.  A PATH-resolved
         # pytest may belong to another environment and can produce a false
         # failure even when the candidate's declared dependencies pass.
@@ -2260,7 +2527,10 @@ class NativeOrchestrationCoordinator:
                         "items": {
                             "type": "object",
                             "properties": {
-                                "severity": {"type": "string", "enum": ["BLOCKER", "MAJOR", "MINOR"]},
+                                "severity": {
+                                    "type": "string",
+                                    "enum": ["BLOCKER", "MAJOR", "MINOR"],
+                                },
                                 "location": {"type": "string"},
                                 "violated_requirement": {"type": "string"},
                                 "expected_correction": {"type": "string"},
@@ -2282,9 +2552,8 @@ class NativeOrchestrationCoordinator:
         )
         if not self._execution_is_successful(res):
             return False
-        if (
-            getattr(res, "structured_output_missing", False)
-            or getattr(res, "structured_output_too_large", False)
+        if getattr(res, "structured_output_missing", False) or getattr(
+            res, "structured_output_too_large", False
         ):
             return False
         try:
@@ -2377,7 +2646,9 @@ class NativeOrchestrationCoordinator:
         status_result = await self._git_run(doc_path, ["status", "--porcelain"])
         if status_result.stdout.strip():
             await self._git_run(doc_path, ["add", "openspec/"])
-            await self._git_run(doc_path, ["commit", "-m", f"docs({change_name}): sync specs and archive change"])
+            await self._git_run(
+                doc_path, ["commit", "-m", f"docs({change_name}): sync specs and archive change"]
+            )
         return True
 
     async def _push_branch(self, worktree_path: Path, branch_name: str) -> None:
@@ -2401,7 +2672,10 @@ class NativeOrchestrationCoordinator:
         )
         result = await result if inspect.isawaitable(result) else result
         if not self._external_success(result) or getattr(result, "data", None) != candidate_sha:
-            detail = getattr(result, "error_message", None) or "Authenticated branch publication was not confirmed."
+            detail = (
+                getattr(result, "error_message", None)
+                or "Authenticated branch publication was not confirmed."
+            )
             raise GitOperationError(
                 GitCommandResult(("push", "-u", "origin", branch_name), 1, "", str(detail))
             )
@@ -2438,15 +2712,18 @@ class NativeOrchestrationCoordinator:
 
     async def _git_run(self, cwd: Path, args: list[str]) -> GitCommandResult:
         proc = await asyncio.create_subprocess_exec(
-            "git", *args,
+            "git",
+            *args,
             cwd=str(cwd),
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
         )
         stdout, stderr = await proc.communicate()
         result = GitCommandResult(
-            tuple(args), proc.returncode or 0,
-            stdout.decode(errors="replace"), stderr.decode(errors="replace"),
+            tuple(args),
+            proc.returncode or 0,
+            stdout.decode(errors="replace"),
+            stderr.decode(errors="replace"),
         )
         if not result.ok:
             raise GitOperationError(result)

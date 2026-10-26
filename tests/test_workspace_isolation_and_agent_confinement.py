@@ -5,12 +5,12 @@ from unittest.mock import MagicMock
 import pytest
 from tests.conftest import InMemoryPersistenceUnitOfWork, setup_managed_repository_fixture
 
-from minime.services.budget_service import BudgetService
 from minime.services.agent_runner import (
     CapacityExhaustedError,
     CliAgentRunner,
     NativeOpenSpecWorkflowUnavailable,
 )
+from minime.services.budget_service import BudgetService
 from minime.services.worktree_manager import WorktreeInfo, WorktreeManager
 
 
@@ -44,8 +44,10 @@ async def test_worktree_manager_create_request_worktree(tmp_path: Path):
 
     manager = WorktreeManager(repo_dir, uow=uow)
     manager._git = MagicMock()
+
     async def async_git(args, project_id=None):
         return "commit123"
+
     manager._git.side_effect = async_git
 
     info = await manager.create_request_worktree(
@@ -103,7 +105,9 @@ def test_agent_runner_dynamic_workflow_resolution_antigravity(tmp_path: Path):
 
 def test_agent_runner_dynamic_workflow_missing_fails_closed(tmp_path: Path):
     runner = CliAgentRunner()
-    with pytest.raises(NativeOpenSpecWorkflowUnavailable, match="Native OpenSpec Verify workflow is not installed"):
+    with pytest.raises(
+        NativeOpenSpecWorkflowUnavailable, match="Native OpenSpec Verify workflow is not installed"
+    ):
         runner.resolve_workflow(
             worktree_path=tmp_path,
             provider="codex",
@@ -132,7 +136,9 @@ def test_agent_runner_capacity_preflight_gating():
 
     capacity_service.can_admit_change.return_value = True
     with pytest.raises(CapacityExhaustedError, match="Budget headroom exhausted"):
-        runner.check_capacity_preflight(project_id="proj-1", provider_id="openrouter", role="thinker")
+        runner.check_capacity_preflight(
+            project_id="proj-1", provider_id="openrouter", role="thinker"
+        )
 
 
 def test_agent_runner_allows_direct_provider_when_openrouter_budget_disabled():
@@ -147,9 +153,7 @@ def test_agent_runner_allows_direct_provider_when_openrouter_budget_disabled():
     CliAgentRunner(
         capacity_service=capacity_service,
         budget_service=budget_service,
-    ).check_capacity_preflight(
-        project_id="proj-1", provider_id="codex", role="thinker"
-    )
+    ).check_capacity_preflight(project_id="proj-1", provider_id="codex", role="thinker")
     budget_service.get_headroom.assert_not_called()
 
 
@@ -163,9 +167,7 @@ def test_direct_subscription_provider_is_independent_of_openrouter_policy(provid
     CliAgentRunner(
         capacity_service=capacity_service,
         budget_service=budget_service,
-    ).check_capacity_preflight(
-        project_id="mini-me", provider_id=provider, role="thinker"
-    )
+    ).check_capacity_preflight(project_id="mini-me", provider_id=provider, role="thinker")
     capacity_service.can_admit_change.assert_called_once_with("mini-me")
     budget_service.get_headroom.assert_not_called()
 
@@ -174,7 +176,10 @@ def test_direct_subscription_provider_is_independent_of_openrouter_policy(provid
     "policy,headroom",
     [
         (None, None),
-        (SimpleNamespace(enabled=False), SimpleNamespace(daily_headroom_usd=0, monthly_headroom_usd=0)),
+        (
+            SimpleNamespace(enabled=False),
+            SimpleNamespace(daily_headroom_usd=0, monthly_headroom_usd=0),
+        ),
     ],
 )
 def test_openrouter_remains_denied_without_enabled_policy(policy, headroom):
@@ -200,6 +205,7 @@ def test_openrouter_requires_positive_budget_and_capacity():
     ).check_capacity_preflight("mini-me", "openrouter", "implementer")
     budget_service.get_headroom.assert_called_once_with("mini-me")
 
+
 def test_codex_preflight_with_real_budget_service_and_no_openrouter_policy():
     """Regression for the exact missing policy row that paused F5 Run #173."""
     uow = InMemoryPersistenceUnitOfWork()
@@ -212,4 +218,3 @@ def test_codex_preflight_with_real_budget_service_and_no_openrouter_policy():
 
     with pytest.raises(CapacityExhaustedError, match="OpenRouter budget policy"):
         runner.check_capacity_preflight("mini-me", "openrouter", "implementer")
-
