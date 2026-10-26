@@ -915,7 +915,7 @@ class TicketSourceAdapter(Protocol):
         issue_number: int,
         body: str,
         *,
-        expected_version: str | None = None,
+        expected_body: str | None = None,
     ) -> ExternalActionResult[dict[str, Any]]: ...
 
     def create_issue(
