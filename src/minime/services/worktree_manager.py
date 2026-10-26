@@ -4082,7 +4082,7 @@ class WorktreeManager:
         Invalid/duplicate reservations fail closed before a Run is created.
         """
         reservation = re.compile(
-            r"^[ \\t]*\\*\\*Change reservado(?:[ \\t]*\\([^\\r\\n)]*\\))?:\\*\\*[ \\t]*(.*)$",
+            r"^[ \t]*\*\*Change reservado(?:[ \t]*\([^\r\n)]*\))?:\*\*[ \t]*(.*)$",
             re.MULTILINE,
         )
         declared = reservation.findall(issue_body or "")
@@ -4090,7 +4090,7 @@ class WorktreeManager:
             if len(declared) != 1:
                 raise ValueError("Issue contains multiple explicit OpenSpec Change reservations")
             match = re.fullmatch(
-                r"`([a-z][a-z0-9]*(?:-[a-z0-9]+)*)`(?:[ \\t]+[—-].*)?",
+                r"`([a-z][a-z0-9]*(?:-[a-z0-9]+)*)`(?:[ \t]+[—-].*)?",
                 declared[0].strip(),
             )
             if match is None or len(match.group(1)) > 128:
