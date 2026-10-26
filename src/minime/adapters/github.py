@@ -2040,21 +2040,65 @@ class GitHubAdapter(GitHubAdapterInterface):
         issue_number: int,
         body: str,
         *,
-        expected_version: str | None = None,
+        expected_body: str | None = None,
     ) -> ExternalActionResult[dict[str, Any]]:
-        """Update an Issue body with an optional ETag concurrency precondition."""
+        """Publish only after verifying the exact original body.
+
+        GitHub Issues PATCH does not support If-Match; sending it fails with
+        HTTP 400. Read again immediately before PATCH and confirm the body
+        after writing. This is not an atomic compare-and-swap, so an
+        unobservable result always requires read-based reconciliation.
+        """
         repo = self._repo(repository)
         if issue_number < 1 or not isinstance(body, str) or not body.strip():
             raise ValueError("Issue body requires a positive number and non-empty text")
-        headers: dict[str, str] = {}
-        if expected_version:
-            headers["If-Match"] = expected_version
+        if expected_body is None:
+            return ExternalActionResult(
+                outcome=ExternalOutcome.FAILURE,
+                source_adapter="github_rest",
+                reason_code=ExternalReasonCode.CONFLICT,
+                retry_safety=RetrySafety.SAFE,
+                error_message="Issue body update requires the observed original body.",
+            )
+
+        current = self.get_issue(repository, issue_number)
+        if (
+            current.outcome is not ExternalOutcome.SUCCESS
+            or not isinstance(current.data, dict)
+            or current.data.get("number") != issue_number
+            or not isinstance(current.data.get("body"), str)
+        ):
+            return ExternalActionResult(
+                outcome=ExternalOutcome.UNKNOWN,
+                source_adapter="github_rest",
+                reason_code=ExternalReasonCode.UNOBSERVABLE,
+                retry_safety=RetrySafety.UNKNOWN,
+                error_message="Issue body cannot be verified before update; PATCH blocked.",
+            )
+
+        if current.data["body"] == body:
+            return ExternalActionResult(
+                outcome=ExternalOutcome.SUCCESS,
+                source_adapter="github_rest",
+                reason_code=ExternalReasonCode.EXECUTION_SUCCESS,
+                retry_safety=RetrySafety.SAFE,
+                data=current.data,
+                observed_evidence={"already_published": True},
+            )
+        if current.data["body"] != expected_body:
+            return ExternalActionResult(
+                outcome=ExternalOutcome.FAILURE,
+                source_adapter="github_rest",
+                reason_code=ExternalReasonCode.CONFLICT,
+                retry_safety=RetrySafety.SAFE,
+                error_message="Issue body changed since it was read; PATCH blocked.",
+            )
+
         try:
             response = self._request(
                 "PATCH",
                 f"/repos/{repo}/issues/{issue_number}",
                 json={"body": body},
-                headers=headers,
             )
         except GitHubAuthorizationError as exc:
             return ExternalActionResult(
@@ -2094,7 +2138,11 @@ class GitHubAdapter(GitHubAdapterInterface):
                 payload = response.json()
             except ValueError:
                 payload = None
-            if isinstance(payload, dict) and payload.get("number") == issue_number:
+            if (
+                isinstance(payload, dict)
+                and payload.get("number") == issue_number
+                and payload.get("body") == body
+            ):
                 return ExternalActionResult(
                     outcome=ExternalOutcome.SUCCESS,
                     source_adapter="github_rest",
