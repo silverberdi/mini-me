@@ -849,6 +849,7 @@ def test_semantic_pr_agent_contract_is_structured_and_fail_closed(tmp_path: Path
     )
     assert prepared[0].startswith("feat(req-7)")
 
+
 @pytest.mark.asyncio
 async def test_legacy_f5_budget_preflight_denial_is_archived_before_explicit_resume(tmp_path: Path):
     """A known pre-subprocess exception can be reconciled, never silently erased."""
