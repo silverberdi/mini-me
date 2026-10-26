@@ -116,7 +116,10 @@ def test_agent_runner_capacity_preflight_gating():
     capacity_service.can_admit_change.return_value = False
 
     budget_service = MagicMock()
-    budget_service.get_headroom.return_value = 0.0
+    budget_service.get_headroom.return_value = (
+        SimpleNamespace(enabled=True),
+        SimpleNamespace(daily_headroom_usd=0, monthly_headroom_usd=0),
+    )
 
     runner = CliAgentRunner(
         capacity_service=capacity_service,
@@ -124,11 +127,11 @@ def test_agent_runner_capacity_preflight_gating():
     )
 
     with pytest.raises(CapacityExhaustedError, match="Capacity service rejected admission"):
-        runner.check_capacity_preflight(project_id="proj-1", provider_id="openai", role="thinker")
+        runner.check_capacity_preflight(project_id="proj-1", provider_id="codex", role="thinker")
 
     capacity_service.can_admit_change.return_value = True
     with pytest.raises(CapacityExhaustedError, match="Budget headroom exhausted"):
-        runner.check_capacity_preflight(project_id="proj-1", provider_id="openai", role="thinker")
+        runner.check_capacity_preflight(project_id="proj-1", provider_id="openrouter", role="thinker")
 
 
 def test_agent_runner_allows_direct_provider_when_openrouter_budget_disabled():
@@ -146,3 +149,52 @@ def test_agent_runner_allows_direct_provider_when_openrouter_budget_disabled():
     ).check_capacity_preflight(
         project_id="proj-1", provider_id="codex", role="thinker"
     )
+    budget_service.get_headroom.assert_not_called()
+
+
+@pytest.mark.parametrize("provider", ["codex", "antigravity"])
+def test_direct_subscription_provider_is_independent_of_openrouter_policy(provider: str):
+    capacity_service = MagicMock()
+    capacity_service.can_admit_change.return_value = (True, None)
+    budget_service = MagicMock()
+    budget_service.get_headroom.return_value = (None, None)
+
+    CliAgentRunner(
+        capacity_service=capacity_service,
+        budget_service=budget_service,
+    ).check_capacity_preflight(
+        project_id="mini-me", provider_id=provider, role="thinker"
+    )
+    capacity_service.can_admit_change.assert_called_once_with("mini-me")
+    budget_service.get_headroom.assert_not_called()
+
+
+@pytest.mark.parametrize(
+    "policy,headroom",
+    [
+        (None, None),
+        (SimpleNamespace(enabled=False), SimpleNamespace(daily_headroom_usd=0, monthly_headroom_usd=0)),
+    ],
+)
+def test_openrouter_remains_denied_without_enabled_policy(policy, headroom):
+    budget_service = MagicMock()
+    budget_service.get_headroom.return_value = (policy, headroom)
+    runner = CliAgentRunner(budget_service=budget_service)
+    with pytest.raises(CapacityExhaustedError, match="OpenRouter budget policy"):
+        runner.check_capacity_preflight("mini-me", "openrouter", "implementer")
+    budget_service.get_headroom.assert_called_once_with("mini-me")
+
+
+def test_openrouter_requires_positive_budget_and_capacity():
+    capacity_service = MagicMock()
+    capacity_service.can_admit_change.return_value = (True, None)
+    budget_service = MagicMock()
+    budget_service.get_headroom.return_value = (
+        SimpleNamespace(enabled=True),
+        SimpleNamespace(daily_headroom_usd=1, monthly_headroom_usd=1),
+    )
+    CliAgentRunner(
+        capacity_service=capacity_service,
+        budget_service=budget_service,
+    ).check_capacity_preflight("mini-me", "openrouter", "implementer")
+    budget_service.get_headroom.assert_called_once_with("mini-me")
