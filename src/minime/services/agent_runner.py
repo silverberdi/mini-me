@@ -287,34 +287,32 @@ class CliAgentRunner:
                         message=f"Capacity service rejected admission for project '{project_id}'.",
                     )
 
-        if self.budget_service is not None and project_id:
-            if hasattr(self.budget_service, "get_headroom"):
-                budget_result = self.budget_service.get_headroom(project_id)
-                if isinstance(budget_result, tuple):
-                    policy, headroom = budget_result
-                else:
-                    policy, headroom = True, budget_result
-                # BudgetService governs the optional OpenRouter drain path. A
-                # project that explicitly disables that fallback must not be
-                # forced to create a meaningless positive OpenRouter allowance
-                # before a direct primary-provider invocation can start.
-                if (
-                    str(provider_id).strip().lower() != "openrouter"
-                    and getattr(policy, "enabled", True) is False
-                ):
-                    return
-                if policy is None or headroom is None:
-                    raise CapacityExhaustedError(
-                        provider_id=provider_id,
-                        message=f"Budget policy/headroom is unavailable for project '{project_id}'.",
-                    )
-                daily = getattr(headroom, "daily_headroom_usd", headroom)
-                monthly = getattr(headroom, "monthly_headroom_usd", daily)
-                if daily <= 0 or monthly <= 0:
-                    raise CapacityExhaustedError(
-                        provider_id=provider_id,
-                        message=f"Budget headroom exhausted for provider '{provider_id}' on project '{project_id}'.",
-                    )
+        # BudgetService is exclusively an OpenRouter fallback authority.
+        # Subscription-based Codex/Antigravity dispatch must not depend on
+        # an OpenRouter policy row, even when the row is absent or enabled.
+        # Provider capacity and per-role authorization are enforced separately.
+        if (
+            self.budget_service is not None
+            and project_id
+            and str(provider_id).strip().lower() == "openrouter"
+        ):
+            budget_result = self.budget_service.get_headroom(project_id)
+            if isinstance(budget_result, tuple):
+                policy, headroom = budget_result
+            else:
+                policy, headroom = None, budget_result
+            if policy is None or not getattr(policy, "enabled", False) or headroom is None:
+                raise CapacityExhaustedError(
+                    provider_id=provider_id,
+                    message=f"OpenRouter budget policy/headroom is unavailable or disabled for project '{project_id}'.",
+                )
+            daily = getattr(headroom, "daily_headroom_usd", headroom)
+            monthly = getattr(headroom, "monthly_headroom_usd", daily)
+            if daily <= 0 or monthly <= 0:
+                raise CapacityExhaustedError(
+                    provider_id=provider_id,
+                    message=f"Budget headroom exhausted for provider '{provider_id}' on project '{project_id}'.",
+                )
 
     def _profile_for(self, role: str, provider: str) -> CliInvocationProfile | None:
         normalized_provider = "antigravity" if provider.lower() == "agy" else provider.lower()
