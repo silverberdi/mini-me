@@ -129,6 +129,8 @@ class RemoteRequestIntakeService:
         if orchestration_runs is None:
             return None
 
+        if hasattr(orchestration_runs, "get_active_by_project"):
+            return orchestration_runs.get_active_by_project(project_id)
         # F3 persistence exposes list_runs, not the retired list_by_project API.
         # Re-entry must preserve the original Run and its immutable Change name.
         if hasattr(orchestration_runs, "list_runs"):
@@ -136,8 +138,6 @@ class RemoteRequestIntakeService:
             if len(runs) > 1:
                 raise ValueError("Multiple active Runs for one project; refusing ambiguous re-entry")
             return runs[0] if runs else None
-        if hasattr(orchestration_runs, "get_active_by_project"):
-            return orchestration_runs.get_active_by_project(project_id)
         if hasattr(orchestration_runs, "list_by_project"):
             runs = [run for run in orchestration_runs.list_by_project(project_id)
                     if getattr(run, "is_active", False)]
@@ -162,11 +162,16 @@ class RemoteRequestIntakeService:
         if active_run is not None:
             details = getattr(active_run, "stop_details", {}) or {}
             issue_number = getattr(active_run, "issue_number", None) or details.get("issue_number")
+            run_id = getattr(active_run, "run_id", None)
+            if not isinstance(run_id, str):
+                legacy_id = getattr(active_run, "id", None)
+                if isinstance(legacy_id, str):
+                    run_id = legacy_id
             return {
                 "re_entrant": True,
                 "project_id": project_id,
                 "repository": repository,
-                "run_id": getattr(active_run, "run_id", None),
+                "run_id": run_id,
                 "issue_number": issue_number,
                 "title": details.get("issue_title") or "change",
                 "change_name": getattr(active_run, "change_name", None),

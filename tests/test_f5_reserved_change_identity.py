@@ -8,15 +8,19 @@ from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
-
 from tests.conftest import InMemoryPersistenceUnitOfWork, setup_managed_repository_fixture
 
-from minime.domain.enums import ExternalOutcome, ExternalReasonCode, OrchestrationStage, RetrySafety, WorktreeCreationState
+from minime.domain.enums import (
+    ExternalOutcome,
+    ExternalReasonCode,
+    OrchestrationStage,
+    RetrySafety,
+    WorktreeCreationState,
+)
 from minime.domain.models import ExternalActionResult, OrchestrationRun
 from minime.services.agent_runner import CliAgentRunner
 from minime.services.orchestration_coordinator import NativeOrchestrationCoordinator
 from minime.services.worktree_manager import WorktreeInfo, WorktreeManager
-
 
 F5_BODY = (
     "## Alcance del único Change OpenSpec\n"
