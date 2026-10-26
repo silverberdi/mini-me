@@ -400,3 +400,115 @@ def test_reentry_recovers_immutable_reserved_change_from_durable_run():
     assert selected["change_name"] == "gacela-05-ui-self-hosted"
     assert selected["title"] == run.stop_details["issue_title"]
     github.list_issues.assert_not_called()
+
+@pytest.mark.asyncio
+async def test_admitted_f5_reentry_recovers_verified_issue_body_without_model(tmp_path: Path):
+    """The accepted Run must not normalize an empty Request after a no-dispatch stop."""
+    uow = InMemoryPersistenceUnitOfWork()
+    repo_dir = tmp_path / "repo"
+    setup_managed_repository_fixture(
+        uow, "mini-me", repo_dir, tmp_path / "worktrees",
+        canonical_repository_identity="github.com/silverberdi/mini-me",
+    )
+    title = "F5 — UI MVP y primera autoejecución real de mini me"
+    run = OrchestrationRun(
+        run_id="f5-original-run",
+        project_id="mini-me",
+        change_name="gacela-05-ui-self-hosted",
+        base_sha="main",
+        current_stage=OrchestrationStage.ADMITTED,
+        stop_details={
+            "issue_number": 173,
+            "issue_title": title,
+            "normalization_attempt": {"status": "FAILED"},
+        },
+    )
+    uow.orchestration_runs.save(run)
+    github = MagicMock()
+    github.get_issue.return_value = ExternalActionResult(
+        outcome=ExternalOutcome.SUCCESS,
+        source_adapter="github",
+        reason_code=ExternalReasonCode.EXECUTION_SUCCESS,
+        retry_safety=RetrySafety.SAFE,
+        data={"number": 173, "title": title, "body": F5_BODY},
+    )
+    worktrees = WorktreeManager(repo_dir, uow=uow)
+    worktrees.create_request_worktree = AsyncMock(
+        return_value=WorktreeInfo(path=repo_dir, branch_name="request-173-f5", base_sha="a" * 40)
+    )
+    runner = CliAgentRunner()
+    runner.run = AsyncMock(side_effect=AssertionError("no model dispatch"))
+    coordinator = NativeOrchestrationCoordinator(
+        uow_factory=lambda: uow,
+        github_adapter=github,
+        worktree_manager=worktrees,
+        agent_runner=runner,
+    )
+    coordinator._normalize_request_before_explore = AsyncMock(
+        return_value=(None, "intentional test-only boundary")
+    )
+
+    result = await coordinator.execute_project_request("mini-me")
+
+    assert result.status == "PAUSED"
+    assert result.run_id == "f5-original-run"
+    assert coordinator._normalize_request_before_explore.await_args.kwargs["issue_body"] == F5_BODY
+    assert worktrees.create_request_worktree.await_args.kwargs["run_id"] == "f5-original-run"
+    assert worktrees.create_request_worktree.await_args.kwargs["change_name"] == "gacela-05-ui-self-hosted"
+    runner.run.assert_not_awaited()
+    github.list_issues.assert_not_called()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("invalid_source", ["empty", "different_change", "unverified"])
+async def test_admitted_f5_reentry_refuses_unverified_issue_body(tmp_path: Path, invalid_source: str):
+    uow = InMemoryPersistenceUnitOfWork()
+    repo_dir = tmp_path / "repo"
+    setup_managed_repository_fixture(
+        uow, "mini-me", repo_dir, tmp_path / "worktrees",
+        canonical_repository_identity="github.com/silverberdi/mini-me",
+    )
+    title = "F5 — UI MVP y primera autoejecución real de mini me"
+    run = OrchestrationRun(
+        run_id="f5-original-run",
+        project_id="mini-me",
+        change_name="gacela-05-ui-self-hosted",
+        base_sha="main",
+        current_stage=OrchestrationStage.ADMITTED,
+        stop_details={"issue_number": 173, "issue_title": title},
+    )
+    uow.orchestration_runs.save(run)
+    body = (
+        ""
+        if invalid_source == "empty"
+        else "**Change reservado (no creado ni activado):** `gacela-06-depuracion-final`"
+    )
+    github = MagicMock()
+    github.get_issue.return_value = ExternalActionResult(
+        outcome=(
+            ExternalOutcome.UNKNOWN if invalid_source == "unverified" else ExternalOutcome.SUCCESS
+        ),
+        source_adapter="github",
+        reason_code=ExternalReasonCode.UNOBSERVABLE,
+        retry_safety=RetrySafety.SAFE,
+        data={"number": 173, "title": title, "body": body},
+    )
+    worktrees = WorktreeManager(repo_dir, uow=uow)
+    worktrees.create_request_worktree = AsyncMock()
+    runner = CliAgentRunner()
+    runner.run = AsyncMock()
+    coordinator = NativeOrchestrationCoordinator(
+        uow_factory=lambda: uow,
+        github_adapter=github,
+        worktree_manager=worktrees,
+        agent_runner=runner,
+    )
+
+    result = await coordinator.execute_project_request("mini-me")
+
+    assert result.status == "PAUSED"
+    assert result.run_id == "f5-original-run"
+    assert uow.orchestration_runs.get_active_run("mini-me", "gacela-05-ui-self-hosted").run_id == "f5-original-run"
+    worktrees.create_request_worktree.assert_not_awaited()
+    runner.run.assert_not_awaited()
+
