@@ -719,9 +719,29 @@ class NativeOrchestrationCoordinator:
         issue_number = selected.get("issue_number")
         issue_title = selected.get("title") or "change"
         issue_body = selected.get("body") or ""
-
-        slug = self.worktree_manager.slugify_request_title(issue_title)
-        change_name = f"req-{issue_number}-{slug}"
+        if selected.get("re_entrant"):
+            # Durable Run identity wins on re-entry; the Issue may have been edited.
+            active_details = getattr(selected.get("run"), "stop_details", {}) or {}
+            issue_number = issue_number or active_details.get("issue_number")
+            issue_title = active_details.get("issue_title") or issue_title
+            change_name = selected.get("change_name")
+            if not change_name or not isinstance(issue_number, int):
+                return OrchestrationCoordinationResult(
+                    status="PAUSED", run_id=selected.get("run_id"),
+                    current_stage=OrchestrationStage.ADMITTED,
+                    message="Active Request lacks immutable Change or Issue identity.",
+                )
+        else:
+            try:
+                change_name = WorktreeManager.resolve_request_change_name(
+                    issue_number, issue_title, issue_body
+                )
+            except ValueError as exc:
+                return OrchestrationCoordinationResult(
+                    status="PAUSED", run_id=None,
+                    current_stage=OrchestrationStage.ADMITTED,
+                    message=f"Request Change identity is invalid: {exc}",
+                )
 
         # Step 2: Durable Run Record
         active_run = None
@@ -755,6 +775,7 @@ class NativeOrchestrationCoordinator:
             issue_title=issue_title,
             base_branch=base_branch,
             run_id=active_run.run_id,
+            change_name=change_name,
         )
         worktree_path = worktree_info.path
 
@@ -1399,8 +1420,13 @@ class NativeOrchestrationCoordinator:
         issue_title = str(next_request.get("title") or "change")
         if not isinstance(issue_number, int) or issue_number < 1:
             return None
-        slug = re.sub(r"[-\s]+", "-", re.sub(r"[^\w\s-]", "", issue_title).strip().lower()).strip("-")
-        change_name = f"req-{issue_number}-{slug[:40].rstrip('-') or 'change'}"
+        try:
+            change_name = WorktreeManager.resolve_request_change_name(
+                issue_number, issue_title, str(next_request.get("body") or "")
+            )
+        except ValueError as exc:
+            logger.warning("Next FIFO request has an invalid Change reservation: %s", exc)
+            return None
         runs = getattr(uow, "orchestration_runs", None)
         if runs is None:
             raise RuntimeError("Durable orchestration run repository is unavailable.")
