@@ -802,11 +802,47 @@ class NativeOrchestrationCoordinator:
             )
             if isinstance(normalized_body, str) and normalized_body.strip():
                 issue_body = normalized_body
-            elif getattr(selected.get("run"), "current_stage", None) not in (
+            elif getattr(selected.get("run"), "current_stage", None) in (
                 OrchestrationStage.ADMITTED,
                 OrchestrationStage.PREPARING_EXECUTION,
                 OrchestrationStage.EXPLORING,
             ):
+                # Older admitted Runs retained the Issue identity but not its
+                # source body. Re-read the authoritative remote Request, never
+                # dispatch an empty prompt or silently switch Change identity.
+                observed = self.github_adapter.get_issue(repository, issue_number)
+                remote_issue = observed.data if (
+                    isinstance(observed, ExternalActionResult)
+                    and observed.outcome is ExternalOutcome.SUCCESS
+                    and isinstance(observed.data, dict)
+                ) else None
+                remote_body = remote_issue.get("body") if remote_issue else None
+                if (
+                    not remote_issue
+                    or remote_issue.get("number") != issue_number
+                    or remote_issue.get("title") != issue_title
+                    or not isinstance(remote_body, str)
+                    or not remote_body.strip()
+                ):
+                    return OrchestrationCoordinationResult(
+                        status="PAUSED", run_id=selected.get("run_id"),
+                        current_stage=selected["run"].current_stage,
+                        message="Admitted Request source body or identity cannot be verified.",
+                    )
+                try:
+                    remote_change = WorktreeManager.resolve_request_change_name(
+                        issue_number, issue_title, remote_body
+                    )
+                except ValueError:
+                    remote_change = None
+                if remote_change != change_name:
+                    return OrchestrationCoordinationResult(
+                        status="PAUSED", run_id=selected.get("run_id"),
+                        current_stage=selected["run"].current_stage,
+                        message="Admitted Request Change reservation does not match the durable Run.",
+                    )
+                issue_body = remote_body
+            else:
                 return OrchestrationCoordinationResult(
                     status="PAUSED", run_id=selected.get("run_id"),
                     current_stage=selected["run"].current_stage,
