@@ -75,10 +75,14 @@ async def test_complexity_rejects_multiple_or_prose_objects(tmp_path: Path):
 
 @pytest.mark.asyncio
 async def test_explore_failure_blocks_propose(tmp_path: Path):
-    runner = ScriptedRunner("not valid")
+    runner = ScriptedRunner("READY_TO_PROPOSE")
     c = coordinator(tmp_path, runner)
     result = await c._run_explore(tmp_path, "codex", 5, "title", "body", project_id="p1")
     assert result["status"] == "READY_TO_PROPOSE"
+    runner.output = "exploration narrative without an explicit verdict"
+    assert (
+        await c._run_explore(tmp_path, "codex", 5, "title", "body", project_id="p1")
+    )["status"] == "FAILED"
     runner.exit_code = 2
     result = await c._run_explore(tmp_path, "codex", 5, "title", "body", project_id="p1")
     assert result["status"] == "FAILED"
