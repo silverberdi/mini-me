@@ -2351,7 +2351,7 @@ class NativeOrchestrationCoordinator:
         # Interpret ONLY explicit, standalone dispositions from the provider's
         # response channel. Broad substring searches across stdout/stderr
         # misclassify READY_TO_PROPOSE when prior HUMAN REQUIRED gates are quoted.
-        output = res.response_output
+        output = self._explore_final_message(res.response_output)
         disposition, marker_line = self._explore_disposition(output)
         if disposition is None:
             return {
@@ -2380,6 +2380,47 @@ class NativeOrchestrationCoordinator:
                 "execution": res,
             }
         return {"status": "READY_TO_PROPOSE", "execution": res}
+
+    @staticmethod
+    def _explore_final_message(provider_response: str) -> str:
+        """Extract a Codex NDJSON agent message instead of parsing tool logs.
+
+        The subscribed Codex exec CLI can emit event records containing
+        tool output, quoted requests and progress. Only the last completed
+        assistant message is its final Explore answer. Unrecognised event
+        streams fail closed; plain-text Antigravity responses remain supported.
+        """
+        messages: list[str] = []
+        event_stream = False
+        for line in provider_response.splitlines():
+            try:
+                event = json.loads(line)
+            except (TypeError, json.JSONDecodeError):
+                continue
+            if not isinstance(event, dict) or not isinstance(event.get("type"), str):
+                continue
+            if event["type"] in {
+                "thread.started",
+                "turn.started",
+                "turn.completed",
+                "turn.failed",
+                "item.started",
+                "item.updated",
+                "item.completed",
+            }:
+                event_stream = True
+            item = event.get("item")
+            if (
+                event.get("type") == "item.completed"
+                and isinstance(item, dict)
+                and item.get("type") == "agent_message"
+                and isinstance(item.get("text"), str)
+                and item["text"].strip()
+            ):
+                messages.append(item["text"])
+        if event_stream:
+            return messages[-1] if messages else ""
+        return provider_response
 
     @staticmethod
     def _explore_disposition(response: str) -> tuple[str | None, int]:
