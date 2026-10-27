@@ -1,28 +1,32 @@
-# mini me — la gacela
+# F5 — excepción de mantenimiento: integridad de resultados de agentes
 
-mini me es una aplicación **personal y de instalación única** que coordina agentes usando los workflows **nativos de OpenSpec** para convertir tickets remotos en cambios implementados, verificados, fusionados y archivados. No programa ni recrea OpenSpec.
+## Autoridad y límites
 
-**Contrato rector:** [docs/CONTRATO_RECTOR.md](docs/CONTRATO_RECTOR.md) (versión 1.2).
-**Backlog de reconstrucción:** [docs/BACKLOG.md](docs/BACKLOG.md).
-**Reconciliación del legado:** [docs/RECONCILIACION_LEGADO.md](docs/RECONCILIACION_LEGADO.md).
-**Contexto de OpenSpec:** [openspec/config.yaml](openspec/config.yaml).
-**Instrucciones para agentes:** [AGENTS.md](AGENTS.md).
+Este directorio contiene una **copia inalterada de los artefactos OpenSpec aprobados** de la reparación transversal F5. El Change `f5-agent-result-integrity-design` es una **envoltura de validación documental aislada**, NO un Change operativo adicional. `gacela-05-ui-self-hosted` sigue siendo el único Change ejecutable de F5.
 
-## Dirección vigente
-GitHub Issues (inicial) → ticket más antiguo elegible → propose y revisión independiente de propuesta → apply → verify + correcciones → review de código condicional → PR → merge humano → sync/archive nativos desde rama documental nueva → PR documental autorizado → ticket cerrado → siguiente.
+- Contrato rector vigente: `docs/CONTRATO_RECTOR.md` v1.3.
+- Run original, Issue #173, rama y worktree de autoejecución: intocables.
+- Ninguna autorización implícita para merge, despliegue, modelos o reanudación.
+- No modificar `openspec/changes/gacela-05-ui-self-hosted` antes de la reentrada nativa autorizada.
 
-Los roles pensamiento, ejecución, revisión independiente y respaldo y sus modelos son configurables. La DB mantiene solo configuración y checkpoints necesarios, no la cartera de tickets. Las preguntas de OpenSpec se presentan con opciones originales o se intentan resolver con contexto sin usurpar autoridad humana.
+## Validación formal del borrador (solo en checkout desechable)
 
-**Una API FastAPI, arquitectura modular pequeña, POO/SOLID/DRY, KISS/YAGNI.** mini me no despliega: despliegue pertenece al CI/CD del proyecto.
+Desde un clon **desechable** de la rama de este PR:
 
-## Reconstrucción: exactamente seis Changes
-1. [#169](https://github.com/silverberdi/mini-me/issues/169) — depuración inicial (lógica/DB, emulación OpenSpec).
-2. [#170](https://github.com/silverberdi/mini-me/issues/170) — proyectos y roles configurables.
-3. [#171](https://github.com/silverberdi/mini-me/issues/171) — OpenSpec nativo, revisión y E2E real.
-4. [#172](https://github.com/silverberdi/mini-me/issues/172) — skills base reutilizables.
-5. [#173](https://github.com/silverberdi/mini-me/issues/173) — UI; **mini me debe ejecutar su propio Change**.
-6. [#174](https://github.com/silverberdi/mini-me/issues/174) — segunda depuración; **mini me debe ejecutar su propio Change**.
+```bash
+cp -a docs/maintenance/f5-agent-result-integrity/openspec/changes/f5-agent-result-integrity-design \
+  openspec/changes/f5-agent-result-integrity-design
+openspec validate f5-agent-result-integrity-design --strict --type change
+```
 
-Un Change por fase, con una o más especificaciones. Las specs y MM-R01–R10 anteriores son historia que se debe conciliar, no un backlog paralelo. Esta actualización de documentos NO ejecuta ninguno de los Changes.
+El resultado válido debe ser exit code 0, stdout de cambio válido, stderr vacío.
+Eliminar únicamente el checkout desechable al finalizar, nunca el worktree del Run F5.
 
-**mini me debe ser una gacela, no un paquidermo.** El valor es un recorrido real completo, no la cantidad de código o checks.
+La misma validación OpenSpec 1.9.0 se ejecutó antes de programar y dio PASS; cualquier revisión de las specs debe repetirla. Los tests, lint y E2E del **código de este PR** todavía requieren evidencia separada; no se declaran PASS por el éxito documental.
+
+## Secuencia de gobierno
+
+1. Validar estrictamente el contrato y revisar código, consumidores y pruebas.
+2. Ejecutar regresiones y E2E offline en entorno aislado; documentar límites y riesgos.
+3. Dejar PR listo solo con resultados verificables; solicitar merge explícito.
+4. No desplegar ni reanudar F5 sin autorizaciones nuevas, separadas y registradas.
