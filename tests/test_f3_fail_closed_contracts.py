@@ -139,7 +139,7 @@ async def test_explore_codex_ndjson_uses_final_agent_message_not_tool_logs(tmp_p
             "type": "item.completed",
             "item": {
                 "type": "command_execution",
-                "output": "HUMAN REQUIRED\\n- An earlier user decision",
+                "output": "HUMAN REQUIRED\n- An earlier user decision",
             },
         },
         {
@@ -147,7 +147,7 @@ async def test_explore_codex_ndjson_uses_final_agent_message_not_tool_logs(tmp_p
             "item": {
                 "type": "agent_message",
                 "text": (
-                    "READY_TO_PROPOSE\\nLa aclaración resuelve el anterior "
+                    "READY_TO_PROPOSE\nLa aclaración resuelve el anterior "
                     "HUMAN REQUIRED."
                 ),
             },
