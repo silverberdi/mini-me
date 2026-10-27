@@ -89,6 +89,76 @@ async def test_explore_failure_blocks_propose(tmp_path: Path):
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("response", "status"),
+    [
+        (
+            "READY_TO_PROPOSE\nLa aclaración resolvió el conflicto. "
+            "El gate HUMAN REQUIRED anterior es solo antecedente.",
+            "READY_TO_PROPOSE",
+        ),
+        (
+            "## **READY_TO_PROPOSE**\nEl backend mínimo ya está autorizado. "
+            "El texto HUMAN REQUIRED aparece en el Issue y logs.",
+            "READY_TO_PROPOSE",
+        ),
+        (
+            "Exploración: se revisó el antecedente HUMAN REQUIRED.\n"
+            "READY_TO_PROPOSE\nListo para Propose.",
+            "READY_TO_PROPOSE",
+        ),
+        (
+            "```text\nHUMAN REQUIRED\n- Ejemplo histórico\n```\n"
+            "READY_TO_PROPOSE\nLa decisión ya está tomada.",
+            "READY_TO_PROPOSE",
+        ),
+        ("HUMAN REQUIRED\n- Consultar diseño\n- Mantener alcance", "HUMAN_REQUIRED"),
+        ("**HUMAN REQUIRED**\n- Aclaración auténtica", "HUMAN_REQUIRED"),
+        ("Se discutió HUMAN REQUIRED pero ya está resuelto.", "FAILED"),
+        ("READY_TO_PROPOSE\nHUMAN REQUIRED\n- Pregunta", "FAILED"),
+        ("- READY_TO_PROPOSE\nSin veredicto formal", "FAILED"),
+        ("HUMAN REQUIRED sin opciones", "FAILED"),
+    ],
+)
+async def test_explore_verdict_uses_exact_provider_disposition_not_context(tmp_path, response, status):
+    runner = ScriptedRunner(response)
+    resolved = await coordinator(tmp_path, runner)._run_explore(
+        tmp_path, "codex", 173, "F5", "Gherkin", project_id="mini-me"
+    )
+    assert resolved["status"] == status
+    assert len(runner.calls) == 1
+
+
+@pytest.mark.asyncio
+async def test_explore_ignores_stderr_human_required_and_blocks_truncated_output(tmp_path):
+    from unittest.mock import AsyncMock
+
+    c = coordinator(tmp_path, ScriptedRunner(""))
+    c.agent_runner.run = AsyncMock(
+        return_value=AgentExecutionResult(
+            exit_code=0,
+            timed_out=False,
+            stdout=["READY_TO_PROPOSE"],
+            stderr=["HUMAN REQUIRED (prior debug notice)"],
+            duration_ms=1,
+        )
+    )
+    assert (
+        await c._run_explore(tmp_path, "codex", 173, "F5", "Gherkin", project_id="mini-me")
+    )["status"] == "READY_TO_PROPOSE"
+    c.agent_runner.run.return_value = AgentExecutionResult(
+        exit_code=0,
+        timed_out=False,
+        stdout=["READY_TO_PROPOSE"],
+        stderr=[],
+        duration_ms=1,
+        output_truncated=True,
+    )
+    assert (
+        await c._run_explore(tmp_path, "codex", 173, "F5", "Gherkin", project_id="mini-me")
+    )["status"] == "FAILED"
+
+@pytest.mark.asyncio
 async def test_reviews_require_positive_structured_verdict(tmp_path: Path):
     change_dir = tmp_path / "openspec" / "changes" / "change"
     change_dir.mkdir(parents=True)
