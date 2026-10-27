@@ -188,6 +188,21 @@ async def test_explore_refuses_codex_events_without_final_assistant_message(tmp_
 
 
 @pytest.mark.asyncio
+async def test_explore_codex_json_failure_event_refuses_to_advance(tmp_path):
+    import json
+
+    payload = [
+        {"type": "item.completed", "item": {"type": "agent_message", "text": "READY_TO_PROPOSE"}},
+        {"type": "turn.failed"},
+    ]
+    text = "\n".join(json.dumps(event) for event in payload)
+    result = await coordinator(tmp_path, ScriptedRunner(text))._run_explore(
+        tmp_path, "codex", 173, "F5", "Gherkin", project_id="mini-me"
+    )
+    assert result["status"] == "FAILED"
+
+
+@pytest.mark.asyncio
 async def test_explore_ignores_stderr_human_required_and_blocks_truncated_output(tmp_path):
     from unittest.mock import AsyncMock
 
