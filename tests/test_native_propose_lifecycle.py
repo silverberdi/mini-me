@@ -94,7 +94,11 @@ async def test_propose_lifecycle_explore_and_propose(mock_env):
         return AgentExecutionResult(
             exit_code=0,
             timed_out=False,
-            stdout=["Done"],
+            stdout=[
+                "READY_TO_PROPOSE"
+                if "Execute official OpenSpec Explore" in prompt_context
+                else "Done"
+            ],
             stderr=[],
             duration_ms=10,
         )
