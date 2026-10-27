@@ -1,0 +1,61 @@
+{
+  "validation": "STATIC_STRUCTURE_ONLY_NOT_OPENSPEC_STRICT",
+  "open_spec_strict": "NOT_EXECUTED_CLI_UNAVAILABLE",
+  "change": "f5-agent-result-integrity-design",
+  "specs": [
+    {
+      "file": "openspec/changes/f5-agent-result-integrity-design/specs/agent-result-evidence-integrity/spec.md",
+      "requirements": 4,
+      "scenarios": 14
+    },
+    {
+      "file": "openspec/changes/f5-agent-result-integrity-design/specs/openspec-orchestration-continuity/spec.md",
+      "requirements": 3,
+      "scenarios": 10
+    },
+    {
+      "file": "openspec/changes/f5-agent-result-integrity-design/specs/openspec-native-propose/spec.md",
+      "requirements": 1,
+      "scenarios": 6
+    }
+  ],
+  "file_count": 9,
+  "files": [
+    {
+      "path": "openspec/changes/f5-agent-result-integrity-design/design.md",
+      "sha256": "f8bb5caed904696ecdf250b5436a54579a660fc2d786516286e69f9f5eec6461"
+    },
+    {
+      "path": "openspec/changes/f5-agent-result-integrity-design/evidence/acceptance-matrix.md",
+      "sha256": "3dbd53262e6bc0729f3a1e22fe4254655c8738ed02b9db2423e4b28beec5b68c"
+    },
+    {
+      "path": "openspec/changes/f5-agent-result-integrity-design/evidence/code-census.md",
+      "sha256": "6a2b45adecd1442f1cc026f14274481c9a0483eae5eb4e4ac20be63d8c43d1f7"
+    },
+    {
+      "path": "openspec/changes/f5-agent-result-integrity-design/evidence/validation-plan.md",
+      "sha256": "69ff8434d1a061926a4955fa5ac73019ce21d40b4dd00d0808b7c73adf213377"
+    },
+    {
+      "path": "openspec/changes/f5-agent-result-integrity-design/proposal.md",
+      "sha256": "d2d30a8333c0accbad451e927ebd9f34aac2fe9454255291c60c780e605fdb1c"
+    },
+    {
+      "path": "openspec/changes/f5-agent-result-integrity-design/specs/agent-result-evidence-integrity/spec.md",
+      "sha256": "383cd20d48090668039163a99993cd4c929ad0f3bd68b6a21748c81be09d71c2"
+    },
+    {
+      "path": "openspec/changes/f5-agent-result-integrity-design/specs/openspec-native-propose/spec.md",
+      "sha256": "1c769c4bdc32dcf12480be88f9d0325d0794935e2ba6896a22ff2420582f98cb"
+    },
+    {
+      "path": "openspec/changes/f5-agent-result-integrity-design/specs/openspec-orchestration-continuity/spec.md",
+      "sha256": "9a0ef04b4df036a773ae312f0b91549883986c2a476a1b611db7f2b810bb722d"
+    },
+    {
+      "path": "openspec/changes/f5-agent-result-integrity-design/tasks.md",
+      "sha256": "fe0d6ed8a9ff323af9a3be4c42e43b4f75222e6dbf455625d13b2f3022e12fdf"
+    }
+  ]
+}
