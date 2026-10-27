@@ -73,7 +73,10 @@ class AgentExecutionResult:
     def response_output(self) -> str:
         """Return only the provider response channel, excluding diagnostics."""
         if self.final_response_status is not None:
-            return self.final_response or "" if self.final_response_status == "COMPLETE" else ""
+            if self.final_response_status != "COMPLETE":
+                return ""
+            if self.final_response is not None:
+                return self.final_response
         return "\n".join(
             self.structured_output if self.structured_output is not None else self.stdout
         )
@@ -109,8 +112,13 @@ class CliAgentRunner:
         raw_lines = raw_text.splitlines()
         events: list[dict[str, Any]] = []
         recognized = {
-            "thread.started", "turn.started", "turn.completed", "turn.failed",
-            "item.started", "item.updated", "item.completed",
+            "thread.started",
+            "turn.started",
+            "turn.completed",
+            "turn.failed",
+            "item.started",
+            "item.updated",
+            "item.completed",
         }
         has_native_events = False
         malformed = False

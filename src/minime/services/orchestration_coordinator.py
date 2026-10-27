@@ -2814,10 +2814,12 @@ class NativeOrchestrationCoordinator:
         archive_root = doc_path / "openspec" / "changes" / "archive"
         archived = (
             [
-                p for p in archive_root.iterdir()
+                p
+                for p in archive_root.iterdir()
                 if p.is_dir() and (p.name == change_name or p.name.endswith(f"-{change_name}"))
             ]
-            if archive_root.is_dir() else []
+            if archive_root.is_dir()
+            else []
         )
         # A success narrative cannot substitute for a real OpenSpec archive.
         if len(archived) != 1:

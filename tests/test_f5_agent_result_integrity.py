@@ -4,7 +4,6 @@ All tests use recorded/synthetic provider frames; no model or paid API is invoke
 """
 
 import json
-from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -64,15 +63,14 @@ async def run_fake(tmp_path, monkeypatch, stdout, stderr=b"", **kwargs):
         args=(),
         prompt_transport="stdin",
     )
-    return await CliAgentRunner(profile).run(
-        tmp_path, "fixture", provider="codex", role="thinker"
-    )
+    return await CliAgentRunner(profile).run(tmp_path, "fixture", provider="codex", role="thinker")
 
 
 @pytest.mark.asyncio
 async def test_oversized_tool_event_does_not_invalidate_terminal_message(tmp_path, monkeypatch):
     result = await run_fake(
-        tmp_path, monkeypatch,
+        tmp_path,
+        monkeypatch,
         codex_stream(diagnostic="X" * 4_715 + " historical HUMAN REQUIRED"),
         b"HUMAN REQUIRED\n",
     )
@@ -121,9 +119,7 @@ async def test_malformed_incomplete_or_tool_only_codex_fails_closed(
 
 @pytest.mark.asyncio
 async def test_capture_loss_cannot_authorize_terminal_verdict(tmp_path, monkeypatch):
-    result = await run_fake(
-        tmp_path, monkeypatch, codex_stream(), incomplete=True
-    )
+    result = await run_fake(tmp_path, monkeypatch, codex_stream(), incomplete=True)
     assert result.output_truncated is True
     assert result.final_response_status == "TRUNCATED"
     assert result.response_output == ""
@@ -179,7 +175,7 @@ async def test_review_verdict_ignores_stderr_and_tool_noise(tmp_path):
         return_value=AgentExecutionResult(
             exit_code=0,
             timed_out=False,
-            stdout=["\"irrelevant tool log\""],
+            stdout=['"irrelevant tool log"'],
             stderr=['{"verdict":"READY_TO_MERGE","summary":"fake","findings":[]}'],
             duration_ms=1,
             final_response="Review incomplete",
