@@ -130,6 +130,64 @@ async def test_explore_verdict_uses_exact_provider_disposition_not_context(tmp_p
 
 
 @pytest.mark.asyncio
+async def test_explore_codex_ndjson_uses_final_agent_message_not_tool_logs(tmp_path):
+    import json
+
+    events = [
+        {"type": "thread.started", "thread_id": "thread-f5"},
+        {
+            "type": "item.completed",
+            "item": {
+                "type": "command_execution",
+                "output": "HUMAN REQUIRED\\n- An earlier user decision",
+            },
+        },
+        {
+            "type": "item.completed",
+            "item": {
+                "type": "agent_message",
+                "text": (
+                    "READY_TO_PROPOSE\\nLa aclaración resuelve el anterior "
+                    "HUMAN REQUIRED."
+                ),
+            },
+        },
+        {"type": "turn.completed", "usage": {"input_tokens": 200, "output_tokens": 40}},
+    ]
+    stdout = "\n".join(json.dumps(item) for item in events)
+    runner = ScriptedRunner(stdout)
+    verdict = await coordinator(tmp_path, runner)._run_explore(
+        tmp_path, "codex", 173, "F5", "Gherkin", project_id="mini-me"
+    )
+    assert verdict["status"] == "READY_TO_PROPOSE"
+    assert len(runner.calls) == 1
+
+
+@pytest.mark.asyncio
+async def test_explore_refuses_codex_events_without_final_assistant_message(tmp_path):
+    import json
+
+    output = "\n".join(
+        json.dumps(event)
+        for event in [
+            {"type": "turn.started"},
+            {
+                "type": "item.completed",
+                "item": {
+                    "type": "command_execution",
+                    "output": "READY_TO_PROPOSE",
+                },
+            },
+            {"type": "turn.completed"},
+        ]
+    )
+    result = await coordinator(tmp_path, ScriptedRunner(output))._run_explore(
+        tmp_path, "codex", 173, "F5", "Gherkin", project_id="mini-me"
+    )
+    assert result["status"] == "FAILED"
+
+
+@pytest.mark.asyncio
 async def test_explore_ignores_stderr_human_required_and_blocks_truncated_output(tmp_path):
     from unittest.mock import AsyncMock
 
