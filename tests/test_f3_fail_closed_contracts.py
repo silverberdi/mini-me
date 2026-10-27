@@ -65,7 +65,9 @@ async def test_complexity_rejects_multiple_or_prose_objects(tmp_path: Path):
     skill = tmp_path / ".agents" / "skills" / "openspec-propose"
     skill.mkdir(parents=True)
     (skill / "SKILL.md").write_text("native")
-    runner = ScriptedRunner('{"complexity":"low","evidence":"a"}\n{"complexity":"high","evidence":"b"}')
+    runner = ScriptedRunner(
+        '{"complexity":"low","evidence":"a"}\n{"complexity":"high","evidence":"b"}'
+    )
     result = await coordinator(tmp_path, runner)._assess_complexity(
         tmp_path, "codex", "title", "body", "p1"
     )
@@ -75,13 +77,160 @@ async def test_complexity_rejects_multiple_or_prose_objects(tmp_path: Path):
 
 @pytest.mark.asyncio
 async def test_explore_failure_blocks_propose(tmp_path: Path):
-    runner = ScriptedRunner("not valid")
+    runner = ScriptedRunner("READY_TO_PROPOSE")
     c = coordinator(tmp_path, runner)
     result = await c._run_explore(tmp_path, "codex", 5, "title", "body", project_id="p1")
     assert result["status"] == "READY_TO_PROPOSE"
+    runner.output = "exploration narrative without an explicit verdict"
+    assert (await c._run_explore(tmp_path, "codex", 5, "title", "body", project_id="p1"))[
+        "status"
+    ] == "FAILED"
     runner.exit_code = 2
     result = await c._run_explore(tmp_path, "codex", 5, "title", "body", project_id="p1")
     assert result["status"] == "FAILED"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("response", "status"),
+    [
+        (
+            "READY_TO_PROPOSE\nLa aclaración resolvió el conflicto. "
+            "El gate HUMAN REQUIRED anterior es solo antecedente.",
+            "READY_TO_PROPOSE",
+        ),
+        (
+            "## **READY_TO_PROPOSE**\nEl backend mínimo ya está autorizado. "
+            "El texto HUMAN REQUIRED aparece en el Issue y logs.",
+            "READY_TO_PROPOSE",
+        ),
+        (
+            "Exploración: se revisó el antecedente HUMAN REQUIRED.\n"
+            "READY_TO_PROPOSE\nListo para Propose.",
+            "READY_TO_PROPOSE",
+        ),
+        (
+            "```text\nHUMAN REQUIRED\n- Ejemplo histórico\n```\n"
+            "READY_TO_PROPOSE\nLa decisión ya está tomada.",
+            "READY_TO_PROPOSE",
+        ),
+        ("HUMAN REQUIRED\n- Consultar diseño\n- Mantener alcance", "HUMAN_REQUIRED"),
+        ("**HUMAN REQUIRED**\n- Aclaración auténtica", "HUMAN_REQUIRED"),
+        ("Se discutió HUMAN REQUIRED pero ya está resuelto.", "FAILED"),
+        ("READY_TO_PROPOSE\nHUMAN REQUIRED\n- Pregunta", "FAILED"),
+        ("- READY_TO_PROPOSE\nSin veredicto formal", "FAILED"),
+        ("HUMAN REQUIRED sin opciones", "FAILED"),
+    ],
+)
+async def test_explore_verdict_uses_exact_provider_disposition_not_context(
+    tmp_path, response, status
+):
+    runner = ScriptedRunner(response)
+    resolved = await coordinator(tmp_path, runner)._run_explore(
+        tmp_path, "codex", 173, "F5", "Gherkin", project_id="mini-me"
+    )
+    assert resolved["status"] == status
+    assert len(runner.calls) == 1
+
+
+@pytest.mark.asyncio
+async def test_explore_codex_ndjson_uses_final_agent_message_not_tool_logs(tmp_path):
+    import json
+
+    events = [
+        {"type": "thread.started", "thread_id": "thread-f5"},
+        {
+            "type": "item.completed",
+            "item": {
+                "type": "command_execution",
+                "output": "HUMAN REQUIRED\n- An earlier user decision",
+            },
+        },
+        {
+            "type": "item.completed",
+            "item": {
+                "type": "agent_message",
+                "text": ("READY_TO_PROPOSE\nLa aclaración resuelve el anterior HUMAN REQUIRED."),
+            },
+        },
+        {"type": "turn.completed", "usage": {"input_tokens": 200, "output_tokens": 40}},
+    ]
+    stdout = "\n".join(json.dumps(item) for item in events)
+    runner = ScriptedRunner(stdout)
+    verdict = await coordinator(tmp_path, runner)._run_explore(
+        tmp_path, "codex", 173, "F5", "Gherkin", project_id="mini-me"
+    )
+    assert verdict["status"] == "READY_TO_PROPOSE"
+    assert len(runner.calls) == 1
+
+
+@pytest.mark.asyncio
+async def test_explore_refuses_codex_events_without_final_assistant_message(tmp_path):
+    import json
+
+    output = "\n".join(
+        json.dumps(event)
+        for event in [
+            {"type": "turn.started"},
+            {
+                "type": "item.completed",
+                "item": {
+                    "type": "command_execution",
+                    "output": "READY_TO_PROPOSE",
+                },
+            },
+            {"type": "turn.completed"},
+        ]
+    )
+    result = await coordinator(tmp_path, ScriptedRunner(output))._run_explore(
+        tmp_path, "codex", 173, "F5", "Gherkin", project_id="mini-me"
+    )
+    assert result["status"] == "FAILED"
+
+
+@pytest.mark.asyncio
+async def test_explore_codex_json_failure_event_refuses_to_advance(tmp_path):
+    import json
+
+    payload = [
+        {"type": "item.completed", "item": {"type": "agent_message", "text": "READY_TO_PROPOSE"}},
+        {"type": "turn.failed"},
+    ]
+    text = "\n".join(json.dumps(event) for event in payload)
+    result = await coordinator(tmp_path, ScriptedRunner(text))._run_explore(
+        tmp_path, "codex", 173, "F5", "Gherkin", project_id="mini-me"
+    )
+    assert result["status"] == "FAILED"
+
+
+@pytest.mark.asyncio
+async def test_explore_ignores_stderr_human_required_and_blocks_truncated_output(tmp_path):
+    from unittest.mock import AsyncMock
+
+    c = coordinator(tmp_path, ScriptedRunner(""))
+    c.agent_runner.run = AsyncMock(
+        return_value=AgentExecutionResult(
+            exit_code=0,
+            timed_out=False,
+            stdout=["READY_TO_PROPOSE"],
+            stderr=["HUMAN REQUIRED (prior debug notice)"],
+            duration_ms=1,
+        )
+    )
+    assert (await c._run_explore(tmp_path, "codex", 173, "F5", "Gherkin", project_id="mini-me"))[
+        "status"
+    ] == "READY_TO_PROPOSE"
+    c.agent_runner.run.return_value = AgentExecutionResult(
+        exit_code=0,
+        timed_out=False,
+        stdout=["READY_TO_PROPOSE"],
+        stderr=[],
+        duration_ms=1,
+        output_truncated=True,
+    )
+    assert (await c._run_explore(tmp_path, "codex", 173, "F5", "Gherkin", project_id="mini-me"))[
+        "status"
+    ] == "FAILED"
 
 
 @pytest.mark.asyncio
@@ -178,4 +327,3 @@ async def test_pytest_exit_five_is_not_pass(tmp_path: Path):
     ok, evidence = await c._run_automated_tests(tmp_path)
     assert ok
     assert "passed" in evidence.lower()
-
