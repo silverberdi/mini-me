@@ -2392,6 +2392,8 @@ class NativeOrchestrationCoordinator:
         """
         messages: list[str] = []
         event_stream = False
+        completed_turn = False
+        failed_turn = False
         for line in provider_response.splitlines():
             try:
                 event = json.loads(line)
@@ -2409,6 +2411,10 @@ class NativeOrchestrationCoordinator:
                 "item.completed",
             }:
                 event_stream = True
+            if event["type"] == "turn.completed":
+                completed_turn = True
+            if event["type"] == "turn.failed":
+                failed_turn = True
             item = event.get("item")
             if (
                 event.get("type") == "item.completed"
@@ -2419,7 +2425,7 @@ class NativeOrchestrationCoordinator:
             ):
                 messages.append(item["text"])
         if event_stream:
-            return messages[-1] if messages else ""
+            return messages[-1] if messages and completed_turn and not failed_turn else ""
         return provider_response
 
     @staticmethod
