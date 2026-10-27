@@ -119,7 +119,8 @@ async def test_validated_checkpoint_reconciles_without_dispatch(tmp_path):
             comments.append({"body": body})
             return ok(comments[-1])
 
-        def update_issue_body(self, _repo, _number, body, expected_version=None):
+        def update_issue_body(self, _repo, _number, body, expected_body=None):
+            assert expected_body == original
             issue["body"] = body
             return ok(issue)
 
@@ -218,7 +219,9 @@ async def test_invalid_gherkin_is_rejected_before_remote_writes(tmp_path):
             return None
 
         def resolve_workflow(self, **_kwargs):
-            return SimpleNamespace(dispatch_command="$minime-request-normalizer issue-6", workflow_sha256="wf")
+            return SimpleNamespace(
+                dispatch_command="$minime-request-normalizer issue-6", workflow_sha256="wf"
+            )
 
         async def run(self, **_kwargs):
             return AgentExecutionResult(

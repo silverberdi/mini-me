@@ -83,7 +83,7 @@ Scenario: Stable output
             comments.append(comment)
             return httpx.Response(201, json=comment)
         if request.method == "PATCH" and request.url.path.endswith("/issues/7"):
-            assert request.headers["if-match"] == '"v1"'
+            assert "if-match" not in request.headers
             issue["body"] = json.loads(request.content)["body"]
             return httpx.Response(200, json=issue, headers={"etag": '"v2"'})
         return httpx.Response(404)
@@ -194,7 +194,8 @@ async def test_coordinator_requires_and_persists_structured_semantic_message(tmp
                 comments.append({"id": len(comments) + 1, "body": body})
             return self.ok(comments[-1])
 
-        def update_issue_body(self, _repo, _number, body, expected_version=None):
+        def update_issue_body(self, _repo, _number, body, expected_body=None):
+            assert expected_body == issue["body"]
             issue["body"] = body
             return self.ok(issue)
 
@@ -1026,3 +1027,136 @@ async def test_f5_ambiguous_normalization_failure_cannot_reenter(tmp_path: Path,
     assert run.stop_details["normalization_attempt"] == previous
     assert "normalization_attempt_history" not in run.stop_details
     runner.run.assert_not_awaited()
+
+
+def test_issue_patch_rejects_if_match_and_succeeds_with_read_verify():
+    """GitHub REST rejects conditional unsafe PATCH; our adapter must omit it."""
+    original = "F5 original body"
+    desired = "Feature: F5\n\nScenario: UI\n  Given access\n  When opened\n  Then it renders"
+    issue = {"number": 173, "body": original}
+    patches = []
+
+    def handler(request):
+        if request.method == "GET" and request.url.path.endswith("/issues/173"):
+            return httpx.Response(200, json=issue, headers={"etag": 'W/"weak-etag"'})
+        if request.method == "PATCH" and request.url.path.endswith("/issues/173"):
+            patches.append(request)
+            if "if-match" in request.headers:
+                return httpx.Response(
+                    400,
+                    json={
+                        "errors": ["Conditional request headers are not allowed in unsafe requests"]
+                    },
+                )
+            issue["body"] = json.loads(request.content)["body"]
+            return httpx.Response(200, json=issue)
+        return httpx.Response(404)
+
+    adapter = GitHubAdapter(auth=StaticAuth(handler))
+    first = adapter.update_issue_body("o/r", 173, desired, expected_body=original)
+    second = adapter.update_issue_body("o/r", 173, desired, expected_body=original)
+
+    assert first.outcome is ExternalOutcome.SUCCESS
+    assert second.outcome is ExternalOutcome.SUCCESS
+    assert second.observed_evidence["already_published"] is True
+    assert issue["body"] == desired
+    assert len(patches) == 1
+    assert "if-match" not in patches[0].headers
+
+
+def test_issue_patch_refuses_changed_body_without_remote_write():
+    original = "Original F5 requirement"
+    remote = {"number": 173, "body": "Human edited requirement"}
+    patch_attempts = []
+
+    def handler(request):
+        if request.method == "GET" and request.url.path.endswith("/issues/173"):
+            return httpx.Response(200, json=remote)
+        if request.method == "PATCH":
+            patch_attempts.append(request)
+            return httpx.Response(200, json=remote)
+        return httpx.Response(404)
+
+    adapter = GitHubAdapter(auth=StaticAuth(handler))
+    result = adapter.update_issue_body("o/r", 173, "Feature: F5", expected_body=original)
+
+    assert result.outcome is ExternalOutcome.FAILURE
+    assert result.reason_code is ExternalReasonCode.CONFLICT
+    assert patch_attempts == []
+
+
+def test_issue_patch_denies_missing_precondition_or_unobservable_issue():
+    patch_attempts = []
+
+    def handler(request):
+        if request.method == "GET":
+            return httpx.Response(503)
+        if request.method == "PATCH":
+            patch_attempts.append(request)
+        return httpx.Response(503)
+
+    adapter = GitHubAdapter(auth=StaticAuth(handler))
+    without_expected = adapter.update_issue_body("o/r", 173, "Feature: F5")
+    unreadable = adapter.update_issue_body(
+        "o/r", 173, "Feature: F5", expected_body="Original requirement"
+    )
+    assert without_expected.outcome is ExternalOutcome.FAILURE
+    assert unreadable.outcome is ExternalOutcome.UNKNOWN
+    assert patch_attempts == []
+
+
+def test_issue_patch_requires_verifiable_response_body():
+    issue = {"number": 173, "body": "Original requirement"}
+    patch_attempts = []
+
+    def handler(request):
+        if request.method == "GET" and request.url.path.endswith("/issues/173"):
+            return httpx.Response(200, json=issue)
+        if request.method == "PATCH" and request.url.path.endswith("/issues/173"):
+            patch_attempts.append(request)
+            return httpx.Response(200, json={"number": 173, "body": "Unexpected remote result"})
+        return httpx.Response(404)
+
+    result = GitHubAdapter(auth=StaticAuth(handler)).update_issue_body(
+        "o/r", 173, "Feature: F5", expected_body="Original requirement"
+    )
+    assert result.outcome is ExternalOutcome.UNKNOWN
+    assert len(patch_attempts) == 1
+
+
+def test_normalization_refuses_source_edit_after_provenance_before_patch():
+    original = "F5 original requirement"
+    normalized = (
+        "Feature: F5\n\nScenario: Dashboard\n"
+        "  Given an operator\n  When the page loads\n  Then the dashboard is visible"
+    )
+    remote = {"number": 173, "body": original}
+    issue_reads = 0
+    patch_attempts = []
+    comments = []
+
+    def handler(request):
+        nonlocal issue_reads
+        if request.method == "GET" and request.url.path.endswith("/issues/173"):
+            issue_reads += 1
+            if issue_reads == 2:
+                remote["body"] = "Changed by an operator while publishing"
+            return httpx.Response(200, json=remote)
+        if request.method == "GET" and request.url.path.endswith("/issues/173/comments"):
+            return httpx.Response(200, json=comments)
+        if request.method == "POST" and request.url.path.endswith("/issues/173/comments"):
+            comment = {"id": len(comments) + 1, "body": json.loads(request.content)["body"]}
+            comments.append(comment)
+            return httpx.Response(201, json=comment)
+        if request.method == "PATCH":
+            patch_attempts.append(request)
+            return httpx.Response(500)
+        return httpx.Response(404)
+
+    service = RequestNormalizationService(GitHubAdapter(auth=StaticAuth(handler)))
+    with pytest.raises(RequestNormalizationError, match="not confirmed remotely"):
+        service.publish("o/r", 173, "run-f5", NormalizedRequest(original, normalized, False))
+    assert issue_reads >= 2
+    assert patch_attempts == []
+    assert remote["body"] == "Changed by an operator while publishing"
+    assert len(comments) == 1

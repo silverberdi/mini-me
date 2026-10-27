@@ -89,7 +89,9 @@ class GitHubAppAuth:
         self._token = token or os.environ.get("GITHUB_TOKEN") or os.environ.get("GH_TOKEN")
         if not self._token:
             try:
-                self._token = subprocess.check_output(["gh", "auth", "token"], timeout=3).decode().strip()
+                self._token = (
+                    subprocess.check_output(["gh", "auth", "token"], timeout=3).decode().strip()
+                )
             except Exception:
                 pass
 
@@ -98,8 +100,10 @@ class GitHubAppAuth:
         return "github_app_installation"
 
     def _credentials(self) -> tuple[str, str, str]:
-        if not self.app_id or not self.installation_id or not (
-            self.private_key_material or self.private_key_path
+        if (
+            not self.app_id
+            or not self.installation_id
+            or not (self.private_key_material or self.private_key_path)
         ):
             raise GitHubAuthorizationError("GitHub App credentials are not configured.")
         if self.private_key_material is not None:
@@ -129,7 +133,11 @@ class GitHubAppAuth:
         now = datetime.fromtimestamp(self._now(), tz=UTC)
         if self._cached and (self._cached.expires_at - now).total_seconds() >= 60:
             return self._cached.value
-        if self._token and not (self.app_id and self.installation_id and (self.private_key_material or self.private_key_path)):
+        if self._token and not (
+            self.app_id
+            and self.installation_id
+            and (self.private_key_material or self.private_key_path)
+        ):
             return self._token
         _, installation_id, _ = self._credentials()
         try:
@@ -217,14 +225,18 @@ class GitHubAdapter(GitHubAdapterInterface):
         if auth_mode == "environment_app":
             return cls()
         if auth_mode != "project_app":
-            raise GitHubAuthorizationError("Project GitHub connection has an unsupported auth mode.")
+            raise GitHubAuthorizationError(
+                "Project GitHub connection has an unsupported auth mode."
+            )
         secret_reference = connection.get("secret_reference")
         if not isinstance(secret_reference, str) or credential_store is None:
             raise GitHubAuthorizationError("Project GitHub App credentials are unavailable.")
         try:
             credentials = credential_store.load_github_app(project_id, secret_reference)
         except (OSError, ValueError):
-            raise GitHubAuthorizationError("Project GitHub App credentials are unavailable.") from None
+            raise GitHubAuthorizationError(
+                "Project GitHub App credentials are unavailable."
+            ) from None
         auth = GitHubAppAuth(
             app_id=credentials["app_id"],
             installation_id=credentials["installation_id"],
@@ -411,9 +423,7 @@ class GitHubAdapter(GitHubAdapterInterface):
                 error_message="GitHub repository default branch could not be verified.",
             )
 
-    def _observe_remote_branch_sha(
-        self, repository: str, branch: str
-    ) -> ExternalActionResult[str]:
+    def _observe_remote_branch_sha(self, repository: str, branch: str) -> ExternalActionResult[str]:
         repo = self._repo(repository)
         if not _is_valid_git_branch(branch):
             return ExternalActionResult(
@@ -452,7 +462,7 @@ class GitHubAdapter(GitHubAdapterInterface):
                     error_message="GitHub branch state is unobservable.",
                 )
             payload = response.json()
-            sha = ((payload.get("object") or {}).get("sha"))
+            sha = (payload.get("object") or {}).get("sha")
             expected_ref = f"refs/heads/{branch}"
             if payload.get("ref") != expected_ref or not _is_git_sha(sha):
                 return ExternalActionResult(
@@ -478,9 +488,7 @@ class GitHubAdapter(GitHubAdapterInterface):
                 error_message="GitHub branch state is unobservable.",
             )
 
-    def get_repository_branch_head(
-        self, repository: str, branch: str
-    ) -> ExternalActionResult[str]:
+    def get_repository_branch_head(self, repository: str, branch: str) -> ExternalActionResult[str]:
         """Read an exact remote branch head without requiring a local clone."""
         return self._observe_remote_branch_sha(repository, branch)
 
@@ -1733,7 +1741,9 @@ class GitHubAdapter(GitHubAdapterInterface):
             return current
         repo = self._repo(repository)
         try:
-            response = self._request("PATCH", f"/repos/{repo}/pulls/{pr_number}", json={"draft": False})
+            response = self._request(
+                "PATCH", f"/repos/{repo}/pulls/{pr_number}", json={"draft": False}
+            )
             if response.status_code in (401, 403):
                 return ExternalActionResult(
                     outcome=ExternalOutcome.FAILURE,
@@ -1830,6 +1840,7 @@ class GitHubAdapter(GitHubAdapterInterface):
                 error_message="GitHub readiness result is unobservable.",
                 provider_detail=_safe_error(str(exc)),
             )
+
     def merge_pull_request(
         self,
         repository: str,
@@ -2040,21 +2051,65 @@ class GitHubAdapter(GitHubAdapterInterface):
         issue_number: int,
         body: str,
         *,
-        expected_version: str | None = None,
+        expected_body: str | None = None,
     ) -> ExternalActionResult[dict[str, Any]]:
-        """Update an Issue body with an optional ETag concurrency precondition."""
+        """Publish only after verifying the exact original body.
+
+        GitHub Issues PATCH does not support If-Match; sending it fails with
+        HTTP 400. Read again immediately before PATCH and confirm the body
+        after writing. This is not an atomic compare-and-swap, so an
+        unobservable result always requires read-based reconciliation.
+        """
         repo = self._repo(repository)
         if issue_number < 1 or not isinstance(body, str) or not body.strip():
             raise ValueError("Issue body requires a positive number and non-empty text")
-        headers: dict[str, str] = {}
-        if expected_version:
-            headers["If-Match"] = expected_version
+        if expected_body is None:
+            return ExternalActionResult(
+                outcome=ExternalOutcome.FAILURE,
+                source_adapter="github_rest",
+                reason_code=ExternalReasonCode.CONFLICT,
+                retry_safety=RetrySafety.SAFE,
+                error_message="Issue body update requires the observed original body.",
+            )
+
+        current = self.get_issue(repository, issue_number)
+        if (
+            current.outcome is not ExternalOutcome.SUCCESS
+            or not isinstance(current.data, dict)
+            or current.data.get("number") != issue_number
+            or not isinstance(current.data.get("body"), str)
+        ):
+            return ExternalActionResult(
+                outcome=ExternalOutcome.UNKNOWN,
+                source_adapter="github_rest",
+                reason_code=ExternalReasonCode.UNOBSERVABLE,
+                retry_safety=RetrySafety.UNKNOWN,
+                error_message="Issue body cannot be verified before update; PATCH blocked.",
+            )
+
+        if current.data["body"] == body:
+            return ExternalActionResult(
+                outcome=ExternalOutcome.SUCCESS,
+                source_adapter="github_rest",
+                reason_code=ExternalReasonCode.EXECUTION_SUCCESS,
+                retry_safety=RetrySafety.SAFE,
+                data=current.data,
+                observed_evidence={"already_published": True},
+            )
+        if current.data["body"] != expected_body:
+            return ExternalActionResult(
+                outcome=ExternalOutcome.FAILURE,
+                source_adapter="github_rest",
+                reason_code=ExternalReasonCode.CONFLICT,
+                retry_safety=RetrySafety.SAFE,
+                error_message="Issue body changed since it was read; PATCH blocked.",
+            )
+
         try:
             response = self._request(
                 "PATCH",
                 f"/repos/{repo}/issues/{issue_number}",
                 json={"body": body},
-                headers=headers,
             )
         except GitHubAuthorizationError as exc:
             return ExternalActionResult(
@@ -2094,7 +2149,11 @@ class GitHubAdapter(GitHubAdapterInterface):
                 payload = response.json()
             except ValueError:
                 payload = None
-            if isinstance(payload, dict) and payload.get("number") == issue_number:
+            if (
+                isinstance(payload, dict)
+                and payload.get("number") == issue_number
+                and payload.get("body") == body
+            ):
                 return ExternalActionResult(
                     outcome=ExternalOutcome.SUCCESS,
                     source_adapter="github_rest",
