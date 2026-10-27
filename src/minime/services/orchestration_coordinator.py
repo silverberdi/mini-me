@@ -2613,7 +2613,7 @@ class NativeOrchestrationCoordinator:
             return False
         tasks_text = tasks_path.read_text(encoding="utf-8", errors="replace")
         # A successful CLI exit cannot replace the native Apply task postcondition.
-        return not bool(re.search(r"(?m)^\\s*-\\s*\\[\\s\\]\\s+", tasks_text))
+        return not bool(re.search(r"(?m)^\s*-\s*\[\s\]\s+", tasks_text))
 
     async def _run_automated_tests(self, worktree_path: Path) -> tuple[bool, str]:
         """Execute project automated tests and verify exit code 0."""
