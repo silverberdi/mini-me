@@ -511,3 +511,115 @@ def test_valid_classification_is_not_reused_after_artifact_hash_change():
         {"proposal.md": "new"},
         {"issue": "issue", "run": "run"},
     ) is None
+
+@pytest.mark.asyncio
+async def test_explore_checkpoint_survives_reentry_without_paid_repeat(mock_env):
+    coordinator, uow, _, _repo_dir = mock_env
+    coordinator.agent_runner.run = AsyncMock(
+        return_value=AgentExecutionResult(
+            exit_code=0,
+            timed_out=False,
+            stdout=[
+                "READY_TO_PROPOSE\nLa aclaración resolvió el gate "
+                "HUMAN REQUIRED anterior."
+            ],
+            stderr=[],
+            duration_ms=19,
+        )
+    )
+    coordinator._run_propose = AsyncMock(
+        return_value={"status": "FAILED", "message": "Test checkpoint boundary"}
+    )
+    first = await coordinator.execute_project_request(
+        "proj-1",
+        operator_clarification="Autorizado backend mínimo de F5",
+        thinker_provider="antigravity",
+        implementer_provider="antigravity",
+        reviewer_provider="antigravity",
+    )
+    assert first.status == "PAUSED"
+    assert first.current_stage == OrchestrationStage.PROPOSING
+    run = uow.orchestration_runs.get_by_id(first.run_id)
+    assert run is not None
+    checkpoint = run.stop_details["explore_checkpoint"]
+    assert checkpoint["status"] == "READY_TO_PROPOSE"
+    assert checkpoint["run_id"] == first.run_id
+    assert len(checkpoint["response_sha256"]) == 64
+    assert checkpoint["duration_ms"] == 19
+
+    # Re-entry into Explore after interruption must not repeat the model.
+    run.current_stage = OrchestrationStage.EXPLORING
+    run.resumable_stage = OrchestrationStage.EXPLORING
+    run.stop_details["request_normalization"] = {
+        "normalized_body": "We need redis caching layer"
+    }
+    uow.orchestration_runs.save(run)
+    coordinator._run_explore = AsyncMock(
+        side_effect=AssertionError("Exploration should reuse its verified checkpoint")
+    )
+    second = await coordinator.execute_project_request(
+        "proj-1",
+        operator_clarification="Autorizado backend mínimo de F5",
+        thinker_provider="antigravity",
+        implementer_provider="antigravity",
+        reviewer_provider="antigravity",
+    )
+    assert second.run_id == first.run_id
+    assert second.current_stage == OrchestrationStage.PROPOSING
+    coordinator._run_explore.assert_not_awaited()
+    assert coordinator.agent_runner.run.await_count == 1
+
+
+@pytest.mark.asyncio
+async def test_explore_checkpoint_rejects_different_clarification(mock_env):
+    coordinator, uow, _, _repo_dir = mock_env
+    coordinator.agent_runner.run = AsyncMock(
+        return_value=AgentExecutionResult(
+            exit_code=0,
+            timed_out=False,
+            stdout=["HUMAN REQUIRED\n- Debe decidir un alcance"],
+            stderr=[],
+            duration_ms=11,
+        )
+    )
+    first = await coordinator.execute_project_request(
+        "proj-1",
+        thinker_provider="antigravity",
+        implementer_provider="antigravity",
+        reviewer_provider="antigravity",
+    )
+    assert first.status == "HUMAN_REQUIRED"
+    run = uow.orchestration_runs.get_by_id(first.run_id)
+    assert run.stop_details["explore_checkpoint"]["status"] == "HUMAN_REQUIRED"
+
+    # An identical reentry returns the durable gate without new inference.
+    run.stop_details["request_normalization"] = {
+        "normalized_body": "We need redis caching layer"
+    }
+    uow.orchestration_runs.save(run)
+    second = await coordinator.execute_project_request(
+        "proj-1",
+        thinker_provider="antigravity",
+        implementer_provider="antigravity",
+        reviewer_provider="antigravity",
+    )
+    assert second.status == "HUMAN_REQUIRED"
+    assert second.human_payload == first.human_payload
+    assert coordinator.agent_runner.run.await_count == 1
+
+    # A new operator clarification changes the hash: no stale gate reuse.
+    coordinator._run_explore = AsyncMock(
+        return_value={"status": "READY_TO_PROPOSE"}
+    )
+    coordinator._run_propose = AsyncMock(
+        return_value={"status": "FAILED", "message": "Boundary stop"}
+    )
+    third = await coordinator.execute_project_request(
+        "proj-1",
+        operator_clarification="Clarificación nueva y material",
+        thinker_provider="antigravity",
+        implementer_provider="antigravity",
+        reviewer_provider="antigravity",
+    )
+    assert third.current_stage == OrchestrationStage.PROPOSING
+    coordinator._run_explore.assert_awaited_once()
