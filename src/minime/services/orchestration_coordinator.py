@@ -1053,15 +1053,67 @@ class NativeOrchestrationCoordinator:
             OrchestrationStage.EXPLORING,
         ):
             self._update_stage(uow, active_run, OrchestrationStage.EXPLORING)
-            explore_result = await self._run_explore(
-                worktree_path=worktree_path,
-                provider=thinker_provider,
-                issue_number=issue_number,
-                issue_title=issue_title,
-                issue_body=issue_body,
-                operator_clarification=operator_clarification,
-                project_id=project_id,
-            )
+            # A validated Explore disposition is immutable for the same
+            # Run/Issue/clarification context. Re-entry must not spend another
+            # subscription turn only to re-read an already accepted verdict.
+            explore_context = {
+                "run_id": active_run.run_id,
+                "project_id": project_id,
+                "issue_number": issue_number,
+                "issue_title": issue_title,
+                "issue_body": issue_body,
+                "provider": thinker_provider,
+                "operator_clarification": operator_clarification,
+            }
+            explore_context_sha = hashlib.sha256(
+                json.dumps(explore_context, ensure_ascii=False, sort_keys=True).encode("utf-8")
+            ).hexdigest()
+            stored_explore = (active_run.stop_details or {}).get("explore_checkpoint")
+            if (
+                isinstance(stored_explore, dict)
+                and stored_explore.get("context_sha256") == explore_context_sha
+                and stored_explore.get("run_id") == active_run.run_id
+                and stored_explore.get("provider") == thinker_provider
+                and stored_explore.get("status") in {"HUMAN_REQUIRED", "READY_TO_PROPOSE"}
+                and isinstance(stored_explore.get("response_sha256"), str)
+                and len(stored_explore["response_sha256"]) == 64
+            ):
+                explore_result = {
+                    "status": stored_explore["status"],
+                    "human_payload": stored_explore.get("human_payload"),
+                }
+            else:
+                explore_result = await self._run_explore(
+                    worktree_path=worktree_path,
+                    provider=thinker_provider,
+                    issue_number=issue_number,
+                    issue_title=issue_title,
+                    issue_body=issue_body,
+                    operator_clarification=operator_clarification,
+                    project_id=project_id,
+                )
+                evidence = explore_result.get("execution")
+                if (
+                    explore_result.get("status") in {"HUMAN_REQUIRED", "READY_TO_PROPOSE"}
+                    and evidence is not None
+                    and self._execution_is_successful(evidence)
+                    and not getattr(evidence, "output_truncated", False)
+                    and getattr(evidence, "response_output", "").strip()
+                ):
+                    details = dict(active_run.stop_details or {})
+                    details["explore_checkpoint"] = {
+                        "run_id": active_run.run_id,
+                        "provider": thinker_provider,
+                        "status": explore_result["status"],
+                        "context_sha256": explore_context_sha,
+                        "response_sha256": hashlib.sha256(
+                            evidence.response_output.encode("utf-8")
+                        ).hexdigest(),
+                        "human_payload": explore_result.get("human_payload"),
+                        "duration_ms": getattr(evidence, "duration_ms", None),
+                        "recorded_at": utc_now().isoformat(),
+                    }
+                    self._persist_run_stop_details(active_run, details)
             if explore_result.get("status") == "HUMAN_REQUIRED":
                 return OrchestrationCoordinationResult(
                     status="HUMAN_REQUIRED",
@@ -2273,6 +2325,13 @@ class NativeOrchestrationCoordinator:
         )
         if operator_clarification:
             prompt += f"\nOperator Clarification Provided:\n{operator_clarification}\n"
+        prompt += (
+            "\nIn your final response use exactly one standalone disposition line: "
+            "READY_TO_PROPOSE if no material questions remain, or HUMAN REQUIRED "
+            "if an unresolved decision genuinely blocks Propose. For HUMAN REQUIRED "
+            "include concrete bullet-point options after that line. Mentions of "
+            "historical gates must not be presented as disposition lines.\n"
+        )
 
         res = await self.agent_runner.run(
             worktree_path=worktree_path,
@@ -2283,18 +2342,29 @@ class NativeOrchestrationCoordinator:
             workflow=wf,
         )
 
-        if not self._execution_is_successful(res):
+        if not self._execution_is_successful(res) or res.output_truncated:
             return {
                 "status": "FAILED",
-                "message": "Explore agent execution was not successful or evidenced.",
+                "message": "Explore execution failed or its response was truncated.",
             }
-        full_out = res.full_output
-        if "HUMAN REQUIRED" in full_out:
+
+        # Interpret ONLY explicit, standalone dispositions from the provider's
+        # response channel. Broad substring searches across stdout/stderr
+        # misclassify READY_TO_PROPOSE when prior HUMAN REQUIRED gates are quoted.
+        output = res.response_output
+        disposition, marker_line = self._explore_disposition(output)
+        if disposition is None:
+            return {
+                "status": "FAILED",
+                "message": "Explore verdict missing or ambiguous; Propose is blocked.",
+            }
+        if disposition == "HUMAN_REQUIRED":
+            lines = output.splitlines()
             options = [
-                line.strip(" -*")
-                for line in full_out.splitlines()
-                if line.strip().startswith(("-", "•"))
-            ]
+                line.strip().lstrip("-• ").strip()[:500]
+                for line in lines[marker_line + 1:]
+                if line.strip().startswith(("- ", "• "))
+            ][:20]
             if not options:
                 return {
                     "status": "FAILED",
@@ -2305,10 +2375,39 @@ class NativeOrchestrationCoordinator:
                 "human_payload": {
                     "question": f"¿Cómo debe resolverse la ambigüedad en el Issue #{issue_number}?",
                     "options": options,
-                    "agent_output": full_out[:1000] if full_out else "",
+                    "agent_output": output[:1000],
                 },
+                "execution": res,
             }
         return {"status": "READY_TO_PROPOSE", "execution": res}
+
+    @staticmethod
+    def _explore_disposition(response: str) -> tuple[str | None, int]:
+        """Require exactly one verdict marker, not incidental status mentions.
+
+        Quoted instructions, tool diagnostics, code blocks and narrative about
+        prior HUMAN REQUIRED gates are not valid new human checkpoints.
+        Competing explicit markers fail closed rather than silently advancing.
+        """
+        pattern = re.compile(
+            r"^(?:#{1,6}\s+)?(?:\*\*)?"
+            r"(READY_TO_PROPOSE|HUMAN(?:_| )REQUIRED)"
+            r"(?:\*\*)?(?:\s*[:—–-]\s*.+)?\s*$"
+        )
+        matches: list[tuple[str, int]] = []
+        fenced = False
+        for index, line in enumerate(response.splitlines()):
+            stripped = line.strip()
+            if stripped.startswith(("```", "~~~")):
+                fenced = not fenced
+                continue
+            if fenced or stripped.startswith((">", "- ", "• ", "{", '"')):
+                continue
+            found = pattern.fullmatch(stripped)
+            if found:
+                status = found.group(1).replace(" ", "_")
+                matches.append((status, index))
+        return matches[0] if len(matches) == 1 else (None, -1)
 
     async def _run_propose(
         self,
