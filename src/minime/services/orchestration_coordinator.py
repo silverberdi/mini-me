@@ -2362,7 +2362,7 @@ class NativeOrchestrationCoordinator:
             lines = output.splitlines()
             options = [
                 line.strip().lstrip("-• ").strip()[:500]
-                for line in lines[marker_line + 1:]
+                for line in lines[marker_line + 1 :]
                 if line.strip().startswith(("- ", "• "))
             ][:20]
             if not options:

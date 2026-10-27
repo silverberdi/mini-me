@@ -65,7 +65,9 @@ async def test_complexity_rejects_multiple_or_prose_objects(tmp_path: Path):
     skill = tmp_path / ".agents" / "skills" / "openspec-propose"
     skill.mkdir(parents=True)
     (skill / "SKILL.md").write_text("native")
-    runner = ScriptedRunner('{"complexity":"low","evidence":"a"}\n{"complexity":"high","evidence":"b"}')
+    runner = ScriptedRunner(
+        '{"complexity":"low","evidence":"a"}\n{"complexity":"high","evidence":"b"}'
+    )
     result = await coordinator(tmp_path, runner)._assess_complexity(
         tmp_path, "codex", "title", "body", "p1"
     )
@@ -80,9 +82,9 @@ async def test_explore_failure_blocks_propose(tmp_path: Path):
     result = await c._run_explore(tmp_path, "codex", 5, "title", "body", project_id="p1")
     assert result["status"] == "READY_TO_PROPOSE"
     runner.output = "exploration narrative without an explicit verdict"
-    assert (
-        await c._run_explore(tmp_path, "codex", 5, "title", "body", project_id="p1")
-    )["status"] == "FAILED"
+    assert (await c._run_explore(tmp_path, "codex", 5, "title", "body", project_id="p1"))[
+        "status"
+    ] == "FAILED"
     runner.exit_code = 2
     result = await c._run_explore(tmp_path, "codex", 5, "title", "body", project_id="p1")
     assert result["status"] == "FAILED"
@@ -120,7 +122,9 @@ async def test_explore_failure_blocks_propose(tmp_path: Path):
         ("HUMAN REQUIRED sin opciones", "FAILED"),
     ],
 )
-async def test_explore_verdict_uses_exact_provider_disposition_not_context(tmp_path, response, status):
+async def test_explore_verdict_uses_exact_provider_disposition_not_context(
+    tmp_path, response, status
+):
     runner = ScriptedRunner(response)
     resolved = await coordinator(tmp_path, runner)._run_explore(
         tmp_path, "codex", 173, "F5", "Gherkin", project_id="mini-me"
@@ -146,10 +150,7 @@ async def test_explore_codex_ndjson_uses_final_agent_message_not_tool_logs(tmp_p
             "type": "item.completed",
             "item": {
                 "type": "agent_message",
-                "text": (
-                    "READY_TO_PROPOSE\nLa aclaración resuelve el anterior "
-                    "HUMAN REQUIRED."
-                ),
+                "text": ("READY_TO_PROPOSE\nLa aclaración resuelve el anterior HUMAN REQUIRED."),
             },
         },
         {"type": "turn.completed", "usage": {"input_tokens": 200, "output_tokens": 40}},
@@ -216,9 +217,9 @@ async def test_explore_ignores_stderr_human_required_and_blocks_truncated_output
             duration_ms=1,
         )
     )
-    assert (
-        await c._run_explore(tmp_path, "codex", 173, "F5", "Gherkin", project_id="mini-me")
-    )["status"] == "READY_TO_PROPOSE"
+    assert (await c._run_explore(tmp_path, "codex", 173, "F5", "Gherkin", project_id="mini-me"))[
+        "status"
+    ] == "READY_TO_PROPOSE"
     c.agent_runner.run.return_value = AgentExecutionResult(
         exit_code=0,
         timed_out=False,
@@ -227,9 +228,10 @@ async def test_explore_ignores_stderr_human_required_and_blocks_truncated_output
         duration_ms=1,
         output_truncated=True,
     )
-    assert (
-        await c._run_explore(tmp_path, "codex", 173, "F5", "Gherkin", project_id="mini-me")
-    )["status"] == "FAILED"
+    assert (await c._run_explore(tmp_path, "codex", 173, "F5", "Gherkin", project_id="mini-me"))[
+        "status"
+    ] == "FAILED"
+
 
 @pytest.mark.asyncio
 async def test_reviews_require_positive_structured_verdict(tmp_path: Path):
@@ -325,4 +327,3 @@ async def test_pytest_exit_five_is_not_pass(tmp_path: Path):
     ok, evidence = await c._run_automated_tests(tmp_path)
     assert ok
     assert "passed" in evidence.lower()
-

@@ -21,7 +21,14 @@ def mock_env(tmp_path: Path):
     # Create dummy workflow files in worktree
     agent_dir = repo_dir / ".agent" / "workflows"
     agent_dir.mkdir(parents=True)
-    for op in ["opsx-explore.md", "opsx-propose.md", "opsx-apply.md", "opsx-verify.md", "opsx-sync.md", "opsx-archive.md"]:
+    for op in [
+        "opsx-explore.md",
+        "opsx-propose.md",
+        "opsx-apply.md",
+        "opsx-verify.md",
+        "opsx-sync.md",
+        "opsx-archive.md",
+    ]:
         (agent_dir / op).write_text(f"# {op}")
 
     uow = InMemoryPersistenceUnitOfWork()
@@ -37,6 +44,7 @@ def mock_env(tmp_path: Path):
     from minime.domain.models import ExternalActionResult
 
     github_mock = MagicMock()
+
     def mock_list_issues(repo, state="open", limit=None):
         return ExternalActionResult(
             outcome=ExternalOutcome.SUCCESS,
@@ -55,14 +63,19 @@ def mock_env(tmp_path: Path):
                 }
             ],
         )
+
     github_mock.list_issues.side_effect = mock_list_issues
 
     wt_manager = WorktreeManager(repo_dir, uow=uow)
     wt_manager.create_request_worktree = AsyncMock(
-        return_value=WorktreeInfo(path=repo_dir, branch_name="request-101-add-caching-layer", base_sha="abc1234")
+        return_value=WorktreeInfo(
+            path=repo_dir, branch_name="request-101-add-caching-layer", base_sha="abc1234"
+        )
     )
     wt_manager.create_documentation_worktree = AsyncMock(
-        return_value=WorktreeInfo(path=repo_dir, branch_name="doc-close-101-add-caching-layer", base_sha="def5678")
+        return_value=WorktreeInfo(
+            path=repo_dir, branch_name="doc-close-101-add-caching-layer", base_sha="def5678"
+        )
     )
 
     agent_runner = CliAgentRunner()
@@ -83,6 +96,7 @@ async def test_propose_lifecycle_explore_and_propose(mock_env):
     # Configure runner to create proposal artifacts on propose dispatch
     async def mock_agent_run(worktree_path, prompt_context, **kwargs):
         from minime.services.agent_runner import AgentExecutionResult
+
         if "Execute official OpenSpec Propose" in prompt_context:
             change_dir = worktree_path / "openspec" / "changes" / "req-101-add-caching-layer"
             change_dir.mkdir(parents=True, exist_ok=True)
@@ -104,7 +118,9 @@ async def test_propose_lifecycle_explore_and_propose(mock_env):
         )
 
     coordinator.agent_runner.run = AsyncMock(side_effect=mock_agent_run)
-    coordinator.openspec_adapter.validate_change_strict = MagicMock(return_value={"status": "PASS", "returncode": 0})
+    coordinator.openspec_adapter.validate_change_strict = MagicMock(
+        return_value={"status": "PASS", "returncode": 0}
+    )
 
     # Test Explore & Propose execution
     result = await coordinator.execute_project_request(
@@ -117,40 +133,47 @@ async def test_propose_lifecycle_explore_and_propose(mock_env):
     assert result.status in ("COMPLETED", "HUMAN_REQUIRED", "PAUSED")
     # Verify change artifacts created
     change_dir = repo_dir / "openspec" / "changes" / "req-101-add-caching-layer"
-    assert (change_dir / "proposal.md").exists() or (repo_dir / "openspec" / "archive" / "req-101-add-caching-layer").exists()
+    assert (change_dir / "proposal.md").exists() or (
+        repo_dir / "openspec" / "archive" / "req-101-add-caching-layer"
+    ).exists()
 
 
 @pytest.mark.asyncio
 async def test_propose_lifecycle_human_required_ambiguity(mock_env):
     coordinator, uow, github_mock, repo_dir = mock_env
     from minime.services.agent_runner import AgentExecutionResult
-    coordinator.agent_runner.run = AsyncMock(return_value=AgentExecutionResult(
-        exit_code=0,
-        timed_out=False,
-        stdout=["HUMAN REQUIRED\n- Opción A\n- Opción B"],
-        stderr=[],
-        duration_ms=1,
-    ))
+
+    coordinator.agent_runner.run = AsyncMock(
+        return_value=AgentExecutionResult(
+            exit_code=0,
+            timed_out=False,
+            stdout=["HUMAN REQUIRED\n- Opción A\n- Opción B"],
+            stderr=[],
+            duration_ms=1,
+        )
+    )
 
     from minime.domain.enums import ExternalOutcome, ExternalReasonCode, RetrySafety
     from minime.domain.models import ExternalActionResult
 
-    github_mock.list_issues.side_effect = lambda repo, state="open", limit=None: ExternalActionResult(
-        outcome=ExternalOutcome.SUCCESS,
-        source_adapter="github",
-        reason_code=ExternalReasonCode.EXECUTION_SUCCESS,
-        retry_safety=RetrySafety.SAFE,
-        data=[
-            {
-                "number": 102,
-                "title": "Unclear architectural requirement",
-                "body": "Material ambiguity: HUMAN REQUIRED to choose architecture",
-                "labels": [],
-                "created_at": "2026-10-20T10:00:00Z",
-                "updated_at": "2026-10-20T10:00:00Z",
-                "html_url": "https://github.com/org/proj-1/issues/102",
-            }
-        ],
+    github_mock.list_issues.side_effect = lambda repo, state="open", limit=None: (
+        ExternalActionResult(
+            outcome=ExternalOutcome.SUCCESS,
+            source_adapter="github",
+            reason_code=ExternalReasonCode.EXECUTION_SUCCESS,
+            retry_safety=RetrySafety.SAFE,
+            data=[
+                {
+                    "number": 102,
+                    "title": "Unclear architectural requirement",
+                    "body": "Material ambiguity: HUMAN REQUIRED to choose architecture",
+                    "labels": [],
+                    "created_at": "2026-10-20T10:00:00Z",
+                    "updated_at": "2026-10-20T10:00:00Z",
+                    "html_url": "https://github.com/org/proj-1/issues/102",
+                }
+            ],
+        )
     )
 
     result = await coordinator.execute_project_request(
@@ -163,20 +186,25 @@ async def test_propose_lifecycle_human_required_ambiguity(mock_env):
     assert result.status == "HUMAN_REQUIRED"
     assert result.current_stage == OrchestrationStage.EXPLORING
     assert result.human_payload is not None
-    assert "pregunta" in result.human_payload.get("question", "").lower() or "¿" in result.human_payload.get("question", "")
+    assert "pregunta" in result.human_payload.get(
+        "question", ""
+    ).lower() or "¿" in result.human_payload.get("question", "")
 
 
 @pytest.mark.asyncio
 async def test_complexity_evaluation_uses_structured_agent_result(mock_env):
     coordinator, _, _, _ = mock_env
     from minime.services.agent_runner import AgentExecutionResult
-    coordinator.agent_runner.run = AsyncMock(return_value=AgentExecutionResult(
-        exit_code=0,
-        timed_out=False,
-        stdout=['{"complexity":"high","evidence":"cross-cutting architectural impact"}'],
-        stderr=[],
-        duration_ms=1,
-    ))
+
+    coordinator.agent_runner.run = AsyncMock(
+        return_value=AgentExecutionResult(
+            exit_code=0,
+            timed_out=False,
+            stdout=['{"complexity":"high","evidence":"cross-cutting architectural impact"}'],
+            stderr=[],
+            duration_ms=1,
+        )
+    )
     result = await coordinator._assess_complexity(
         _, "antigravity", "Small typo", "breaking migration words", "proj-1"
     )
@@ -209,17 +237,22 @@ async def test_resume_validating_reuses_existing_proposal_without_propose(mock_e
         return_value={"status": "PASS", "returncode": 0}
     )
     coordinator._run_propose = AsyncMock(side_effect=AssertionError("propose must not repeat"))
-    coordinator.agent_runner.run = AsyncMock(return_value=AgentExecutionResult(
-        exit_code=0,
-        timed_out=False,
-        stdout=['{"complexity":"low","evidence":"one focused change"}'],
-        stderr=[],
-        duration_ms=1,
-    ))
+    coordinator.agent_runner.run = AsyncMock(
+        return_value=AgentExecutionResult(
+            exit_code=0,
+            timed_out=False,
+            stdout=['{"complexity":"low","evidence":"one focused change"}'],
+            stderr=[],
+            duration_ms=1,
+        )
+    )
     coordinator._run_apply = AsyncMock(return_value=False)
 
     result = await coordinator.execute_project_request(
-        "proj-1", thinker_provider="antigravity", implementer_provider="antigravity", reviewer_provider="antigravity"
+        "proj-1",
+        thinker_provider="antigravity",
+        implementer_provider="antigravity",
+        reviewer_provider="antigravity",
     )
 
     assert result.status == "PAUSED"
@@ -230,17 +263,24 @@ async def test_resume_validating_reuses_existing_proposal_without_propose(mock_e
 @pytest.mark.asyncio
 async def test_explore_failed_blocks_propose(mock_env):
     coordinator, _, _, _ = mock_env
-    coordinator.agent_runner.run = AsyncMock(return_value=AgentExecutionResult(
-        exit_code=2,
-        timed_out=False,
-        stdout=[],
-        stderr=["explore failed"],
-        duration_ms=1,
-    ))
-    coordinator._run_propose = AsyncMock(side_effect=AssertionError("failed Explore must block Propose"))
+    coordinator.agent_runner.run = AsyncMock(
+        return_value=AgentExecutionResult(
+            exit_code=2,
+            timed_out=False,
+            stdout=[],
+            stderr=["explore failed"],
+            duration_ms=1,
+        )
+    )
+    coordinator._run_propose = AsyncMock(
+        side_effect=AssertionError("failed Explore must block Propose")
+    )
 
     result = await coordinator.execute_project_request(
-        "proj-1", thinker_provider="antigravity", implementer_provider="antigravity", reviewer_provider="antigravity"
+        "proj-1",
+        thinker_provider="antigravity",
+        implementer_provider="antigravity",
+        reviewer_provider="antigravity",
     )
 
     assert result.status == "PAUSED"
@@ -275,13 +315,15 @@ async def test_classification_checkpoint_stops_after_one_codex_call(mock_env):
     coordinator.openspec_adapter.validate_change_strict = MagicMock(
         return_value={"status": "PASS", "returncode": 0}
     )
-    coordinator.agent_runner.run = AsyncMock(return_value=AgentExecutionResult(
-        exit_code=0,
-        timed_out=False,
-        stdout=['{"complexity":"moderate","evidence":"single focused change"}'],
-        stderr=[],
-        duration_ms=1,
-    ))
+    coordinator.agent_runner.run = AsyncMock(
+        return_value=AgentExecutionResult(
+            exit_code=0,
+            timed_out=False,
+            stdout=['{"complexity":"moderate","evidence":"single focused change"}'],
+            stderr=[],
+            duration_ms=1,
+        )
+    )
     coordinator._run_explore = AsyncMock(side_effect=AssertionError("Explore must not run"))
     coordinator._run_propose = AsyncMock(side_effect=AssertionError("Propose must not run"))
     coordinator._run_apply = AsyncMock(side_effect=AssertionError("Apply must not run"))
@@ -303,13 +345,15 @@ async def test_classification_checkpoint_stops_after_one_codex_call(mock_env):
 @pytest.mark.asyncio
 async def test_complexity_uses_response_channel_and_ignores_diagnostics(mock_env):
     coordinator, _, _, repo_dir = mock_env
-    coordinator.agent_runner.run = AsyncMock(return_value=AgentExecutionResult(
-        exit_code=0,
-        timed_out=False,
-        stdout=['{"complexity":"moderate","evidence":"bounded change"}'],
-        stderr=["Codex session metadata and progress output"],
-        duration_ms=1,
-    ))
+    coordinator.agent_runner.run = AsyncMock(
+        return_value=AgentExecutionResult(
+            exit_code=0,
+            timed_out=False,
+            stdout=['{"complexity":"moderate","evidence":"bounded change"}'],
+            stderr=["Codex session metadata and progress output"],
+            duration_ms=1,
+        )
+    )
 
     result = await coordinator._assess_complexity(
         repo_dir, "antigravity", "Issue", "Body", "proj-1"
@@ -324,19 +368,24 @@ async def test_complexity_uses_response_channel_and_ignores_diagnostics(mock_env
 @pytest.mark.parametrize(
     "stdout,expected",
     [
-        ('{"complexity":"low","evidence":"one"}\n{"complexity":"high","evidence":"two"}', "INVALID_OUTPUT"),
+        (
+            '{"complexity":"low","evidence":"one"}\n{"complexity":"high","evidence":"two"}',
+            "INVALID_OUTPUT",
+        ),
         ('session log {"complexity":"low","evidence":"incidental"}', "INVALID_OUTPUT"),
     ],
 )
 async def test_complexity_rejects_ambiguous_response_channel(mock_env, stdout, expected):
     coordinator, _, _, repo_dir = mock_env
-    coordinator.agent_runner.run = AsyncMock(return_value=AgentExecutionResult(
-        exit_code=0,
-        timed_out=False,
-        stdout=stdout.splitlines(),
-        stderr=[],
-        duration_ms=1,
-    ))
+    coordinator.agent_runner.run = AsyncMock(
+        return_value=AgentExecutionResult(
+            exit_code=0,
+            timed_out=False,
+            stdout=stdout.splitlines(),
+            stderr=[],
+            duration_ms=1,
+        )
+    )
 
     result = await coordinator._assess_complexity(
         repo_dir, "antigravity", "Issue", "Body", "proj-1"
@@ -348,16 +397,18 @@ async def test_complexity_rejects_ambiguous_response_channel(mock_env, stdout, e
 @pytest.mark.asyncio
 async def test_complexity_accepts_structured_response_when_diagnostics_truncated(mock_env):
     coordinator, _, _, repo_dir = mock_env
-    coordinator.agent_runner.run = AsyncMock(return_value=AgentExecutionResult(
-        exit_code=0,
-        timed_out=False,
-        stdout=['{"complexity":"moderate","evidence":"bounded change"}'],
-        stderr=[],
-        duration_ms=1,
-        structured_output=['{"complexity":"moderate","evidence":"bounded change"}'],
-        diagnostic_output=["diagnostic output was truncated"],
-        output_truncated=True,
-    ))
+    coordinator.agent_runner.run = AsyncMock(
+        return_value=AgentExecutionResult(
+            exit_code=0,
+            timed_out=False,
+            stdout=['{"complexity":"moderate","evidence":"bounded change"}'],
+            stderr=[],
+            duration_ms=1,
+            structured_output=['{"complexity":"moderate","evidence":"bounded change"}'],
+            diagnostic_output=["diagnostic output was truncated"],
+            output_truncated=True,
+        )
+    )
 
     result = await coordinator._assess_complexity(
         repo_dir, "antigravity", "Issue", "Body", "proj-1"
@@ -452,16 +503,26 @@ async def test_classification_retry_authorization_is_single_use(mock_env):
         artifact_hashes=hashes,
         context_hashes=context_hashes,
     )
-    coordinator.agent_runner.run = AsyncMock(return_value=AgentExecutionResult(
-        exit_code=2, timed_out=False, stdout=[], stderr=["blocked"], duration_ms=1
-    ))
+    coordinator.agent_runner.run = AsyncMock(
+        return_value=AgentExecutionResult(
+            exit_code=2, timed_out=False, stdout=[], stderr=["blocked"], duration_ms=1
+        )
+    )
 
     first = await coordinator.classify_existing_run(
-        "proj-1", run.run_id, repo_dir, thinker_provider="codex", issue_number=101,
+        "proj-1",
+        run.run_id,
+        repo_dir,
+        thinker_provider="codex",
+        issue_number=101,
         authorization_reference="retry-once",
     )
     second = await coordinator.classify_existing_run(
-        "proj-1", run.run_id, repo_dir, thinker_provider="codex", issue_number=101,
+        "proj-1",
+        run.run_id,
+        repo_dir,
+        thinker_provider="codex",
+        issue_number=101,
         authorization_reference="retry-once",
     )
 
@@ -471,23 +532,30 @@ async def test_classification_retry_authorization_is_single_use(mock_env):
 
 
 def test_persisted_recovery_requires_explicit_channels_and_accepts_one_valid_message():
-    recovered = NativeOrchestrationCoordinator._recover_persisted_complexity({
-        "exit_code": 0,
-        "output_truncated": False,
-        "structured_output": '{"complexity":"low","evidence":"one focused change"}',
-        "diagnostic_output": "Codex session banner",
-        "output": "combined sanitized output",
-        "attempt_id": "attempt-1",
-        "artifact_hashes": {"proposal.md": "hash"},
-        "context_hashes": {"issue": "hash", "run": "hash"},
-    })
+    recovered = NativeOrchestrationCoordinator._recover_persisted_complexity(
+        {
+            "exit_code": 0,
+            "output_truncated": False,
+            "structured_output": '{"complexity":"low","evidence":"one focused change"}',
+            "diagnostic_output": "Codex session banner",
+            "output": "combined sanitized output",
+            "attempt_id": "attempt-1",
+            "artifact_hashes": {"proposal.md": "hash"},
+            "context_hashes": {"issue": "hash", "run": "hash"},
+        }
+    )
     assert recovered is not None
     assert recovered.complexity == "low"
-    assert NativeOrchestrationCoordinator._recover_persisted_complexity({
-        "exit_code": 0,
-        "structured_output": '{"complexity":"low","evidence":"one"}',
-        "diagnostic_output": "",
-    }) is None
+    assert (
+        NativeOrchestrationCoordinator._recover_persisted_complexity(
+            {
+                "exit_code": 0,
+                "structured_output": '{"complexity":"low","evidence":"one"}',
+                "diagnostic_output": "",
+            }
+        )
+        is None
+    )
 
 
 def test_valid_classification_is_not_reused_after_artifact_hash_change():
@@ -506,11 +574,15 @@ def test_valid_classification_is_not_reused_after_artifact_hash_change():
         },
     )
 
-    assert NativeOrchestrationCoordinator._stored_complexity_assessment(
-        run,
-        {"proposal.md": "new"},
-        {"issue": "issue", "run": "run"},
-    ) is None
+    assert (
+        NativeOrchestrationCoordinator._stored_complexity_assessment(
+            run,
+            {"proposal.md": "new"},
+            {"issue": "issue", "run": "run"},
+        )
+        is None
+    )
+
 
 @pytest.mark.asyncio
 async def test_explore_checkpoint_survives_reentry_without_paid_repeat(mock_env):
@@ -519,10 +591,7 @@ async def test_explore_checkpoint_survives_reentry_without_paid_repeat(mock_env)
         return_value=AgentExecutionResult(
             exit_code=0,
             timed_out=False,
-            stdout=[
-                "READY_TO_PROPOSE\nLa aclaración resolvió el gate "
-                "HUMAN REQUIRED anterior."
-            ],
+            stdout=["READY_TO_PROPOSE\nLa aclaración resolvió el gate HUMAN REQUIRED anterior."],
             stderr=[],
             duration_ms=19,
         )
@@ -550,9 +619,7 @@ async def test_explore_checkpoint_survives_reentry_without_paid_repeat(mock_env)
     # Re-entry into Explore after interruption must not repeat the model.
     run.current_stage = OrchestrationStage.EXPLORING
     run.resumable_stage = OrchestrationStage.EXPLORING
-    run.stop_details["request_normalization"] = {
-        "normalized_body": "We need redis caching layer"
-    }
+    run.stop_details["request_normalization"] = {"normalized_body": "We need redis caching layer"}
     uow.orchestration_runs.save(run)
     coordinator._run_explore = AsyncMock(
         side_effect=AssertionError("Exploration should reuse its verified checkpoint")
@@ -593,9 +660,7 @@ async def test_explore_checkpoint_rejects_different_clarification(mock_env):
     assert run.stop_details["explore_checkpoint"]["status"] == "HUMAN_REQUIRED"
 
     # An identical reentry returns the durable gate without new inference.
-    run.stop_details["request_normalization"] = {
-        "normalized_body": "We need redis caching layer"
-    }
+    run.stop_details["request_normalization"] = {"normalized_body": "We need redis caching layer"}
     uow.orchestration_runs.save(run)
     second = await coordinator.execute_project_request(
         "proj-1",
@@ -608,9 +673,7 @@ async def test_explore_checkpoint_rejects_different_clarification(mock_env):
     assert coordinator.agent_runner.run.await_count == 1
 
     # A new operator clarification changes the hash: no stale gate reuse.
-    coordinator._run_explore = AsyncMock(
-        return_value={"status": "READY_TO_PROPOSE"}
-    )
+    coordinator._run_explore = AsyncMock(return_value={"status": "READY_TO_PROPOSE"})
     coordinator._run_propose = AsyncMock(
         return_value={"status": "FAILED", "message": "Boundary stop"}
     )
