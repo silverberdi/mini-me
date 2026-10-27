@@ -48,6 +48,8 @@ class AgentProcessResult:
     timed_out: bool = False
     credential_rotation_detected: bool = False
     credential_access_refresh_only: bool = False
+    stdout_capture_truncated: bool = False
+    stderr_capture_truncated: bool = False
 
 
 @dataclass
@@ -1224,15 +1226,31 @@ class AgentProcessConfinement:
 
                 async def _read_stream(
                     stream: asyncio.StreamReader | None, chunks: list[bytes], sig: WatchdogSignal
-                ):
+                ) -> bool:
+                    """Drain the pipe while bounding retained bytes, including unbroken NDJSON lines.
+
+                    Reading fixed-size chunks avoids StreamReader.readline's 64 KiB line
+                    limit. Exceeding the capture budget is observable; it never
+                    silently turns a partial stdout stream into a final answer.
+                    """
                     if not stream:
-                        return
+                        return False
+                    max_capture_bytes = 8 * 1024 * 1024
+                    captured = 0
+                    truncated = False
                     while True:
-                        line = await stream.readline()
-                        if not line:
+                        chunk = await stream.read(64 * 1024)
+                        if not chunk:
                             break
-                        chunks.append(line)
+                        remaining = max_capture_bytes - captured
+                        if remaining > 0:
+                            retained = chunk[:remaining]
+                            chunks.append(retained)
+                            captured += len(retained)
+                        if len(chunk) > remaining:
+                            truncated = True
                         watchdog.record_activity(sig)
+                    return truncated
 
                 if input_bytes and process.stdin:
                     process.stdin.write(input_bytes)
@@ -1284,7 +1302,11 @@ class AgentProcessConfinement:
                                 logger.debug(
                                     f"Process PID {process.pid} inactive ({watchdog.diagnostic_reason}); preserving process under uncertainty."
                                 )
-                    await asyncio.gather(stdout_task, stderr_task, return_exceptions=True)
+                    capture_results = await asyncio.gather(
+                        stdout_task, stderr_task, return_exceptions=True
+                    )
+                    stdout_capture_truncated = capture_results[0] is not False
+                    stderr_capture_truncated = capture_results[1] is not False
                     stdout = b"".join(stdout_chunks)
                     stderr = b"".join(stderr_chunks)
                 except BaseException:
@@ -1330,6 +1352,8 @@ class AgentProcessConfinement:
                     timed_out=timed_out,
                     credential_rotation_detected=rotation,
                     credential_access_refresh_only=access_refresh_only,
+                    stdout_capture_truncated=stdout_capture_truncated,
+                    stderr_capture_truncated=stderr_capture_truncated,
                 )
         except asyncio.CancelledError:
             raise

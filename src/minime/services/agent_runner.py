@@ -61,6 +61,9 @@ class AgentExecutionResult:
     output_truncated: bool = False
     structured_output_missing: bool = False
     structured_output_too_large: bool = False
+    final_response: str | None = None
+    final_response_status: str | None = None
+    final_response_source: str | None = None
 
     @property
     def full_output(self) -> str:
@@ -69,6 +72,8 @@ class AgentExecutionResult:
     @property
     def response_output(self) -> str:
         """Return only the provider response channel, excluding diagnostics."""
+        if self.final_response_status is not None:
+            return self.final_response or "" if self.final_response_status == "COMPLETE" else ""
         return "\n".join(
             self.structured_output if self.structured_output is not None else self.stdout
         )
@@ -83,6 +88,79 @@ class CliAgentRunner:
     MAX_OUTPUT_LINES = 2500
     MAX_LINE_CHARS = 4000
     MAX_STRUCTURED_OUTPUT_BYTES = 1_048_576
+    MAX_FINAL_RESPONSE_BYTES = MAX_STRUCTURED_OUTPUT_BYTES
+
+    @classmethod
+    def _extract_final_response(
+        cls, stdout: bytes, provider: str, *, captured_incompletely: bool = False
+    ) -> tuple[str | None, str, str]:
+        """Extract a complete provider answer BEFORE diagnostic log abbreviations.
+
+        This method has no authority over OpenSpec stages: it verifies transport
+        completeness only. An incomplete Codex event stream cannot degrade to
+        plain text and accidentally authorize a stage from tool logs.
+        """
+        if captured_incompletely or len(stdout) > 8 * 1024 * 1024:
+            return None, "TRUNCATED", "stdout"
+        try:
+            raw_text = stdout.decode("utf-8", errors="strict")
+        except UnicodeDecodeError:
+            return None, "TRUNCATED", "stdout"
+        raw_lines = raw_text.splitlines()
+        events: list[dict[str, Any]] = []
+        recognized = {
+            "thread.started", "turn.started", "turn.completed", "turn.failed",
+            "item.started", "item.updated", "item.completed",
+        }
+        has_native_events = False
+        malformed = False
+        for line in raw_lines:
+            if not line.strip():
+                continue
+            try:
+                event = json.loads(line)
+            except (TypeError, ValueError):
+                malformed = True
+                continue
+            if not isinstance(event, dict) or not isinstance(event.get("type"), str):
+                malformed = True
+                continue
+            if event["type"] in recognized:
+                has_native_events = True
+            events.append(event)
+        if has_native_events:
+            if provider.lower() != "codex" or malformed:
+                return None, "AMBIGUOUS", "codex_ndjson"
+            completed = 0
+            failed = False
+            final_messages: list[str] = []
+            for event in events:
+                event_type = event.get("type")
+                if event_type == "turn.failed":
+                    failed = True
+                elif event_type == "turn.completed":
+                    completed += 1
+                elif event_type == "item.completed":
+                    item = event.get("item")
+                    if not isinstance(item, dict):
+                        return None, "AMBIGUOUS", "codex_ndjson"
+                    if item.get("type") == "agent_message":
+                        if completed or not isinstance(item.get("text"), str):
+                            return None, "AMBIGUOUS", "codex_ndjson"
+                        if item["text"].strip():
+                            final_messages.append(item["text"])
+            if failed or completed != 1 or not final_messages:
+                return None, "AMBIGUOUS", "codex_ndjson"
+            answer = final_messages[-1]
+            source = "codex_ndjson"
+        else:
+            answer = raw_text
+            source = "stdout_text"
+        if not answer.strip():
+            return None, "MISSING", source
+        if len(answer.encode("utf-8")) > cls.MAX_FINAL_RESPONSE_BYTES:
+            return None, "TRUNCATED", source
+        return redact_secrets(answer), "COMPLETE", source
 
     def __init__(
         self,
@@ -547,6 +625,8 @@ class CliAgentRunner:
             len(raw_stdout_lines) > self.MAX_OUTPUT_LINES
             or len(raw_stderr_lines) > self.MAX_OUTPUT_LINES
             or any(len(line) > self.MAX_LINE_CHARS for line in raw_stdout_lines + raw_stderr_lines)
+            or getattr(result, "stdout_capture_truncated", False)
+            or getattr(result, "stderr_capture_truncated", False)
         )
         stdout_lines = [redact_secrets(line[: self.MAX_LINE_CHARS]) for line in raw_stdout_lines][
             : self.MAX_OUTPUT_LINES
@@ -557,14 +637,34 @@ class CliAgentRunner:
         structured_output_missing = bool(response_path and not response_path.is_file())
         structured_output_too_large = False
         structured_output: list[str] | None = [] if response_path else None
+        final_response: str | None = None
+        final_response_status = "MISSING"
+        final_response_source = "structured_file" if response_path else "stdout"
         if response_path and response_path.is_file():
             if response_path.stat().st_size > self.MAX_STRUCTURED_OUTPUT_BYTES:
                 structured_output_too_large = True
+                final_response_status = "TRUNCATED"
             else:
-                # The last-message file is the structured response channel,
-                # not diagnostic output. Preserve it intact so valid JSON is
-                # never cut at the diagnostic line/character limits.
-                structured_output = [response_path.read_text(encoding="utf-8", errors="replace")]
+                try:
+                    # Structured final responses are bounded and read without
+                    # UTF-8 replacement, independently from diagnostic output.
+                    original_response = response_path.read_text(encoding="utf-8")
+                except UnicodeError:
+                    final_response_status = "TRUNCATED"
+                else:
+                    final_response = redact_secrets(original_response)
+                    structured_output = [final_response]
+                    final_response_status = "COMPLETE" if final_response.strip() else "MISSING"
+                    if final_response_status != "COMPLETE":
+                        final_response = None
+        if not response_path:
+            final_response, final_response_status, final_response_source = (
+                self._extract_final_response(
+                    result.stdout,
+                    provider,
+                    captured_incompletely=getattr(result, "stdout_capture_truncated", False),
+                )
+            )
         if structured_output_missing:
             stdout_lines = []
         rotation_error = (
@@ -591,6 +691,9 @@ class CliAgentRunner:
                 output_truncated=output_truncated,
                 structured_output_missing=structured_output_missing,
                 structured_output_too_large=structured_output_too_large,
+                final_response=final_response,
+                final_response_status=final_response_status,
+                final_response_source=final_response_source,
             )
         finally:
             cleanup_structured_output()

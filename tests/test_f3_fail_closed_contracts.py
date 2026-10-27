@@ -204,7 +204,7 @@ async def test_explore_codex_json_failure_event_refuses_to_advance(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_explore_ignores_stderr_human_required_and_blocks_truncated_output(tmp_path):
+async def test_explore_ignores_stderr_and_blocks_incomplete_final_response(tmp_path):
     from unittest.mock import AsyncMock
 
     c = coordinator(tmp_path, ScriptedRunner(""))
@@ -227,6 +227,7 @@ async def test_explore_ignores_stderr_human_required_and_blocks_truncated_output
         stderr=[],
         duration_ms=1,
         output_truncated=True,
+        final_response_status="TRUNCATED",
     )
     assert (await c._run_explore(tmp_path, "codex", 173, "F5", "Gherkin", project_id="mini-me"))[
         "status"
@@ -312,8 +313,14 @@ async def test_apply_and_sync_fail_closed_on_agent_error(tmp_path: Path):
     runner.exit_code = 0
     runner.output = "sync evidence"
     c._git_run = AsyncMock(return_value=SimpleNamespace(stdout=""))
+    # Exit zero and a success narrative are insufficient without archive files.
+    assert not await c._run_sync_and_archive(tmp_path, "codex", "change")
+    archive = tmp_path / "openspec" / "changes" / "archive" / "2026-10-27-change"
+    (archive / "specs").mkdir(parents=True)
+    for filename in ("proposal.md", "design.md", "tasks.md"):
+        (archive / filename).write_text("native")
     assert await c._run_sync_and_archive(tmp_path, "codex", "change")
-    assert len(runner.calls) == 3  # Apply plus independent Sync and Archive.
+    assert len(runner.calls) == 5  # Apply plus two complete Sync/Archive cycles.
 
 
 @pytest.mark.asyncio
@@ -327,3 +334,16 @@ async def test_pytest_exit_five_is_not_pass(tmp_path: Path):
     ok, evidence = await c._run_automated_tests(tmp_path)
     assert ok
     assert "passed" in evidence.lower()
+
+
+@pytest.mark.asyncio
+async def test_native_apply_requires_tasks_not_just_success_text(tmp_path: Path):
+    runner = ScriptedRunner("Apply completed")
+    c = coordinator(tmp_path, runner)
+    assert not await c._run_apply(tmp_path, "codex", "change")
+    change = tmp_path / "openspec" / "changes" / "change"
+    change.mkdir(parents=True)
+    (change / "tasks.md").write_text("## Tasks\n- [ ] 1.1 Implement\n")
+    assert not await c._run_apply(tmp_path, "codex", "change")
+    (change / "tasks.md").write_text("## Tasks\n- [x] 1.1 Implement\n")
+    assert await c._run_apply(tmp_path, "codex", "change")

@@ -1075,8 +1075,14 @@ class NativeOrchestrationCoordinator:
                 and stored_explore.get("run_id") == active_run.run_id
                 and stored_explore.get("provider") == thinker_provider
                 and stored_explore.get("status") in {"HUMAN_REQUIRED", "READY_TO_PROPOSE"}
+                and stored_explore.get("checkpoint_version") == 2
+                and stored_explore.get("response_status") == "COMPLETE"
+                and stored_explore.get("response_source")
+                in {"codex_ndjson", "structured_file", "stdout_text"}
                 and isinstance(stored_explore.get("response_sha256"), str)
                 and len(stored_explore["response_sha256"]) == 64
+                and isinstance(stored_explore.get("workflow_sha256"), str)
+                and len(stored_explore["workflow_sha256"]) == 64
             ):
                 explore_result = {
                     "status": stored_explore["status"],
@@ -1097,13 +1103,21 @@ class NativeOrchestrationCoordinator:
                     explore_result.get("status") in {"HUMAN_REQUIRED", "READY_TO_PROPOSE"}
                     and evidence is not None
                     and self._execution_is_successful(evidence)
-                    and not getattr(evidence, "output_truncated", False)
+                    and getattr(evidence, "final_response_status", None) == "COMPLETE"
                     and getattr(evidence, "response_output", "").strip()
+                    and isinstance(
+                        getattr(getattr(evidence, "workflow", None), "workflow_sha256", None),
+                        str,
+                    )
                 ):
                     details = dict(active_run.stop_details or {})
                     details["explore_checkpoint"] = {
+                        "checkpoint_version": 2,
                         "run_id": active_run.run_id,
                         "provider": thinker_provider,
+                        "response_status": evidence.final_response_status,
+                        "response_source": evidence.final_response_source,
+                        "workflow_sha256": evidence.workflow.workflow_sha256,
                         "status": explore_result["status"],
                         "context_sha256": explore_context_sha,
                         "response_sha256": hashlib.sha256(
@@ -1914,13 +1928,9 @@ class NativeOrchestrationCoordinator:
             return False
         if getattr(result, "environment_error", False):
             return False
-        structured = getattr(result, "structured_output", None)
-        evidence = (
-            getattr(result, "response_output", "")
-            if structured is not None
-            else getattr(result, "full_output", "")
-        )
-        return bool(evidence.strip())
+        if getattr(result, "final_response_status", None) not in (None, "COMPLETE"):
+            return False
+        return bool(getattr(result, "response_output", "").strip())
 
     @staticmethod
     def _proposal_artifacts_present(worktree_path: Path, change_name: str) -> bool:
@@ -2342,10 +2352,10 @@ class NativeOrchestrationCoordinator:
             workflow=wf,
         )
 
-        if not self._execution_is_successful(res) or res.output_truncated:
+        if not self._execution_is_successful(res):
             return {
                 "status": "FAILED",
-                "message": "Explore execution failed or its response was truncated.",
+                "message": "Explore failed or has no complete authoritative final response.",
             }
 
         # Interpret ONLY explicit, standalone dispositions from the provider's
@@ -2438,7 +2448,7 @@ class NativeOrchestrationCoordinator:
         """
         pattern = re.compile(
             r"^(?:#{1,6}\s+)?(?:\*\*)?"
-            r"(READY_TO_PROPOSE|HUMAN(?:_| )REQUIRED)"
+            r"(READY(?:_| )TO(?:_| )PROPOSE|HUMAN(?:_| )REQUIRED)"
             r"(?:\*\*)?(?:\s*[:—–-]\s*.+)?\s*$"
         )
         matches: list[tuple[str, int]] = []
@@ -2493,6 +2503,11 @@ class NativeOrchestrationCoordinator:
             return {
                 "status": "FAILED",
                 "message": "Propose agent execution was not successful or evidenced.",
+            }
+        if not self._proposal_artifacts_present(worktree_path, change_name):
+            return {
+                "status": "FAILED",
+                "message": "Native Propose completed without the complete canonical artifacts.",
             }
         return {"status": "READY_TO_VALIDATE", "workflow": wf, "execution": res}
 
@@ -2559,7 +2574,7 @@ class NativeOrchestrationCoordinator:
         if not self._execution_is_successful(res):
             return False
         try:
-            return parse_review_verdict(res.full_output).verdict.value == "READY_TO_MERGE"
+            return parse_review_verdict(res.response_output).verdict.value == "READY_TO_MERGE"
         except MalformedReviewOutputError:
             return False
 
@@ -2591,7 +2606,14 @@ class NativeOrchestrationCoordinator:
             provider=provider,
             workflow=wf,
         )
-        return self._execution_is_successful(result)
+        if not self._execution_is_successful(result):
+            return False
+        tasks_path = worktree_path / "openspec" / "changes" / change_name / "tasks.md"
+        if not tasks_path.is_file():
+            return False
+        tasks_text = tasks_path.read_text(encoding="utf-8", errors="replace")
+        # A successful CLI exit cannot replace the native Apply task postcondition.
+        return not bool(re.search(r"(?m)^\\s*-\\s*\\[\\s\\]\\s+", tasks_text))
 
     async def _run_automated_tests(self, worktree_path: Path) -> tuple[bool, str]:
         """Execute project automated tests and verify exit code 0."""
@@ -2721,7 +2743,9 @@ class NativeOrchestrationCoordinator:
             f"You are the independent reviewer agent (read-only). Perform code review on OpenSpec change '{change_name}'.\n\n"
             f"Candidate Diff:\n{diff[:4000]}\n\n"
             f"Evaluate implementation correctness, security, maintainability, and absence of overengineering.\n"
-            f"Emit APPROVED if code meets requirements, or CHANGES REQUESTED with actionable feedback."
+            "Return exactly one JSON review object with verdict READY_TO_MERGE and empty "
+            "findings only on verified success, otherwise CHANGES_REQUIRED with "
+            "concrete findings and required corrections. Do not use APPROVED prose."
         )
         res = await self.agent_runner.run(
             worktree_path=worktree_path,
@@ -2733,7 +2757,7 @@ class NativeOrchestrationCoordinator:
         if not self._execution_is_successful(res):
             return False
         try:
-            return parse_review_verdict(res.full_output).verdict.value == "READY_TO_MERGE"
+            return parse_review_verdict(res.response_output).verdict.value == "READY_TO_MERGE"
         except MalformedReviewOutputError:
             return False
 
@@ -2786,6 +2810,25 @@ class NativeOrchestrationCoordinator:
             workflow=archive_wf,
         )
         if not self._execution_is_successful(archive_result):
+            return False
+        archive_root = doc_path / "openspec" / "changes" / "archive"
+        archived = (
+            [
+                p for p in archive_root.iterdir()
+                if p.is_dir() and (p.name == change_name or p.name.endswith(f"-{change_name}"))
+            ]
+            if archive_root.is_dir() else []
+        )
+        # A success narrative cannot substitute for a real OpenSpec archive.
+        if len(archived) != 1:
+            return False
+        archived_change = archived[0]
+        if not (
+            (archived_change / "proposal.md").is_file()
+            and (archived_change / "design.md").is_file()
+            and (archived_change / "tasks.md").is_file()
+            and (archived_change / "specs").is_dir()
+        ):
             return False
 
         # Check git status in doc worktree; if changes are uncommitted, stage and commit them

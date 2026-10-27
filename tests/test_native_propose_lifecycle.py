@@ -1,4 +1,5 @@
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
@@ -594,6 +595,9 @@ async def test_explore_checkpoint_survives_reentry_without_paid_repeat(mock_env)
             stdout=["READY_TO_PROPOSE\nLa aclaración resolvió el gate HUMAN REQUIRED anterior."],
             stderr=[],
             duration_ms=19,
+            final_response_status="COMPLETE",
+            final_response_source="stdout_text",
+            workflow=SimpleNamespace(workflow_sha256="a" * 64),
         )
     )
     coordinator._run_propose = AsyncMock(
@@ -612,6 +616,9 @@ async def test_explore_checkpoint_survives_reentry_without_paid_repeat(mock_env)
     assert run is not None
     checkpoint = run.stop_details["explore_checkpoint"]
     assert checkpoint["status"] == "READY_TO_PROPOSE"
+    assert checkpoint["checkpoint_version"] == 2
+    assert checkpoint["response_status"] == "COMPLETE"
+    assert checkpoint["workflow_sha256"] == "a" * 64
     assert checkpoint["run_id"] == first.run_id
     assert len(checkpoint["response_sha256"]) == 64
     assert checkpoint["duration_ms"] == 19
@@ -647,6 +654,9 @@ async def test_explore_checkpoint_rejects_different_clarification(mock_env):
             stdout=["HUMAN REQUIRED\n- Debe decidir un alcance"],
             stderr=[],
             duration_ms=11,
+            final_response_status="COMPLETE",
+            final_response_source="stdout_text",
+            workflow=SimpleNamespace(workflow_sha256="a" * 64),
         )
     )
     first = await coordinator.execute_project_request(
