@@ -187,10 +187,34 @@ def test_watchdog_terminates_only_on_positive_verifiable_deadlock(tmp_path: Path
     assert state == WatchdogState.SUSPECTED_STALL
     assert "INACTIVITY_STALL_DIAGNOSED" in (watchdog.diagnostic_reason or "")
 
-    # When positive deadlock evidence is verified (e.g. defunct/zombie in tree)
-    watchdog.detect_positive_deadlock = lambda pid: (True, "zombie/defunct process detected in tree (count=1)")
-    state_deadlock = watchdog.evaluate_tick(pid=12345)
-    assert state_deadlock == WatchdogState.STALLED
+    # A single positive observation is not sufficient to terminate an agent.
+    watchdog.detect_positive_deadlock = lambda pid: (
+        True, "zombie/defunct process detected in tree (count=1)"
+    )
+    for _ in range(watchdog.min_deadlock_confirmation_probes - 1):
+        assert watchdog.evaluate_tick(pid=12345) == WatchdogState.SUSPECTED_STALL
+        assert "POSITIVE_DEADLOCK_UNCONFIRMED" in (watchdog.diagnostic_reason or "")
+    assert watchdog.evaluate_tick(pid=12345) == WatchdogState.STALLED
     assert "POSITIVE_DEADLOCK_CONFIRMED" in (watchdog.diagnostic_reason or "")
+
+
+def test_watchdog_deadlock_confirmation_resets_on_uncertainty(tmp_path: Path):
+    watchdog = ProgressWatchdog(
+        worktree_path=tmp_path,
+        inactivity_threshold_seconds=0.01,
+        stall_timeout_seconds=0.02,
+        min_deadlock_confirmation_probes=3,
+    )
+    watchdog.last_activity_at -= 1
+    watchdog.check_process_tree_activity = lambda pid: False
+    observations = iter([(True, "transient"), (False, "normal wait"),
+                         (True, "transient"), (True, "transient"), (True, "confirmed")])
+    watchdog.detect_positive_deadlock = lambda pid: next(observations)
+    assert watchdog.evaluate_tick(pid=12345) == WatchdogState.SUSPECTED_STALL
+    assert watchdog.evaluate_tick(pid=12345) == WatchdogState.SUSPECTED_STALL
+    assert watchdog._deadlock_confirmation_count == 0
+    assert watchdog.evaluate_tick(pid=12345) == WatchdogState.SUSPECTED_STALL
+    assert watchdog.evaluate_tick(pid=12345) == WatchdogState.SUSPECTED_STALL
+    assert watchdog.evaluate_tick(pid=12345) == WatchdogState.STALLED
 
 
