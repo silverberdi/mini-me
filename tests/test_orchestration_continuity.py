@@ -67,6 +67,7 @@ async def test_orchestration_continuity_worktree_preserved_on_failure(tmp_path: 
 
     agent_runner = CliAgentRunner()
     openspec_mock = MagicMock()
+    openspec_mock.planning_status = MagicMock(return_value={"status": "PASS", "pending": []})
     openspec_mock.validate_change_strict = MagicMock(return_value={"status": "PASS", "returncode": 0})
 
     coordinator = NativeOrchestrationCoordinator(

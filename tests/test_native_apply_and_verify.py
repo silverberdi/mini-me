@@ -67,6 +67,7 @@ def mock_apply_env(tmp_path: Path):
     agent_runner = CliAgentRunner()
 
     openspec_mock = MagicMock()
+    openspec_mock.planning_status = MagicMock(return_value={"status": "PASS", "pending": []})
     openspec_mock.validate_change_strict = MagicMock(return_value={"status": "PASS", "returncode": 0})
 
     coordinator = NativeOrchestrationCoordinator(
