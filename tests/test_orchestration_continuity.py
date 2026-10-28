@@ -124,6 +124,7 @@ def test_request_rest_api_endpoints(in_memory_uow, tmp_path: Path):
             project_id="proj-test",
             display_name="Test",
             repository="org/repo-test",
+            agent_profiles={"thinking": {"agent_id": "antigravity", "model_id": "test-model"}},
         )
     )
 
@@ -205,6 +206,27 @@ def test_request_rest_api_endpoints(in_memory_uow, tmp_path: Path):
         record = in_memory_uow.operator_actions.get_by_request_id("api-recovery-1")
         assert record is not None
         assert record.actor_identity == "operator@example.com"
+
+        legacy_run = OrchestrationRun(
+            run_id="run-legacy-api",
+            project_id="proj-test",
+            change_name="req-102-legacy",
+            base_sha="main",
+            current_stage=OrchestrationStage.EXPLORING,
+            resumable_stage=OrchestrationStage.EXPLORING,
+            stop_details={"issue_number": 102},
+        )
+        in_memory_uow.orchestration_runs.save(legacy_run)
+        res = client.post(
+            "/api/v1/projects/proj-test/runs/run-legacy-api/explore-recovery-authorizations",
+            json={"action_request_id": "api-legacy-recovery-1"},
+        )
+        assert res.status_code == 200
+        legacy_record = in_memory_uow.operator_actions.get_by_request_id(
+            "api-legacy-recovery-1"
+        )
+        assert legacy_record is not None
+        assert legacy_record.parameters_json["legacy_missing_attempt"] is True
     finally:
         app.dependency_overrides.clear()
 

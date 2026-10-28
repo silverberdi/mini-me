@@ -574,7 +574,7 @@ class NativeOrchestrationCoordinator:
         issue_number: int,
         provider: str,
         model_identity: str,
-        prior_attempt_id: str,
+        prior_attempt_id: str | None,
         artifact_hashes: dict[str, str],
         context_hashes: dict[str, str],
     ) -> bool:
@@ -638,7 +638,15 @@ class NativeOrchestrationCoordinator:
             return False
         details = dict(run.stop_details or {})
         attempt = details.get("explore_attempt")
-        if not isinstance(attempt, dict) or attempt.get("attempt_id") != prior_attempt_id:
+        legacy_missing_attempt = prior_attempt_id is None
+        if legacy_missing_attempt:
+            if (
+                attempt is not None
+                or details.get("explore_checkpoint") is not None
+                or run.current_stage != OrchestrationStage.EXPLORING
+            ):
+                return False
+        elif not isinstance(attempt, dict) or attempt.get("attempt_id") != prior_attempt_id:
             return False
         actions = getattr(uow, "operator_actions", None)
         if actions is None or actions.get_by_request_id(authorization_reference) is not None:
@@ -660,8 +668,13 @@ class NativeOrchestrationCoordinator:
                 "issue_number": issue_number,
                 "provider": provider,
                 "prior_attempt_id": prior_attempt_id,
-                "prior_context_sha256": attempt.get("context_sha256"),
-                "prior_workflow_sha256": attempt.get("workflow_sha256"),
+                "legacy_missing_attempt": legacy_missing_attempt,
+                "prior_context_sha256": (
+                    attempt.get("context_sha256") if isinstance(attempt, dict) else None
+                ),
+                "prior_workflow_sha256": (
+                    attempt.get("workflow_sha256") if isinstance(attempt, dict) else None
+                ),
             },
         )
         actions.save(action)
@@ -1204,7 +1217,9 @@ class NativeOrchestrationCoordinator:
                     if isinstance(stored_attempt, dict)
                     else None
                 )
-                if actions is None or not prior_attempt_id or not explore_recovery_authorization_id:
+                attempt_payload = stored_attempt if isinstance(stored_attempt, dict) else {}
+                legacy_missing_attempt = stored_attempt is None
+                if actions is None or not explore_recovery_authorization_id:
                     return OrchestrationCoordinationResult(
                         status="PAUSED",
                         run_id=active_run.run_id,
@@ -1220,8 +1235,9 @@ class NativeOrchestrationCoordinator:
                     "issue_number": issue_number,
                     "provider": thinker_provider,
                     "prior_attempt_id": prior_attempt_id,
-                    "prior_context_sha256": stored_attempt.get("context_sha256"),
-                    "prior_workflow_sha256": stored_attempt.get("workflow_sha256"),
+                    "legacy_missing_attempt": legacy_missing_attempt,
+                    "prior_context_sha256": attempt_payload.get("context_sha256"),
+                    "prior_workflow_sha256": attempt_payload.get("workflow_sha256"),
                 }
                 existing_authorization = actions.get_by_request_id(
                     explore_recovery_authorization_id

@@ -725,7 +725,7 @@ async def run_project_request(
 
 
 class ExploreRecoveryAuthorizationPayload(BaseModel):
-    prior_attempt_id: str
+    prior_attempt_id: str | None = None
     action_request_id: str | None = None
 
 
@@ -747,8 +747,19 @@ def authorize_explore_recovery(
     run = uow.orchestration_runs.get_by_id(run_id)
     if run is None or run.project_id != project_id or not run.is_active:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Active Run not found")
-    attempt = (run.stop_details or {}).get("explore_attempt")
-    if not isinstance(attempt, dict) or attempt.get("attempt_id") != payload.prior_attempt_id:
+    details = dict(run.stop_details or {})
+    attempt = details.get("explore_attempt")
+    if payload.prior_attempt_id is None:
+        if (
+            attempt is not None
+            or details.get("explore_checkpoint") is not None
+            or run.current_stage.value != "EXPLORING"
+        ):
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail="Legacy recovery is allowed only for an Explore Run without prior evidence",
+            )
+    elif not isinstance(attempt, dict) or attempt.get("attempt_id") != payload.prior_attempt_id:
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Explore attempt does not match Run")
     from minime.adapters.github import GitHubAdapter
     from minime.services.agent_runner import CliAgentRunner
@@ -764,6 +775,17 @@ def authorize_explore_recovery(
         worktree_manager=WorktreeManager(Path(binding.managed_repository_root), uow=uow),
         agent_runner=CliAgentRunner(),
     )
+    if payload.prior_attempt_id is None:
+        issue_number = details.get("issue_number")
+        provider = coordinator._configured_provider(project, "thinking")
+        if not isinstance(issue_number, int) or issue_number <= 0 or not provider:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail="Legacy Run lacks an authoritative issue or thinking provider binding",
+            )
+    else:
+        issue_number = int(attempt.get("issue_number") or 0)
+        provider = str(attempt.get("provider") or "")
     action_request_id = payload.action_request_id or str(uuid4())
     accepted = coordinator.register_explore_recovery_authorization(
         project_id=project_id,
@@ -771,8 +793,8 @@ def authorize_explore_recovery(
         authorization_reference=action_request_id,
         actor_identity=operator.email,
         source_interface="api",
-        issue_number=int(attempt.get("issue_number") or 0),
-        provider=str(attempt.get("provider") or ""),
+        issue_number=issue_number,
+        provider=provider,
         prior_attempt_id=payload.prior_attempt_id,
     )
     if not accepted:

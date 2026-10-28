@@ -491,6 +491,62 @@ def test_recovery_claim_release_uses_owner_and_fence_context(
         assert stored.released_at is not None
 
 
+def test_legacy_explore_run_without_attempt_accepts_only_explicit_recovery(
+    pg_session_factory: sessionmaker[Session],
+):
+    """The observed legacy state gets a new authorization, never a fabricated attempt."""
+    suffix = str(time.time_ns())
+    project_id = f"legacy-explore-{suffix}"
+    run_id = f"legacy-explore-run-{suffix}"
+    action_id = f"legacy-recovery-{suffix}"
+    with pg_session_factory() as session:
+        uow = PostgresPersistenceUnitOfWork(session)
+        uow.projects.save(
+            Project(
+                project_id=project_id,
+                display_name="Legacy Explore",
+                repository="o/r",
+                base_branch="main",
+            )
+        )
+        uow.orchestration_runs.save(
+            OrchestrationRun(
+                run_id=run_id,
+                project_id=project_id,
+                change_name="gacela-05-ui-self-hosted",
+                base_sha="main",
+                current_stage=OrchestrationStage.EXPLORING,
+                resumable_stage=OrchestrationStage.EXPLORING,
+                stop_details={"issue_number": 173},
+            )
+        )
+        uow.commit()
+        coordinator = NativeOrchestrationCoordinator(
+            uow_factory=lambda: uow,
+            github_adapter=MagicMock(),
+            worktree_manager=MagicMock(),
+            agent_runner=MagicMock(),
+        )
+        assert coordinator.register_explore_recovery_authorization(
+            project_id=project_id,
+            run_id=run_id,
+            authorization_reference=action_id,
+            actor_identity="operator@example.com",
+            source_interface="api",
+            issue_number=173,
+            provider="antigravity",
+            prior_attempt_id=None,
+        )
+        record = uow.operator_actions.get_by_request_id(action_id)
+        assert record is not None
+        assert record.parameters_json["legacy_missing_attempt"] is True
+        assert record.parameters_json["prior_attempt_id"] is None
+        stored_run = uow.orchestration_runs.get_by_id(run_id)
+        assert stored_run is not None
+        assert "explore_attempt" not in stored_run.stop_details
+        assert "explore_checkpoint" not in stored_run.stop_details
+
+
 def test_explore_dispatch_claim_serializes_two_postgres_workers(
     pg_session_factory: sessionmaker[Session],
 ):

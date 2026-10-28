@@ -870,3 +870,80 @@ async def test_explore_checkpoint_rejects_forged_or_mismatched_workflow_sha(mock
     )
     assert missing.status == "PAUSED"
     coordinator._run_explore.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_legacy_explore_run_without_attempt_requires_explicit_recovery(mock_env):
+    coordinator, uow, _, repo_dir = mock_env
+    change_name = "req-101-add-caching-layer"
+    uow.orchestration_runs.save(
+        OrchestrationRun(
+            project_id="proj-1",
+            change_name=change_name,
+            base_sha="abc1234",
+            current_stage=OrchestrationStage.EXPLORING,
+            resumable_stage=OrchestrationStage.EXPLORING,
+            stop_details={
+                "issue_number": 101,
+                "issue_title": "Add caching layer",
+                "request_normalization": {"normalized_body": "We need redis caching layer"},
+            },
+        )
+    )
+    real_wf = coordinator.agent_runner.resolve_workflow(
+        worktree_path=repo_dir,
+        provider="antigravity",
+        operation="explore",
+        change_name="issue-101",
+    )
+    answer = "READY_TO_PROPOSE\nLegacy Run recovery was explicitly authorized."
+    coordinator.agent_runner.run = AsyncMock(
+        return_value=AgentExecutionResult(
+            exit_code=0,
+            timed_out=False,
+            stdout=[answer],
+            stderr=[],
+            duration_ms=10,
+            final_response=answer,
+            final_response_status="COMPLETE",
+            final_response_source="stdout_text",
+            workflow=real_wf,
+        )
+    )
+    coordinator._run_propose = AsyncMock(
+        return_value={"status": "FAILED", "message": "Legacy recovery boundary"}
+    )
+
+    ordinary = await coordinator.execute_project_request(
+        "proj-1",
+        thinker_provider="antigravity",
+        implementer_provider="antigravity",
+        reviewer_provider="antigravity",
+    )
+    assert ordinary.status == "PAUSED"
+    assert coordinator.agent_runner.run.await_count == 0
+
+    assert coordinator.register_explore_recovery_authorization(
+        project_id="proj-1",
+        run_id=ordinary.run_id,
+        authorization_reference="legacy-explore-recovery-1",
+        actor_identity="operator@example.com",
+        source_interface="test",
+        issue_number=101,
+        provider="antigravity",
+        prior_attempt_id=None,
+    )
+    recovered = await coordinator.execute_project_request(
+        "proj-1",
+        explore_recovery_authorization_id="legacy-explore-recovery-1",
+        thinker_provider="antigravity",
+        implementer_provider="antigravity",
+        reviewer_provider="antigravity",
+    )
+    assert recovered.status == "PAUSED"
+    assert recovered.current_stage == OrchestrationStage.PROPOSING
+    assert coordinator.agent_runner.run.await_count == 1
+    run = uow.orchestration_runs.get_by_id(ordinary.run_id)
+    assert run is not None
+    assert run.stop_details["explore_attempt"]["attempt_id"]
+    assert "explore_checkpoint" in run.stop_details
