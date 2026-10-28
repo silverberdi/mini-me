@@ -576,6 +576,59 @@ def test_explore_dispatch_claim_serializes_two_postgres_workers(
         )
         uow.commit()
 
+    barrier = threading.Barrier(2)
+    results: list[tuple[str, str, RecoveryClaimContext] | None] = []
+    errors: list[str] = []
+
+    def prepare() -> None:
+        with pg_session_factory() as session:
+            uow = PostgresPersistenceUnitOfWork(session)
+            coordinator = NativeOrchestrationCoordinator(
+                uow_factory=lambda: uow,
+                github_adapter=MagicMock(),
+                worktree_manager=MagicMock(),
+                agent_runner=MagicMock(),
+            )
+            barrier.wait()
+            try:
+                run = uow.orchestration_runs.get_by_id(run_id)
+                assert run is not None
+                result = coordinator._prepare_explore_dispatch(
+                    uow=uow,
+                    run=run,
+                    issue_number=173,
+                    provider="antigravity",
+                    context_sha="c" * 64,
+                    workflow_sha="d" * 64,
+                    is_recovery=True,
+                )
+                results.append(result)
+            except Exception as exc:
+                errors.append(repr(exc))
+
+    threads = [threading.Thread(target=prepare) for _ in range(2)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(timeout=10)
+
+    admitted = [result for result in results if result is not None]
+    assert not errors, errors
+    assert len(admitted) == 1
+    attempt_id, action_key, context = admitted[0]
+    assert attempt_id
+    assert action_key.startswith(f"explore:{run_id}:")
+
+    with pg_session_factory() as session:
+        uow = PostgresPersistenceUnitOfWork(session)
+        action = uow.orchestration_external_actions.get_by_action_key(action_key)
+        assert action is not None
+        assert action.status.value == "EXECUTING"
+        attempts = uow.external_action_attempts.list_by_action_key(action_key)
+        assert len(attempts) == 1
+        assert attempts[0].dispatch_intent_key.startswith(action_key)
+        assert uow.claims.release_claim(context) is True
+        uow.commit()
 
 def test_propose_dispatch_claim_serializes_two_postgres_workers(
     pg_session_factory: sessionmaker[Session],
@@ -648,60 +701,6 @@ def test_propose_dispatch_claim_serializes_two_postgres_workers(
     attempt_id, action_key, context = admitted[0]
     assert attempt_id
     assert action_key.startswith(f"propose:{run_id}:")
-
-    with pg_session_factory() as session:
-        uow = PostgresPersistenceUnitOfWork(session)
-        action = uow.orchestration_external_actions.get_by_action_key(action_key)
-        assert action is not None
-        assert action.status.value == "EXECUTING"
-        attempts = uow.external_action_attempts.list_by_action_key(action_key)
-        assert len(attempts) == 1
-        assert attempts[0].dispatch_intent_key.startswith(action_key)
-        assert uow.claims.release_claim(context) is True
-        uow.commit()
-
-    barrier = threading.Barrier(2)
-    results: list[tuple[str, str, RecoveryClaimContext] | None] = []
-    errors: list[str] = []
-
-    def prepare() -> None:
-        with pg_session_factory() as session:
-            uow = PostgresPersistenceUnitOfWork(session)
-            coordinator = NativeOrchestrationCoordinator(
-                uow_factory=lambda: uow,
-                github_adapter=MagicMock(),
-                worktree_manager=MagicMock(),
-                agent_runner=MagicMock(),
-            )
-            barrier.wait()
-            try:
-                run = uow.orchestration_runs.get_by_id(run_id)
-                assert run is not None
-                result = coordinator._prepare_explore_dispatch(
-                    uow=uow,
-                    run=run,
-                    issue_number=173,
-                    provider="antigravity",
-                    context_sha="c" * 64,
-                    workflow_sha="d" * 64,
-                    is_recovery=True,
-                )
-                results.append(result)
-            except Exception as exc:
-                errors.append(repr(exc))
-
-    threads = [threading.Thread(target=prepare) for _ in range(2)]
-    for thread in threads:
-        thread.start()
-    for thread in threads:
-        thread.join(timeout=10)
-
-    admitted = [result for result in results if result is not None]
-    assert not errors, errors
-    assert len(admitted) == 1
-    attempt_id, action_key, context = admitted[0]
-    assert attempt_id
-    assert action_key.startswith(f"explore:{run_id}:")
 
     with pg_session_factory() as session:
         uow = PostgresPersistenceUnitOfWork(session)
