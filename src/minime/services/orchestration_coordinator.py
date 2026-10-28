@@ -1489,6 +1489,24 @@ class NativeOrchestrationCoordinator:
                 and not verified_propose_checkpoint
                 and (stored_propose_attempt is not None or self._proposal_artifacts_any(worktree_path, change_name))
             )
+            stored_propose_gate = (active_run.stop_details or {}).get("propose_human_required")
+            if (
+                propose_recovery_needed
+                and isinstance(stored_propose_gate, dict)
+                and isinstance(stored_propose_attempt, dict)
+                and stored_propose_gate.get("attempt_id") == stored_propose_attempt.get("attempt_id")
+                and stored_propose_attempt.get("status") == "COMPLETE"
+                and not (isinstance(operator_clarification, str) and operator_clarification.strip())
+            ):
+                # A power interruption or refresh must not hide a genuine
+                # human question or spend another model invocation to rediscover it.
+                return OrchestrationCoordinationResult(
+                    status="HUMAN_REQUIRED",
+                    run_id=active_run.run_id,
+                    current_stage=OrchestrationStage.PROPOSING,
+                    message="Propose is awaiting an operator clarification.",
+                    human_payload=stored_propose_gate.get("human_payload"),
+                )
             if propose_recovery_needed:
                 actions = getattr(uow, "operator_actions", None)
                 prior_attempt_id = (
@@ -1559,6 +1577,11 @@ class NativeOrchestrationCoordinator:
                         issue_body=issue_body,
                         project_id=project_id,
                         continue_existing=propose_recovery_needed,
+                        operator_clarification=(
+                            operator_clarification
+                            if propose_recovery_needed and isinstance(stored_propose_gate, dict)
+                            else None
+                        ),
                     )
                 except asyncio.CancelledError:
                     self._finish_propose_dispatch(uow, active_run, propose_attempt_id, propose_action_key, propose_claim, "AMBIGUOUS", None)
@@ -1568,19 +1591,21 @@ class NativeOrchestrationCoordinator:
                     raise
                 else:
                     success = propose_result.get("status") == "READY_TO_VALIDATE"
+                    human_required = propose_result.get("status") == "HUMAN_REQUIRED"
                     self._finish_propose_dispatch(
                         uow,
                         active_run,
                         propose_attempt_id,
                         propose_action_key,
                         propose_claim,
-                        "COMPLETE" if success else (
+                        "COMPLETE" if success or human_required else (
                             "FAILED" if propose_result.get("status") == "INCOMPLETE" else "AMBIGUOUS"
                         ),
                         propose_result.get("message") if not success else None,
                     )
                     if success:
                         details = dict(active_run.stop_details or {})
+                        details.pop("propose_human_required", None)
                         details["propose_checkpoint"] = {
                             "checkpoint_version": 1,
                             "run_id": active_run.run_id,
@@ -1605,6 +1630,22 @@ class NativeOrchestrationCoordinator:
                             "recorded_at": utc_now().isoformat(),
                         }
                         self._persist_run_stop_details(active_run, details)
+                    elif human_required:
+                        details = dict(active_run.stop_details or {})
+                        details["propose_human_required"] = {
+                            "attempt_id": propose_attempt_id,
+                            "human_payload": propose_result["human_payload"],
+                            "recorded_at": utc_now().isoformat(),
+                        }
+                        self._persist_run_stop_details(active_run, details)
+                if propose_result.get("status") == "HUMAN_REQUIRED":
+                    return OrchestrationCoordinationResult(
+                        status="HUMAN_REQUIRED",
+                        run_id=active_run.run_id,
+                        current_stage=OrchestrationStage.PROPOSING,
+                        message=propose_result["message"],
+                        human_payload=propose_result["human_payload"],
+                    )
                 if propose_result.get("status") != "READY_TO_VALIDATE":
                     return OrchestrationCoordinationResult(
                         status="PAUSED",
@@ -3174,6 +3215,7 @@ class NativeOrchestrationCoordinator:
         issue_body: str,
         project_id: str | None = None,
         continue_existing: bool = False,
+        operator_clarification: str | None = None,
     ) -> dict[str, Any]:
         """Dispatch native Propose or native Continue for an incomplete proposal."""
         operation = "continue" if continue_existing else "propose"
@@ -3195,6 +3237,8 @@ class NativeOrchestrationCoordinator:
                 else f"Generate canonical change planning artifacts under openspec/changes/{change_name}/: proposal.md, specs/, design.md, and tasks.md."
             )
         )
+        if continue_existing and operator_clarification:
+            prompt += f"\nOperator clarification for the pending native workflow:\n{operator_clarification}\n"
         res = await self.agent_runner.run(
             worktree_path=worktree_path,
             prompt_context=prompt,
@@ -3210,15 +3254,27 @@ class NativeOrchestrationCoordinator:
             and report.status != "COMPLETE"
             and getattr(res, "exit_code", None) == 0
             and not getattr(res, "timed_out", False)
+            and not getattr(res, "preflight_error", None)
+            and not getattr(res, "environment_error", False)
             and getattr(res, "final_response_status", None) == "COMPLETE"
         ):
-            return {
-                "status": "INCOMPLETE",
-                "message": (
-                    f"Agent reported {report.status}: {report.summary}; "
-                    f"pending: {'; '.join(report.pending)}"
-                )[:1000],
-            }
+            message = (
+                f"Agent reported {report.status}: {report.summary}; "
+                f"pending: {'; '.join(report.pending)}"
+            )[:1000]
+            if report.status == "HUMAN_REQUIRED":
+                return {
+                    "status": "HUMAN_REQUIRED",
+                    "message": message,
+                    "human_payload": {
+                        "question": report.pending[0],
+                        "options": [],
+                        "pending": list(report.pending),
+                        "agent_output": report.summary,
+                    },
+                    "execution": res,
+                }
+            return {"status": "INCOMPLETE", "message": message}
         if not self._execution_is_successful(res):
             return {
                 "status": "FAILED",
