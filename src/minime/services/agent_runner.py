@@ -621,7 +621,7 @@ class CliAgentRunner:
             prompt_context += (
                 "\n\nAt the end of this SAME agent invocation, report whether your "
                 "OpenSpec work finished. Add exactly one standalone line "
-                "'MINIME_WORKFLOW_RESULT: ' followed by a compact single-line JSON "
+                "starting MINIME_WORKFLOW_RESULT: followed by a compact single-line JSON "
                 'object with exactly these keys: {"status":"COMPLETE|INCOMPLETE|HUMAN_REQUIRED",'
                 '"summary":"brief factual explanation","pending":["specific remaining work or question"]}. '
                 "Use an empty pending array ONLY for COMPLETE. For INCOMPLETE and "
