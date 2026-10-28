@@ -1458,11 +1458,26 @@ class NativeOrchestrationCoordinator:
             complete_proposal = self._proposal_artifacts_present(worktree_path, change_name)
             stored_propose_attempt = (active_run.stop_details or {}).get("propose_attempt")
             stored_propose_checkpoint = (active_run.stop_details or {}).get("propose_checkpoint")
-            partial_proposal = self._proposal_artifacts_any(worktree_path, change_name) and not complete_proposal
+            # Artifact existence belongs to OpenSpec validation, not execution proof.
+            # On a PROPOSING re-entry, only an attributable completed checkpoint
+            # can skip a previously invoked agent, even if all files happen to exist.
+            verified_propose_checkpoint = (
+                complete_proposal
+                and isinstance(stored_propose_checkpoint, dict)
+                and stored_propose_checkpoint.get("checkpoint_version") == 1
+                and stored_propose_checkpoint.get("run_id") == active_run.run_id
+                and stored_propose_checkpoint.get("provider") == thinker_provider
+                and stored_propose_checkpoint.get("status") == "READY_TO_VALIDATE"
+                and isinstance(stored_propose_attempt, dict)
+                and stored_propose_attempt.get("status") == "COMPLETE"
+                and stored_propose_checkpoint.get("attempt_id") == stored_propose_attempt.get("attempt_id")
+                and stored_propose_checkpoint.get("artifact_hashes")
+                == self._proposal_artifact_hashes(worktree_path, change_name)
+            )
             propose_recovery_needed = (
                 active_run.current_stage == OrchestrationStage.PROPOSING
-                and not complete_proposal
-                and (stored_propose_attempt is not None or partial_proposal)
+                and not verified_propose_checkpoint
+                and (stored_propose_attempt is not None or self._proposal_artifacts_any(worktree_path, change_name))
             )
             if propose_recovery_needed:
                 actions = getattr(uow, "operator_actions", None)
@@ -1500,9 +1515,11 @@ class NativeOrchestrationCoordinator:
                         current_stage=OrchestrationStage.PROPOSING,
                         message="Propose recovery authorization is missing, mismatched, or already consumed.",
                     )
-            existing_proposal = complete_proposal or (
-                isinstance(stored_propose_checkpoint, dict)
-                and stored_propose_checkpoint.get("status") == "READY_TO_VALIDATE"
+            existing_proposal = (
+                active_run.current_stage == OrchestrationStage.VALIDATING and complete_proposal
+            ) or (
+                active_run.current_stage == OrchestrationStage.PROPOSING
+                and verified_propose_checkpoint
             )
             if not existing_proposal:
                 self._update_stage(uow, active_run, OrchestrationStage.PROPOSING)
@@ -1547,7 +1564,9 @@ class NativeOrchestrationCoordinator:
                         propose_attempt_id,
                         propose_action_key,
                         propose_claim,
-                        "COMPLETE" if success else "AMBIGUOUS",
+                        "COMPLETE" if success else (
+                            "FAILED" if propose_result.get("status") == "INCOMPLETE" else "AMBIGUOUS"
+                        ),
                         propose_result.get("message") if not success else None,
                     )
                     if success:
@@ -2321,6 +2340,10 @@ class NativeOrchestrationCoordinator:
         """Only an explicit, evidenced, zero-exit execution can advance a stage."""
         if result is None or getattr(result, "exit_code", None) != 0:
             return False
+        if getattr(result, "workflow_handoff_required", False):
+            report = getattr(result, "workflow_handoff", None)
+            if report is None or getattr(report, "status", None) != "COMPLETE":
+                return False
         if getattr(result, "timed_out", False) or getattr(result, "preflight_error", None):
             return False
         if getattr(result, "environment_error", False):
@@ -3149,10 +3172,19 @@ class NativeOrchestrationCoordinator:
             provider=provider,
             workflow=wf,
         )
+        report = getattr(res, "workflow_handoff", None)
+        if getattr(res, "workflow_handoff_required", False) and report is not None and report.status != "COMPLETE":
+            return {
+                "status": "INCOMPLETE",
+                "message": (
+                    f"Agent reported {report.status}: {report.summary}; "
+                    f"pending: {'; '.join(report.pending)}"
+                )[:1000],
+            }
         if not self._execution_is_successful(res):
             return {
                 "status": "FAILED",
-                "message": "Propose agent execution was not successful or evidenced.",
+                "message": "Propose agent execution was not successful or did not report a valid final handoff.",
             }
         if not self._proposal_artifacts_present(worktree_path, change_name):
             return {
