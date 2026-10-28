@@ -64,3 +64,13 @@ def test_missing_or_ambiguous_openspec_status_fails_closed(monkeypatch, tmp_path
 
         monkeypatch.setattr("minime.adapters.openspec.subprocess.run", run)
         assert OpenSpecAdapter().planning_status("example-change", tmp_path)["status"] == "UNKNOWN"
+
+
+def test_openspec_status_timeout_fails_closed(monkeypatch, tmp_path: Path):
+    def run(cmd, **kwargs):
+        raise subprocess.TimeoutExpired(cmd, 30)
+
+    monkeypatch.setattr("minime.adapters.openspec.subprocess.run", run)
+    result = OpenSpecAdapter().planning_status("example-change", tmp_path)
+    assert result["status"] == "UNKNOWN"
+    assert "timed out" in result["reason"]

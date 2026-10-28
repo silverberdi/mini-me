@@ -600,7 +600,7 @@ def test_explore_dispatch_claim_serializes_two_postgres_workers(
                     provider="antigravity",
                     context_sha="c" * 64,
                     workflow_sha="d" * 64,
-                    is_recovery=True,
+                    is_recovery=False,
                 )
                 results.append(result)
             except Exception as exc:
@@ -683,7 +683,7 @@ def test_propose_dispatch_claim_serializes_two_postgres_workers(
                         issue_number=173,
                         provider="codex",
                         change_name="propose-dispatch-change",
-                        is_recovery=True,
+                        is_recovery=False,
                     )
                 )
             except Exception as exc:

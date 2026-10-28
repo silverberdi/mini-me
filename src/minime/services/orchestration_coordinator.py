@@ -181,6 +181,76 @@ class NativeOrchestrationCoordinator:
         self.semantic_pr_agent = semantic_pr_agent
         self.max_correction_attempts = max_correction_attempts
 
+    @staticmethod
+    def _safe_human_payload(payload: Any) -> dict[str, Any]:
+        """Redact agent text once before it becomes durable or operator-visible."""
+        clean = redact_secrets(payload)
+        return clean if isinstance(clean, dict) else {}
+
+    async def _run_claimed(self, uow: Any, claim: RecoveryClaimContext, operation: Any) -> Any:
+        """Keep the durable claim owned by this live worker, or fence the child."""
+        renew = getattr(uow, "renew_claim_heartbeat_isolated", None)
+        if not callable(renew):
+            return await operation()
+        stopped = asyncio.Event()
+        lost = False
+
+        async def heartbeat() -> None:
+            nonlocal lost
+            while True:
+                try:
+                    await asyncio.wait_for(
+                        stopped.wait(),
+                        timeout=getattr(self, "_claim_heartbeat_interval_seconds", 30),
+                    )
+                    return
+                except asyncio.TimeoutError:
+                    if not renew(claim, 90):
+                        lost = True
+                        return
+
+        work = asyncio.create_task(operation())
+        heart = asyncio.create_task(heartbeat())
+        try:
+            while not work.done() and not heart.done():
+                await asyncio.wait({work, heart}, return_when=asyncio.FIRST_COMPLETED)
+            if lost:
+                work.cancel()
+                await asyncio.gather(work, return_exceptions=True)
+                raise RuntimeError("Recovery claim heartbeat lost while agent was executing")
+            return await work
+        finally:
+            stopped.set()
+            if not heart.done():
+                heart.cancel()
+            await asyncio.gather(heart, return_exceptions=True)
+
+    async def _run_native_dispatch(
+        self,
+        uow: Any,
+        run: OrchestrationRun,
+        operation: str,
+        dispatch: tuple[str, str, RecoveryClaimContext],
+        work: Any,
+        complete: Any,
+    ) -> Any:
+        """Run one native agent call under the shared claim and close its intent."""
+        attempt_id, action_key, claim = dispatch
+        try:
+            result = await self._run_claimed(uow, claim, work)
+        except asyncio.CancelledError:
+            self._finish_native_dispatch(uow, run, operation, attempt_id, action_key, claim, "AMBIGUOUS", None)
+            raise
+        except Exception as exc:
+            self._finish_native_dispatch(uow, run, operation, attempt_id, action_key, claim, "AMBIGUOUS", str(exc))
+            raise
+        status = "COMPLETE" if complete(result) else "FAILED"
+        self._finish_native_dispatch(
+            uow, run, operation, attempt_id, action_key, claim, status,
+            None if status == "COMPLETE" else result.get("message"),
+        )
+        return result
+
     async def _normalize_request_before_explore(
         self,
         *,
@@ -709,7 +779,7 @@ class NativeOrchestrationCoordinator:
             return False
         details = dict(run.stop_details or {})
         attempt = details.get("propose_attempt")
-        if run.current_stage != OrchestrationStage.PROPOSING:
+        if run.current_stage not in {OrchestrationStage.PROPOSING, OrchestrationStage.VALIDATING}:
             return False
         if prior_attempt_id is not None and (
             not isinstance(attempt, dict) or attempt.get("attempt_id") != prior_attempt_id
@@ -728,7 +798,7 @@ class NativeOrchestrationCoordinator:
             action_type=OperatorActionType.RETRY,
             actor_identity=actor_identity,
             source_interface=source_interface,
-            precondition_stage=OrchestrationStage.PROPOSING.value,
+            precondition_stage=run.current_stage.value,
             status=OperatorActionStatus.ACCEPTED,
             summary="One-shot authorization to continue an incomplete native Propose.",
             parameters_json={
@@ -1234,7 +1304,6 @@ class NativeOrchestrationCoordinator:
                 expected_explore_wf = None
 
             stored_explore = (active_run.stop_details or {}).get("explore_checkpoint")
-            stored_attempt = (active_run.stop_details or {}).get("explore_attempt")
             checkpoint_verified = (
                 expected_explore_wf is not None
                 and isinstance(stored_explore, dict)
@@ -1274,15 +1343,7 @@ class NativeOrchestrationCoordinator:
                 )
             )
             if recovery_needed:
-                actions = getattr(uow, "operator_actions", None)
-                prior_attempt_id = (
-                    stored_attempt.get("attempt_id")
-                    if isinstance(stored_attempt, dict)
-                    else None
-                )
-                attempt_payload = stored_attempt if isinstance(stored_attempt, dict) else {}
-                legacy_missing_attempt = stored_attempt is None
-                if actions is None or not explore_recovery_authorization_id:
+                if not explore_recovery_authorization_id:
                     return OrchestrationCoordinationResult(
                         status="PAUSED",
                         run_id=active_run.run_id,
@@ -1292,44 +1353,23 @@ class NativeOrchestrationCoordinator:
                             "an explicit, Run-bound recovery authorization is required."
                         ),
                     )
-                expected_parameters = {
-                    "single_use": True,
-                    "stage": "explore",
-                    "issue_number": issue_number,
-                    "provider": thinker_provider,
-                    "prior_attempt_id": prior_attempt_id,
-                    "legacy_missing_attempt": legacy_missing_attempt,
-                    "prior_context_sha256": attempt_payload.get("context_sha256"),
-                    "prior_workflow_sha256": attempt_payload.get("workflow_sha256"),
-                }
-                existing_authorization = actions.get_by_request_id(
-                    explore_recovery_authorization_id
+                prior = getattr(uow, "operator_actions", None)
+                existing = (
+                    prior.get_by_request_id(explore_recovery_authorization_id)
+                    if prior is not None
+                    else None
                 )
-                consumed = actions.consume_single_use(
-                    explore_recovery_authorization_id,
-                    run_id=active_run.run_id,
-                    action_type=OperatorActionType.RETRY,
-                    expected_parameters=expected_parameters,
-                )
-                if consumed is None:
-                    message = (
-                        "Explore recovery authorization has already been consumed."
-                        if existing_authorization is not None
-                        and existing_authorization.status != OperatorActionStatus.ACCEPTED
-                        else (
-                            "Explore recovery authorization is missing or mismatched."
-                        )
-                    )
+                if existing is not None and existing.status != OperatorActionStatus.ACCEPTED:
                     return OrchestrationCoordinationResult(
                         status="PAUSED",
                         run_id=active_run.run_id,
                         current_stage=OrchestrationStage.EXPLORING,
-                        message=message,
+                        message="Explore recovery authorization has already been consumed.",
                     )
             if same_context:
                 explore_result = {
                     "status": stored_explore["status"],
-                    "human_payload": stored_explore.get("human_payload"),
+                    "human_payload": self._safe_human_payload(stored_explore.get("human_payload")),
                 }
             else:
                 dispatch = self._prepare_explore_dispatch(
@@ -1344,6 +1384,7 @@ class NativeOrchestrationCoordinator:
                         else None
                     ),
                     is_recovery=recovery_needed,
+                    recovery_authorization_id=explore_recovery_authorization_id,
                 )
                 if dispatch is None:
                     return OrchestrationCoordinationResult(
@@ -1352,9 +1393,12 @@ class NativeOrchestrationCoordinator:
                         current_stage=OrchestrationStage.EXPLORING,
                         message="Explore dispatch is already owned or its durable intent is ambiguous.",
                     )
-                attempt_id, action_key, claim_context = dispatch
-                try:
-                    explore_result = await self._run_explore(
+                explore_result = await self._run_native_dispatch(
+                    uow,
+                    active_run,
+                    "explore",
+                    dispatch,
+                    lambda: self._run_explore(
                         worktree_path=worktree_path,
                         provider=thinker_provider,
                         issue_number=issue_number,
@@ -1362,45 +1406,12 @@ class NativeOrchestrationCoordinator:
                         issue_body=issue_body,
                         operator_clarification=operator_clarification,
                         project_id=project_id,
-                    )
-                except asyncio.CancelledError:
-                    self._finish_explore_dispatch(
-                        uow,
-                        active_run,
-                        attempt_id,
-                        action_key,
-                        claim_context,
-                        "AMBIGUOUS",
-                        None,
-                    )
-                    raise
-                except Exception as exc:
-                    self._finish_explore_dispatch(
-                        uow,
-                        active_run,
-                        attempt_id,
-                        action_key,
-                        claim_context,
-                        "AMBIGUOUS",
-                        str(exc),
-                    )
-                    raise
-                else:
-                    evidence = explore_result.get("execution")
-                    terminal = (
-                        "COMPLETE"
-                        if evidence is not None and self._execution_is_successful(evidence)
-                        else "FAILED"
-                    )
-                    self._finish_explore_dispatch(
-                        uow,
-                        active_run,
-                        attempt_id,
-                        action_key,
-                        claim_context,
-                        terminal,
-                        None,
-                    )
+                    ),
+                    lambda result: (
+                        result.get("execution") is not None
+                        and self._execution_is_successful(result["execution"])
+                    ),
+                )
                 evidence = explore_result.get("execution")
                 if (
                     explore_result.get("status") in {"HUMAN_REQUIRED", "READY_TO_PROPOSE"}
@@ -1427,8 +1438,8 @@ class NativeOrchestrationCoordinator:
                         "response_sha256": hashlib.sha256(
                             evidence.response_output.encode("utf-8")
                         ).hexdigest(),
-                        "attempt_id": attempt_id,
-                        "human_payload": explore_result.get("human_payload"),
+                        "attempt_id": dispatch[0],
+                        "human_payload": self._safe_human_payload(explore_result.get("human_payload")),
                         "duration_ms": getattr(evidence, "duration_ms", None),
                         "recorded_at": utc_now().isoformat(),
                     }
@@ -1439,7 +1450,7 @@ class NativeOrchestrationCoordinator:
                     run_id=active_run.run_id,
                     current_stage=OrchestrationStage.EXPLORING,
                     message="Explore stage requires operator clarification.",
-                    human_payload=explore_result.get("human_payload"),
+                    human_payload=self._safe_human_payload(explore_result.get("human_payload")),
                 )
             if explore_result.get("status") != "READY_TO_PROPOSE":
                 return OrchestrationCoordinationResult(
@@ -1457,35 +1468,37 @@ class NativeOrchestrationCoordinator:
         ):
             stored_propose_attempt = (active_run.stop_details or {}).get("propose_attempt")
             stored_propose_checkpoint = (active_run.stop_details or {}).get("propose_checkpoint")
-            # Use official OpenSpec status for new agent handoffs. Historical
-            # checkpoints retain the existing file preflight for compatibility.
-            canonical_status_required = (
-                isinstance(stored_propose_checkpoint, dict)
-                and isinstance(stored_propose_checkpoint.get("agent_handoff"), dict)
+            planning = (
+                self.openspec_adapter.planning_status(change_name, worktree_path)
+                if active_run.current_stage == OrchestrationStage.VALIDATING
+                else None
             )
+            if isinstance(planning, dict) and planning.get("status") == "UNKNOWN":
+                return OrchestrationCoordinationResult(
+                    status="PAUSED",
+                    run_id=active_run.run_id,
+                    current_stage=OrchestrationStage.VALIDATING,
+                    message="OpenSpec planning status is unobservable; no Propose dispatch is permitted.",
+                )
             complete_proposal = (
-                self.openspec_adapter.planning_status(change_name, worktree_path).get("status") == "PASS"
-                if canonical_status_required
-                else self._proposal_artifacts_present(worktree_path, change_name)
+                isinstance(planning, dict) and planning.get("status") == "PASS"
+            ) or (
+                planning is None and self._proposal_artifacts_present(worktree_path, change_name)
             )
-            # Artifact existence belongs to OpenSpec validation, not execution proof.
-            # On a PROPOSING re-entry, only an attributable completed checkpoint
-            # can skip a previously invoked agent, even if all files happen to exist.
             verified_propose_checkpoint = (
-                complete_proposal
-                and isinstance(stored_propose_checkpoint, dict)
-                and stored_propose_checkpoint.get("checkpoint_version") == 1
+                isinstance(stored_propose_checkpoint, dict)
                 and stored_propose_checkpoint.get("run_id") == active_run.run_id
                 and stored_propose_checkpoint.get("provider") == thinker_provider
                 and stored_propose_checkpoint.get("status") == "READY_TO_VALIDATE"
                 and isinstance(stored_propose_attempt, dict)
                 and stored_propose_attempt.get("status") == "COMPLETE"
                 and stored_propose_checkpoint.get("attempt_id") == stored_propose_attempt.get("attempt_id")
-                and stored_propose_checkpoint.get("artifact_hashes")
-                == self._proposal_artifact_hashes(worktree_path, change_name)
             )
             propose_recovery_needed = (
-                active_run.current_stage == OrchestrationStage.PROPOSING
+                active_run.current_stage in {
+                    OrchestrationStage.PROPOSING,
+                    OrchestrationStage.VALIDATING,
+                }
                 and not verified_propose_checkpoint
                 and (stored_propose_attempt is not None or self._proposal_artifacts_any(worktree_path, change_name))
             )
@@ -1508,50 +1521,18 @@ class NativeOrchestrationCoordinator:
                     run_id=active_run.run_id,
                     current_stage=OrchestrationStage.PROPOSING,
                     message="Propose is awaiting an operator clarification.",
-                    human_payload=stored_propose_gate.get("human_payload"),
+                    human_payload=self._safe_human_payload(stored_propose_gate.get("human_payload")),
                 )
-            if propose_recovery_needed:
-                actions = getattr(uow, "operator_actions", None)
-                prior_attempt_id = (
-                    stored_propose_attempt.get("attempt_id")
-                    if isinstance(stored_propose_attempt, dict)
-                    else None
-                )
-                if actions is None or not propose_recovery_authorization_id:
-                    return OrchestrationCoordinationResult(
-                        status="PAUSED",
-                        run_id=active_run.run_id,
-                        current_stage=OrchestrationStage.PROPOSING,
-                        message=(
-                            "Propose has incomplete or unverified artifacts; an explicit, "
-                            "Run-bound recovery authorization is required."
-                        ),
-                    )
-                consumed = actions.consume_single_use(
-                    propose_recovery_authorization_id,
+            if propose_recovery_needed and not propose_recovery_authorization_id:
+                return OrchestrationCoordinationResult(
+                    status="PAUSED",
                     run_id=active_run.run_id,
-                    action_type=OperatorActionType.RETRY,
-                    expected_parameters={
-                        "single_use": True,
-                        "stage": "propose",
-                        "issue_number": issue_number,
-                        "provider": thinker_provider,
-                        "prior_attempt_id": prior_attempt_id,
-                    },
+                    current_stage=OrchestrationStage.PROPOSING,
+                    message="Propose recovery authorization is required before dispatch.",
                 )
-                if consumed is None:
-                    return OrchestrationCoordinationResult(
-                        status="PAUSED",
-                        run_id=active_run.run_id,
-                        current_stage=OrchestrationStage.PROPOSING,
-                        message="Propose recovery authorization is missing, mismatched, or already consumed.",
-                    )
             existing_proposal = (
                 active_run.current_stage == OrchestrationStage.VALIDATING and complete_proposal
-            ) or (
-                active_run.current_stage == OrchestrationStage.PROPOSING
-                and verified_propose_checkpoint
-            )
+            ) or (active_run.current_stage == OrchestrationStage.PROPOSING and verified_propose_checkpoint)
             if not existing_proposal:
                 self._update_stage(uow, active_run, OrchestrationStage.PROPOSING)
                 dispatch = self._prepare_propose_dispatch(
@@ -1561,6 +1542,7 @@ class NativeOrchestrationCoordinator:
                     provider=thinker_provider,
                     change_name=change_name,
                     is_recovery=propose_recovery_needed,
+                    recovery_authorization_id=propose_recovery_authorization_id,
                 )
                 if dispatch is None:
                     return OrchestrationCoordinationResult(
@@ -1569,9 +1551,12 @@ class NativeOrchestrationCoordinator:
                         current_stage=OrchestrationStage.PROPOSING,
                         message="Propose dispatch is already owned or its durable intent is ambiguous.",
                     )
-                propose_attempt_id, propose_action_key, propose_claim = dispatch
-                try:
-                    propose_result = await self._run_propose(
+                propose_result = await self._run_native_dispatch(
+                    uow,
+                    active_run,
+                    "propose",
+                    dispatch,
+                    lambda: self._run_propose(
                         worktree_path=worktree_path,
                         provider=thinker_provider,
                         change_name=change_name,
@@ -1581,32 +1566,15 @@ class NativeOrchestrationCoordinator:
                         project_id=project_id,
                         continue_existing=propose_recovery_needed,
                         operator_clarification=(
-                            operator_clarification
-                            if verified_propose_human_gate
-                            else None
+                            operator_clarification if verified_propose_human_gate else None
                         ),
-                    )
-                except asyncio.CancelledError:
-                    self._finish_propose_dispatch(uow, active_run, propose_attempt_id, propose_action_key, propose_claim, "AMBIGUOUS", None)
-                    raise
-                except Exception as exc:
-                    self._finish_propose_dispatch(uow, active_run, propose_attempt_id, propose_action_key, propose_claim, "AMBIGUOUS", str(exc))
-                    raise
-                else:
-                    success = propose_result.get("status") == "READY_TO_VALIDATE"
-                    human_required = propose_result.get("status") == "HUMAN_REQUIRED"
-                    self._finish_propose_dispatch(
-                        uow,
-                        active_run,
-                        propose_attempt_id,
-                        propose_action_key,
-                        propose_claim,
-                        "COMPLETE" if success or human_required else (
-                            "FAILED" if propose_result.get("status") == "INCOMPLETE" else "AMBIGUOUS"
-                        ),
-                        propose_result.get("message") if not success else None,
-                    )
-                    if success:
+                    ),
+                    lambda result: result.get("status") in {"READY_TO_VALIDATE", "HUMAN_REQUIRED"},
+                )
+                propose_attempt_id = dispatch[0]
+                success = propose_result.get("status") == "READY_TO_VALIDATE"
+                human_required = propose_result.get("status") == "HUMAN_REQUIRED"
+                if success:
                         details = dict(active_run.stop_details or {})
                         details.pop("propose_human_required", None)
                         details["propose_checkpoint"] = {
@@ -1629,15 +1597,14 @@ class NativeOrchestrationCoordinator:
                                 if getattr(propose_result["execution"], "workflow_handoff", None)
                                 else None
                             ),
-                            "artifact_hashes": self._proposal_artifact_hashes(worktree_path, change_name),
                             "recorded_at": utc_now().isoformat(),
                         }
                         self._persist_run_stop_details(active_run, details)
-                    elif human_required:
+                elif human_required:
                         details = dict(active_run.stop_details or {})
                         details["propose_human_required"] = {
                             "attempt_id": propose_attempt_id,
-                            "human_payload": propose_result["human_payload"],
+                            "human_payload": self._safe_human_payload(propose_result["human_payload"]),
                             "recorded_at": utc_now().isoformat(),
                         }
                         self._persist_run_stop_details(active_run, details)
@@ -1647,7 +1614,7 @@ class NativeOrchestrationCoordinator:
                         run_id=active_run.run_id,
                         current_stage=OrchestrationStage.PROPOSING,
                         message=propose_result["message"],
-                        human_payload=propose_result["human_payload"],
+                        human_payload=self._safe_human_payload(propose_result["human_payload"]),
                     )
                 if propose_result.get("status") != "READY_TO_VALIDATE":
                     return OrchestrationCoordinationResult(
@@ -2459,6 +2426,122 @@ class NativeOrchestrationCoordinator:
             for path in sorted(paths)
         }
 
+    def _prepare_native_dispatch(
+        self,
+        *,
+        uow: Any,
+        run: OrchestrationRun,
+        issue_number: int,
+        provider: str,
+        operation: str,
+        action_type: ExternalActionType,
+        target_identity: str,
+        request_fingerprint: str,
+        is_recovery: bool,
+        recovery_authorization_id: str | None,
+        attempt_fields: dict[str, Any],
+    ) -> tuple[str, str, RecoveryClaimContext] | None:
+        """Persist one native dispatch intent and its fenced claim before I/O."""
+        actions = getattr(uow, "orchestration_external_actions", None)
+        claims = getattr(uow, "claims", None)
+        if actions is None or claims is None:
+            return None
+
+        attempt_id = str(uuid4())
+        action_key = f"{operation}:{run.run_id}:{attempt_id}"
+        details = dict(run.stop_details or {})
+        previous_attempt = details.get(f"{operation}_attempt") or {}
+        details[f"{operation}_attempt"] = {
+            "attempt_id": attempt_id,
+            "status": "IN_PROGRESS",
+            "provider": provider,
+            "issue_number": issue_number,
+            "action_key": action_key,
+            "recovery": is_recovery,
+            "recorded_at": utc_now().isoformat(),
+            **attempt_fields,
+        }
+        claim = claims.acquire_or_reacquire(
+            claim_key=f"run:{run.run_id}",
+            owner_instance_id=f"{operation}:{uuid4()}",
+            lease_seconds=90,
+        )
+        if claim is None:
+            return None
+        claim_context = RecoveryClaimContext(
+            claim_key=claim.claim_key,
+            owner_instance_id=claim.owner_instance_id,
+            fence_token=claim.fence_token,
+            lease_expires_at=claim.lease_expires_at,
+        )
+        try:
+            run.stop_details = details
+            uow.orchestration_runs.save(run)
+            actions.reserve(
+                OrchestrationExternalAction(
+                    run_id=run.run_id,
+                    action_key=action_key,
+                    action_type=action_type,
+                    target_identity=target_identity,
+                    request_fingerprint=request_fingerprint,
+                    generation=run.current_generation,
+                    status=ExternalActionStatus.RESERVED,
+                )
+            )
+            uow.flush()
+            if is_recovery:
+                if not recovery_authorization_id:
+                    raise ValueError("Explore recovery authorization is required")
+                operator_actions = getattr(uow, "operator_actions", None)
+                if operator_actions is None:
+                    raise ValueError("Operator action repository is unavailable")
+                consumed = operator_actions.consume_single_use(
+                    recovery_authorization_id,
+                    run_id=run.run_id,
+                    action_type=OperatorActionType.RETRY,
+                    expected_parameters={
+                        "single_use": True,
+                        "stage": operation,
+                        "issue_number": issue_number,
+                        "provider": provider,
+                        "prior_attempt_id": previous_attempt.get("attempt_id"),
+                        **(
+                            {
+                                "legacy_missing_attempt": not bool(previous_attempt),
+                                "prior_context_sha256": previous_attempt.get("context_sha256"),
+                                "prior_workflow_sha256": previous_attempt.get("workflow_sha256"),
+                            }
+                            if operation == "explore"
+                            else {}
+                        ),
+                    },
+                )
+                if consumed is None:
+                    raise ValueError("Explore recovery authorization is missing, mismatched, or consumed")
+            claims.commit_fenced_dispatch_intent(
+                claim_key=claim_context.claim_key,
+                owner_instance_id=claim_context.owner_instance_id,
+                fence_token=claim_context.fence_token,
+                action_key=action_key,
+                authorization=DispatchAuthorization(
+                    action_key=action_key,
+                    is_authorized=True,
+                    authorization_reason=(
+                        f"Explicit operator authorization for {operation} recovery."
+                        if is_recovery
+                        else f"Original {operation.title()} dispatch for this Run."
+                    ),
+                    is_retry=is_recovery,
+                ),
+            )
+        except Exception as exc:
+            logger.warning("%s dispatch preparation failed: %s", operation.title(), exc)
+            uow.rollback()
+            claims.release_claim(claim_context)
+            uow.commit()
+            return None
+        return attempt_id, action_key, claim_context
+
     def _prepare_explore_dispatch(
         self,
         *,
@@ -2469,116 +2552,77 @@ class NativeOrchestrationCoordinator:
         context_sha: str,
         workflow_sha: str | None,
         is_recovery: bool,
+        recovery_authorization_id: str | None = None,
     ) -> tuple[str, str, RecoveryClaimContext] | None:
-        """Persist an Explore attempt and fenced dispatch intent before provider I/O."""
-        actions = getattr(uow, "orchestration_external_actions", None)
-        claims = getattr(uow, "claims", None)
-        if actions is None or claims is None:
-            return None
-
-        attempt_id = str(uuid4())
-        action_key = f"explore:{run.run_id}:{attempt_id}"
-        details = dict(run.stop_details or {})
-        details["explore_attempt"] = {
-            "attempt_id": attempt_id,
-            "status": "IN_PROGRESS",
-            "provider": provider,
-            "issue_number": issue_number,
-            "context_sha256": context_sha,
-            "workflow_sha256": workflow_sha,
-            "action_key": action_key,
-            "recovery": is_recovery,
-            "recorded_at": utc_now().isoformat(),
-        }
-        owner_instance_id = f"explore:{uuid4()}"
-        claim = claims.acquire_or_reacquire(
-            claim_key=f"run:{run.run_id}",
-            owner_instance_id=owner_instance_id,
-            lease_seconds=3600,
+        return self._prepare_native_dispatch(
+            uow=uow,
+            run=run,
+            issue_number=issue_number,
+            provider=provider,
+            operation="explore",
+            action_type=ExternalActionType.OPENSPEC_EXPLORE_DISPATCH,
+            target_identity=f"{run.project_id}:{issue_number}:{provider}",
+            request_fingerprint=context_sha,
+            is_recovery=is_recovery,
+            recovery_authorization_id=recovery_authorization_id,
+            attempt_fields={
+                "context_sha256": context_sha,
+                "workflow_sha256": workflow_sha,
+            },
         )
-        if claim is None:
-            return None
-        claim_context = RecoveryClaimContext(
-            claim_key=claim.claim_key,
-            owner_instance_id=claim.owner_instance_id,
-            fence_token=claim.fence_token,
-            lease_expires_at=claim.lease_expires_at,
-        )
-        try:
-            run.stop_details = details
-            uow.orchestration_runs.save(run)
-            actions.reserve(
-                OrchestrationExternalAction(
-                    run_id=run.run_id,
-                    action_key=action_key,
-                    action_type=ExternalActionType.OPENSPEC_EXPLORE_DISPATCH,
-                    target_identity=f"{run.project_id}:{issue_number}:{provider}",
-                    request_fingerprint=context_sha,
-                    generation=run.current_generation,
-                    status=ExternalActionStatus.RESERVED,
-                )
-            )
-            uow.flush()
-            claims.commit_fenced_dispatch_intent(
-                claim_key=claim_context.claim_key,
-                owner_instance_id=claim_context.owner_instance_id,
-                fence_token=claim_context.fence_token,
-                action_key=action_key,
-                authorization=DispatchAuthorization(
-                    action_key=action_key,
-                    is_authorized=True,
-                    authorization_reason=(
-                        "Explicit operator authorization for Explore recovery."
-                        if is_recovery
-                        else "Original Explore dispatch for this Run."
-                    ),
-                    is_retry=is_recovery,
-                ),
-            )
-        except Exception as exc:
-            logger.warning("Explore dispatch preparation failed: %s", exc)
-            uow.rollback()
-            claims.release_claim(claim_context)
-            uow.commit()
-            return None
-        return attempt_id, action_key, claim_context
 
-    def _finish_explore_dispatch(
+    def _finish_native_dispatch(
         self,
         uow: Any,
         run: OrchestrationRun,
+        operation: str,
         attempt_id: str,
         action_key: str,
         claim_context: RecoveryClaimContext,
         attempt_status: str,
         error_message: str | None,
     ) -> None:
-        """Close only an observed provider result; leave crashes as EXECUTING/IN_PROGRESS."""
+        """Close one observed native result; crashes remain in-progress/ambiguous."""
+        validate = getattr(uow.claims, "validate_cas", None)
+        if callable(validate) and not validate(
+            claim_context.claim_key, claim_context.owner_instance_id, claim_context.fence_token
+        ):
+            uow.orchestration_external_actions.update_status(
+                action_key=action_key,
+                status=ExternalActionStatus.AMBIGUOUS,
+                error_message="Dispatch claim was fenced before result persistence.",
+            )
+            uow.commit()
+            return
         details = dict(run.stop_details or {})
-        attempt = dict(details.get("explore_attempt") or {})
+        attempt = dict(details.get(f"{operation}_attempt") or {})
         if attempt.get("attempt_id") == attempt_id:
-            attempt["status"] = attempt_status
+            attempt.update(status=attempt_status, finished_at=utc_now().isoformat())
             if error_message:
                 attempt["error"] = redact_secrets(error_message)[:1000]
-            attempt["finished_at"] = utc_now().isoformat()
-            details["explore_attempt"] = attempt
+            details[f"{operation}_attempt"] = attempt
             run.stop_details = details
             uow.orchestration_runs.save(run)
-        terminal_status = {
+        status = {
             "COMPLETE": ExternalActionStatus.COMPLETED,
             "FAILED": ExternalActionStatus.FAILED,
             "AMBIGUOUS": ExternalActionStatus.AMBIGUOUS,
         }.get(attempt_status, ExternalActionStatus.UNKNOWN)
         try:
             uow.orchestration_external_actions.update_status(
-                action_key=action_key,
-                status=terminal_status,
-                error_message=error_message,
+                action_key=action_key, status=status, error_message=error_message
             )
             uow.commit()
         finally:
             uow.claims.release_claim(claim_context)
             uow.commit()
+
+    def _finish_explore_dispatch(self, uow: Any, run: OrchestrationRun, attempt_id: str,
+                                 action_key: str, claim_context: RecoveryClaimContext,
+                                 attempt_status: str, error_message: str | None) -> None:
+        self._finish_native_dispatch(
+            uow, run, "explore", attempt_id, action_key, claim_context, attempt_status, error_message
+        )
 
     def _prepare_propose_dispatch(
         self,
@@ -2589,115 +2633,30 @@ class NativeOrchestrationCoordinator:
         provider: str,
         change_name: str,
         is_recovery: bool,
+        recovery_authorization_id: str | None = None,
     ) -> tuple[str, str, RecoveryClaimContext] | None:
-        """Persist and fence a Propose dispatch before provider I/O."""
-        actions = getattr(uow, "orchestration_external_actions", None)
-        claims = getattr(uow, "claims", None)
-        if actions is None or claims is None:
-            return None
-        attempt_id = str(uuid4())
-        action_key = f"propose:{run.run_id}:{attempt_id}"
-        details = dict(run.stop_details or {})
-        details["propose_attempt"] = {
-            "attempt_id": attempt_id,
-            "status": "IN_PROGRESS",
-            "provider": provider,
-            "issue_number": issue_number,
-            "change_name": change_name,
-            "action_key": action_key,
-            "recovery": is_recovery,
-            "recorded_at": utc_now().isoformat(),
-        }
-        claim = claims.acquire_or_reacquire(
-            claim_key=f"run:{run.run_id}",
-            owner_instance_id=f"propose:{uuid4()}",
-            lease_seconds=3600,
+        return self._prepare_native_dispatch(
+            uow=uow,
+            run=run,
+            issue_number=issue_number,
+            provider=provider,
+            operation="propose",
+            action_type=ExternalActionType.OPENSPEC_EXPLORE_DISPATCH,
+            target_identity=f"{run.project_id}:{issue_number}:{change_name}:{provider}",
+            request_fingerprint=hashlib.sha256(
+                f"{run.run_id}:{change_name}:{issue_number}:{provider}".encode()
+            ).hexdigest(),
+            is_recovery=is_recovery,
+            recovery_authorization_id=recovery_authorization_id,
+            attempt_fields={"change_name": change_name},
         )
-        if claim is None:
-            return None
-        claim_context = RecoveryClaimContext(
-            claim_key=claim.claim_key,
-            owner_instance_id=claim.owner_instance_id,
-            fence_token=claim.fence_token,
-            lease_expires_at=claim.lease_expires_at,
-        )
-        try:
-            run.stop_details = details
-            uow.orchestration_runs.save(run)
-            actions.reserve(
-                OrchestrationExternalAction(
-                    run_id=run.run_id,
-                    action_key=action_key,
-                    action_type=ExternalActionType.OPENSPEC_PROPOSE_DISPATCH,
-                    target_identity=f"{run.project_id}:{issue_number}:{change_name}:{provider}",
-                    request_fingerprint=hashlib.sha256(
-                        f"{run.run_id}:{change_name}:{issue_number}:{provider}".encode()
-                    ).hexdigest(),
-                    generation=run.current_generation,
-                    status=ExternalActionStatus.RESERVED,
-                )
-            )
-            uow.flush()
-            claims.commit_fenced_dispatch_intent(
-                claim_key=claim_context.claim_key,
-                owner_instance_id=claim_context.owner_instance_id,
-                fence_token=claim_context.fence_token,
-                action_key=action_key,
-                authorization=DispatchAuthorization(
-                    action_key=action_key,
-                    is_authorized=True,
-                    authorization_reason=(
-                        "Explicit operator authorization for Propose recovery."
-                        if is_recovery
-                        else "Original Propose dispatch for this Run."
-                    ),
-                    is_retry=is_recovery,
-                ),
-            )
-        except Exception as exc:
-            logger.warning("Propose dispatch preparation failed: %s", exc)
-            uow.rollback()
-            claims.release_claim(claim_context)
-            uow.commit()
-            return None
-        return attempt_id, action_key, claim_context
 
-    def _finish_propose_dispatch(
-        self,
-        uow: Any,
-        run: OrchestrationRun,
-        attempt_id: str,
-        action_key: str,
-        claim_context: RecoveryClaimContext,
-        attempt_status: str,
-        error_message: str | None,
-    ) -> None:
-        """Persist only observed results; cancellation remains ambiguous."""
-        details = dict(run.stop_details or {})
-        attempt = dict(details.get("propose_attempt") or {})
-        if attempt.get("attempt_id") == attempt_id:
-            attempt["status"] = attempt_status
-            if error_message:
-                attempt["error"] = redact_secrets(error_message)[:1000]
-            attempt["finished_at"] = utc_now().isoformat()
-            details["propose_attempt"] = attempt
-            run.stop_details = details
-            uow.orchestration_runs.save(run)
-        terminal_status = {
-            "COMPLETE": ExternalActionStatus.COMPLETED,
-            "FAILED": ExternalActionStatus.FAILED,
-            "AMBIGUOUS": ExternalActionStatus.AMBIGUOUS,
-        }.get(attempt_status, ExternalActionStatus.UNKNOWN)
-        try:
-            uow.orchestration_external_actions.update_status(
-                action_key=action_key,
-                status=terminal_status,
-                error_message=error_message,
-            )
-            uow.commit()
-        finally:
-            uow.claims.release_claim(claim_context)
-            uow.commit()
+    def _finish_propose_dispatch(self, uow: Any, run: OrchestrationRun, attempt_id: str,
+                                 action_key: str, claim_context: RecoveryClaimContext,
+                                 attempt_status: str, error_message: str | None) -> None:
+        self._finish_native_dispatch(
+            uow, run, "propose", attempt_id, action_key, claim_context, attempt_status, error_message
+        )
 
     @staticmethod
     def _configured_provider(project: Any, role: str) -> str | None:
@@ -3124,11 +3083,11 @@ class NativeOrchestrationCoordinator:
                 }
             return {
                 "status": "HUMAN_REQUIRED",
-                "human_payload": {
+                "human_payload": self._safe_human_payload({
                     "question": f"¿Cómo debe resolverse la ambigüedad en el Issue #{issue_number}?",
                     "options": options,
                     "agent_output": output[:1000],
-                },
+                }),
                 "execution": res,
             }
         return {"status": "READY_TO_PROPOSE", "execution": res}
@@ -3269,12 +3228,12 @@ class NativeOrchestrationCoordinator:
                 return {
                     "status": "HUMAN_REQUIRED",
                     "message": message,
-                    "human_payload": {
+                    "human_payload": self._safe_human_payload({
                         "question": report.pending[0],
                         "options": [],
                         "pending": list(report.pending),
                         "agent_output": report.summary,
-                    },
+                    }),
                     "execution": res,
                 }
             return {"status": "INCOMPLETE", "message": message}
@@ -3283,22 +3242,16 @@ class NativeOrchestrationCoordinator:
                 "status": "FAILED",
                 "message": "Propose agent execution was not successful or did not report a valid final handoff.",
             }
-        if getattr(res, "workflow_handoff_required", False):
-            # The installed OpenSpec CLI, not a list of expected filenames, owns
-            # planning completeness and artifact dependencies.
-            planning = self.openspec_adapter.planning_status(change_name, worktree_path)
-            if planning.get("status") != "PASS":
-                pending = ", ".join(planning.get("pending") or [])
-                return {
-                    "status": "INCOMPLETE" if planning.get("status") == "INCOMPLETE" else "FAILED",
-                    "message": f"OpenSpec planning is not complete: {planning.get('reason')}; pending: {pending}"[:1000],
-                }
-        elif not self._proposal_artifacts_present(worktree_path, change_name):
-            # Compatibility with historical test runners that have no final
-            # handoff contract; production agents use canonical OpenSpec status.
+        planning = self.openspec_adapter.planning_status(change_name, worktree_path)
+        if not isinstance(planning, dict):
+            planning = {"status": "PASS"} if self._proposal_artifacts_present(
+                worktree_path, change_name
+            ) else {"status": "UNKNOWN", "reason": "OpenSpec status was not structured"}
+        if planning.get("status") != "PASS":
+            pending = ", ".join(planning.get("pending") or [])
             return {
-                "status": "FAILED",
-                "message": "Native Propose completed without the complete canonical artifacts.",
+                "status": "INCOMPLETE" if planning.get("status") == "INCOMPLETE" else "FAILED",
+                "message": f"OpenSpec planning is not complete: {planning.get('reason')}; pending: {pending}"[:1000],
             }
         return {"status": "READY_TO_VALIDATE", "workflow": wf, "execution": res}
 

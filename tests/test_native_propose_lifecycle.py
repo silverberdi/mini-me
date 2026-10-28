@@ -1266,3 +1266,37 @@ async def test_agent_claims_complete_but_openspec_still_has_pending_planning(moc
     coordinator.openspec_adapter.planning_status.assert_called_once_with(
         "req-101-add-caching-layer", repo_dir
     )
+@pytest.mark.asyncio
+async def test_validating_unknown_openspec_status_never_redispatches(mock_env):
+    coordinator, uow, _, _ = mock_env
+    run = OrchestrationRun(
+        project_id="proj-1",
+        change_name="req-101-add-caching-layer",
+        base_sha="abc1234",
+        current_stage=OrchestrationStage.VALIDATING,
+        resumable_stage=OrchestrationStage.VALIDATING,
+        stop_details={
+            "issue_number": 101,
+            "issue_title": "Add caching layer",
+            "request_normalization": {"normalized_body": "Need caching"},
+            "propose_attempt": {"attempt_id": "attempt-1", "status": "COMPLETE"},
+            "propose_checkpoint": {"agent_handoff": {"status": "COMPLETE"}},
+        },
+    )
+    uow.orchestration_runs.save(run)
+    coordinator.openspec_adapter.planning_status = MagicMock(
+        return_value={"status": "UNKNOWN", "reason": "cli unavailable"}
+    )
+    coordinator._run_propose = AsyncMock(side_effect=AssertionError("redispatch"))
+
+    result = await coordinator.execute_project_request(
+        "proj-1",
+        thinker_provider="antigravity",
+        implementer_provider="antigravity",
+        reviewer_provider="antigravity",
+    )
+
+    assert result.status == "PAUSED"
+    assert result.current_stage == OrchestrationStage.VALIDATING
+    assert "unobservable" in result.message
+    coordinator._run_propose.assert_not_awaited()

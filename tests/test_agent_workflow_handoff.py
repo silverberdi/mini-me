@@ -1,5 +1,10 @@
 """The agent reports completion in the same invocation; OpenSpec remains authoritative."""
 
+import asyncio
+from types import SimpleNamespace
+
+import pytest
+
 from minime.services.agent_runner import (
     AgentExecutionResult,
     AgentWorkflowHandoff,
@@ -147,3 +152,32 @@ def test_codex_terminal_handoff_is_not_read_from_tool_diagnostics():
     assert handoff is not None
     assert handoff.status == "INCOMPLETE"
     assert handoff.pending == ("design.md",)
+
+
+@pytest.mark.asyncio
+async def test_claim_heartbeat_loss_fences_the_child():
+    coordinator = NativeOrchestrationCoordinator.__new__(NativeOrchestrationCoordinator)
+    calls = []
+
+    def renew(_claim, _lease):
+        calls.append(True)
+        return False
+
+    uow = SimpleNamespace(renew_claim_heartbeat_isolated=renew)
+    coordinator._claim_heartbeat_interval_seconds = 0.01
+    claim = object()
+
+    async def work():
+        await asyncio.sleep(0.1)
+
+    with pytest.raises(RuntimeError, match="heartbeat lost"):
+        await coordinator._run_claimed(uow, claim, work)
+    assert calls
+
+
+def test_human_payload_is_redacted_at_the_output_boundary():
+    payload = NativeOrchestrationCoordinator._safe_human_payload(
+        {"question": "Use token=sk-secret12345678", "pending": ["password=hidden"]}
+    )
+    assert "sk-secret12345678" not in payload["question"]
+    assert "password=hidden" not in payload["pending"][0]

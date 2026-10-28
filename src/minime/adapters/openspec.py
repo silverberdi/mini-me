@@ -335,8 +335,9 @@ class OpenSpecAdapter(OpenSpecAdapterInterface):
                 capture_output=True,
                 text=True,
                 check=False,
+                timeout=30,
             )
-        except OSError as exc:
+        except (OSError, subprocess.TimeoutExpired) as exc:
             return {"status": "UNKNOWN", "reason": str(exc), "pending": []}
         if result.returncode != 0:
             return {"status": "UNKNOWN", "reason": "OpenSpec status command failed", "pending": []}
