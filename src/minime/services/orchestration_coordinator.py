@@ -1577,6 +1577,20 @@ class NativeOrchestrationCoordinator:
                             "provider": thinker_provider,
                             "status": "READY_TO_VALIDATE",
                             "attempt_id": propose_attempt_id,
+                            "agent_response_sha256": hashlib.sha256(
+                                propose_result["execution"].response_output.encode("utf-8")
+                            ).hexdigest(),
+                            "agent_handoff": (
+                                {
+                                    "status": propose_result["execution"].workflow_handoff.status,
+                                    "summary": redact_secrets(
+                                        propose_result["execution"].workflow_handoff.summary
+                                    )[:600],
+                                    "pending": [],
+                                }
+                                if getattr(propose_result["execution"], "workflow_handoff", None)
+                                else None
+                            ),
                             "artifact_hashes": self._proposal_artifact_hashes(worktree_path, change_name),
                             "recorded_at": utc_now().isoformat(),
                         }
