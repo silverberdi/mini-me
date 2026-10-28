@@ -335,10 +335,23 @@ class ProgressWatchdog:
             # Check for positive, verifiable evidence of an irrecoverable deadlock
             is_deadlock, deadlock_reason = self.detect_positive_deadlock(pid)
             if is_deadlock:
+                # One transient zombie or D-state sample is not enough to
+                # terminate a potentially healthy agent process. Require
+                # repeated positive observations without intervening progress.
+                self._deadlock_confirmation_count += 1
+                if self._deadlock_confirmation_count < self.min_deadlock_confirmation_probes:
+                    self.state = WatchdogState.SUSPECTED_STALL
+                    self.diagnostic_reason = (
+                        "POSITIVE_DEADLOCK_UNCONFIRMED: "
+                        f"{self._deadlock_confirmation_count}/"
+                        f"{self.min_deadlock_confirmation_probes}: {deadlock_reason}"
+                    )
+                    return self.state
                 self.state = WatchdogState.STALLED
                 self.diagnostic_reason = f"POSITIVE_DEADLOCK_CONFIRMED: {deadlock_reason}"
                 return self.state
 
+            self._deadlock_confirmation_count = 0
             # Under uncertainty (process alive but silent without CPU consumption),
             # preserve process and durable state without authorizing termination.
             self.state = WatchdogState.SUSPECTED_STALL
