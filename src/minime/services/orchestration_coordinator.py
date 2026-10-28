@@ -1490,12 +1490,15 @@ class NativeOrchestrationCoordinator:
                 and (stored_propose_attempt is not None or self._proposal_artifacts_any(worktree_path, change_name))
             )
             stored_propose_gate = (active_run.stop_details or {}).get("propose_human_required")
-            if (
+            verified_propose_human_gate = (
                 propose_recovery_needed
                 and isinstance(stored_propose_gate, dict)
                 and isinstance(stored_propose_attempt, dict)
                 and stored_propose_gate.get("attempt_id") == stored_propose_attempt.get("attempt_id")
                 and stored_propose_attempt.get("status") == "COMPLETE"
+            )
+            if (
+                verified_propose_human_gate
                 and not (isinstance(operator_clarification, str) and operator_clarification.strip())
             ):
                 # A power interruption or refresh must not hide a genuine
@@ -1579,7 +1582,7 @@ class NativeOrchestrationCoordinator:
                         continue_existing=propose_recovery_needed,
                         operator_clarification=(
                             operator_clarification
-                            if propose_recovery_needed and isinstance(stored_propose_gate, dict)
+                            if verified_propose_human_gate
                             else None
                         ),
                     )
