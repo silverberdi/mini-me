@@ -2372,9 +2372,10 @@ class NativeOrchestrationCoordinator:
             return False
         if getattr(result, "environment_error", False):
             return False
+        # Diagnostic output may be abbreviated for display. The authoritative
+        # provider response is checked separately through final_response_status.
         if (
-            getattr(result, "output_truncated", False)
-            or getattr(result, "structured_output_missing", False)
+            getattr(result, "structured_output_missing", False)
             or getattr(result, "structured_output_too_large", False)
         ):
             return False
