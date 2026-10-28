@@ -19,6 +19,7 @@ from minime.db.models import Base
 from minime.db.repository import PostgresPersistenceUnitOfWork
 from minime.db.retry import TransactionRetryWrapper
 from minime.domain.enums import (
+    ExternalActionType,
     OperatorActionStatus,
     OperatorActionType,
     OrchestrationStage,
@@ -527,7 +528,7 @@ def test_legacy_explore_run_without_attempt_accepts_only_explicit_recovery(
             worktree_manager=MagicMock(),
             agent_runner=MagicMock(),
         )
-        assert coordinator.register_explore_recovery_authorization(
+        assert coordinator.register_recovery_authorization(
             project_id=project_id,
             run_id=run_id,
             authorization_reference=action_id,
@@ -536,6 +537,7 @@ def test_legacy_explore_run_without_attempt_accepts_only_explicit_recovery(
             issue_number=173,
             provider="antigravity",
             prior_attempt_id=None,
+            stage="explore",
         )
         record = uow.operator_actions.get_by_request_id(action_id)
         assert record is not None
@@ -593,14 +595,18 @@ def test_explore_dispatch_claim_serializes_two_postgres_workers(
             try:
                 run = uow.orchestration_runs.get_by_id(run_id)
                 assert run is not None
-                result = coordinator._prepare_explore_dispatch(
+                result = coordinator._prepare_native_dispatch(
                     uow=uow,
                     run=run,
                     issue_number=173,
                     provider="antigravity",
-                    context_sha="c" * 64,
-                    workflow_sha="d" * 64,
+                    operation="explore",
+                    action_type=ExternalActionType.OPENSPEC_EXPLORE_DISPATCH,
+                    target_identity=f"{run.project_id}:173:antigravity",
+                    request_fingerprint="c" * 64,
+                    attempt_fields={"context_sha256": "c" * 64, "workflow_sha256": "d" * 64},
                     is_recovery=False,
+                    recovery_authorization_id=None,
                 )
                 results.append(result)
             except Exception as exc:
@@ -677,13 +683,18 @@ def test_propose_dispatch_claim_serializes_two_postgres_workers(
                 run = uow.orchestration_runs.get_by_id(run_id)
                 assert run is not None
                 results.append(
-                    coordinator._prepare_propose_dispatch(
+                    coordinator._prepare_native_dispatch(
                         uow=uow,
                         run=run,
                         issue_number=173,
                         provider="codex",
-                        change_name="propose-dispatch-change",
+                        operation="propose",
+                        action_type=ExternalActionType.OPENSPEC_EXPLORE_DISPATCH,
+                        target_identity=f"{run.project_id}:173:propose-dispatch-change:codex",
+                        request_fingerprint="p" * 64,
+                        attempt_fields={"change_name": "propose-dispatch-change"},
                         is_recovery=False,
+                            recovery_authorization_id=None,
                     )
                 )
             except Exception as exc:

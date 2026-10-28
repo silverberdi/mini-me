@@ -18,8 +18,8 @@ La trazabilidad es: autorización del operador → hallazgos Antigravity F1–F1
 | F6 | Redactar en el único punto de salida humana | No persistir secretos | prueba HUMAN_REQUIRED |
 | F7 | Consumir autorización en la misma transacción que reserva despacho | Una autorización, un intento | prueba de rollback/preparación fallida |
 | F8 | Timeout solo para `openspec status` | Agente sin límite global arbitrario | prueba TimeoutExpired |
-| F9 | Compartir camino técnico Explore/Propose | Un dueño de despacho | pruebas de ambos workflows |
-| F10 | Retirar compatibilidad redundante donde no proteja historia | Una fuente de verdad | diff y regresión focalizada |
+| F9 | Compartir camino técnico Explore/Propose y autorización parametrizada por etapa | Un dueño de despacho y de autorización | pruebas de ambos workflows |
+| F10 | Retirar compatibilidad redundante donde no proteja historia | Una fuente de verdad | diff, búsqueda de consumidores y regresión focalizada |
 
 ## Removal Ledger
 
@@ -27,6 +27,9 @@ La trazabilidad es: autorización del operador → hallazgos Antigravity F1–F1
 |---|---|---|
 | `planning_status` como heurística de ejecución | MANTENER como observación oficial OpenSpec | autoridad de completitud, no de despacho |
 | chequeo de archivos para handoff nuevo | RETIRAR progresivamente; conservar solo legado verificable | evita segunda fuente de verdad |
+| `verified_propose_checkpoint` y sus hashes/compatibilidad | ELIMINAR | el handoff terminal y `openspec status/validate` son la autoridad; no duplicar checkpoint semántico |
+| `register_*_recovery_authorization` y `_prepare_*_dispatch` duplicados | ELIMINAR | Explore y Propose comparten `register_recovery_authorization` y `_prepare_native_dispatch` |
+| `classify_existing_run` y su autorización de reintento | ELIMINAR | el ciclo normal conserva solo la evaluación de complejidad dentro de VALIDATING; no mantener una entrada de recuperación paralela |
 | `ExternalActionType.OPENSPEC_PROPOSE_DISPATCH` | ELIMINADO; se reutiliza categoría nativa existente | no añadir enum/migración por una etiqueta |
 | `db/repository.py`, `worktree_manager.py` y conteo de tablas | RETAIN-WITH-REASON, deuda fuera de #196 | requieren auditoría independiente, no son necesarios para esta reparación |
 

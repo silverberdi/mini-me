@@ -789,7 +789,7 @@ def authorize_explore_recovery(
         issue_number = int(attempt.get("issue_number") or 0)
         provider = str(attempt.get("provider") or "")
     action_request_id = payload.action_request_id or str(uuid4())
-    accepted = coordinator.register_explore_recovery_authorization(
+    accepted = coordinator.register_recovery_authorization(
         project_id=project_id,
         run_id=run_id,
         authorization_reference=action_request_id,
@@ -798,6 +798,7 @@ def authorize_explore_recovery(
         issue_number=issue_number,
         provider=provider,
         prior_attempt_id=payload.prior_attempt_id,
+        stage="explore",
     )
     if not accepted:
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Explore recovery authorization was rejected")
@@ -847,7 +848,7 @@ def authorize_propose_recovery(
     if issue_number <= 0 or not provider:
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Run lacks authoritative Issue/provider binding")
     action_request_id = payload.action_request_id or str(uuid4())
-    accepted = coordinator.register_propose_recovery_authorization(
+    accepted = coordinator.register_recovery_authorization(
         project_id=project_id,
         run_id=run_id,
         authorization_reference=action_request_id,
@@ -856,6 +857,7 @@ def authorize_propose_recovery(
         issue_number=issue_number,
         provider=provider,
         prior_attempt_id=payload.prior_attempt_id,
+        stage="propose",
     )
     if not accepted:
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Propose recovery authorization was rejected")
