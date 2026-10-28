@@ -240,63 +240,15 @@ class ProgressWatchdog:
         self._explicit_deadlock_reason = reason
 
     def detect_positive_deadlock(self, pid: int) -> tuple[bool, str]:
-        """Detect positive, verifiable evidence of irrecoverable deadlock.
+        """Only an explicit, verified irrecoverable condition can terminate an agent.
 
-        Absence of activity, CPU consumption, or open sockets is negative evidence
-        (uncertainty) and is never treated as a deadlock. Legitimate inference calls
-        or IO waits may be silent without consuming CPU.
-
-        Positive deadlock evidence requires verifiable proof such as:
-        - Zombie / defunct child processes in the tree that cannot make progress (state 'Z')
-        - Persistent uninterruptible kernel disk sleep across the entire tree (state 'D')
-        - An explicitly marked irrecoverable deadlock condition or cyclic stagnation.
+        Zombie descendants and uninterruptible disk waits are observations,
+        not proof that the living parent cannot finish. Repeated observations
+        do not turn them into authorization to kill a long OpenSpec workflow.
         """
         if self._explicit_positive_deadlock:
             return True, self._explicit_deadlock_reason or "explicitly authorized deadlock condition"
-
-        tree = self.get_process_tree_pids(pid)
-        if not tree:
-            return False, "no process tree"
-
-        any_alive = False
-        zombie_count = 0
-        uninterruptible_count = 0
-        total_procs = 0
-
-        for p in tree:
-            try:
-                os.kill(p, 0)
-                any_alive = True
-            except OSError:
-                continue
-
-            total_procs += 1
-            try:
-                proc = subprocess.run(
-                    ["ps", "-p", str(p), "-o", "stat="],
-                    capture_output=True,
-                    text=True,
-                    timeout=1.0,
-                )
-                if proc.returncode == 0 and proc.stdout.strip():
-                    stat = proc.stdout.strip()
-                    if "Z" in stat:
-                        zombie_count += 1
-                    elif "D" in stat:
-                        uninterruptible_count += 1
-            except Exception:
-                pass
-
-        if not any_alive:
-            return False, "process already terminated"
-
-        if zombie_count > 0:
-            return True, f"zombie/defunct process detected in tree (count={zombie_count})"
-
-        if total_procs > 0 and uninterruptible_count == total_procs:
-            return True, f"entire process tree stuck in uninterruptible sleep (count={uninterruptible_count})"
-
-        return False, "process tree alive in normal wait state; absence of activity is not deadlock"
+        return False, "No verified irrecoverable deadlock; preserving the agent process"
 
     def evaluate_tick(self, pid: int | None = None) -> WatchdogState:
         """Evaluate state machine progression: RUNNING -> SUSPECTED_STALL -> STALLED.
