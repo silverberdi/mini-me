@@ -17,11 +17,18 @@ from minime.config import ProbeConfig
 from minime.db.models import Base
 from minime.db.repository import PostgresPersistenceUnitOfWork
 from minime.db.retry import TransactionRetryWrapper
-from minime.domain.enums import ProviderHealthStatus
+from minime.domain.enums import (
+    OperatorActionStatus,
+    OperatorActionType,
+    OrchestrationStage,
+    ProviderHealthStatus,
+)
 from minime.domain.models import (
     Job,
     OpenRouterBudgetPolicy,
     OpenRouterPricingSnapshot,
+    OperatorActionRecord,
+    OrchestrationRun,
     Project,
     ProviderHealth,
 )
@@ -360,3 +367,96 @@ def test_t15_external_effect_retry_safety(pg_session_factory: sessionmaker[Sessi
     assert result == "success"
     assert attempt_counter == 2
     assert external_call_count == 1, "External action must be executed exactly once outside retries."
+
+
+def test_explore_recovery_authorization_is_single_use_under_postgres_contention(
+    pg_session_factory: sessionmaker[Session],
+):
+    """Two real DB sessions may consume one recovery decision only once."""
+    project_id = "explore-auth-concurrency"
+    run_id = "explore-auth-run"
+    action_id = "explore-auth-request"
+    prior_attempt_id = "explore-prior-attempt"
+    expected = {
+        "single_use": True,
+        "stage": "explore",
+        "issue_number": 173,
+        "provider": "antigravity",
+        "prior_attempt_id": prior_attempt_id,
+        "prior_context_sha256": "a" * 64,
+        "prior_workflow_sha256": "b" * 64,
+    }
+
+    with pg_session_factory() as session:
+        uow = PostgresPersistenceUnitOfWork(session)
+        uow.projects.save(
+            Project(
+                project_id=project_id,
+                display_name="Explore auth contention",
+                repository="o/r",
+                base_branch="main",
+            )
+        )
+        uow.orchestration_runs.save(
+            OrchestrationRun(
+                run_id=run_id,
+                project_id=project_id,
+                change_name="explore-auth-change",
+                base_sha="main",
+                current_stage=OrchestrationStage.EXPLORING,
+                resumable_stage=OrchestrationStage.EXPLORING,
+                stop_details={
+                    "explore_attempt": {
+                        "attempt_id": prior_attempt_id,
+                        "status": "IN_PROGRESS",
+                        "context_sha256": expected["prior_context_sha256"],
+                        "workflow_sha256": expected["prior_workflow_sha256"],
+                    }
+                },
+            )
+        )
+        uow.operator_actions.save(
+            OperatorActionRecord(
+                id="explore-auth-record",
+                action_request_id=action_id,
+                project_id=project_id,
+                change_name="explore-auth-change",
+                run_id=run_id,
+                action_type=OperatorActionType.RETRY,
+                actor_identity="operator@example.com",
+                source_interface="api",
+                precondition_stage=OrchestrationStage.EXPLORING.value,
+                status=OperatorActionStatus.ACCEPTED,
+                parameters_json=expected,
+            )
+        )
+        uow.commit()
+
+    barrier = threading.Barrier(2)
+    results: list[bool] = []
+
+    def consume() -> None:
+        with pg_session_factory() as session:
+            uow = PostgresPersistenceUnitOfWork(session)
+            barrier.wait()
+            consumed = uow.operator_actions.consume_single_use(
+                action_id,
+                run_id=run_id,
+                action_type=OperatorActionType.RETRY,
+                expected_parameters=expected,
+            )
+            results.append(consumed is not None)
+            uow.commit()
+
+    threads = [threading.Thread(target=consume) for _ in range(2)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(timeout=10)
+    assert sorted(results) == [False, True]
+
+    with pg_session_factory() as session:
+        uow = PostgresPersistenceUnitOfWork(session)
+        record = uow.operator_actions.get_by_request_id(action_id)
+        assert record is not None
+        assert record.status == OperatorActionStatus.COMPLETED

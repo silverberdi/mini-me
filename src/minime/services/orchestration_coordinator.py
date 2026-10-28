@@ -11,11 +11,13 @@ from dataclasses import dataclass
 from dataclasses import replace as dataclass_replace
 from pathlib import Path
 from typing import Any
-from uuid import UUID, uuid4
+from uuid import uuid4
 
 from minime.adapters.github import GitHubAdapter
 from minime.adapters.openspec import OpenSpecAdapter
 from minime.domain.enums import (
+    ExternalActionStatus,
+    ExternalActionType,
     ExternalOutcome,
     OperatorActionStatus,
     OperatorActionType,
@@ -24,9 +26,12 @@ from minime.domain.enums import (
 )
 from minime.domain.interfaces import PersistenceUnitOfWork
 from minime.domain.models import (
+    DispatchAuthorization,
     ExternalActionResult,
     OperatorActionRecord,
+    OrchestrationExternalAction,
     OrchestrationRun,
+    RecoveryClaimContext,
     utc_now,
 )
 from minime.logging import get_logger, redact_secrets
@@ -610,6 +615,59 @@ class NativeOrchestrationCoordinator:
         uow.commit()
         return True
 
+    def register_explore_recovery_authorization(
+        self,
+        *,
+        project_id: str,
+        run_id: str,
+        authorization_reference: str,
+        actor_identity: str,
+        source_interface: str,
+        issue_number: int,
+        provider: str,
+        prior_attempt_id: str,
+    ) -> bool:
+        """Register one authenticated, Run-bound recovery decision before dispatch."""
+        uow = self.uow_factory()
+        run = (
+            uow.orchestration_runs.get_for_update(run_id)
+            if hasattr(uow.orchestration_runs, "get_for_update")
+            else uow.orchestration_runs.get_by_id(run_id)
+        )
+        if not run or run.project_id != project_id or not run.is_active:
+            return False
+        details = dict(run.stop_details or {})
+        attempt = details.get("explore_attempt")
+        if not isinstance(attempt, dict) or attempt.get("attempt_id") != prior_attempt_id:
+            return False
+        actions = getattr(uow, "operator_actions", None)
+        if actions is None or actions.get_by_request_id(authorization_reference) is not None:
+            return False
+        action = OperatorActionRecord(
+            action_request_id=authorization_reference,
+            project_id=project_id,
+            change_name=run.change_name,
+            run_id=run_id,
+            action_type=OperatorActionType.RETRY,
+            actor_identity=actor_identity,
+            source_interface=source_interface,
+            precondition_stage=OrchestrationStage.EXPLORING.value,
+            status=OperatorActionStatus.ACCEPTED,
+            summary="One-shot authenticated authorization for Explore recovery.",
+            parameters_json={
+                "single_use": True,
+                "stage": "explore",
+                "issue_number": issue_number,
+                "provider": provider,
+                "prior_attempt_id": prior_attempt_id,
+                "prior_context_sha256": attempt.get("context_sha256"),
+                "prior_workflow_sha256": attempt.get("workflow_sha256"),
+            },
+        )
+        actions.save(action)
+        uow.commit()
+        return True
+
     async def classify_existing_run(
         self,
         project_id: str,
@@ -841,8 +899,7 @@ class NativeOrchestrationCoordinator:
         *,
         operator_ack: bool = False,
         operator_clarification: str | None = None,
-        explore_recovery_run_id: str | None = None,
-        explore_recovery_token: str | None = None,
+        explore_recovery_authorization_id: str | None = None,
         thinker_provider: str = "antigravity",
         implementer_provider: str = "codex",
         reviewer_provider: str = "antigravity",
@@ -1013,6 +1070,10 @@ class NativeOrchestrationCoordinator:
                 uow.orchestration_runs.save(active_run)
                 if hasattr(uow, "commit"):
                     uow.commit()
+        elif hasattr(uow.orchestration_runs, "get_for_update"):
+            locked_run = uow.orchestration_runs.get_for_update(active_run.run_id)
+            if locked_run is not None:
+                active_run = locked_run
 
         # Step 3: Git Workspace Isolation
         base_branch = "main"
@@ -1097,6 +1158,7 @@ class NativeOrchestrationCoordinator:
                 expected_explore_wf = None
 
             stored_explore = (active_run.stop_details or {}).get("explore_checkpoint")
+            stored_attempt = (active_run.stop_details or {}).get("explore_attempt")
             checkpoint_verified = (
                 expected_explore_wf is not None
                 and isinstance(stored_explore, dict)
@@ -1136,14 +1198,13 @@ class NativeOrchestrationCoordinator:
                 )
             )
             if recovery_needed:
-                try:
-                    recovery_uuid = str(UUID(explore_recovery_token or ""))
-                except (ValueError, TypeError, AttributeError):
-                    recovery_uuid = None
-                if (
-                    explore_recovery_run_id != active_run.run_id
-                    or recovery_uuid is None
-                ):
+                actions = getattr(uow, "operator_actions", None)
+                prior_attempt_id = (
+                    stored_attempt.get("attempt_id")
+                    if isinstance(stored_attempt, dict)
+                    else None
+                )
+                if actions is None or not prior_attempt_id or not explore_recovery_authorization_id:
                     return OrchestrationCoordinationResult(
                         status="PAUSED",
                         run_id=active_run.run_id,
@@ -1153,62 +1214,96 @@ class NativeOrchestrationCoordinator:
                             "an explicit, Run-bound recovery authorization is required."
                         ),
                     )
-                details = dict(active_run.stop_details or {})
-                authorizations = details.get("explore_recovery_authorizations", [])
-                if not isinstance(authorizations, list):
-                    return OrchestrationCoordinationResult(
-                        status="PAUSED",
-                        run_id=active_run.run_id,
-                        current_stage=OrchestrationStage.EXPLORING,
-                        message="Explore recovery authorization history is not trustworthy.",
-                    )
-                recovery_digest = hashlib.sha256(
-                    recovery_uuid.encode("utf-8")
-                ).hexdigest()
-                if any(
-                    not isinstance(record, dict)
-                    or record.get("authorization_sha256") == recovery_digest
-                    for record in authorizations
-                ):
-                    return OrchestrationCoordinationResult(
-                        status="PAUSED",
-                        run_id=active_run.run_id,
-                        current_stage=OrchestrationStage.EXPLORING,
-                        message="Explore recovery authorization has already been consumed.",
-                    )
-                authorizations.append(
-                    {
-                        "run_id": active_run.run_id,
-                        "authorization_sha256": recovery_digest,
-                        "context_sha256": explore_context_sha,
-                        "workflow_sha256": (
-                            expected_explore_wf.workflow_sha256
-                            if expected_explore_wf is not None else None
-                        ),
-                        "previous_response_sha256": (
-                            stored_explore.get("response_sha256")
-                            if isinstance(stored_explore, dict) else None
-                        ),
-                        "recorded_at": utc_now().isoformat(),
-                    }
+                expected_parameters = {
+                    "single_use": True,
+                    "stage": "explore",
+                    "issue_number": issue_number,
+                    "provider": thinker_provider,
+                    "prior_attempt_id": prior_attempt_id,
+                    "prior_context_sha256": stored_attempt.get("context_sha256"),
+                    "prior_workflow_sha256": stored_attempt.get("workflow_sha256"),
+                }
+                existing_authorization = actions.get_by_request_id(
+                    explore_recovery_authorization_id
                 )
-                details["explore_recovery_authorizations"] = authorizations
-                self._persist_run_stop_details(active_run, details)
+                consumed = actions.consume_single_use(
+                    explore_recovery_authorization_id,
+                    run_id=active_run.run_id,
+                    action_type=OperatorActionType.RETRY,
+                    expected_parameters=expected_parameters,
+                )
+                if consumed is None:
+                    message = (
+                        "Explore recovery authorization has already been consumed."
+                        if existing_authorization is not None
+                        and existing_authorization.status != OperatorActionStatus.ACCEPTED
+                        else (
+                            "Explore recovery authorization is missing or mismatched."
+                        )
+                    )
+                    return OrchestrationCoordinationResult(
+                        status="PAUSED",
+                        run_id=active_run.run_id,
+                        current_stage=OrchestrationStage.EXPLORING,
+                        message=message,
+                    )
             if same_context:
                 explore_result = {
                     "status": stored_explore["status"],
                     "human_payload": stored_explore.get("human_payload"),
                 }
             else:
-                explore_result = await self._run_explore(
-                    worktree_path=worktree_path,
-                    provider=thinker_provider,
+                dispatch = self._prepare_explore_dispatch(
+                    uow=uow,
+                    run=active_run,
                     issue_number=issue_number,
-                    issue_title=issue_title,
-                    issue_body=issue_body,
-                    operator_clarification=operator_clarification,
-                    project_id=project_id,
+                    provider=thinker_provider,
+                    context_sha=explore_context_sha,
+                    workflow_sha=(
+                        expected_explore_wf.workflow_sha256
+                        if expected_explore_wf is not None
+                        else None
+                    ),
+                    is_recovery=recovery_needed,
                 )
+                if dispatch is None:
+                    return OrchestrationCoordinationResult(
+                        status="PAUSED",
+                        run_id=active_run.run_id,
+                        current_stage=OrchestrationStage.EXPLORING,
+                        message="Explore dispatch is already owned or its durable intent is ambiguous.",
+                    )
+                attempt_id, action_key, claim_context = dispatch
+                try:
+                    explore_result = await self._run_explore(
+                        worktree_path=worktree_path,
+                        provider=thinker_provider,
+                        issue_number=issue_number,
+                        issue_title=issue_title,
+                        issue_body=issue_body,
+                        operator_clarification=operator_clarification,
+                        project_id=project_id,
+                    )
+                except asyncio.CancelledError:
+                    self._finish_explore_dispatch(
+                        uow, active_run, attempt_id, action_key, "AMBIGUOUS", None
+                    )
+                    raise
+                except Exception as exc:
+                    self._finish_explore_dispatch(
+                        uow, active_run, attempt_id, action_key, "AMBIGUOUS", str(exc)
+                    )
+                    raise
+                else:
+                    evidence = explore_result.get("execution")
+                    terminal = (
+                        "COMPLETE"
+                        if evidence is not None and self._execution_is_successful(evidence)
+                        else "FAILED"
+                    )
+                    self._finish_explore_dispatch(
+                        uow, active_run, attempt_id, action_key, terminal, None
+                    )
                 evidence = explore_result.get("execution")
                 if (
                     explore_result.get("status") in {"HUMAN_REQUIRED", "READY_TO_PROPOSE"}
@@ -1235,6 +1330,7 @@ class NativeOrchestrationCoordinator:
                         "response_sha256": hashlib.sha256(
                             evidence.response_output.encode("utf-8")
                         ).hexdigest(),
+                        "attempt_id": attempt_id,
                         "human_payload": explore_result.get("human_payload"),
                         "duration_ms": getattr(evidence, "duration_ms", None),
                         "recorded_at": utc_now().isoformat(),
@@ -2068,6 +2164,126 @@ class NativeOrchestrationCoordinator:
             str(path.relative_to(worktree_path)): hashlib.sha256(path.read_bytes()).hexdigest()
             for path in sorted(paths)
         }
+
+    def _prepare_explore_dispatch(
+        self,
+        *,
+        uow: Any,
+        run: OrchestrationRun,
+        issue_number: int,
+        provider: str,
+        context_sha: str,
+        workflow_sha: str | None,
+        is_recovery: bool,
+    ) -> tuple[str, str, RecoveryClaimContext] | None:
+        """Persist an Explore attempt and fenced dispatch intent before provider I/O."""
+        actions = getattr(uow, "orchestration_external_actions", None)
+        claims = getattr(uow, "claims", None)
+        if actions is None or claims is None:
+            return None
+
+        attempt_id = str(uuid4())
+        action_key = f"explore:{run.run_id}:{attempt_id}"
+        details = dict(run.stop_details or {})
+        details["explore_attempt"] = {
+            "attempt_id": attempt_id,
+            "status": "IN_PROGRESS",
+            "provider": provider,
+            "issue_number": issue_number,
+            "context_sha256": context_sha,
+            "workflow_sha256": workflow_sha,
+            "action_key": action_key,
+            "recovery": is_recovery,
+            "recorded_at": utc_now().isoformat(),
+        }
+        owner_instance_id = f"explore:{uuid4()}"
+        claim = claims.acquire_or_reacquire(
+            claim_key=f"run:{run.run_id}",
+            owner_instance_id=owner_instance_id,
+            lease_seconds=3600,
+        )
+        if claim is None:
+            return None
+        claim_context = RecoveryClaimContext(
+            claim_key=claim.claim_key,
+            owner_instance_id=claim.owner_instance_id,
+            fence_token=claim.fence_token,
+            lease_expires_at=claim.lease_expires_at,
+        )
+        try:
+            run.stop_details = details
+            uow.orchestration_runs.save(run)
+            actions.reserve(
+                OrchestrationExternalAction(
+                    run_id=run.run_id,
+                    action_key=action_key,
+                    action_type=ExternalActionType.OPENSPEC_EXPLORE_DISPATCH,
+                    target_identity=f"{run.project_id}:{issue_number}:{provider}",
+                    request_fingerprint=context_sha,
+                    generation=run.current_generation,
+                    status=ExternalActionStatus.RESERVED,
+                )
+            )
+            claims.commit_fenced_dispatch_intent(
+                claim_key=claim_context.claim_key,
+                owner_instance_id=claim_context.owner_instance_id,
+                fence_token=claim_context.fence_token,
+                action_key=action_key,
+                authorization=DispatchAuthorization(
+                    action_key=action_key,
+                    is_authorized=True,
+                    authorization_reason=(
+                        "Explicit operator authorization for Explore recovery."
+                        if is_recovery
+                        else "Original Explore dispatch for this Run."
+                    ),
+                    is_retry=is_recovery,
+                ),
+            )
+        except Exception:
+            uow.rollback()
+            claims.release_claim(claim_context)
+            uow.commit()
+            return None
+        return attempt_id, action_key, claim_context
+
+    def _finish_explore_dispatch(
+        self,
+        uow: Any,
+        run: OrchestrationRun,
+        attempt_id: str,
+        action_key: str,
+        attempt_status: str,
+        error_message: str | None,
+    ) -> None:
+        """Close only an observed provider result; leave crashes as EXECUTING/IN_PROGRESS."""
+        details = dict(run.stop_details or {})
+        attempt = dict(details.get("explore_attempt") or {})
+        if attempt.get("attempt_id") == attempt_id:
+            attempt["status"] = attempt_status
+            if error_message:
+                attempt["error"] = redact_secrets(error_message)[:1000]
+            attempt["finished_at"] = utc_now().isoformat()
+            details["explore_attempt"] = attempt
+            run.stop_details = details
+            uow.orchestration_runs.save(run)
+        terminal_status = {
+            "COMPLETE": ExternalActionStatus.COMPLETED,
+            "FAILED": ExternalActionStatus.FAILED,
+            "AMBIGUOUS": ExternalActionStatus.AMBIGUOUS,
+        }.get(attempt_status, ExternalActionStatus.UNKNOWN)
+        try:
+            uow.orchestration_external_actions.update_status(
+                action_key=action_key,
+                status=terminal_status,
+                error_message=error_message,
+            )
+            uow.commit()
+        finally:
+            claim = uow.claims.get_by_key(f"run:{run.run_id}")
+            if claim is not None:
+                uow.claims.release_claim(claim)
+                uow.commit()
 
     @staticmethod
     def _configured_provider(project: Any, role: str) -> str | None:

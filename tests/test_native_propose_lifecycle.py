@@ -814,19 +814,31 @@ async def test_explore_checkpoint_rejects_forged_or_mismatched_workflow_sha(mock
             ),
         }
     )
-    recovery_token = "02b27d59-71be-45a7-b9e4-2572f8cd48b4"
+    recovery_authorization_id = "explore-recovery-authorization-1"
+    prior_attempt_id = run.stop_details["explore_attempt"]["attempt_id"]
+    assert coordinator.register_explore_recovery_authorization(
+        project_id="proj-1",
+        run_id=first.run_id,
+        authorization_reference=recovery_authorization_id,
+        actor_identity="operator@example.com",
+        source_interface="test",
+        issue_number=101,
+        provider="antigravity",
+        prior_attempt_id=prior_attempt_id,
+    )
     authorized = await coordinator.execute_project_request(
         "proj-1",
         operator_clarification="Autorizado backend mínimo de F5",
-        explore_recovery_run_id=first.run_id,
-        explore_recovery_token=recovery_token,
+        explore_recovery_authorization_id=recovery_authorization_id,
         thinker_provider="antigravity",
         implementer_provider="antigravity",
         reviewer_provider="antigravity",
     )
     assert authorized.current_stage == OrchestrationStage.PROPOSING
     coordinator._run_explore.assert_awaited_once()
-    assert len(run.stop_details["explore_recovery_authorizations"]) == 1
+    consumed = uow.operator_actions.get_by_request_id(recovery_authorization_id)
+    assert consumed is not None
+    assert consumed.status.value == "COMPLETED"
 
     # Replaying the same authorization may not spend another provider turn.
     run.current_stage = OrchestrationStage.EXPLORING
@@ -836,8 +848,7 @@ async def test_explore_checkpoint_rejects_forged_or_mismatched_workflow_sha(mock
     repeated = await coordinator.execute_project_request(
         "proj-1",
         operator_clarification="Autorizado backend mínimo de F5",
-        explore_recovery_run_id=first.run_id,
-        explore_recovery_token=recovery_token,
+        explore_recovery_authorization_id=recovery_authorization_id,
         thinker_provider="antigravity",
         implementer_provider="antigravity",
         reviewer_provider="antigravity",

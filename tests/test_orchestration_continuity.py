@@ -5,7 +5,7 @@ import pytest
 from tests.conftest import InMemoryPersistenceUnitOfWork, setup_managed_repository_fixture
 
 from minime.domain.enums import ExternalOutcome, ExternalReasonCode, OrchestrationStage, RetrySafety
-from minime.domain.models import ExternalActionResult
+from minime.domain.models import ExternalActionResult, OrchestrationRun
 from minime.services.agent_runner import CliAgentRunner
 from minime.services.orchestration_coordinator import NativeOrchestrationCoordinator
 from minime.services.worktree_manager import WorktreeInfo, WorktreeManager
@@ -174,6 +174,37 @@ def test_request_rest_api_endpoints(in_memory_uow, tmp_path: Path):
             res = client.post("/api/v1/projects/proj-test/requests/ack")
             assert res.status_code == 200
             mock_exec.assert_called_once_with("proj-test", operator_ack=True)
+
+        # 4. Recovery authority is recorded through the authenticated API and
+        # produces the same durable OperatorActionRecord consumed by CLI runs.
+        recovery_run = OrchestrationRun(
+            run_id="run-recovery-api",
+            project_id="proj-test",
+            change_name="req-101-feat",
+            base_sha="main",
+            current_stage=OrchestrationStage.EXPLORING,
+            resumable_stage=OrchestrationStage.EXPLORING,
+            stop_details={
+                "explore_attempt": {
+                    "attempt_id": "attempt-recovery-api",
+                    "status": "IN_PROGRESS",
+                    "issue_number": 101,
+                    "provider": "antigravity",
+                    "context_sha256": "a" * 64,
+                    "workflow_sha256": "b" * 64,
+                }
+            },
+        )
+        in_memory_uow.orchestration_runs.save(recovery_run)
+        res = client.post(
+            "/api/v1/projects/proj-test/runs/run-recovery-api/explore-recovery-authorizations",
+            json={"prior_attempt_id": "attempt-recovery-api", "action_request_id": "api-recovery-1"},
+        )
+        assert res.status_code == 200
+        assert res.json()["status"] == "ACCEPTED"
+        record = in_memory_uow.operator_actions.get_by_request_id("api-recovery-1")
+        assert record is not None
+        assert record.actor_identity == "operator@example.com"
     finally:
         app.dependency_overrides.clear()
 
