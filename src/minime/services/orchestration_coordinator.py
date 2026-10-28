@@ -1455,9 +1455,19 @@ class NativeOrchestrationCoordinator:
             OrchestrationStage.PROPOSING,
             OrchestrationStage.VALIDATING,
         ):
-            complete_proposal = self._proposal_artifacts_present(worktree_path, change_name)
             stored_propose_attempt = (active_run.stop_details or {}).get("propose_attempt")
             stored_propose_checkpoint = (active_run.stop_details or {}).get("propose_checkpoint")
+            # Use official OpenSpec status for new agent handoffs. Historical
+            # checkpoints retain the existing file preflight for compatibility.
+            canonical_status_required = (
+                isinstance(stored_propose_checkpoint, dict)
+                and isinstance(stored_propose_checkpoint.get("agent_handoff"), dict)
+            )
+            complete_proposal = (
+                self.openspec_adapter.planning_status(change_name, worktree_path).get("status") == "PASS"
+                if canonical_status_required
+                else self._proposal_artifacts_present(worktree_path, change_name)
+            )
             # Artifact existence belongs to OpenSpec validation, not execution proof.
             # On a PROPOSING re-entry, only an attributable completed checkpoint
             # can skip a previously invoked agent, even if all files happen to exist.
@@ -3207,7 +3217,19 @@ class NativeOrchestrationCoordinator:
                 "status": "FAILED",
                 "message": "Propose agent execution was not successful or did not report a valid final handoff.",
             }
-        if not self._proposal_artifacts_present(worktree_path, change_name):
+        if getattr(res, "workflow_handoff_required", False):
+            # The installed OpenSpec CLI, not a list of expected filenames, owns
+            # planning completeness and artifact dependencies.
+            planning = self.openspec_adapter.planning_status(change_name, worktree_path)
+            if planning.get("status") != "PASS":
+                pending = ", ".join(planning.get("pending") or [])
+                return {
+                    "status": "INCOMPLETE" if planning.get("status") == "INCOMPLETE" else "FAILED",
+                    "message": f"OpenSpec planning is not complete: {planning.get('reason')}; pending: {pending}"[:1000],
+                }
+        elif not self._proposal_artifacts_present(worktree_path, change_name):
+            # Compatibility with historical test runners that have no final
+            # handoff contract; production agents use canonical OpenSpec status.
             return {
                 "status": "FAILED",
                 "message": "Native Propose completed without the complete canonical artifacts.",
