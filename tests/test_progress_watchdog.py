@@ -171,26 +171,27 @@ async def test_watchdog_preserves_alive_silent_zero_cpu_process_without_terminat
             pass
 
 
-def test_watchdog_terminates_only_on_positive_verifiable_deadlock(tmp_path: Path):
-    """Verify that STALLED is authorized only upon positive verifiable deadlock evidence."""
+def test_watchdog_requires_explicit_verified_deadlock_before_termination(tmp_path: Path):
+    """Ordinary child process states and silence never authorize killing the agent."""
     watchdog = ProgressWatchdog(
         worktree_path=tmp_path,
         inactivity_threshold_seconds=0.05,
         stall_timeout_seconds=0.1,
         check_interval_seconds=0.02,
     )
-    time.sleep(0.12)
+    watchdog.last_activity_at -= 1
+    watchdog.check_process_tree_activity = lambda pid: False
 
-    # Alive process without positive deadlock is NOT marked STALLED under silence
-    watchdog.detect_positive_deadlock = lambda pid: (False, "normal sleep")
-    state = watchdog.evaluate_tick(pid=12345)
-    assert state == WatchdogState.SUSPECTED_STALL
-    assert "INACTIVITY_STALL_DIAGNOSED" in (watchdog.diagnostic_reason or "")
+    # Repeated idle observations, including potentially defunct descendants,
+    # are not proof that the live parent is irrecoverably deadlocked.
+    deadlocked, reason = watchdog.detect_positive_deadlock(pid=12345)
+    assert deadlocked is False
+    assert "preserving" in reason
+    for _ in range(watchdog.min_deadlock_confirmation_probes + 2):
+        assert watchdog.evaluate_tick(pid=12345) == WatchdogState.SUSPECTED_STALL
 
-    # A single positive observation is not sufficient to terminate an agent.
-    watchdog.detect_positive_deadlock = lambda pid: (
-        True, "zombie/defunct process detected in tree (count=1)"
-    )
+    # Only a separately verified irrecoverable condition authorizes termination.
+    watchdog.mark_positive_deadlock("verified irrecoverable condition")
     for _ in range(watchdog.min_deadlock_confirmation_probes - 1):
         assert watchdog.evaluate_tick(pid=12345) == WatchdogState.SUSPECTED_STALL
         assert "POSITIVE_DEADLOCK_UNCONFIRMED" in (watchdog.diagnostic_reason or "")
