@@ -1,5 +1,4 @@
 from pathlib import Path
-from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
@@ -587,17 +586,25 @@ def test_valid_classification_is_not_reused_after_artifact_hash_change():
 
 @pytest.mark.asyncio
 async def test_explore_checkpoint_survives_reentry_without_paid_repeat(mock_env):
-    coordinator, uow, _, _repo_dir = mock_env
+    coordinator, uow, _, repo_dir = mock_env
+    real_wf = coordinator.agent_runner.resolve_workflow(
+        worktree_path=repo_dir,
+        provider="antigravity",
+        operation="explore",
+        change_name="issue-101",
+    )
+    answer = "READY_TO_PROPOSE\nLa aclaración resolvió el gate HUMAN REQUIRED anterior."
     coordinator.agent_runner.run = AsyncMock(
         return_value=AgentExecutionResult(
             exit_code=0,
             timed_out=False,
-            stdout=["READY_TO_PROPOSE\nLa aclaración resolvió el gate HUMAN REQUIRED anterior."],
+            stdout=[answer],
             stderr=[],
             duration_ms=19,
+            final_response=answer,
             final_response_status="COMPLETE",
             final_response_source="stdout_text",
-            workflow=SimpleNamespace(workflow_sha256="a" * 64),
+            workflow=real_wf,
         )
     )
     coordinator._run_propose = AsyncMock(
@@ -618,7 +625,7 @@ async def test_explore_checkpoint_survives_reentry_without_paid_repeat(mock_env)
     assert checkpoint["status"] == "READY_TO_PROPOSE"
     assert checkpoint["checkpoint_version"] == 2
     assert checkpoint["response_status"] == "COMPLETE"
-    assert checkpoint["workflow_sha256"] == "a" * 64
+    assert checkpoint["workflow_sha256"] == real_wf.workflow_sha256
     assert checkpoint["run_id"] == first.run_id
     assert len(checkpoint["response_sha256"]) == 64
     assert checkpoint["duration_ms"] == 19
@@ -646,17 +653,25 @@ async def test_explore_checkpoint_survives_reentry_without_paid_repeat(mock_env)
 
 @pytest.mark.asyncio
 async def test_explore_checkpoint_rejects_different_clarification(mock_env):
-    coordinator, uow, _, _repo_dir = mock_env
+    coordinator, uow, _, repo_dir = mock_env
+    real_wf = coordinator.agent_runner.resolve_workflow(
+        worktree_path=repo_dir,
+        provider="antigravity",
+        operation="explore",
+        change_name="issue-101",
+    )
+    human_answer = "HUMAN REQUIRED\n- Debe decidir un alcance"
     coordinator.agent_runner.run = AsyncMock(
         return_value=AgentExecutionResult(
             exit_code=0,
             timed_out=False,
-            stdout=["HUMAN REQUIRED\n- Debe decidir un alcance"],
+            stdout=[human_answer],
             stderr=[],
             duration_ms=11,
+            final_response=human_answer,
             final_response_status="COMPLETE",
             final_response_source="stdout_text",
-            workflow=SimpleNamespace(workflow_sha256="a" * 64),
+            workflow=real_wf,
         )
     )
     first = await coordinator.execute_project_request(
@@ -695,4 +710,72 @@ async def test_explore_checkpoint_rejects_different_clarification(mock_env):
         reviewer_provider="antigravity",
     )
     assert third.current_stage == OrchestrationStage.PROPOSING
+    coordinator._run_explore.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_explore_checkpoint_rejects_forged_or_mismatched_workflow_sha(mock_env):
+    coordinator, uow, _, repo_dir = mock_env
+    real_wf = coordinator.agent_runner.resolve_workflow(
+        worktree_path=repo_dir,
+        provider="antigravity",
+        operation="explore",
+        change_name="issue-101",
+    )
+    answer = "READY_TO_PROPOSE\nLa aclaración resolvió el gate HUMAN REQUIRED anterior."
+    coordinator.agent_runner.run = AsyncMock(
+        return_value=AgentExecutionResult(
+            exit_code=0,
+            timed_out=False,
+            stdout=[answer],
+            stderr=[],
+            duration_ms=19,
+            final_response=answer,
+            final_response_status="COMPLETE",
+            final_response_source="stdout_text",
+            workflow=real_wf,
+        )
+    )
+    coordinator._run_propose = AsyncMock(
+        return_value={"status": "FAILED", "message": "Test checkpoint boundary"}
+    )
+    first = await coordinator.execute_project_request(
+        "proj-1",
+        operator_clarification="Autorizado backend mínimo de F5",
+        thinker_provider="antigravity",
+        implementer_provider="antigravity",
+        reviewer_provider="antigravity",
+    )
+    run = uow.orchestration_runs.get_by_id(first.run_id)
+    assert run is not None
+    # Forged 64-char SHA that does not match the worktree's actual workflow file
+    run.stop_details["explore_checkpoint"]["workflow_sha256"] = "f" * 64
+    run.current_stage = OrchestrationStage.EXPLORING
+    run.resumable_stage = OrchestrationStage.EXPLORING
+    run.stop_details["request_normalization"] = {"normalized_body": "We need redis caching layer"}
+    uow.orchestration_runs.save(run)
+
+    coordinator._run_explore = AsyncMock(
+        return_value={
+            "status": "READY_TO_PROPOSE",
+            "execution": AgentExecutionResult(
+                exit_code=0,
+                timed_out=False,
+                stdout=[answer],
+                stderr=[],
+                duration_ms=10,
+                final_response=answer,
+                final_response_status="COMPLETE",
+                final_response_source="stdout_text",
+                workflow=real_wf,
+            ),
+        }
+    )
+    await coordinator.execute_project_request(
+        "proj-1",
+        operator_clarification="Autorizado backend mínimo de F5",
+        thinker_provider="antigravity",
+        implementer_provider="antigravity",
+        reviewer_provider="antigravity",
+    )
     coordinator._run_explore.assert_awaited_once()

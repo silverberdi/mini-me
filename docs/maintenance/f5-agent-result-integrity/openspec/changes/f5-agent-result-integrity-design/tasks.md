@@ -2,7 +2,7 @@
 
 - [ ] 1.1 Confirmar explícitamente con el operador la ubicación canónica de esta especificación sin infringir el único Change F5 `gacela-05-ui-self-hosted`; **este borrador no constituye autorización de código**.
 - [ ] 1.2 Congelar el inventario del código y de los consumidores realmente alcanzables desde Run F5 (codificador de CLI, normalización, Explore, Propose, clasificación, proposal review, Apply, Verify, code review, PR1/PR2, Sync/Archive, cierre). Documentar contratos y responsables sin aceptar ausencia de cobertura.
-- [ ] 1.3 Conciliar `docs/CONTRATO_RECTOR.md` v1.3, `openspec/config.yaml`, specs F2/F3/F4 y protocolos `READY TO PROPOSE` / `READY_TO_PROPOSE`; aprobar una convención compatible por proveedor.
+- [x] 1.3 Conciliar `docs/CONTRATO_RECTOR.md` v1.3, `openspec/config.yaml`, specs F2/F3/F4 y protocolos `READY TO PROPOSE` / `READY_TO_PROPOSE`; aprobar una convención compatible por proveedor.
 - [ ] 1.4 Inspeccionar en modo de solo lectura las versiones y capacidades **reales** de Codex y Antigravity sobre Ubuntu para el transporte de última respuesta, NDJSON/texto, manejo de errores y cierre de turno; registrar fixtures saneados, nunca credenciales.
 - [ ] 1.5 Verificar el Run F5 y sus intentos previos de solo lectura; documentar qué veredictos finales son recuperables con evidencia fuente y cuáles permanecen ambiguos, sin editar `stop_details` ni reejecutar agentes.
 - [ ] 1.6 Obtener aprobación del diseño y de los límites de seguridad, datos y reanudación antes de implementar.

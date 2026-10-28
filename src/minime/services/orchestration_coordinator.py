@@ -30,7 +30,11 @@ from minime.domain.models import (
     utc_now,
 )
 from minime.logging import get_logger, redact_secrets
-from minime.services.agent_runner import CliAgentRunner, NativeOpenSpecWorkflowUnavailable
+from minime.services.agent_runner import (
+    CliAgentRunner,
+    NativeOpenSpecWorkflowUnavailable,
+    ResolvedWorkflow,
+)
 from minime.services.pr_preparer_service import PrPreparationInput, PrPreparerService
 from minime.services.remote_request_intake import RemoteRequestIntakeService
 from minime.services.request_normalization import (
@@ -1068,9 +1072,21 @@ class NativeOrchestrationCoordinator:
             explore_context_sha = hashlib.sha256(
                 json.dumps(explore_context, ensure_ascii=False, sort_keys=True).encode("utf-8")
             ).hexdigest()
+            expected_explore_wf: ResolvedWorkflow | None = None
+            try:
+                expected_explore_wf = self.agent_runner.resolve_workflow(
+                    worktree_path=worktree_path,
+                    provider=thinker_provider,
+                    operation="explore",
+                    change_name=f"issue-{issue_number}",
+                )
+            except Exception:
+                expected_explore_wf = None
+
             stored_explore = (active_run.stop_details or {}).get("explore_checkpoint")
             if (
-                isinstance(stored_explore, dict)
+                expected_explore_wf is not None
+                and isinstance(stored_explore, dict)
                 and stored_explore.get("context_sha256") == explore_context_sha
                 and stored_explore.get("run_id") == active_run.run_id
                 and stored_explore.get("provider") == thinker_provider
@@ -1081,8 +1097,7 @@ class NativeOrchestrationCoordinator:
                 in {"codex_ndjson", "structured_file", "stdout_text"}
                 and isinstance(stored_explore.get("response_sha256"), str)
                 and len(stored_explore["response_sha256"]) == 64
-                and isinstance(stored_explore.get("workflow_sha256"), str)
-                and len(stored_explore["workflow_sha256"]) == 64
+                and stored_explore.get("workflow_sha256") == expected_explore_wf.workflow_sha256
             ):
                 explore_result = {
                     "status": stored_explore["status"],

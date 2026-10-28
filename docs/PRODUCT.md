@@ -1,6 +1,6 @@
 # Definición del producto — mini me
 
-**Fuente rectora:** [CONTRATO_RECTOR.md](CONTRATO_RECTOR.md) v1.2.
+**Fuente rectora:** [CONTRATO_RECTOR.md](CONTRATO_RECTOR.md) v1.3.
 
 mini me es un coordinador pequeño de desarrollos de software que convierte tickets remotos en resultados mediante agentes y workflows nativos de OpenSpec. **No programa ni emula OpenSpec.**
 

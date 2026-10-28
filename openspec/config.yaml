@@ -1,7 +1,7 @@
 schema: spec-driven
 
 context: |
-  MINI ME — CONTRATO RECTOR V1.2 (docs/CONTRATO_RECTOR.md). Esta referencia prevalece sobre planes heredados incompatibles.
+  MINI ME — CONTRATO RECTOR V1.3 (docs/CONTRATO_RECTOR.md). Esta referencia prevalece sobre planes heredados incompatibles.
   Objetivo: una gacela, no un paquidermo. Aplicación personal única, pequeña, FastAPI modular + PostgreSQL mínimo, que coordina agentes con workflows NATIVOS OpenSpec; mini me NO programa ni emula propose/update/apply/verify/sync/archive.
   Proveedores: agente/modelo de pensamiento, ejecución, revisión independiente y respaldo configurables por proyecto; medium por defecto en propose/apply/verify/review, esfuerzo mínimo compatible en sync/archive; no hardcodear Codex/AGY/DeepSeek/OpenRouter como roles permanentes.
   Fuente de tickets remota y autoritativa: GitHub inicialmente. Contratos distintos para tickets y Git/PR; sin cola duplicada DB. Selección del ticket elegible más antiguo por fecha + ID; un cambio activo por proyecto; no scoring ni scheduler complejo.

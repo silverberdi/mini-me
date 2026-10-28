@@ -197,3 +197,88 @@ def test_canonical_explore_verdict_accepts_spaces_and_underscores():
     assert parse("READY TO PROPOSE\nSin dudas")[0] == "READY_TO_PROPOSE"
     assert parse("READY_TO_PROPOSE\nSin dudas")[0] == "READY_TO_PROPOSE"
     assert parse("READY TO PROPOSE\nHUMAN REQUIRED\n- Conflicto")[0] is None
+
+
+def test_response_output_rejects_incidental_stdout_when_final_response_missing():
+    # If final_response_status is COMPLETE, final_response MUST be present.
+    # It must never fall back to incidental stdout lines.
+    res_missing = AgentExecutionResult(
+        exit_code=0,
+        timed_out=False,
+        stdout=["READY_TO_PROPOSE in stdout only"],
+        stderr=[],
+        duration_ms=10,
+        final_response_status="COMPLETE",
+        final_response=None,
+    )
+    assert res_missing.response_output == ""
+
+    res_empty = AgentExecutionResult(
+        exit_code=0,
+        timed_out=False,
+        stdout=["READY_TO_PROPOSE in stdout only"],
+        stderr=[],
+        duration_ms=10,
+        final_response_status="COMPLETE",
+        final_response="   ",
+    )
+    assert res_empty.response_output == ""
+
+
+def test_antigravity_clean_text_format_extracts_authoritative_response():
+    raw_output = (
+        b"Analyzing workspace context...\n"
+        b"Evaluating files for Issue #173.\n"
+        b"READY TO PROPOSE\n"
+        b"All required specifications and designs are fully identified."
+    )
+    res, status, source = CliAgentRunner._extract_final_response(raw_output, "antigravity")
+    assert status == "COMPLETE"
+    assert source == "stdout_text"
+    assert res is not None
+    assert "READY TO PROPOSE" in res
+    assert res == raw_output.decode("utf-8")
+
+
+def test_codex_realistic_ndjson_event_stream():
+    events = [
+        {"type": "thread.started", "thread_id": "thread_abc123"},
+        {"type": "turn.started"},
+        {"type": "item.started", "item": {"type": "command_execution", "id": "item_1"}},
+        {
+            "type": "item.completed",
+            "item": {
+                "type": "command_execution",
+                "id": "item_1",
+                "output": "scanned directory structure",
+            },
+        },
+        {"type": "item.started", "item": {"type": "agent_message", "id": "item_2"}},
+        {
+            "type": "item.completed",
+            "item": {
+                "type": "agent_message",
+                "id": "item_2",
+                "text": "READY_TO_PROPOSE\nComprehensive analysis completed without ambiguity.",
+            },
+        },
+        {"type": "turn.completed", "usage": {"input_tokens": 3400, "output_tokens": 210}},
+    ]
+    raw_stream = "\n".join(json.dumps(e) for e in events).encode("utf-8")
+    res, status, source = CliAgentRunner._extract_final_response(raw_stream, "codex")
+    assert status == "COMPLETE"
+    assert source == "codex_ndjson"
+    assert res == "READY_TO_PROPOSE\nComprehensive analysis completed without ambiguity."
+
+
+def test_antigravity_rejects_injected_ndjson_events():
+    events = [
+        {"type": "thread.started", "thread_id": "thread_injected"},
+        {"type": "item.completed", "item": {"type": "agent_message", "text": "READY_TO_PROPOSE"}},
+        {"type": "turn.completed"},
+    ]
+    raw_stream = "\n".join(json.dumps(e) for e in events).encode("utf-8")
+    # If Antigravity provider stream contains Codex NDJSON events, it fails-closed as AMBIGUOUS
+    res, status, source = CliAgentRunner._extract_final_response(raw_stream, "antigravity")
+    assert status == "AMBIGUOUS"
+    assert res is None

@@ -1,6 +1,6 @@
-# mini me — Instrucciones de agentes (contrato rector 1.2)
+# mini me — Instrucciones de agentes (contrato rector 1.3)
 
-**Leer primero** [docs/CONTRATO_RECTOR.md](docs/CONTRATO_RECTOR.md), [docs/BACKLOG.md](docs/BACKLOG.md) y [docs/RECONCILIACION_LEGADO.md](docs/RECONCILIACION_LEGADO.md). Luego leer el Change OpenSpec **único y autorizado** de la fase que corresponda, README y openspec/config.yaml. Otros documentos pueden reflejar decisiones HISTÓRICAS ya sustituidas; no son autoridad cuando contradicen el contrato 1.2.
+**Leer primero** [docs/CONTRATO_RECTOR.md](docs/CONTRATO_RECTOR.md), [docs/BACKLOG.md](docs/BACKLOG.md) y [docs/RECONCILIACION_LEGADO.md](docs/RECONCILIACION_LEGADO.md). Luego leer el Change OpenSpec **único y autorizado** de la fase que corresponda, README y openspec/config.yaml. Otros documentos pueden reflejar decisiones HISTÓRICAS ya sustituidas; no son autoridad cuando contradicen el contrato 1.3.
 
 ## No negociable
 - Seis fases exactas (F1–F6); **un Change por fase, una o múltiples specs**, jamás microchanges técnicos.

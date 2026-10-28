@@ -71,15 +71,26 @@ class AgentExecutionResult:
 
     @property
     def response_output(self) -> str:
-        """Return only the provider response channel, excluding diagnostics."""
+        """Return only the authoritative provider response channel, excluding diagnostics.
+
+        If final_response_status is specified:
+        - Only 'COMPLETE' allows access to final_response.
+        - If final_response is missing, empty, or whitespace, it returns ""
+          (never falls back to diagnostic stdout or incidental output).
+        If final_response_status is not specified (e.g. legacy test fixtures without status):
+        - Returns explicit final_response if present, then structured_output, then stdout.
+        """
         if self.final_response_status is not None:
             if self.final_response_status != "COMPLETE":
                 return ""
-            if self.final_response is not None:
-                return self.final_response
-        return "\n".join(
-            self.structured_output if self.structured_output is not None else self.stdout
-        )
+            if self.final_response is not None and self.final_response.strip():
+                return self.final_response.strip()
+            return ""
+        if self.final_response is not None and self.final_response.strip():
+            return self.final_response.strip()
+        if self.structured_output is not None:
+            return "\n".join(self.structured_output).strip()
+        return "\n".join(self.stdout).strip()
 
     def contains_token(self, token: str) -> bool:
         return token in self.full_output

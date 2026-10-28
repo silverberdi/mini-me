@@ -1,6 +1,6 @@
 # Decisiones canónicas vigentes — mini me (21-10-2026)
 
-**Autoridad superior:** [CONTRATO_RECTOR.md](CONTRATO_RECTOR.md) v1.2. Este documento reemplaza la antigua dirección MM-R01–R10, las reglas particulares para proveedores permanentes y el postdeploy dentro de mini me. Los cambios históricos siguen en Git como evidencia, NO como política actual.
+**Autoridad superior:** [CONTRATO_RECTOR.md](CONTRATO_RECTOR.md) v1.3. Este documento reemplaza la antigua dirección MM-R01–R10, las reglas particulares para proveedores permanentes y el postdeploy dentro de mini me. Los cambios históricos siguen en Git como evidencia, NO como política actual.
 
 1. Producto personal e instalación única; **gacela, no paquidermo**. Una API FastAPI, arquitectura Python POO y SOLID/DRY/KISS/YAGNI, PostgreSQL mínimo.
 2. mini me coordina y observa; **agentes ejecutan workflows nativos OpenSpec**; prohibido que mini me genere propuestas, implemente, verifique semánticamente, sincronice o archive con lógica propia sustituta.

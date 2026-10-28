@@ -1,4 +1,4 @@
-# Contratos de agentes — mini me v1.2
+# Contratos de agentes — mini me v1.3
 
 **Fuente:** [CONTRATO_RECTOR.md](CONTRATO_RECTOR.md), configuración por proyecto.
 
