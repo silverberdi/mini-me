@@ -6,7 +6,7 @@ from tests.conftest import InMemoryPersistenceUnitOfWork, setup_managed_reposito
 
 from minime.domain.enums import OrchestrationStage
 from minime.domain.models import OrchestrationRun
-from minime.services.agent_runner import AgentExecutionResult, CliAgentRunner
+from minime.services.agent_runner import AgentExecutionResult, AgentWorkflowHandoff, CliAgentRunner
 from minime.services.orchestration_coordinator import NativeOrchestrationCoordinator
 from minime.services.worktree_manager import WorktreeInfo, WorktreeManager
 
@@ -1023,3 +1023,75 @@ async def test_legacy_explore_run_without_attempt_requires_explicit_recovery(moc
     assert run is not None
     assert run.stop_details["explore_attempt"]["attempt_id"]
     assert "explore_checkpoint" in run.stop_details
+
+
+@pytest.mark.asyncio
+async def test_complete_files_without_agent_checkpoint_do_not_bypass_propose_authorization(mock_env):
+    """A file tree is OpenSpec input, not proof that a previous agent finished."""
+    coordinator, uow, _, repo_dir = mock_env
+    change_name = "req-101-add-caching-layer"
+    change_dir = repo_dir / "openspec" / "changes" / change_name
+    (change_dir / "specs" / "feature").mkdir(parents=True)
+    for name in ("proposal.md", "design.md", "tasks.md"):
+        (change_dir / name).write_text("# preserved, not yet evidenced")
+    (change_dir / "specs" / "feature" / "spec.md").write_text("# old spec")
+    run = OrchestrationRun(
+        project_id="proj-1",
+        change_name=change_name,
+        base_sha="abc1234",
+        current_stage=OrchestrationStage.PROPOSING,
+        resumable_stage=OrchestrationStage.PROPOSING,
+        stop_details={
+            "issue_number": 101,
+            "issue_title": "Add caching layer",
+            "request_normalization": {"normalized_body": "We need redis caching layer"},
+        },
+    )
+    uow.orchestration_runs.save(run)
+    coordinator.agent_runner.run = AsyncMock()
+    blocked = await coordinator.execute_project_request(
+        "proj-1",
+        thinker_provider="antigravity",
+        implementer_provider="antigravity",
+        reviewer_provider="antigravity",
+    )
+    assert blocked.status == "PAUSED"
+    assert blocked.current_stage == OrchestrationStage.PROPOSING
+    assert "authorization" in blocked.message
+    coordinator.agent_runner.run.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_agent_reports_incomplete_propose_without_false_completion(mock_env):
+    coordinator, _, _, repo_dir = mock_env
+    coordinator.agent_runner.run = AsyncMock(
+        return_value=AgentExecutionResult(
+            exit_code=0,
+            timed_out=False,
+            stdout=["Final agent report"],
+            stderr=[],
+            duration_ms=7,
+            final_response=(
+                'MINIME_WORKFLOW_RESULT: {"status":"INCOMPLETE",'
+                '"summary":"Work remains","pending":["design.md","tasks.md"]}'
+            ),
+            final_response_status="COMPLETE",
+            workflow_handoff_required=True,
+            workflow_handoff=AgentWorkflowHandoff(
+                "INCOMPLETE", "Work remains", ("design.md", "tasks.md")
+            ),
+        )
+    )
+    result = await coordinator._run_propose(
+        worktree_path=repo_dir,
+        provider="antigravity",
+        change_name="req-101-add-caching-layer",
+        issue_number=101,
+        issue_title="Add caching layer",
+        issue_body="We need redis caching layer",
+        project_id="proj-1",
+    )
+    assert result["status"] == "INCOMPLETE"
+    assert "design.md" in result["message"]
+    assert "tasks.md" in result["message"]
+    coordinator.agent_runner.run.assert_awaited_once()
