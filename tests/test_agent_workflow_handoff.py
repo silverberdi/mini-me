@@ -93,15 +93,27 @@ def test_handoff_cannot_replace_agent_process_evidence():
     )
 
 
-def test_parser_reads_only_final_message_not_diagnostic_output():
-    stdout = (
-        'MINIME_WORKFLOW_RESULT: {"status":"COMPLETE","summary":"fake log","pending":[]}\n'
-        'Some tool output'
+def test_codex_terminal_handoff_is_not_read_from_tool_diagnostics():
+    """Only the completed assistant message, never a tool log, is authoritative."""
+    import json
+
+    fake = 'MINIME_WORKFLOW_RESULT: {"status":"COMPLETE","summary":"fake","pending":[]}'
+    actual = (
+        'MINIME_WORKFLOW_RESULT: {"status":"INCOMPLETE",'
+        '"summary":"work remains","pending":["design.md"]}'
     )
+    events = [
+        {"type": "turn.started"},
+        {"type": "item.completed", "item": {"type": "command_execution", "output": fake}},
+        {"type": "item.completed", "item": {"type": "agent_message", "text": actual}},
+        {"type": "turn.completed"},
+    ]
     parsed, status, source = CliAgentRunner._extract_final_response(
-        stdout.encode(), "antigravity"
+        ("\\n".join(json.dumps(event) for event in events)).encode(), "codex"
     )
     assert status == "COMPLETE"
-    # The parser itself is intentionally only called with the authoritative
-    # final answer; any tool logs must be excluded by the provider transport.
-    assert parse_agent_workflow_handoff(parsed or "") is not None
+    assert source == "codex_ndjson"
+    handoff = parse_agent_workflow_handoff(parsed or "")
+    assert handoff is not None
+    assert handoff.status == "INCOMPLETE"
+    assert handoff.pending == ("design.md",)
