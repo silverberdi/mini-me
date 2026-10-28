@@ -322,6 +322,46 @@ class OpenSpecAdapter(OpenSpecAdapterInterface):
             return {"status": "UNKNOWN", "reason": "official OpenSpec list was unobservable"}
         return {"status": "PASS", "changes": listing.get("changes", [])}
 
+    def planning_status(self, change_name: str, project_root: str | Path) -> dict[str, Any]:
+        """Ask the installed OpenSpec CLI whether its planning workflow is complete.
+
+        A file existing on disk is not an authoritative planning-complete verdict.
+        Never implement OpenSpec's artifact dependency graph inside mini me.
+        """
+        try:
+            result = subprocess.run(
+                [self.cli_command, "status", "--change", change_name, "--json"],
+                cwd=str(project_root),
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+        except OSError as exc:
+            return {"status": "UNKNOWN", "reason": str(exc), "pending": []}
+        if result.returncode != 0:
+            return {"status": "UNKNOWN", "reason": "OpenSpec status command failed", "pending": []}
+        try:
+            payload = json.loads(result.stdout)
+        except (ValueError, TypeError):
+            return {"status": "UNKNOWN", "reason": "OpenSpec status is not valid JSON", "pending": []}
+        if not isinstance(payload, dict):
+            return {"status": "UNKNOWN", "reason": "OpenSpec status is not an object", "pending": []}
+        complete = payload.get("isPlanningComplete", payload.get("isComplete"))
+        if type(complete) is not bool:
+            return {"status": "UNKNOWN", "reason": "OpenSpec planning completeness is unavailable", "pending": []}
+        artifacts = payload.get("artifacts", [])
+        pending = (
+            [str(item.get("id") or item.get("name") or "unknown") for item in artifacts
+             if isinstance(item, dict) and item.get("status") not in {"done", "skipped"}]
+            if isinstance(artifacts, list)
+            else []
+        )
+        return {
+            "status": "PASS" if complete else "INCOMPLETE",
+            "reason": "OpenSpec reports planning complete" if complete else "OpenSpec reports pending planning",
+            "pending": pending,
+        }
+
     def validate_change_strict(self, change_name: str, project_root: str | Path) -> dict[str, Any]:
         """Return raw, truthful evidence for canonical strict change validation."""
         try:
