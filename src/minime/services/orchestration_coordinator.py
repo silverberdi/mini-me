@@ -1286,12 +1286,24 @@ class NativeOrchestrationCoordinator:
                     )
                 except asyncio.CancelledError:
                     self._finish_explore_dispatch(
-                        uow, active_run, attempt_id, action_key, "AMBIGUOUS", None
+                        uow,
+                        active_run,
+                        attempt_id,
+                        action_key,
+                        claim_context,
+                        "AMBIGUOUS",
+                        None,
                     )
                     raise
                 except Exception as exc:
                     self._finish_explore_dispatch(
-                        uow, active_run, attempt_id, action_key, "AMBIGUOUS", str(exc)
+                        uow,
+                        active_run,
+                        attempt_id,
+                        action_key,
+                        claim_context,
+                        "AMBIGUOUS",
+                        str(exc),
                     )
                     raise
                 else:
@@ -1302,7 +1314,13 @@ class NativeOrchestrationCoordinator:
                         else "FAILED"
                     )
                     self._finish_explore_dispatch(
-                        uow, active_run, attempt_id, action_key, terminal, None
+                        uow,
+                        active_run,
+                        attempt_id,
+                        action_key,
+                        claim_context,
+                        terminal,
+                        None,
                     )
                 evidence = explore_result.get("execution")
                 if (
@@ -2224,6 +2242,7 @@ class NativeOrchestrationCoordinator:
                     status=ExternalActionStatus.RESERVED,
                 )
             )
+            uow.flush()
             claims.commit_fenced_dispatch_intent(
                 claim_key=claim_context.claim_key,
                 owner_instance_id=claim_context.owner_instance_id,
@@ -2240,7 +2259,8 @@ class NativeOrchestrationCoordinator:
                     is_retry=is_recovery,
                 ),
             )
-        except Exception:
+        except Exception as exc:
+            logger.warning("Explore dispatch preparation failed: %s", exc)
             uow.rollback()
             claims.release_claim(claim_context)
             uow.commit()
@@ -2253,6 +2273,7 @@ class NativeOrchestrationCoordinator:
         run: OrchestrationRun,
         attempt_id: str,
         action_key: str,
+        claim_context: RecoveryClaimContext,
         attempt_status: str,
         error_message: str | None,
     ) -> None:
@@ -2280,10 +2301,8 @@ class NativeOrchestrationCoordinator:
             )
             uow.commit()
         finally:
-            claim = uow.claims.get_by_key(f"run:{run.run_id}")
-            if claim is not None:
-                uow.claims.release_claim(claim)
-                uow.commit()
+            uow.claims.release_claim(claim_context)
+            uow.commit()
 
     @staticmethod
     def _configured_provider(project: Any, role: str) -> str | None:
