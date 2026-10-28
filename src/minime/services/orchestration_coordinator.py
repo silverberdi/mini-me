@@ -191,14 +191,7 @@ class NativeOrchestrationCoordinator:
         """Keep the durable claim owned by this live worker, or fence the child."""
         renew = getattr(uow, "renew_claim_heartbeat_isolated", None)
         if not callable(renew):
-            claims = getattr(uow, "claims", None)
-            local_renew = getattr(claims, "renew_heartbeat", None)
-            if not callable(local_renew):
-                raise RuntimeError("Recovery claim heartbeat is unavailable")
-            def renew(context: RecoveryClaimContext, lease: int) -> bool:
-                return local_renew(
-                    context.claim_key, context.owner_instance_id, context.fence_token, lease
-                )
+            raise RuntimeError("Recovery claim heartbeat is unavailable")
         stopped = asyncio.Event()
         lost = False
 
@@ -1517,7 +1510,6 @@ class NativeOrchestrationCoordinator:
             ) or (
                 active_run.current_stage == OrchestrationStage.VALIDATING
                 and not complete_proposal
-                and stored_propose_attempt is not None
             )
             stored_propose_gate = (active_run.stop_details or {}).get("propose_human_required")
             verified_propose_human_gate = (
@@ -1592,39 +1584,39 @@ class NativeOrchestrationCoordinator:
                 success = propose_result.get("status") == "READY_TO_VALIDATE"
                 human_required = propose_result.get("status") == "HUMAN_REQUIRED"
                 if success:
-                        details = dict(active_run.stop_details or {})
-                        details.pop("propose_human_required", None)
-                        details["propose_checkpoint"] = {
-                            "checkpoint_version": 1,
-                            "run_id": active_run.run_id,
-                            "provider": thinker_provider,
-                            "status": "READY_TO_VALIDATE",
-                            "attempt_id": propose_attempt_id,
-                            "agent_response_sha256": hashlib.sha256(
-                                propose_result["execution"].response_output.encode("utf-8")
-                            ).hexdigest(),
-                            "agent_handoff": (
-                                {
-                                    "status": propose_result["execution"].workflow_handoff.status,
-                                    "summary": redact_secrets(
-                                        propose_result["execution"].workflow_handoff.summary
-                                    )[:600],
-                                    "pending": [],
-                                }
-                                if getattr(propose_result["execution"], "workflow_handoff", None)
-                                else None
-                            ),
-                            "recorded_at": utc_now().isoformat(),
-                        }
-                        self._persist_run_stop_details(active_run, details)
+                    details = dict(active_run.stop_details or {})
+                    details.pop("propose_human_required", None)
+                    details["propose_checkpoint"] = {
+                        "checkpoint_version": 1,
+                        "run_id": active_run.run_id,
+                        "provider": thinker_provider,
+                        "status": "READY_TO_VALIDATE",
+                        "attempt_id": propose_attempt_id,
+                        "agent_response_sha256": hashlib.sha256(
+                            propose_result["execution"].response_output.encode("utf-8")
+                        ).hexdigest(),
+                        "agent_handoff": (
+                            {
+                                "status": propose_result["execution"].workflow_handoff.status,
+                                "summary": redact_secrets(
+                                    propose_result["execution"].workflow_handoff.summary
+                                )[:600],
+                                "pending": [],
+                            }
+                            if getattr(propose_result["execution"], "workflow_handoff", None)
+                            else None
+                        ),
+                        "recorded_at": utc_now().isoformat(),
+                    }
+                    self._persist_run_stop_details(active_run, details)
                 elif human_required:
-                        details = dict(active_run.stop_details or {})
-                        details["propose_human_required"] = {
-                            "attempt_id": propose_attempt_id,
-                            "human_payload": self._safe_human_payload(propose_result["human_payload"]),
-                            "recorded_at": utc_now().isoformat(),
-                        }
-                        self._persist_run_stop_details(active_run, details)
+                    details = dict(active_run.stop_details or {})
+                    details["propose_human_required"] = {
+                        "attempt_id": propose_attempt_id,
+                        "human_payload": self._safe_human_payload(propose_result["human_payload"]),
+                        "recorded_at": utc_now().isoformat(),
+                    }
+                    self._persist_run_stop_details(active_run, details)
                 if propose_result.get("status") == "HUMAN_REQUIRED":
                     return OrchestrationCoordinationResult(
                         status="HUMAN_REQUIRED",
@@ -2643,13 +2635,6 @@ class NativeOrchestrationCoordinator:
             uow.claims.release_claim(claim_context)
             uow.commit()
 
-    def _finish_explore_dispatch(self, uow: Any, run: OrchestrationRun, attempt_id: str,
-                                 action_key: str, claim_context: RecoveryClaimContext,
-                                 attempt_status: str, error_message: str | None) -> None:
-        self._finish_native_dispatch(
-            uow, run, "explore", attempt_id, action_key, claim_context, attempt_status, error_message
-        )
-
     def _prepare_propose_dispatch(
         self,
         *,
@@ -2675,13 +2660,6 @@ class NativeOrchestrationCoordinator:
             is_recovery=is_recovery,
             recovery_authorization_id=recovery_authorization_id,
             attempt_fields={"change_name": change_name},
-        )
-
-    def _finish_propose_dispatch(self, uow: Any, run: OrchestrationRun, attempt_id: str,
-                                 action_key: str, claim_context: RecoveryClaimContext,
-                                 attempt_status: str, error_message: str | None) -> None:
-        self._finish_native_dispatch(
-            uow, run, "propose", attempt_id, action_key, claim_context, attempt_status, error_message
         )
 
     @staticmethod
