@@ -1072,6 +1072,16 @@ class NativeOrchestrationCoordinator:
             explore_context_sha = hashlib.sha256(
                 json.dumps(explore_context, ensure_ascii=False, sort_keys=True).encode("utf-8")
             ).hexdigest()
+            # Preserve the immutable Request/context identity separately so a
+            # new human clarification can authorize another Explore only after
+            # a genuine, otherwise verified HUMAN_REQUIRED checkpoint.
+            explore_base_context = dict(explore_context)
+            explore_base_context.pop("operator_clarification", None)
+            explore_base_context_sha = hashlib.sha256(
+                json.dumps(
+                    explore_base_context, ensure_ascii=False, sort_keys=True
+                ).encode("utf-8")
+            ).hexdigest()
             expected_explore_wf: ResolvedWorkflow | None = None
             try:
                 expected_explore_wf = self.agent_runner.resolve_workflow(
@@ -1084,10 +1094,9 @@ class NativeOrchestrationCoordinator:
                 expected_explore_wf = None
 
             stored_explore = (active_run.stop_details or {}).get("explore_checkpoint")
-            if (
+            checkpoint_verified = (
                 expected_explore_wf is not None
                 and isinstance(stored_explore, dict)
-                and stored_explore.get("context_sha256") == explore_context_sha
                 and stored_explore.get("run_id") == active_run.run_id
                 and stored_explore.get("provider") == thinker_provider
                 and stored_explore.get("status") in {"HUMAN_REQUIRED", "READY_TO_PROPOSE"}
@@ -1098,7 +1107,36 @@ class NativeOrchestrationCoordinator:
                 and isinstance(stored_explore.get("response_sha256"), str)
                 and len(stored_explore["response_sha256"]) == 64
                 and stored_explore.get("workflow_sha256") == expected_explore_wf.workflow_sha256
+                and stored_explore.get("base_context_sha256") == explore_base_context_sha
+            )
+            same_context = (
+                checkpoint_verified
+                and stored_explore.get("context_sha256") == explore_context_sha
+            )
+            authorized_clarification = (
+                checkpoint_verified
+                and not same_context
+                and stored_explore.get("status") == "HUMAN_REQUIRED"
+                and isinstance(operator_clarification, str)
+                and bool(operator_clarification.strip())
+            )
+            # A checkpoint that exists but cannot be trusted is evidence of an
+            # ambiguous previous attempt, NOT a license to invoke a paid agent
+            # again. A fresh, explicit recovery decision is required.
+            if stored_explore is not None and not (
+                same_context or authorized_clarification
             ):
+                return OrchestrationCoordinationResult(
+                    status="PAUSED",
+                    run_id=active_run.run_id,
+                    current_stage=OrchestrationStage.EXPLORING,
+                    message=(
+                        "Explore checkpoint is invalid, stale or unverifiable; "
+                        "explicit operator recovery authorization is required "
+                        "before any new agent invocation."
+                    ),
+                )
+            if same_context:
                 explore_result = {
                     "status": stored_explore["status"],
                     "human_payload": stored_explore.get("human_payload"),
@@ -1135,6 +1173,7 @@ class NativeOrchestrationCoordinator:
                         "workflow_sha256": evidence.workflow.workflow_sha256,
                         "status": explore_result["status"],
                         "context_sha256": explore_context_sha,
+                        "base_context_sha256": explore_base_context_sha,
                         "response_sha256": hashlib.sha256(
                             evidence.response_output.encode("utf-8")
                         ).hexdigest(),

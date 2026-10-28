@@ -756,26 +756,36 @@ async def test_explore_checkpoint_rejects_forged_or_mismatched_workflow_sha(mock
     uow.orchestration_runs.save(run)
 
     coordinator._run_explore = AsyncMock(
-        return_value={
-            "status": "READY_TO_PROPOSE",
-            "execution": AgentExecutionResult(
-                exit_code=0,
-                timed_out=False,
-                stdout=[answer],
-                stderr=[],
-                duration_ms=10,
-                final_response=answer,
-                final_response_status="COMPLETE",
-                final_response_source="stdout_text",
-                workflow=real_wf,
-            ),
-        }
+        side_effect=AssertionError("Invalid checkpoint must not re-dispatch Explore")
     )
-    await coordinator.execute_project_request(
+    rejected = await coordinator.execute_project_request(
         "proj-1",
         operator_clarification="Autorizado backend mínimo de F5",
         thinker_provider="antigravity",
         implementer_provider="antigravity",
         reviewer_provider="antigravity",
     )
-    coordinator._run_explore.assert_awaited_once()
+    assert rejected.status == "PAUSED"
+    assert rejected.run_id == first.run_id
+    assert rejected.current_stage == OrchestrationStage.EXPLORING
+    assert "recovery authorization" in rejected.message
+    coordinator._run_explore.assert_not_awaited()
+    assert coordinator.agent_runner.run.await_count == 1
+
+    # Even if the persisted SHA is restored, a change in the real native
+    # workflow invalidates the checkpoint and must not consume another turn.
+    run.stop_details["explore_checkpoint"]["workflow_sha256"] = real_wf.workflow_sha256
+    (repo_dir / ".agent" / "workflows" / "opsx-explore.md").write_text(
+        "# modified after the checkpoint"
+    )
+    uow.orchestration_runs.save(run)
+    mismatched_workflow = await coordinator.execute_project_request(
+        "proj-1",
+        operator_clarification="Autorizado backend mínimo de F5",
+        thinker_provider="antigravity",
+        implementer_provider="antigravity",
+        reviewer_provider="antigravity",
+    )
+    assert mismatched_workflow.status == "PAUSED"
+    coordinator._run_explore.assert_not_awaited()
+    assert coordinator.agent_runner.run.await_count == 1
