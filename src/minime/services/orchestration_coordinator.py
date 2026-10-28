@@ -2372,6 +2372,12 @@ class NativeOrchestrationCoordinator:
             return False
         if getattr(result, "environment_error", False):
             return False
+        if (
+            getattr(result, "output_truncated", False)
+            or getattr(result, "structured_output_missing", False)
+            or getattr(result, "structured_output_too_large", False)
+        ):
+            return False
         if getattr(result, "final_response_status", None) not in (None, "COMPLETE"):
             return False
         return bool(getattr(result, "response_output", "").strip())
