@@ -1062,6 +1062,139 @@ async def test_complete_files_without_agent_checkpoint_do_not_bypass_propose_aut
 
 
 @pytest.mark.asyncio
+async def test_propose_human_question_survives_restart_and_resumes_same_change(mock_env):
+    coordinator, uow, _, repo_dir = mock_env
+    change_name = "req-101-add-caching-layer"
+    run = OrchestrationRun(
+        project_id="proj-1",
+        change_name=change_name,
+        base_sha="abc1234",
+        current_stage=OrchestrationStage.PROPOSING,
+        resumable_stage=OrchestrationStage.PROPOSING,
+        stop_details={
+            "issue_number": 101,
+            "issue_title": "Add caching layer",
+            "request_normalization": {"normalized_body": "We need redis caching layer"},
+        },
+    )
+    uow.orchestration_runs.save(run)
+
+    human_result = AgentExecutionResult(
+        exit_code=0,
+        timed_out=False,
+        stdout=["diagnostic"],
+        stderr=[],
+        duration_ms=7,
+        final_response=(
+            'MINIME_WORKFLOW_RESULT: {"status":"HUMAN_REQUIRED",'
+            '"summary":"Architecture decision needed","pending":["¿Redis o memoria local?"]}'
+        ),
+        final_response_status="COMPLETE",
+        workflow_handoff_required=True,
+        workflow_handoff=AgentWorkflowHandoff(
+            "HUMAN_REQUIRED", "Architecture decision needed", ("¿Redis o memoria local?",)
+        ),
+    )
+    complete_result = AgentExecutionResult(
+        exit_code=0,
+        timed_out=False,
+        stdout=["diagnostic"],
+        stderr=[],
+        duration_ms=8,
+        final_response=(
+            'MINIME_WORKFLOW_RESULT: {"status":"COMPLETE",'
+            '"summary":"Planning finished","pending":[]}'
+        ),
+        final_response_status="COMPLETE",
+        workflow_handoff_required=True,
+        workflow_handoff=AgentWorkflowHandoff("COMPLETE", "Planning finished", ()),
+    )
+
+    async def agent_run(**kwargs):
+        if "OpenSpec Continue" in kwargs["prompt_context"]:
+            assert "Operator clarification for the pending native workflow:" in kwargs["prompt_context"]
+            assert "Redis" in kwargs["prompt_context"]
+            change_dir = repo_dir / "openspec" / "changes" / change_name
+            (change_dir / "specs" / "feature").mkdir(parents=True, exist_ok=True)
+            for artifact in ("proposal.md", "design.md", "tasks.md"):
+                (change_dir / artifact).write_text("# Preserved OpenSpec content")
+            (change_dir / "specs" / "feature" / "spec.md").write_text("# Specification")
+            return complete_result
+        return human_result
+
+    coordinator.agent_runner.run = AsyncMock(side_effect=agent_run)
+    initial = await coordinator.execute_project_request(
+        "proj-1",
+        thinker_provider="antigravity",
+        implementer_provider="antigravity",
+        reviewer_provider="antigravity",
+    )
+    assert initial.status == "HUMAN_REQUIRED"
+    assert initial.current_stage == OrchestrationStage.PROPOSING
+    assert initial.run_id == run.run_id
+    assert initial.human_payload["question"] == "¿Redis o memoria local?"
+    persisted = uow.orchestration_runs.get_by_id(run.run_id)
+    attempt_id = persisted.stop_details["propose_attempt"]["attempt_id"]
+    assert persisted.stop_details["propose_human_required"]["attempt_id"] == attempt_id
+
+    # Re-entry after interruption returns the persisted question without a paid call.
+    again = await coordinator.execute_project_request(
+        "proj-1",
+        thinker_provider="antigravity",
+        implementer_provider="antigravity",
+        reviewer_provider="antigravity",
+    )
+    assert again.status == "HUMAN_REQUIRED"
+    assert again.human_payload == initial.human_payload
+    assert coordinator.agent_runner.run.await_count == 1
+
+    # Clarification alone is not a license for a new model invocation.
+    blocked = await coordinator.execute_project_request(
+        "proj-1",
+        operator_clarification="Redis",
+        thinker_provider="antigravity",
+        implementer_provider="antigravity",
+        reviewer_provider="antigravity",
+    )
+    assert blocked.status == "PAUSED"
+    assert coordinator.agent_runner.run.await_count == 1
+
+    auth_id = "recover-propose-with-clarification"
+    assert coordinator.register_propose_recovery_authorization(
+        project_id="proj-1",
+        run_id=run.run_id,
+        authorization_reference=auth_id,
+        actor_identity="operator@example.com",
+        source_interface="test",
+        issue_number=101,
+        provider="antigravity",
+        prior_attempt_id=attempt_id,
+    )
+    coordinator.openspec_adapter.planning_status = MagicMock(
+        return_value={"status": "PASS", "reason": "complete", "pending": []}
+    )
+    coordinator.openspec_adapter.validate_change_strict = MagicMock(
+        return_value={"status": "FAIL", "stderr": "stop before classification"}
+    )
+    coordinator.max_correction_attempts = 0
+    recovered = await coordinator.execute_project_request(
+        "proj-1",
+        operator_clarification="Redis",
+        propose_recovery_authorization_id=auth_id,
+        thinker_provider="antigravity",
+        implementer_provider="antigravity",
+        reviewer_provider="antigravity",
+    )
+    assert recovered.run_id == run.run_id
+    assert recovered.current_stage == OrchestrationStage.VALIDATING
+    assert coordinator.agent_runner.run.await_count == 2
+    coordinator.openspec_adapter.planning_status.assert_called_once_with(change_name, repo_dir)
+    persisted = uow.orchestration_runs.get_by_id(run.run_id)
+    assert "propose_human_required" not in persisted.stop_details
+    assert persisted.stop_details["propose_checkpoint"]["status"] == "READY_TO_VALIDATE"
+
+
+@pytest.mark.asyncio
 async def test_agent_reports_incomplete_propose_without_false_completion(mock_env):
     coordinator, _, _, repo_dir = mock_env
     coordinator.agent_runner.run = AsyncMock(
