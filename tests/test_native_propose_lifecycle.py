@@ -789,3 +789,73 @@ async def test_explore_checkpoint_rejects_forged_or_mismatched_workflow_sha(mock
     assert mismatched_workflow.status == "PAUSED"
     coordinator._run_explore.assert_not_awaited()
     assert coordinator.agent_runner.run.await_count == 1
+
+    # Explicit authenticated recovery is Run-bound, one-use and recorded
+    # BEFORE another provider invocation. No manual SQL or fabricated checkpoint.
+    modified_wf = coordinator.agent_runner.resolve_workflow(
+        worktree_path=repo_dir,
+        provider="antigravity",
+        operation="explore",
+        change_name="issue-101",
+    )
+    coordinator._run_explore = AsyncMock(
+        return_value={
+            "status": "READY_TO_PROPOSE",
+            "execution": AgentExecutionResult(
+                exit_code=0,
+                timed_out=False,
+                stdout=[answer],
+                stderr=[],
+                duration_ms=10,
+                final_response=answer,
+                final_response_status="COMPLETE",
+                final_response_source="stdout_text",
+                workflow=modified_wf,
+            ),
+        }
+    )
+    recovery_token = "02b27d59-71be-45a7-b9e4-2572f8cd48b4"
+    authorized = await coordinator.execute_project_request(
+        "proj-1",
+        operator_clarification="Autorizado backend mínimo de F5",
+        explore_recovery_run_id=first.run_id,
+        explore_recovery_token=recovery_token,
+        thinker_provider="antigravity",
+        implementer_provider="antigravity",
+        reviewer_provider="antigravity",
+    )
+    assert authorized.current_stage == OrchestrationStage.PROPOSING
+    coordinator._run_explore.assert_awaited_once()
+    assert len(run.stop_details["explore_recovery_authorizations"]) == 1
+
+    # Replaying the same authorization may not spend another provider turn.
+    run.current_stage = OrchestrationStage.EXPLORING
+    run.resumable_stage = OrchestrationStage.EXPLORING
+    run.stop_details["explore_checkpoint"]["workflow_sha256"] = "f" * 64
+    uow.orchestration_runs.save(run)
+    repeated = await coordinator.execute_project_request(
+        "proj-1",
+        operator_clarification="Autorizado backend mínimo de F5",
+        explore_recovery_run_id=first.run_id,
+        explore_recovery_token=recovery_token,
+        thinker_provider="antigravity",
+        implementer_provider="antigravity",
+        reviewer_provider="antigravity",
+    )
+    assert repeated.status == "PAUSED"
+    assert "already been consumed" in repeated.message
+    coordinator._run_explore.assert_awaited_once()
+
+    # A historical Explore with no authentic checkpoint must also pause
+    # instead of silently repeating a paid agent call.
+    run.stop_details.pop("explore_checkpoint")
+    uow.orchestration_runs.save(run)
+    missing = await coordinator.execute_project_request(
+        "proj-1",
+        operator_clarification="Autorizado backend mínimo de F5",
+        thinker_provider="antigravity",
+        implementer_provider="antigravity",
+        reviewer_provider="antigravity",
+    )
+    assert missing.status == "PAUSED"
+    coordinator._run_explore.assert_awaited_once()

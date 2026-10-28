@@ -11,7 +11,7 @@ from dataclasses import dataclass
 from dataclasses import replace as dataclass_replace
 from pathlib import Path
 from typing import Any
-from uuid import uuid4
+from uuid import UUID, uuid4
 
 from minime.adapters.github import GitHubAdapter
 from minime.adapters.openspec import OpenSpecAdapter
@@ -841,6 +841,8 @@ class NativeOrchestrationCoordinator:
         *,
         operator_ack: bool = False,
         operator_clarification: str | None = None,
+        explore_recovery_run_id: str | None = None,
+        explore_recovery_token: str | None = None,
         thinker_provider: str = "antigravity",
         implementer_provider: str = "codex",
         reviewer_provider: str = "antigravity",
@@ -1056,6 +1058,7 @@ class NativeOrchestrationCoordinator:
             OrchestrationStage.PREPARING_EXECUTION,
             OrchestrationStage.EXPLORING,
         ):
+            stage_before_explore = active_run.current_stage
             self._update_stage(uow, active_run, OrchestrationStage.EXPLORING)
             # A validated Explore disposition is immutable for the same
             # Run/Issue/clarification context. Re-entry must not spend another
@@ -1120,22 +1123,77 @@ class NativeOrchestrationCoordinator:
                 and isinstance(operator_clarification, str)
                 and bool(operator_clarification.strip())
             )
-            # A checkpoint that exists but cannot be trusted is evidence of an
-            # ambiguous previous attempt, NOT a license to invoke a paid agent
-            # again. A fresh, explicit recovery decision is required.
-            if stored_explore is not None and not (
-                same_context or authorized_clarification
-            ):
-                return OrchestrationCoordinationResult(
-                    status="PAUSED",
-                    run_id=active_run.run_id,
-                    current_stage=OrchestrationStage.EXPLORING,
-                    message=(
-                        "Explore checkpoint is invalid, stale or unverifiable; "
-                        "explicit operator recovery authorization is required "
-                        "before any new agent invocation."
-                    ),
+            # A previously dispatched Explore without a checkpoint is also
+            # ambiguous. Never turn an ordinary resumed API call into another
+            # paid inference. Recovery is explicit, Run-bound and one-use.
+            recovery_needed = (
+                (stored_explore is not None and not (
+                    same_context or authorized_clarification
+                ))
+                or (
+                    stored_explore is None
+                    and stage_before_explore == OrchestrationStage.EXPLORING
                 )
+            )
+            if recovery_needed:
+                try:
+                    recovery_uuid = str(UUID(explore_recovery_token or ""))
+                except (ValueError, TypeError, AttributeError):
+                    recovery_uuid = None
+                if (
+                    explore_recovery_run_id != active_run.run_id
+                    or recovery_uuid is None
+                ):
+                    return OrchestrationCoordinationResult(
+                        status="PAUSED",
+                        run_id=active_run.run_id,
+                        current_stage=OrchestrationStage.EXPLORING,
+                        message=(
+                            "Explore has incomplete or unverified prior evidence; "
+                            "an explicit, Run-bound recovery authorization is required."
+                        ),
+                    )
+                details = dict(active_run.stop_details or {})
+                authorizations = details.get("explore_recovery_authorizations", [])
+                if not isinstance(authorizations, list):
+                    return OrchestrationCoordinationResult(
+                        status="PAUSED",
+                        run_id=active_run.run_id,
+                        current_stage=OrchestrationStage.EXPLORING,
+                        message="Explore recovery authorization history is not trustworthy.",
+                    )
+                recovery_digest = hashlib.sha256(
+                    recovery_uuid.encode("utf-8")
+                ).hexdigest()
+                if any(
+                    not isinstance(record, dict)
+                    or record.get("authorization_sha256") == recovery_digest
+                    for record in authorizations
+                ):
+                    return OrchestrationCoordinationResult(
+                        status="PAUSED",
+                        run_id=active_run.run_id,
+                        current_stage=OrchestrationStage.EXPLORING,
+                        message="Explore recovery authorization has already been consumed.",
+                    )
+                authorizations.append(
+                    {
+                        "run_id": active_run.run_id,
+                        "authorization_sha256": recovery_digest,
+                        "context_sha256": explore_context_sha,
+                        "workflow_sha256": (
+                            expected_explore_wf.workflow_sha256
+                            if expected_explore_wf is not None else None
+                        ),
+                        "previous_response_sha256": (
+                            stored_explore.get("response_sha256")
+                            if isinstance(stored_explore, dict) else None
+                        ),
+                        "recorded_at": utc_now().isoformat(),
+                    }
+                )
+                details["explore_recovery_authorizations"] = authorizations
+                self._persist_run_stop_details(active_run, details)
             if same_context:
                 explore_result = {
                     "status": stored_explore["status"],

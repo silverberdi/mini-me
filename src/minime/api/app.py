@@ -628,6 +628,8 @@ class ProjectRequestRunPayload(BaseModel):
     operator_ack: bool = False
     operator_response: str | None = None
     operator_clarification: str | None = None
+    explore_recovery_run_id: str | None = None
+    explore_recovery_token: str | None = None
     thinker_provider: str | None = None
     implementer_provider: str | None = None
     reviewer_provider: str | None = None
@@ -706,6 +708,8 @@ async def run_project_request(
         project_id,
         operator_ack=body.operator_ack,
         operator_clarification=clarification,
+        explore_recovery_run_id=body.explore_recovery_run_id,
+        explore_recovery_token=body.explore_recovery_token,
         thinker_provider=agent_runner.provider_for_role("thinker"),
         implementer_provider=agent_runner.provider_for_role("implementer"),
         reviewer_provider=agent_runner.provider_for_role("reviewer"),
