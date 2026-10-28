@@ -7,6 +7,7 @@ import time
 from decimal import Decimal
 from pathlib import Path
 from typing import Generator
+from unittest.mock import MagicMock
 
 import pytest
 from sqlalchemy import Engine, create_engine
@@ -17,15 +18,24 @@ from minime.config import ProbeConfig
 from minime.db.models import Base
 from minime.db.repository import PostgresPersistenceUnitOfWork
 from minime.db.retry import TransactionRetryWrapper
-from minime.domain.enums import ProviderHealthStatus
+from minime.domain.enums import (
+    OperatorActionStatus,
+    OperatorActionType,
+    OrchestrationStage,
+    ProviderHealthStatus,
+)
 from minime.domain.models import (
     Job,
     OpenRouterBudgetPolicy,
     OpenRouterPricingSnapshot,
+    OperatorActionRecord,
+    OrchestrationRun,
     Project,
     ProviderHealth,
+    RecoveryClaimContext,
 )
 from minime.services.budget_service import BudgetService
+from minime.services.orchestration_coordinator import NativeOrchestrationCoordinator
 from minime.services.provider_health_service import ProviderHealthService
 
 
@@ -360,3 +370,262 @@ def test_t15_external_effect_retry_safety(pg_session_factory: sessionmaker[Sessi
     assert result == "success"
     assert attempt_counter == 2
     assert external_call_count == 1, "External action must be executed exactly once outside retries."
+
+
+def test_explore_recovery_authorization_is_single_use_under_postgres_contention(
+    pg_session_factory: sessionmaker[Session],
+):
+    """Two real DB sessions may consume one recovery decision only once."""
+    project_id = "explore-auth-concurrency"
+    run_id = "explore-auth-run"
+    action_id = "explore-auth-request"
+    prior_attempt_id = "explore-prior-attempt"
+    expected = {
+        "single_use": True,
+        "stage": "explore",
+        "issue_number": 173,
+        "provider": "antigravity",
+        "prior_attempt_id": prior_attempt_id,
+        "prior_context_sha256": "a" * 64,
+        "prior_workflow_sha256": "b" * 64,
+    }
+
+    with pg_session_factory() as session:
+        uow = PostgresPersistenceUnitOfWork(session)
+        uow.projects.save(
+            Project(
+                project_id=project_id,
+                display_name="Explore auth contention",
+                repository="o/r",
+                base_branch="main",
+            )
+        )
+        uow.orchestration_runs.save(
+            OrchestrationRun(
+                run_id=run_id,
+                project_id=project_id,
+                change_name="explore-auth-change",
+                base_sha="main",
+                current_stage=OrchestrationStage.EXPLORING,
+                resumable_stage=OrchestrationStage.EXPLORING,
+                stop_details={
+                    "explore_attempt": {
+                        "attempt_id": prior_attempt_id,
+                        "status": "IN_PROGRESS",
+                        "context_sha256": expected["prior_context_sha256"],
+                        "workflow_sha256": expected["prior_workflow_sha256"],
+                    }
+                },
+            )
+        )
+        uow.operator_actions.save(
+            OperatorActionRecord(
+                id="explore-auth-record",
+                action_request_id=action_id,
+                project_id=project_id,
+                change_name="explore-auth-change",
+                run_id=run_id,
+                action_type=OperatorActionType.RETRY,
+                actor_identity="operator@example.com",
+                source_interface="api",
+                precondition_stage=OrchestrationStage.EXPLORING.value,
+                status=OperatorActionStatus.ACCEPTED,
+                parameters_json=expected,
+            )
+        )
+        uow.commit()
+
+    barrier = threading.Barrier(2)
+    results: list[bool] = []
+
+    def consume() -> None:
+        with pg_session_factory() as session:
+            uow = PostgresPersistenceUnitOfWork(session)
+            barrier.wait()
+            consumed = uow.operator_actions.consume_single_use(
+                action_id,
+                run_id=run_id,
+                action_type=OperatorActionType.RETRY,
+                expected_parameters=expected,
+            )
+            results.append(consumed is not None)
+            uow.commit()
+
+    threads = [threading.Thread(target=consume) for _ in range(2)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(timeout=10)
+    assert sorted(results) == [False, True]
+
+    with pg_session_factory() as session:
+        uow = PostgresPersistenceUnitOfWork(session)
+        record = uow.operator_actions.get_by_request_id(action_id)
+        assert record is not None
+        assert record.status == OperatorActionStatus.COMPLETED
+
+
+def test_recovery_claim_release_uses_owner_and_fence_context(
+    pg_session_factory: sessionmaker[Session],
+):
+    """A completed Explore dispatch releases its PostgreSQL claim by CAS identity."""
+    claim_key = "run:explore-release-context"
+    owner = "explore-release-owner"
+    with pg_session_factory() as session:
+        uow = PostgresPersistenceUnitOfWork(session)
+        claim = uow.claims.acquire_or_reacquire(claim_key, owner, lease_seconds=300)
+        assert claim is not None
+        context = RecoveryClaimContext(
+            claim_key=claim.claim_key,
+            owner_instance_id=claim.owner_instance_id,
+            fence_token=claim.fence_token,
+            lease_expires_at=claim.lease_expires_at,
+        )
+        assert uow.claims.release_claim(context) is True
+        uow.commit()
+
+    with pg_session_factory() as session:
+        uow = PostgresPersistenceUnitOfWork(session)
+        stored = uow.claims.get_by_key(claim_key)
+        assert stored is not None
+        assert stored.released_at is not None
+
+
+def test_legacy_explore_run_without_attempt_accepts_only_explicit_recovery(
+    pg_session_factory: sessionmaker[Session],
+):
+    """The observed legacy state gets a new authorization, never a fabricated attempt."""
+    suffix = str(time.time_ns())
+    project_id = f"legacy-explore-{suffix}"
+    run_id = f"legacy-explore-run-{suffix}"
+    action_id = f"legacy-recovery-{suffix}"
+    with pg_session_factory() as session:
+        uow = PostgresPersistenceUnitOfWork(session)
+        uow.projects.save(
+            Project(
+                project_id=project_id,
+                display_name="Legacy Explore",
+                repository="o/r",
+                base_branch="main",
+            )
+        )
+        uow.orchestration_runs.save(
+            OrchestrationRun(
+                run_id=run_id,
+                project_id=project_id,
+                change_name="gacela-05-ui-self-hosted",
+                base_sha="main",
+                current_stage=OrchestrationStage.EXPLORING,
+                resumable_stage=OrchestrationStage.EXPLORING,
+                stop_details={"issue_number": 173},
+            )
+        )
+        uow.commit()
+        coordinator = NativeOrchestrationCoordinator(
+            uow_factory=lambda: uow,
+            github_adapter=MagicMock(),
+            worktree_manager=MagicMock(),
+            agent_runner=MagicMock(),
+        )
+        assert coordinator.register_explore_recovery_authorization(
+            project_id=project_id,
+            run_id=run_id,
+            authorization_reference=action_id,
+            actor_identity="operator@example.com",
+            source_interface="api",
+            issue_number=173,
+            provider="antigravity",
+            prior_attempt_id=None,
+        )
+        record = uow.operator_actions.get_by_request_id(action_id)
+        assert record is not None
+        assert record.parameters_json["legacy_missing_attempt"] is True
+        assert record.parameters_json["prior_attempt_id"] is None
+        stored_run = uow.orchestration_runs.get_by_id(run_id)
+        assert stored_run is not None
+        assert "explore_attempt" not in stored_run.stop_details
+        assert "explore_checkpoint" not in stored_run.stop_details
+
+
+def test_explore_dispatch_claim_serializes_two_postgres_workers(
+    pg_session_factory: sessionmaker[Session],
+):
+    """The durable Explore dispatch intent admits one worker before provider I/O."""
+    suffix = str(time.time_ns())
+    project_id = f"explore-dispatch-{suffix}"
+    run_id = f"explore-dispatch-run-{suffix}"
+    with pg_session_factory() as session:
+        uow = PostgresPersistenceUnitOfWork(session)
+        uow.projects.save(
+            Project(
+                project_id=project_id,
+                display_name="Explore dispatch contention",
+                repository="o/r",
+                base_branch="main",
+            )
+        )
+        uow.orchestration_runs.save(
+            OrchestrationRun(
+                run_id=run_id,
+                project_id=project_id,
+                change_name="explore-dispatch-change",
+                base_sha="main",
+                current_stage=OrchestrationStage.EXPLORING,
+                resumable_stage=OrchestrationStage.EXPLORING,
+            )
+        )
+        uow.commit()
+
+    barrier = threading.Barrier(2)
+    results: list[tuple[str, str, RecoveryClaimContext] | None] = []
+    errors: list[str] = []
+
+    def prepare() -> None:
+        with pg_session_factory() as session:
+            uow = PostgresPersistenceUnitOfWork(session)
+            coordinator = NativeOrchestrationCoordinator(
+                uow_factory=lambda: uow,
+                github_adapter=MagicMock(),
+                worktree_manager=MagicMock(),
+                agent_runner=MagicMock(),
+            )
+            barrier.wait()
+            try:
+                run = uow.orchestration_runs.get_by_id(run_id)
+                assert run is not None
+                result = coordinator._prepare_explore_dispatch(
+                    uow=uow,
+                    run=run,
+                    issue_number=173,
+                    provider="antigravity",
+                    context_sha="c" * 64,
+                    workflow_sha="d" * 64,
+                    is_recovery=True,
+                )
+                results.append(result)
+            except Exception as exc:
+                errors.append(repr(exc))
+
+    threads = [threading.Thread(target=prepare) for _ in range(2)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(timeout=10)
+
+    admitted = [result for result in results if result is not None]
+    assert not errors, errors
+    assert len(admitted) == 1
+    attempt_id, action_key, context = admitted[0]
+    assert attempt_id
+    assert action_key.startswith(f"explore:{run_id}:")
+
+    with pg_session_factory() as session:
+        uow = PostgresPersistenceUnitOfWork(session)
+        action = uow.orchestration_external_actions.get_by_action_key(action_key)
+        assert action is not None
+        assert action.status.value == "EXECUTING"
+        attempts = uow.external_action_attempts.list_by_action_key(action_key)
+        assert len(attempts) == 1
+        assert attempts[0].dispatch_intent_key.startswith(action_key)
+        assert uow.claims.release_claim(context) is True
+        uow.commit()

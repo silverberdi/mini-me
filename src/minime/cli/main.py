@@ -446,6 +446,11 @@ def budget_status_cmd(project_id: str | None = typer.Option(None, "--project-id"
 def request_run_cmd(
     project_id: str = typer.Argument(..., help="Target project ID"),
     operator_ack: bool = typer.Option(False, "--ack", help="Acknowledge high complexity changes"),
+    explore_recovery_authorization_id: str | None = typer.Option(
+        None,
+        "--explore-recovery-authorization-id",
+        help="Authenticated one-use OperatorActionRecord reference for Explore recovery",
+    ),
     json_output: bool = typer.Option(False, "--json", help="Emit output as JSON"),
 ) -> None:
     """Run or resume the next eligible OpenSpec request for a project."""
@@ -497,6 +502,7 @@ def request_run_cmd(
                 coordinator.execute_project_request(
                     project_id=project_id,
                     operator_ack=operator_ack,
+                    explore_recovery_authorization_id=explore_recovery_authorization_id,
                     thinker_provider=agent_runner.provider_for_role("thinker"),
                     implementer_provider=agent_runner.provider_for_role("implementer"),
                     reviewer_provider=agent_runner.provider_for_role("reviewer"),

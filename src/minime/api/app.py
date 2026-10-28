@@ -8,6 +8,7 @@ from contextlib import asynccontextmanager
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Annotated, Any, Generator
+from uuid import uuid4
 
 from fastapi import Depends, FastAPI, HTTPException, Query, Request, status
 from fastapi.concurrency import run_in_threadpool
@@ -628,6 +629,7 @@ class ProjectRequestRunPayload(BaseModel):
     operator_ack: bool = False
     operator_response: str | None = None
     operator_clarification: str | None = None
+    explore_recovery_authorization_id: str | None = None
     thinker_provider: str | None = None
     implementer_provider: str | None = None
     reviewer_provider: str | None = None
@@ -706,6 +708,7 @@ async def run_project_request(
         project_id,
         operator_ack=body.operator_ack,
         operator_clarification=clarification,
+        explore_recovery_authorization_id=body.explore_recovery_authorization_id,
         thinker_provider=agent_runner.provider_for_role("thinker"),
         implementer_provider=agent_runner.provider_for_role("implementer"),
         reviewer_provider=agent_runner.provider_for_role("reviewer"),
@@ -719,6 +722,84 @@ async def run_project_request(
         "pr2_url": res.pr2_url,
         "human_payload": res.human_payload,
     }
+
+
+class ExploreRecoveryAuthorizationPayload(BaseModel):
+    prior_attempt_id: str | None = None
+    action_request_id: str | None = None
+
+
+@app.post(
+    "/api/v1/projects/{project_id}/runs/{run_id}/explore-recovery-authorizations",
+    tags=["requests"],
+)
+def authorize_explore_recovery(
+    project_id: str,
+    run_id: str,
+    operator: AuthenticatedOperatorDep,
+    payload: ExploreRecoveryAuthorizationPayload,
+    uow: UowDep,
+) -> dict[str, Any]:
+    """Record a single authenticated decision to recover an unverifiable Explore."""
+    project = uow.projects.get_by_id(project_id)
+    if project is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Project not found")
+    run = uow.orchestration_runs.get_by_id(run_id)
+    if run is None or run.project_id != project_id or not run.is_active:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Active Run not found")
+    details = dict(run.stop_details or {})
+    attempt = details.get("explore_attempt")
+    if payload.prior_attempt_id is None:
+        if (
+            attempt is not None
+            or details.get("explore_checkpoint") is not None
+            or run.current_stage.value != "EXPLORING"
+        ):
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail="Legacy recovery is allowed only for an Explore Run without prior evidence",
+            )
+    elif not isinstance(attempt, dict) or attempt.get("attempt_id") != payload.prior_attempt_id:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Explore attempt does not match Run")
+    from minime.adapters.github import GitHubAdapter
+    from minime.services.agent_runner import CliAgentRunner
+    from minime.services.orchestration_coordinator import NativeOrchestrationCoordinator
+    from minime.services.worktree_manager import WorktreeManager
+
+    binding = uow.project_managed_repository_bindings.get_by_project_id(project_id)
+    if binding is None or not binding.managed_repository_root:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Verified managed repository binding is required")
+    coordinator = NativeOrchestrationCoordinator(
+        uow_factory=lambda: uow,
+        github_adapter=GitHubAdapter(),
+        worktree_manager=WorktreeManager(Path(binding.managed_repository_root), uow=uow),
+        agent_runner=CliAgentRunner(),
+    )
+    if payload.prior_attempt_id is None:
+        issue_number = details.get("issue_number")
+        provider = coordinator._configured_provider(project, "thinking")
+        if not isinstance(issue_number, int) or issue_number <= 0 or not provider:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail="Legacy Run lacks an authoritative issue or thinking provider binding",
+            )
+    else:
+        issue_number = int(attempt.get("issue_number") or 0)
+        provider = str(attempt.get("provider") or "")
+    action_request_id = payload.action_request_id or str(uuid4())
+    accepted = coordinator.register_explore_recovery_authorization(
+        project_id=project_id,
+        run_id=run_id,
+        authorization_reference=action_request_id,
+        actor_identity=operator.email,
+        source_interface="api",
+        issue_number=issue_number,
+        provider=provider,
+        prior_attempt_id=payload.prior_attempt_id,
+    )
+    if not accepted:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Explore recovery authorization was rejected")
+    return {"action_request_id": action_request_id, "run_id": run_id, "status": "ACCEPTED"}
 
 
 @app.post("/api/v1/projects/{project_id}/requests/ack", tags=["requests"])

@@ -6,7 +6,7 @@
 La historia 001–022, el backlog de recuperación MM-R01–MM-R10, los tickets N01–N05 y los dossiers respectivos describen trabajo anterior con componentes y políticas que el nuevo contrato puede sustituir. Permanece como evidencia/historia técnica. **No debe tratarse como una segunda ruta vigente de ejecución.** No borrar Issues/PR, worktrees o datos operativos mediante este ajuste documental.
 
 ## Contradicciones explícitas
-| Tema heredado | Dirección sustituida por contrato 1.2 | Fase responsable |
+| Tema heredado | Dirección sustituida por contrato 1.3 | Fase responsable |
 | --- | --- | --- |
 | Plan MM-R01–R10 y prioridad de stages técnicos | Seis fases originales F1–F6 preservadas, un Change por fase; fases futuras F7 y F8 añadidas por decisión posterior, disabled, sin Changes aún | F1–F8 |
 | Scheduler con scoring/aging, gates y backlog DB | Ticket remoto más antiguo elegible; un activo por proyecto | F1, F3, F6 |

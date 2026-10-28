@@ -586,14 +586,25 @@ def test_valid_classification_is_not_reused_after_artifact_hash_change():
 
 @pytest.mark.asyncio
 async def test_explore_checkpoint_survives_reentry_without_paid_repeat(mock_env):
-    coordinator, uow, _, _repo_dir = mock_env
+    coordinator, uow, _, repo_dir = mock_env
+    real_wf = coordinator.agent_runner.resolve_workflow(
+        worktree_path=repo_dir,
+        provider="antigravity",
+        operation="explore",
+        change_name="issue-101",
+    )
+    answer = "READY_TO_PROPOSE\nLa aclaración resolvió el gate HUMAN REQUIRED anterior."
     coordinator.agent_runner.run = AsyncMock(
         return_value=AgentExecutionResult(
             exit_code=0,
             timed_out=False,
-            stdout=["READY_TO_PROPOSE\nLa aclaración resolvió el gate HUMAN REQUIRED anterior."],
+            stdout=[answer],
             stderr=[],
             duration_ms=19,
+            final_response=answer,
+            final_response_status="COMPLETE",
+            final_response_source="stdout_text",
+            workflow=real_wf,
         )
     )
     coordinator._run_propose = AsyncMock(
@@ -612,6 +623,9 @@ async def test_explore_checkpoint_survives_reentry_without_paid_repeat(mock_env)
     assert run is not None
     checkpoint = run.stop_details["explore_checkpoint"]
     assert checkpoint["status"] == "READY_TO_PROPOSE"
+    assert checkpoint["checkpoint_version"] == 2
+    assert checkpoint["response_status"] == "COMPLETE"
+    assert checkpoint["workflow_sha256"] == real_wf.workflow_sha256
     assert checkpoint["run_id"] == first.run_id
     assert len(checkpoint["response_sha256"]) == 64
     assert checkpoint["duration_ms"] == 19
@@ -639,14 +653,25 @@ async def test_explore_checkpoint_survives_reentry_without_paid_repeat(mock_env)
 
 @pytest.mark.asyncio
 async def test_explore_checkpoint_rejects_different_clarification(mock_env):
-    coordinator, uow, _, _repo_dir = mock_env
+    coordinator, uow, _, repo_dir = mock_env
+    real_wf = coordinator.agent_runner.resolve_workflow(
+        worktree_path=repo_dir,
+        provider="antigravity",
+        operation="explore",
+        change_name="issue-101",
+    )
+    human_answer = "HUMAN REQUIRED\n- Debe decidir un alcance"
     coordinator.agent_runner.run = AsyncMock(
         return_value=AgentExecutionResult(
             exit_code=0,
             timed_out=False,
-            stdout=["HUMAN REQUIRED\n- Debe decidir un alcance"],
+            stdout=[human_answer],
             stderr=[],
             duration_ms=11,
+            final_response=human_answer,
+            final_response_status="COMPLETE",
+            final_response_source="stdout_text",
+            workflow=real_wf,
         )
     )
     first = await coordinator.execute_project_request(
@@ -686,3 +711,239 @@ async def test_explore_checkpoint_rejects_different_clarification(mock_env):
     )
     assert third.current_stage == OrchestrationStage.PROPOSING
     coordinator._run_explore.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_explore_checkpoint_rejects_forged_or_mismatched_workflow_sha(mock_env):
+    coordinator, uow, _, repo_dir = mock_env
+    real_wf = coordinator.agent_runner.resolve_workflow(
+        worktree_path=repo_dir,
+        provider="antigravity",
+        operation="explore",
+        change_name="issue-101",
+    )
+    answer = "READY_TO_PROPOSE\nLa aclaración resolvió el gate HUMAN REQUIRED anterior."
+    coordinator.agent_runner.run = AsyncMock(
+        return_value=AgentExecutionResult(
+            exit_code=0,
+            timed_out=False,
+            stdout=[answer],
+            stderr=[],
+            duration_ms=19,
+            final_response=answer,
+            final_response_status="COMPLETE",
+            final_response_source="stdout_text",
+            workflow=real_wf,
+        )
+    )
+    coordinator._run_propose = AsyncMock(
+        return_value={"status": "FAILED", "message": "Test checkpoint boundary"}
+    )
+    first = await coordinator.execute_project_request(
+        "proj-1",
+        operator_clarification="Autorizado backend mínimo de F5",
+        thinker_provider="antigravity",
+        implementer_provider="antigravity",
+        reviewer_provider="antigravity",
+    )
+    run = uow.orchestration_runs.get_by_id(first.run_id)
+    assert run is not None
+    # Forged 64-char SHA that does not match the worktree's actual workflow file
+    run.stop_details["explore_checkpoint"]["workflow_sha256"] = "f" * 64
+    run.current_stage = OrchestrationStage.EXPLORING
+    run.resumable_stage = OrchestrationStage.EXPLORING
+    run.stop_details["request_normalization"] = {"normalized_body": "We need redis caching layer"}
+    uow.orchestration_runs.save(run)
+
+    coordinator._run_explore = AsyncMock(
+        side_effect=AssertionError("Invalid checkpoint must not re-dispatch Explore")
+    )
+    rejected = await coordinator.execute_project_request(
+        "proj-1",
+        operator_clarification="Autorizado backend mínimo de F5",
+        thinker_provider="antigravity",
+        implementer_provider="antigravity",
+        reviewer_provider="antigravity",
+    )
+    assert rejected.status == "PAUSED"
+    assert rejected.run_id == first.run_id
+    assert rejected.current_stage == OrchestrationStage.EXPLORING
+    assert "recovery authorization" in rejected.message
+    coordinator._run_explore.assert_not_awaited()
+    assert coordinator.agent_runner.run.await_count == 1
+
+    # Even if the persisted SHA is restored, a change in the real native
+    # workflow invalidates the checkpoint and must not consume another turn.
+    run.stop_details["explore_checkpoint"]["workflow_sha256"] = real_wf.workflow_sha256
+    (repo_dir / ".agent" / "workflows" / "opsx-explore.md").write_text(
+        "# modified after the checkpoint"
+    )
+    uow.orchestration_runs.save(run)
+    mismatched_workflow = await coordinator.execute_project_request(
+        "proj-1",
+        operator_clarification="Autorizado backend mínimo de F5",
+        thinker_provider="antigravity",
+        implementer_provider="antigravity",
+        reviewer_provider="antigravity",
+    )
+    assert mismatched_workflow.status == "PAUSED"
+    coordinator._run_explore.assert_not_awaited()
+    assert coordinator.agent_runner.run.await_count == 1
+
+    # Explicit authenticated recovery is Run-bound, one-use and recorded
+    # BEFORE another provider invocation. No manual SQL or fabricated checkpoint.
+    modified_wf = coordinator.agent_runner.resolve_workflow(
+        worktree_path=repo_dir,
+        provider="antigravity",
+        operation="explore",
+        change_name="issue-101",
+    )
+    coordinator._run_explore = AsyncMock(
+        return_value={
+            "status": "READY_TO_PROPOSE",
+            "execution": AgentExecutionResult(
+                exit_code=0,
+                timed_out=False,
+                stdout=[answer],
+                stderr=[],
+                duration_ms=10,
+                final_response=answer,
+                final_response_status="COMPLETE",
+                final_response_source="stdout_text",
+                workflow=modified_wf,
+            ),
+        }
+    )
+    recovery_authorization_id = "explore-recovery-authorization-1"
+    prior_attempt_id = run.stop_details["explore_attempt"]["attempt_id"]
+    assert coordinator.register_explore_recovery_authorization(
+        project_id="proj-1",
+        run_id=first.run_id,
+        authorization_reference=recovery_authorization_id,
+        actor_identity="operator@example.com",
+        source_interface="test",
+        issue_number=101,
+        provider="antigravity",
+        prior_attempt_id=prior_attempt_id,
+    )
+    authorized = await coordinator.execute_project_request(
+        "proj-1",
+        operator_clarification="Autorizado backend mínimo de F5",
+        explore_recovery_authorization_id=recovery_authorization_id,
+        thinker_provider="antigravity",
+        implementer_provider="antigravity",
+        reviewer_provider="antigravity",
+    )
+    assert authorized.current_stage == OrchestrationStage.PROPOSING
+    coordinator._run_explore.assert_awaited_once()
+    consumed = uow.operator_actions.get_by_request_id(recovery_authorization_id)
+    assert consumed is not None
+    assert consumed.status.value == "COMPLETED"
+
+    # Replaying the same authorization may not spend another provider turn.
+    run.current_stage = OrchestrationStage.EXPLORING
+    run.resumable_stage = OrchestrationStage.EXPLORING
+    run.stop_details["explore_checkpoint"]["workflow_sha256"] = "f" * 64
+    uow.orchestration_runs.save(run)
+    repeated = await coordinator.execute_project_request(
+        "proj-1",
+        operator_clarification="Autorizado backend mínimo de F5",
+        explore_recovery_authorization_id=recovery_authorization_id,
+        thinker_provider="antigravity",
+        implementer_provider="antigravity",
+        reviewer_provider="antigravity",
+    )
+    assert repeated.status == "PAUSED"
+    assert "already been consumed" in repeated.message
+    coordinator._run_explore.assert_awaited_once()
+
+    # A historical Explore with no authentic checkpoint must also pause
+    # instead of silently repeating a paid agent call.
+    run.stop_details.pop("explore_checkpoint")
+    uow.orchestration_runs.save(run)
+    missing = await coordinator.execute_project_request(
+        "proj-1",
+        operator_clarification="Autorizado backend mínimo de F5",
+        thinker_provider="antigravity",
+        implementer_provider="antigravity",
+        reviewer_provider="antigravity",
+    )
+    assert missing.status == "PAUSED"
+    coordinator._run_explore.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_legacy_explore_run_without_attempt_requires_explicit_recovery(mock_env):
+    coordinator, uow, _, repo_dir = mock_env
+    change_name = "req-101-add-caching-layer"
+    uow.orchestration_runs.save(
+        OrchestrationRun(
+            project_id="proj-1",
+            change_name=change_name,
+            base_sha="abc1234",
+            current_stage=OrchestrationStage.EXPLORING,
+            resumable_stage=OrchestrationStage.EXPLORING,
+            stop_details={
+                "issue_number": 101,
+                "issue_title": "Add caching layer",
+                "request_normalization": {"normalized_body": "We need redis caching layer"},
+            },
+        )
+    )
+    real_wf = coordinator.agent_runner.resolve_workflow(
+        worktree_path=repo_dir,
+        provider="antigravity",
+        operation="explore",
+        change_name="issue-101",
+    )
+    answer = "READY_TO_PROPOSE\nLegacy Run recovery was explicitly authorized."
+    coordinator.agent_runner.run = AsyncMock(
+        return_value=AgentExecutionResult(
+            exit_code=0,
+            timed_out=False,
+            stdout=[answer],
+            stderr=[],
+            duration_ms=10,
+            final_response=answer,
+            final_response_status="COMPLETE",
+            final_response_source="stdout_text",
+            workflow=real_wf,
+        )
+    )
+    coordinator._run_propose = AsyncMock(
+        return_value={"status": "FAILED", "message": "Legacy recovery boundary"}
+    )
+
+    ordinary = await coordinator.execute_project_request(
+        "proj-1",
+        thinker_provider="antigravity",
+        implementer_provider="antigravity",
+        reviewer_provider="antigravity",
+    )
+    assert ordinary.status == "PAUSED"
+    assert coordinator.agent_runner.run.await_count == 0
+
+    assert coordinator.register_explore_recovery_authorization(
+        project_id="proj-1",
+        run_id=ordinary.run_id,
+        authorization_reference="legacy-explore-recovery-1",
+        actor_identity="operator@example.com",
+        source_interface="test",
+        issue_number=101,
+        provider="antigravity",
+        prior_attempt_id=None,
+    )
+    recovered = await coordinator.execute_project_request(
+        "proj-1",
+        explore_recovery_authorization_id="legacy-explore-recovery-1",
+        thinker_provider="antigravity",
+        implementer_provider="antigravity",
+        reviewer_provider="antigravity",
+    )
+    assert recovered.status == "PAUSED"
+    assert recovered.current_stage == OrchestrationStage.PROPOSING
+    assert coordinator.agent_runner.run.await_count == 1
+    run = uow.orchestration_runs.get_by_id(ordinary.run_id)
+    assert run is not None
+    assert run.stop_details["explore_attempt"]["attempt_id"]
+    assert "explore_checkpoint" in run.stop_details

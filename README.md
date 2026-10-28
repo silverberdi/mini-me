@@ -2,7 +2,7 @@
 
 mini me es una aplicación **personal y de instalación única** que coordina agentes usando los workflows **nativos de OpenSpec** para convertir tickets remotos en cambios implementados, verificados, fusionados y archivados. No programa ni recrea OpenSpec.
 
-**Contrato rector:** [docs/CONTRATO_RECTOR.md](docs/CONTRATO_RECTOR.md) (versión 1.2).
+**Contrato rector:** [docs/CONTRATO_RECTOR.md](docs/CONTRATO_RECTOR.md) (versión 1.3).
 **Backlog de reconstrucción:** [docs/BACKLOG.md](docs/BACKLOG.md).
 **Reconciliación del legado:** [docs/RECONCILIACION_LEGADO.md](docs/RECONCILIACION_LEGADO.md).
 **Contexto de OpenSpec:** [openspec/config.yaml](openspec/config.yaml).

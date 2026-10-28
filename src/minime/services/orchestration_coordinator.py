@@ -16,6 +16,8 @@ from uuid import uuid4
 from minime.adapters.github import GitHubAdapter
 from minime.adapters.openspec import OpenSpecAdapter
 from minime.domain.enums import (
+    ExternalActionStatus,
+    ExternalActionType,
     ExternalOutcome,
     OperatorActionStatus,
     OperatorActionType,
@@ -24,13 +26,20 @@ from minime.domain.enums import (
 )
 from minime.domain.interfaces import PersistenceUnitOfWork
 from minime.domain.models import (
+    DispatchAuthorization,
     ExternalActionResult,
     OperatorActionRecord,
+    OrchestrationExternalAction,
     OrchestrationRun,
+    RecoveryClaimContext,
     utc_now,
 )
 from minime.logging import get_logger, redact_secrets
-from minime.services.agent_runner import CliAgentRunner, NativeOpenSpecWorkflowUnavailable
+from minime.services.agent_runner import (
+    CliAgentRunner,
+    NativeOpenSpecWorkflowUnavailable,
+    ResolvedWorkflow,
+)
 from minime.services.pr_preparer_service import PrPreparationInput, PrPreparerService
 from minime.services.remote_request_intake import RemoteRequestIntakeService
 from minime.services.request_normalization import (
@@ -565,7 +574,7 @@ class NativeOrchestrationCoordinator:
         issue_number: int,
         provider: str,
         model_identity: str,
-        prior_attempt_id: str,
+        prior_attempt_id: str | None,
         artifact_hashes: dict[str, str],
         context_hashes: dict[str, str],
     ) -> bool:
@@ -600,6 +609,72 @@ class NativeOrchestrationCoordinator:
                 "prior_attempt_id": prior_attempt_id,
                 "artifact_hashes": artifact_hashes,
                 "context_hashes": context_hashes,
+            },
+        )
+        actions.save(action)
+        uow.commit()
+        return True
+
+    def register_explore_recovery_authorization(
+        self,
+        *,
+        project_id: str,
+        run_id: str,
+        authorization_reference: str,
+        actor_identity: str,
+        source_interface: str,
+        issue_number: int,
+        provider: str,
+        prior_attempt_id: str,
+    ) -> bool:
+        """Register one authenticated, Run-bound recovery decision before dispatch."""
+        uow = self.uow_factory()
+        run = (
+            uow.orchestration_runs.get_for_update(run_id)
+            if hasattr(uow.orchestration_runs, "get_for_update")
+            else uow.orchestration_runs.get_by_id(run_id)
+        )
+        if not run or run.project_id != project_id or not run.is_active:
+            return False
+        details = dict(run.stop_details or {})
+        attempt = details.get("explore_attempt")
+        legacy_missing_attempt = prior_attempt_id is None
+        if legacy_missing_attempt:
+            if (
+                attempt is not None
+                or details.get("explore_checkpoint") is not None
+                or run.current_stage != OrchestrationStage.EXPLORING
+            ):
+                return False
+        elif not isinstance(attempt, dict) or attempt.get("attempt_id") != prior_attempt_id:
+            return False
+        actions = getattr(uow, "operator_actions", None)
+        if actions is None or actions.get_by_request_id(authorization_reference) is not None:
+            return False
+        action = OperatorActionRecord(
+            action_request_id=authorization_reference,
+            project_id=project_id,
+            change_name=run.change_name,
+            run_id=run_id,
+            action_type=OperatorActionType.RETRY,
+            actor_identity=actor_identity,
+            source_interface=source_interface,
+            precondition_stage=OrchestrationStage.EXPLORING.value,
+            status=OperatorActionStatus.ACCEPTED,
+            summary="One-shot authenticated authorization for Explore recovery.",
+            parameters_json={
+                "single_use": True,
+                "stage": "explore",
+                "issue_number": issue_number,
+                "provider": provider,
+                "prior_attempt_id": prior_attempt_id,
+                "legacy_missing_attempt": legacy_missing_attempt,
+                "prior_context_sha256": (
+                    attempt.get("context_sha256") if isinstance(attempt, dict) else None
+                ),
+                "prior_workflow_sha256": (
+                    attempt.get("workflow_sha256") if isinstance(attempt, dict) else None
+                ),
             },
         )
         actions.save(action)
@@ -837,6 +912,7 @@ class NativeOrchestrationCoordinator:
         *,
         operator_ack: bool = False,
         operator_clarification: str | None = None,
+        explore_recovery_authorization_id: str | None = None,
         thinker_provider: str = "antigravity",
         implementer_provider: str = "codex",
         reviewer_provider: str = "antigravity",
@@ -1007,6 +1083,10 @@ class NativeOrchestrationCoordinator:
                 uow.orchestration_runs.save(active_run)
                 if hasattr(uow, "commit"):
                     uow.commit()
+        elif hasattr(uow.orchestration_runs, "get_for_update"):
+            locked_run = uow.orchestration_runs.get_for_update(active_run.run_id)
+            if locked_run is not None:
+                active_run = locked_run
 
         # Step 3: Git Workspace Isolation
         base_branch = "main"
@@ -1052,6 +1132,7 @@ class NativeOrchestrationCoordinator:
             OrchestrationStage.PREPARING_EXECUTION,
             OrchestrationStage.EXPLORING,
         ):
+            stage_before_explore = active_run.current_stage
             self._update_stage(uow, active_run, OrchestrationStage.EXPLORING)
             # A validated Explore disposition is immutable for the same
             # Run/Issue/clarification context. Re-entry must not spend another
@@ -1068,47 +1149,222 @@ class NativeOrchestrationCoordinator:
             explore_context_sha = hashlib.sha256(
                 json.dumps(explore_context, ensure_ascii=False, sort_keys=True).encode("utf-8")
             ).hexdigest()
+            # Preserve the immutable Request/context identity separately so a
+            # new human clarification can authorize another Explore only after
+            # a genuine, otherwise verified HUMAN_REQUIRED checkpoint.
+            explore_base_context = dict(explore_context)
+            explore_base_context.pop("operator_clarification", None)
+            explore_base_context_sha = hashlib.sha256(
+                json.dumps(
+                    explore_base_context, ensure_ascii=False, sort_keys=True
+                ).encode("utf-8")
+            ).hexdigest()
+            expected_explore_wf: ResolvedWorkflow | None = None
+            try:
+                expected_explore_wf = self.agent_runner.resolve_workflow(
+                    worktree_path=worktree_path,
+                    provider=thinker_provider,
+                    operation="explore",
+                    change_name=f"issue-{issue_number}",
+                )
+            except Exception:
+                expected_explore_wf = None
+
             stored_explore = (active_run.stop_details or {}).get("explore_checkpoint")
-            if (
-                isinstance(stored_explore, dict)
-                and stored_explore.get("context_sha256") == explore_context_sha
+            stored_attempt = (active_run.stop_details or {}).get("explore_attempt")
+            checkpoint_verified = (
+                expected_explore_wf is not None
+                and isinstance(stored_explore, dict)
                 and stored_explore.get("run_id") == active_run.run_id
                 and stored_explore.get("provider") == thinker_provider
                 and stored_explore.get("status") in {"HUMAN_REQUIRED", "READY_TO_PROPOSE"}
+                and stored_explore.get("checkpoint_version") == 2
+                and stored_explore.get("response_status") == "COMPLETE"
+                and stored_explore.get("response_source")
+                in {"codex_ndjson", "structured_file", "stdout_text"}
                 and isinstance(stored_explore.get("response_sha256"), str)
                 and len(stored_explore["response_sha256"]) == 64
-            ):
+                and stored_explore.get("workflow_sha256") == expected_explore_wf.workflow_sha256
+                and stored_explore.get("base_context_sha256") == explore_base_context_sha
+            )
+            same_context = (
+                checkpoint_verified
+                and stored_explore.get("context_sha256") == explore_context_sha
+            )
+            authorized_clarification = (
+                checkpoint_verified
+                and not same_context
+                and stored_explore.get("status") == "HUMAN_REQUIRED"
+                and isinstance(operator_clarification, str)
+                and bool(operator_clarification.strip())
+            )
+            # A previously dispatched Explore without a checkpoint is also
+            # ambiguous. Never turn an ordinary resumed API call into another
+            # paid inference. Recovery is explicit, Run-bound and one-use.
+            recovery_needed = (
+                (stored_explore is not None and not (
+                    same_context or authorized_clarification
+                ))
+                or (
+                    stored_explore is None
+                    and stage_before_explore == OrchestrationStage.EXPLORING
+                )
+            )
+            if recovery_needed:
+                actions = getattr(uow, "operator_actions", None)
+                prior_attempt_id = (
+                    stored_attempt.get("attempt_id")
+                    if isinstance(stored_attempt, dict)
+                    else None
+                )
+                attempt_payload = stored_attempt if isinstance(stored_attempt, dict) else {}
+                legacy_missing_attempt = stored_attempt is None
+                if actions is None or not explore_recovery_authorization_id:
+                    return OrchestrationCoordinationResult(
+                        status="PAUSED",
+                        run_id=active_run.run_id,
+                        current_stage=OrchestrationStage.EXPLORING,
+                        message=(
+                            "Explore has incomplete or unverified prior evidence; "
+                            "an explicit, Run-bound recovery authorization is required."
+                        ),
+                    )
+                expected_parameters = {
+                    "single_use": True,
+                    "stage": "explore",
+                    "issue_number": issue_number,
+                    "provider": thinker_provider,
+                    "prior_attempt_id": prior_attempt_id,
+                    "legacy_missing_attempt": legacy_missing_attempt,
+                    "prior_context_sha256": attempt_payload.get("context_sha256"),
+                    "prior_workflow_sha256": attempt_payload.get("workflow_sha256"),
+                }
+                existing_authorization = actions.get_by_request_id(
+                    explore_recovery_authorization_id
+                )
+                consumed = actions.consume_single_use(
+                    explore_recovery_authorization_id,
+                    run_id=active_run.run_id,
+                    action_type=OperatorActionType.RETRY,
+                    expected_parameters=expected_parameters,
+                )
+                if consumed is None:
+                    message = (
+                        "Explore recovery authorization has already been consumed."
+                        if existing_authorization is not None
+                        and existing_authorization.status != OperatorActionStatus.ACCEPTED
+                        else (
+                            "Explore recovery authorization is missing or mismatched."
+                        )
+                    )
+                    return OrchestrationCoordinationResult(
+                        status="PAUSED",
+                        run_id=active_run.run_id,
+                        current_stage=OrchestrationStage.EXPLORING,
+                        message=message,
+                    )
+            if same_context:
                 explore_result = {
                     "status": stored_explore["status"],
                     "human_payload": stored_explore.get("human_payload"),
                 }
             else:
-                explore_result = await self._run_explore(
-                    worktree_path=worktree_path,
-                    provider=thinker_provider,
+                dispatch = self._prepare_explore_dispatch(
+                    uow=uow,
+                    run=active_run,
                     issue_number=issue_number,
-                    issue_title=issue_title,
-                    issue_body=issue_body,
-                    operator_clarification=operator_clarification,
-                    project_id=project_id,
+                    provider=thinker_provider,
+                    context_sha=explore_context_sha,
+                    workflow_sha=(
+                        expected_explore_wf.workflow_sha256
+                        if expected_explore_wf is not None
+                        else None
+                    ),
+                    is_recovery=recovery_needed,
                 )
+                if dispatch is None:
+                    return OrchestrationCoordinationResult(
+                        status="PAUSED",
+                        run_id=active_run.run_id,
+                        current_stage=OrchestrationStage.EXPLORING,
+                        message="Explore dispatch is already owned or its durable intent is ambiguous.",
+                    )
+                attempt_id, action_key, claim_context = dispatch
+                try:
+                    explore_result = await self._run_explore(
+                        worktree_path=worktree_path,
+                        provider=thinker_provider,
+                        issue_number=issue_number,
+                        issue_title=issue_title,
+                        issue_body=issue_body,
+                        operator_clarification=operator_clarification,
+                        project_id=project_id,
+                    )
+                except asyncio.CancelledError:
+                    self._finish_explore_dispatch(
+                        uow,
+                        active_run,
+                        attempt_id,
+                        action_key,
+                        claim_context,
+                        "AMBIGUOUS",
+                        None,
+                    )
+                    raise
+                except Exception as exc:
+                    self._finish_explore_dispatch(
+                        uow,
+                        active_run,
+                        attempt_id,
+                        action_key,
+                        claim_context,
+                        "AMBIGUOUS",
+                        str(exc),
+                    )
+                    raise
+                else:
+                    evidence = explore_result.get("execution")
+                    terminal = (
+                        "COMPLETE"
+                        if evidence is not None and self._execution_is_successful(evidence)
+                        else "FAILED"
+                    )
+                    self._finish_explore_dispatch(
+                        uow,
+                        active_run,
+                        attempt_id,
+                        action_key,
+                        claim_context,
+                        terminal,
+                        None,
+                    )
                 evidence = explore_result.get("execution")
                 if (
                     explore_result.get("status") in {"HUMAN_REQUIRED", "READY_TO_PROPOSE"}
                     and evidence is not None
                     and self._execution_is_successful(evidence)
-                    and not getattr(evidence, "output_truncated", False)
+                    and getattr(evidence, "final_response_status", None) == "COMPLETE"
                     and getattr(evidence, "response_output", "").strip()
+                    and isinstance(
+                        getattr(getattr(evidence, "workflow", None), "workflow_sha256", None),
+                        str,
+                    )
                 ):
                     details = dict(active_run.stop_details or {})
                     details["explore_checkpoint"] = {
+                        "checkpoint_version": 2,
                         "run_id": active_run.run_id,
                         "provider": thinker_provider,
+                        "response_status": evidence.final_response_status,
+                        "response_source": evidence.final_response_source,
+                        "workflow_sha256": evidence.workflow.workflow_sha256,
                         "status": explore_result["status"],
                         "context_sha256": explore_context_sha,
+                        "base_context_sha256": explore_base_context_sha,
                         "response_sha256": hashlib.sha256(
                             evidence.response_output.encode("utf-8")
                         ).hexdigest(),
+                        "attempt_id": attempt_id,
                         "human_payload": explore_result.get("human_payload"),
                         "duration_ms": getattr(evidence, "duration_ms", None),
                         "recorded_at": utc_now().isoformat(),
@@ -1914,13 +2170,9 @@ class NativeOrchestrationCoordinator:
             return False
         if getattr(result, "environment_error", False):
             return False
-        structured = getattr(result, "structured_output", None)
-        evidence = (
-            getattr(result, "response_output", "")
-            if structured is not None
-            else getattr(result, "full_output", "")
-        )
-        return bool(evidence.strip())
+        if getattr(result, "final_response_status", None) not in (None, "COMPLETE"):
+            return False
+        return bool(getattr(result, "response_output", "").strip())
 
     @staticmethod
     def _proposal_artifacts_present(worktree_path: Path, change_name: str) -> bool:
@@ -1946,6 +2198,127 @@ class NativeOrchestrationCoordinator:
             str(path.relative_to(worktree_path)): hashlib.sha256(path.read_bytes()).hexdigest()
             for path in sorted(paths)
         }
+
+    def _prepare_explore_dispatch(
+        self,
+        *,
+        uow: Any,
+        run: OrchestrationRun,
+        issue_number: int,
+        provider: str,
+        context_sha: str,
+        workflow_sha: str | None,
+        is_recovery: bool,
+    ) -> tuple[str, str, RecoveryClaimContext] | None:
+        """Persist an Explore attempt and fenced dispatch intent before provider I/O."""
+        actions = getattr(uow, "orchestration_external_actions", None)
+        claims = getattr(uow, "claims", None)
+        if actions is None or claims is None:
+            return None
+
+        attempt_id = str(uuid4())
+        action_key = f"explore:{run.run_id}:{attempt_id}"
+        details = dict(run.stop_details or {})
+        details["explore_attempt"] = {
+            "attempt_id": attempt_id,
+            "status": "IN_PROGRESS",
+            "provider": provider,
+            "issue_number": issue_number,
+            "context_sha256": context_sha,
+            "workflow_sha256": workflow_sha,
+            "action_key": action_key,
+            "recovery": is_recovery,
+            "recorded_at": utc_now().isoformat(),
+        }
+        owner_instance_id = f"explore:{uuid4()}"
+        claim = claims.acquire_or_reacquire(
+            claim_key=f"run:{run.run_id}",
+            owner_instance_id=owner_instance_id,
+            lease_seconds=3600,
+        )
+        if claim is None:
+            return None
+        claim_context = RecoveryClaimContext(
+            claim_key=claim.claim_key,
+            owner_instance_id=claim.owner_instance_id,
+            fence_token=claim.fence_token,
+            lease_expires_at=claim.lease_expires_at,
+        )
+        try:
+            run.stop_details = details
+            uow.orchestration_runs.save(run)
+            actions.reserve(
+                OrchestrationExternalAction(
+                    run_id=run.run_id,
+                    action_key=action_key,
+                    action_type=ExternalActionType.OPENSPEC_EXPLORE_DISPATCH,
+                    target_identity=f"{run.project_id}:{issue_number}:{provider}",
+                    request_fingerprint=context_sha,
+                    generation=run.current_generation,
+                    status=ExternalActionStatus.RESERVED,
+                )
+            )
+            uow.flush()
+            claims.commit_fenced_dispatch_intent(
+                claim_key=claim_context.claim_key,
+                owner_instance_id=claim_context.owner_instance_id,
+                fence_token=claim_context.fence_token,
+                action_key=action_key,
+                authorization=DispatchAuthorization(
+                    action_key=action_key,
+                    is_authorized=True,
+                    authorization_reason=(
+                        "Explicit operator authorization for Explore recovery."
+                        if is_recovery
+                        else "Original Explore dispatch for this Run."
+                    ),
+                    is_retry=is_recovery,
+                ),
+            )
+        except Exception as exc:
+            logger.warning("Explore dispatch preparation failed: %s", exc)
+            uow.rollback()
+            claims.release_claim(claim_context)
+            uow.commit()
+            return None
+        return attempt_id, action_key, claim_context
+
+    def _finish_explore_dispatch(
+        self,
+        uow: Any,
+        run: OrchestrationRun,
+        attempt_id: str,
+        action_key: str,
+        claim_context: RecoveryClaimContext,
+        attempt_status: str,
+        error_message: str | None,
+    ) -> None:
+        """Close only an observed provider result; leave crashes as EXECUTING/IN_PROGRESS."""
+        details = dict(run.stop_details or {})
+        attempt = dict(details.get("explore_attempt") or {})
+        if attempt.get("attempt_id") == attempt_id:
+            attempt["status"] = attempt_status
+            if error_message:
+                attempt["error"] = redact_secrets(error_message)[:1000]
+            attempt["finished_at"] = utc_now().isoformat()
+            details["explore_attempt"] = attempt
+            run.stop_details = details
+            uow.orchestration_runs.save(run)
+        terminal_status = {
+            "COMPLETE": ExternalActionStatus.COMPLETED,
+            "FAILED": ExternalActionStatus.FAILED,
+            "AMBIGUOUS": ExternalActionStatus.AMBIGUOUS,
+        }.get(attempt_status, ExternalActionStatus.UNKNOWN)
+        try:
+            uow.orchestration_external_actions.update_status(
+                action_key=action_key,
+                status=terminal_status,
+                error_message=error_message,
+            )
+            uow.commit()
+        finally:
+            uow.claims.release_claim(claim_context)
+            uow.commit()
 
     @staticmethod
     def _configured_provider(project: Any, role: str) -> str | None:
@@ -2342,10 +2715,10 @@ class NativeOrchestrationCoordinator:
             workflow=wf,
         )
 
-        if not self._execution_is_successful(res) or res.output_truncated:
+        if not self._execution_is_successful(res):
             return {
                 "status": "FAILED",
-                "message": "Explore execution failed or its response was truncated.",
+                "message": "Explore failed or has no complete authoritative final response.",
             }
 
         # Interpret ONLY explicit, standalone dispositions from the provider's
@@ -2438,7 +2811,7 @@ class NativeOrchestrationCoordinator:
         """
         pattern = re.compile(
             r"^(?:#{1,6}\s+)?(?:\*\*)?"
-            r"(READY_TO_PROPOSE|HUMAN(?:_| )REQUIRED)"
+            r"(READY(?:_| )TO(?:_| )PROPOSE|HUMAN(?:_| )REQUIRED)"
             r"(?:\*\*)?(?:\s*[:—–-]\s*.+)?\s*$"
         )
         matches: list[tuple[str, int]] = []
@@ -2493,6 +2866,11 @@ class NativeOrchestrationCoordinator:
             return {
                 "status": "FAILED",
                 "message": "Propose agent execution was not successful or evidenced.",
+            }
+        if not self._proposal_artifacts_present(worktree_path, change_name):
+            return {
+                "status": "FAILED",
+                "message": "Native Propose completed without the complete canonical artifacts.",
             }
         return {"status": "READY_TO_VALIDATE", "workflow": wf, "execution": res}
 
@@ -2559,7 +2937,7 @@ class NativeOrchestrationCoordinator:
         if not self._execution_is_successful(res):
             return False
         try:
-            return parse_review_verdict(res.full_output).verdict.value == "READY_TO_MERGE"
+            return parse_review_verdict(res.response_output).verdict.value == "READY_TO_MERGE"
         except MalformedReviewOutputError:
             return False
 
@@ -2591,7 +2969,14 @@ class NativeOrchestrationCoordinator:
             provider=provider,
             workflow=wf,
         )
-        return self._execution_is_successful(result)
+        if not self._execution_is_successful(result):
+            return False
+        tasks_path = worktree_path / "openspec" / "changes" / change_name / "tasks.md"
+        if not tasks_path.is_file():
+            return False
+        tasks_text = tasks_path.read_text(encoding="utf-8", errors="replace")
+        # A successful CLI exit cannot replace the native Apply task postcondition.
+        return not bool(re.search(r"(?m)^\s*-\s*\[\s\]\s+", tasks_text))
 
     async def _run_automated_tests(self, worktree_path: Path) -> tuple[bool, str]:
         """Execute project automated tests and verify exit code 0."""
@@ -2721,7 +3106,9 @@ class NativeOrchestrationCoordinator:
             f"You are the independent reviewer agent (read-only). Perform code review on OpenSpec change '{change_name}'.\n\n"
             f"Candidate Diff:\n{diff[:4000]}\n\n"
             f"Evaluate implementation correctness, security, maintainability, and absence of overengineering.\n"
-            f"Emit APPROVED if code meets requirements, or CHANGES REQUESTED with actionable feedback."
+            "Return exactly one JSON review object with verdict READY_TO_MERGE and empty "
+            "findings only on verified success, otherwise CHANGES_REQUIRED with "
+            "concrete findings and required corrections. Do not use APPROVED prose."
         )
         res = await self.agent_runner.run(
             worktree_path=worktree_path,
@@ -2733,7 +3120,7 @@ class NativeOrchestrationCoordinator:
         if not self._execution_is_successful(res):
             return False
         try:
-            return parse_review_verdict(res.full_output).verdict.value == "READY_TO_MERGE"
+            return parse_review_verdict(res.response_output).verdict.value == "READY_TO_MERGE"
         except MalformedReviewOutputError:
             return False
 
@@ -2786,6 +3173,27 @@ class NativeOrchestrationCoordinator:
             workflow=archive_wf,
         )
         if not self._execution_is_successful(archive_result):
+            return False
+        archive_root = doc_path / "openspec" / "changes" / "archive"
+        archived = (
+            [
+                p
+                for p in archive_root.iterdir()
+                if p.is_dir() and (p.name == change_name or p.name.endswith(f"-{change_name}"))
+            ]
+            if archive_root.is_dir()
+            else []
+        )
+        # A success narrative cannot substitute for a real OpenSpec archive.
+        if len(archived) != 1:
+            return False
+        archived_change = archived[0]
+        if not (
+            (archived_change / "proposal.md").is_file()
+            and (archived_change / "design.md").is_file()
+            and (archived_change / "tasks.md").is_file()
+            and (archived_change / "specs").is_dir()
+        ):
             return False
 
         # Check git status in doc worktree; if changes are uncommitted, stage and commit them
