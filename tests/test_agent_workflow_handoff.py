@@ -91,6 +91,21 @@ def test_handoff_cannot_replace_agent_process_evidence():
             workflow_handoff_required=True,
         )
     )
+    for flag in ("output_truncated", "structured_output_too_large", "structured_output_missing"):
+        partial = AgentExecutionResult(
+            exit_code=0,
+            timed_out=False,
+            stdout=["diagnostic"],
+            stderr=[],
+            duration_ms=1,
+            final_response=successful.final_response,
+            final_response_status="COMPLETE",
+            workflow_handoff_required=True,
+            workflow_handoff=successful.workflow_handoff,
+            **{flag: True},
+        )
+        assert not NativeOrchestrationCoordinator._execution_is_successful(partial)
+
 
 
 def test_codex_terminal_handoff_is_not_read_from_tool_diagnostics():
@@ -109,7 +124,7 @@ def test_codex_terminal_handoff_is_not_read_from_tool_diagnostics():
         {"type": "turn.completed"},
     ]
     parsed, status, source = CliAgentRunner._extract_final_response(
-        ("\\n".join(json.dumps(event) for event in events)).encode(), "codex"
+        ("\n".join(json.dumps(event) for event in events)).encode(), "codex"
     )
     assert status == "COMPLETE"
     assert source == "codex_ndjson"
