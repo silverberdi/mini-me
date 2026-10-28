@@ -91,7 +91,7 @@ def test_handoff_cannot_replace_agent_process_evidence():
             workflow_handoff_required=True,
         )
     )
-    for flag in ("output_truncated", "structured_output_too_large", "structured_output_missing"):
+    for flag in ("structured_output_too_large", "structured_output_missing"):
         partial = AgentExecutionResult(
             exit_code=0,
             timed_out=False,
@@ -105,6 +105,21 @@ def test_handoff_cannot_replace_agent_process_evidence():
             **{flag: True},
         )
         assert not NativeOrchestrationCoordinator._execution_is_successful(partial)
+
+    # A complete final message stays authoritative when only display logs are abbreviated.
+    verbose_diagnostics = AgentExecutionResult(
+        exit_code=0,
+        timed_out=False,
+        stdout=["display log abbreviated"],
+        stderr=[],
+        duration_ms=1,
+        final_response=successful.final_response,
+        final_response_status="COMPLETE",
+        workflow_handoff_required=True,
+        workflow_handoff=successful.workflow_handoff,
+        output_truncated=True,
+    )
+    assert NativeOrchestrationCoordinator._execution_is_successful(verbose_diagnostics)
 
 
 
