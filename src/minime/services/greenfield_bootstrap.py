@@ -44,7 +44,9 @@ from minime.services.project_service import ProjectService
 
 
 class ThinkingAgent(Protocol):
-    async def run(self, worktree: Path, instruction: str, timeout_seconds: int) -> ImplementerResult: ...
+    async def run(
+        self, worktree: Path, instruction: str, timeout_seconds: float | None = None
+    ) -> ImplementerResult: ...
 
 
 class GreenfieldBootstrapError(RuntimeError):
@@ -126,7 +128,7 @@ class GreenfieldBootstrapCoordinator:
         archive: bytes,
         *,
         operator_email: str = "operator",
-        timeout_seconds: int = 1_800,
+        timeout_seconds: float | None = None,
     ) -> dict[str, Any]:
         """Perform a resumable Greenfield bootstrap and return sanitized evidence."""
         if configuration.project_type is not ProjectType.GREENFIELD:
@@ -184,7 +186,7 @@ class GreenfieldBootstrapCoordinator:
         archive: bytes,
         *,
         authorization: dict[str, Any] | None = None,
-        timeout_seconds: int = 1_800,
+        timeout_seconds: float | None = None,
     ) -> dict[str, Any]:
         """Publish one incremental context PR without changing approved context."""
         project = self.uow.projects.get_by_id(project_id)
@@ -315,7 +317,7 @@ class GreenfieldBootstrapCoordinator:
         source_files: tuple[str, ...],
         *,
         operator_email: str,
-        timeout_seconds: int,
+        timeout_seconds: float | None,
     ) -> dict[str, Any]:
         profile = self._thinking_profile(project)
         self._validate_thinking_profile(profile)
@@ -761,7 +763,7 @@ class GreenfieldBootstrapCoordinator:
         *,
         authorization: dict[str, Any] | None = None,
         operator_email: str = "operator",
-        timeout_seconds: int = 1_800,
+        timeout_seconds: float | None = None,
     ) -> dict[str, Any]:
         """Resume a reconciled failed attempt only after explicit authorization."""
         project = self.uow.projects.get_by_id(project_id)
@@ -1140,7 +1142,7 @@ class GreenfieldBootstrapCoordinator:
         }
 
     def _run_thinking_agent(
-        self, project: Project, worktree: Path, profile: Any, timeout_seconds: int
+        self, project: Project, worktree: Path, profile: Any, timeout_seconds: float | None
     ) -> ImplementerResult:
         attempt: dict[str, Any] = {
             "status": "EXECUTION_UNKNOWN",

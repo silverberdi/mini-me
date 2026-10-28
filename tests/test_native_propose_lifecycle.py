@@ -24,6 +24,7 @@ def mock_env(tmp_path: Path):
     for op in [
         "opsx-explore.md",
         "opsx-propose.md",
+        "opsx-continue.md",
         "opsx-apply.md",
         "opsx-verify.md",
         "opsx-sync.md",
@@ -152,7 +153,6 @@ async def test_propose_lifecycle_human_required_ambiguity(mock_env):
             duration_ms=1,
         )
     )
-
     from minime.domain.enums import ExternalOutcome, ExternalReasonCode, RetrySafety
     from minime.domain.models import ExternalActionResult
 
@@ -206,12 +206,88 @@ async def test_complexity_evaluation_uses_structured_agent_result(mock_env):
         )
     )
     result = await coordinator._assess_complexity(
-        _, "antigravity", "Small typo", "breaking migration words", "proj-1"
+        mock_env[3], "antigravity", "Small typo", "breaking migration words", "proj-1"
     )
     assert result.status == "VALID"
     assert result.complexity == "high"
 
 
+@pytest.mark.asyncio
+async def test_partial_propose_requires_one_use_authorization_and_continues_natively(mock_env):
+    coordinator, uow, _, repo_dir = mock_env
+    change_name = "req-101-add-caching-layer"
+    change_dir = repo_dir / "openspec" / "changes" / change_name
+    (change_dir / "specs" / "feature").mkdir(parents=True)
+    (change_dir / "proposal.md").write_text("# Existing proposal")
+    (change_dir / "specs" / "feature" / "spec.md").write_text("# Existing spec")
+    run = OrchestrationRun(
+        project_id="proj-1",
+        change_name=change_name,
+        base_sha="abc1234",
+        current_stage=OrchestrationStage.PROPOSING,
+        resumable_stage=OrchestrationStage.PROPOSING,
+        stop_details={
+            "issue_number": 101,
+            "issue_title": "Add caching layer",
+            "request_normalization": {"normalized_body": "We need redis caching layer"},
+        },
+    )
+    uow.orchestration_runs.save(run)
+
+    async def continue_agent(**kwargs):
+        (change_dir / "design.md").write_text("# Design")
+        (change_dir / "tasks.md").write_text("# Tasks")
+        return AgentExecutionResult(
+            exit_code=0,
+            timed_out=False,
+            stdout=["Done"],
+            stderr=[],
+            duration_ms=10,
+        )
+
+    coordinator.agent_runner.run = AsyncMock(side_effect=continue_agent)
+    coordinator.max_correction_attempts = 0
+    coordinator.openspec_adapter.validate_change_strict = MagicMock(
+        return_value={"status": "FAIL", "stderr": "test stops before classification"}
+    )
+
+    blocked = await coordinator.execute_project_request(
+        "proj-1",
+        thinker_provider="antigravity",
+        implementer_provider="antigravity",
+        reviewer_provider="antigravity",
+    )
+    assert blocked.status == "PAUSED"
+    assert "authorization" in blocked.message
+    coordinator.agent_runner.run.assert_not_awaited()
+
+    authorization_id = "propose-recovery-1"
+    assert coordinator.register_propose_recovery_authorization(
+        project_id="proj-1",
+        run_id=run.run_id,
+        authorization_reference=authorization_id,
+        actor_identity="operator@example.com",
+        source_interface="test",
+        issue_number=101,
+        provider="antigravity",
+        prior_attempt_id=None,
+    )
+    resumed = await coordinator.execute_project_request(
+        "proj-1",
+        propose_recovery_authorization_id=authorization_id,
+        thinker_provider="antigravity",
+        implementer_provider="antigravity",
+        reviewer_provider="antigravity",
+    )
+    assert resumed.status == "PAUSED"
+    assert coordinator.agent_runner.run.await_count == 1
+    prompt = coordinator.agent_runner.run.await_args.kwargs["prompt_context"]
+    assert "OpenSpec Continue" in prompt
+    assert "/opsx-continue req-101-add-caching-layer" in prompt
+    persisted = uow.orchestration_runs.get_by_id(run.run_id)
+    assert persisted is not None
+    assert persisted.stop_details["propose_checkpoint"]["status"] == "READY_TO_VALIDATE"
+    assert uow.operator_actions.get_by_request_id(authorization_id).status.value == "COMPLETED"
 @pytest.mark.asyncio
 async def test_resume_validating_reuses_existing_proposal_without_propose(mock_env):
     coordinator, uow, _, repo_dir = mock_env

@@ -576,6 +576,90 @@ def test_explore_dispatch_claim_serializes_two_postgres_workers(
         )
         uow.commit()
 
+
+def test_propose_dispatch_claim_serializes_two_postgres_workers(
+    pg_session_factory: sessionmaker[Session],
+):
+    """A partial Propose continuation cannot create two provider dispatches."""
+    suffix = str(time.time_ns())
+    project_id = f"propose-dispatch-{suffix}"
+    run_id = f"propose-dispatch-run-{suffix}"
+    with pg_session_factory() as session:
+        uow = PostgresPersistenceUnitOfWork(session)
+        uow.projects.save(
+            Project(
+                project_id=project_id,
+                display_name="Propose dispatch contention",
+                repository="o/r",
+                base_branch="main",
+            )
+        )
+        uow.orchestration_runs.save(
+            OrchestrationRun(
+                run_id=run_id,
+                project_id=project_id,
+                change_name="propose-dispatch-change",
+                base_sha="main",
+                current_stage=OrchestrationStage.PROPOSING,
+                resumable_stage=OrchestrationStage.PROPOSING,
+            )
+        )
+        uow.commit()
+
+    barrier = threading.Barrier(2)
+    results: list[tuple[str, str, RecoveryClaimContext] | None] = []
+    errors: list[str] = []
+
+    def prepare() -> None:
+        with pg_session_factory() as session:
+            uow = PostgresPersistenceUnitOfWork(session)
+            coordinator = NativeOrchestrationCoordinator(
+                uow_factory=lambda: uow,
+                github_adapter=MagicMock(),
+                worktree_manager=MagicMock(),
+                agent_runner=MagicMock(),
+            )
+            barrier.wait()
+            try:
+                run = uow.orchestration_runs.get_by_id(run_id)
+                assert run is not None
+                results.append(
+                    coordinator._prepare_propose_dispatch(
+                        uow=uow,
+                        run=run,
+                        issue_number=173,
+                        provider="codex",
+                        change_name="propose-dispatch-change",
+                        is_recovery=True,
+                    )
+                )
+            except Exception as exc:
+                errors.append(repr(exc))
+
+    threads = [threading.Thread(target=prepare) for _ in range(2)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(timeout=10)
+
+    admitted = [result for result in results if result is not None]
+    assert not errors, errors
+    assert len(admitted) == 1
+    attempt_id, action_key, context = admitted[0]
+    assert attempt_id
+    assert action_key.startswith(f"propose:{run_id}:")
+
+    with pg_session_factory() as session:
+        uow = PostgresPersistenceUnitOfWork(session)
+        action = uow.orchestration_external_actions.get_by_action_key(action_key)
+        assert action is not None
+        assert action.status.value == "EXECUTING"
+        attempts = uow.external_action_attempts.list_by_action_key(action_key)
+        assert len(attempts) == 1
+        assert attempts[0].dispatch_intent_key.startswith(action_key)
+        assert uow.claims.release_claim(context) is True
+        uow.commit()
+
     barrier = threading.Barrier(2)
     results: list[tuple[str, str, RecoveryClaimContext] | None] = []
     errors: list[str] = []

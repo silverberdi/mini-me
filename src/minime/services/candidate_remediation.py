@@ -370,7 +370,7 @@ class CandidateRemediationService:
         )
         result = None
         if remediation.status == RemediationStatus.IMPLEMENTER_RUNNING:
-            result = await runner.run(workspace.path, prompt, 3600)
+            result = await runner.run(workspace.path, prompt, None)
         if result is not None and result.exit_code != 0:
             remediation.status = RemediationStatus.NEEDS_HUMAN
             remediation.failure_code = RemediationFailureCode.PROVIDER_UNAVAILABLE

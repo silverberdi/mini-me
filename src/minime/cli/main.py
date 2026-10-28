@@ -451,6 +451,11 @@ def request_run_cmd(
         "--explore-recovery-authorization-id",
         help="Authenticated one-use OperatorActionRecord reference for Explore recovery",
     ),
+    propose_recovery_authorization_id: str | None = typer.Option(
+        None,
+        "--propose-recovery-authorization-id",
+        help="Authenticated one-use OperatorActionRecord reference for Propose recovery",
+    ),
     json_output: bool = typer.Option(False, "--json", help="Emit output as JSON"),
 ) -> None:
     """Run or resume the next eligible OpenSpec request for a project."""
@@ -503,6 +508,7 @@ def request_run_cmd(
                     project_id=project_id,
                     operator_ack=operator_ack,
                     explore_recovery_authorization_id=explore_recovery_authorization_id,
+                    propose_recovery_authorization_id=propose_recovery_authorization_id,
                     thinker_provider=agent_runner.provider_for_role("thinker"),
                     implementer_provider=agent_runner.provider_for_role("implementer"),
                     reviewer_provider=agent_runner.provider_for_role("reviewer"),

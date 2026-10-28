@@ -681,6 +681,68 @@ class NativeOrchestrationCoordinator:
         uow.commit()
         return True
 
+    def register_propose_recovery_authorization(
+        self,
+        *,
+        project_id: str,
+        run_id: str,
+        authorization_reference: str,
+        actor_identity: str,
+        source_interface: str,
+        issue_number: int,
+        provider: str,
+        prior_attempt_id: str | None,
+    ) -> bool:
+        """Register one Run-bound authorization for an incomplete Propose.
+
+        A partial change directory is evidence of work, not evidence of a
+        successful Propose.  The authorization is therefore consumed only by
+        the continuation path and never turns a first invocation into a retry.
+        """
+        uow = self.uow_factory()
+        run = (
+            uow.orchestration_runs.get_for_update(run_id)
+            if hasattr(uow.orchestration_runs, "get_for_update")
+            else uow.orchestration_runs.get_by_id(run_id)
+        )
+        if not run or run.project_id != project_id or not run.is_active:
+            return False
+        details = dict(run.stop_details or {})
+        attempt = details.get("propose_attempt")
+        if run.current_stage != OrchestrationStage.PROPOSING:
+            return False
+        if prior_attempt_id is not None and (
+            not isinstance(attempt, dict) or attempt.get("attempt_id") != prior_attempt_id
+        ):
+            return False
+        if prior_attempt_id is None and attempt is not None:
+            return False
+        actions = getattr(uow, "operator_actions", None)
+        if actions is None or actions.get_by_request_id(authorization_reference) is not None:
+            return False
+        action = OperatorActionRecord(
+            action_request_id=authorization_reference,
+            project_id=project_id,
+            change_name=run.change_name,
+            run_id=run_id,
+            action_type=OperatorActionType.RETRY,
+            actor_identity=actor_identity,
+            source_interface=source_interface,
+            precondition_stage=OrchestrationStage.PROPOSING.value,
+            status=OperatorActionStatus.ACCEPTED,
+            summary="One-shot authorization to continue an incomplete native Propose.",
+            parameters_json={
+                "single_use": True,
+                "stage": "propose",
+                "issue_number": issue_number,
+                "provider": provider,
+                "prior_attempt_id": prior_attempt_id,
+            },
+        )
+        actions.save(action)
+        uow.commit()
+        return True
+
     async def classify_existing_run(
         self,
         project_id: str,
@@ -913,6 +975,7 @@ class NativeOrchestrationCoordinator:
         operator_ack: bool = False,
         operator_clarification: str | None = None,
         explore_recovery_authorization_id: str | None = None,
+        propose_recovery_authorization_id: str | None = None,
         thinker_provider: str = "antigravity",
         implementer_provider: str = "codex",
         reviewer_provider: str = "antigravity",
@@ -1392,21 +1455,113 @@ class NativeOrchestrationCoordinator:
             OrchestrationStage.PROPOSING,
             OrchestrationStage.VALIDATING,
         ):
-            existing_proposal = (
-                active_run.current_stage == OrchestrationStage.VALIDATING
-                and self._proposal_artifacts_present(worktree_path, change_name)
+            complete_proposal = self._proposal_artifacts_present(worktree_path, change_name)
+            stored_propose_attempt = (active_run.stop_details or {}).get("propose_attempt")
+            stored_propose_checkpoint = (active_run.stop_details or {}).get("propose_checkpoint")
+            partial_proposal = self._proposal_artifacts_any(worktree_path, change_name) and not complete_proposal
+            propose_recovery_needed = (
+                active_run.current_stage == OrchestrationStage.PROPOSING
+                and not complete_proposal
+                and (stored_propose_attempt is not None or partial_proposal)
+            )
+            if propose_recovery_needed:
+                actions = getattr(uow, "operator_actions", None)
+                prior_attempt_id = (
+                    stored_propose_attempt.get("attempt_id")
+                    if isinstance(stored_propose_attempt, dict)
+                    else None
+                )
+                if actions is None or not propose_recovery_authorization_id:
+                    return OrchestrationCoordinationResult(
+                        status="PAUSED",
+                        run_id=active_run.run_id,
+                        current_stage=OrchestrationStage.PROPOSING,
+                        message=(
+                            "Propose has incomplete or unverified artifacts; an explicit, "
+                            "Run-bound recovery authorization is required."
+                        ),
+                    )
+                consumed = actions.consume_single_use(
+                    propose_recovery_authorization_id,
+                    run_id=active_run.run_id,
+                    action_type=OperatorActionType.RETRY,
+                    expected_parameters={
+                        "single_use": True,
+                        "stage": "propose",
+                        "issue_number": issue_number,
+                        "provider": thinker_provider,
+                        "prior_attempt_id": prior_attempt_id,
+                    },
+                )
+                if consumed is None:
+                    return OrchestrationCoordinationResult(
+                        status="PAUSED",
+                        run_id=active_run.run_id,
+                        current_stage=OrchestrationStage.PROPOSING,
+                        message="Propose recovery authorization is missing, mismatched, or already consumed.",
+                    )
+            existing_proposal = complete_proposal or (
+                isinstance(stored_propose_checkpoint, dict)
+                and stored_propose_checkpoint.get("status") == "READY_TO_VALIDATE"
             )
             if not existing_proposal:
                 self._update_stage(uow, active_run, OrchestrationStage.PROPOSING)
-                propose_result = await self._run_propose(
-                    worktree_path=worktree_path,
+                dispatch = self._prepare_propose_dispatch(
+                    uow=uow,
+                    run=active_run,
+                    issue_number=issue_number,
                     provider=thinker_provider,
                     change_name=change_name,
-                    issue_number=issue_number,
-                    issue_title=issue_title,
-                    issue_body=issue_body,
-                    project_id=project_id,
+                    is_recovery=propose_recovery_needed,
                 )
+                if dispatch is None:
+                    return OrchestrationCoordinationResult(
+                        status="PAUSED",
+                        run_id=active_run.run_id,
+                        current_stage=OrchestrationStage.PROPOSING,
+                        message="Propose dispatch is already owned or its durable intent is ambiguous.",
+                    )
+                propose_attempt_id, propose_action_key, propose_claim = dispatch
+                try:
+                    propose_result = await self._run_propose(
+                        worktree_path=worktree_path,
+                        provider=thinker_provider,
+                        change_name=change_name,
+                        issue_number=issue_number,
+                        issue_title=issue_title,
+                        issue_body=issue_body,
+                        project_id=project_id,
+                        continue_existing=propose_recovery_needed,
+                    )
+                except asyncio.CancelledError:
+                    self._finish_propose_dispatch(uow, active_run, propose_attempt_id, propose_action_key, propose_claim, "AMBIGUOUS", None)
+                    raise
+                except Exception as exc:
+                    self._finish_propose_dispatch(uow, active_run, propose_attempt_id, propose_action_key, propose_claim, "AMBIGUOUS", str(exc))
+                    raise
+                else:
+                    success = propose_result.get("status") == "READY_TO_VALIDATE"
+                    self._finish_propose_dispatch(
+                        uow,
+                        active_run,
+                        propose_attempt_id,
+                        propose_action_key,
+                        propose_claim,
+                        "COMPLETE" if success else "AMBIGUOUS",
+                        propose_result.get("message") if not success else None,
+                    )
+                    if success:
+                        details = dict(active_run.stop_details or {})
+                        details["propose_checkpoint"] = {
+                            "checkpoint_version": 1,
+                            "run_id": active_run.run_id,
+                            "provider": thinker_provider,
+                            "status": "READY_TO_VALIDATE",
+                            "attempt_id": propose_attempt_id,
+                            "artifact_hashes": self._proposal_artifact_hashes(worktree_path, change_name),
+                            "recorded_at": utc_now().isoformat(),
+                        }
+                        self._persist_run_stop_details(active_run, details)
                 if propose_result.get("status") != "READY_TO_VALIDATE":
                     return OrchestrationCoordinationResult(
                         status="PAUSED",
@@ -2187,6 +2342,13 @@ class NativeOrchestrationCoordinator:
         )
 
     @staticmethod
+    def _proposal_artifacts_any(worktree_path: Path, change_name: str) -> bool:
+        change_dir = worktree_path / "openspec" / "changes" / change_name
+        return change_dir.is_dir() and any(
+            path.is_file() and path.suffix == ".md" for path in change_dir.rglob("*.md")
+        )
+
+    @staticmethod
     def _proposal_artifact_hashes(worktree_path: Path, change_name: str) -> dict[str, str]:
         change_dir = worktree_path / "openspec" / "changes" / change_name
         paths = (
@@ -2302,6 +2464,125 @@ class NativeOrchestrationCoordinator:
                 attempt["error"] = redact_secrets(error_message)[:1000]
             attempt["finished_at"] = utc_now().isoformat()
             details["explore_attempt"] = attempt
+            run.stop_details = details
+            uow.orchestration_runs.save(run)
+        terminal_status = {
+            "COMPLETE": ExternalActionStatus.COMPLETED,
+            "FAILED": ExternalActionStatus.FAILED,
+            "AMBIGUOUS": ExternalActionStatus.AMBIGUOUS,
+        }.get(attempt_status, ExternalActionStatus.UNKNOWN)
+        try:
+            uow.orchestration_external_actions.update_status(
+                action_key=action_key,
+                status=terminal_status,
+                error_message=error_message,
+            )
+            uow.commit()
+        finally:
+            uow.claims.release_claim(claim_context)
+            uow.commit()
+
+    def _prepare_propose_dispatch(
+        self,
+        *,
+        uow: Any,
+        run: OrchestrationRun,
+        issue_number: int,
+        provider: str,
+        change_name: str,
+        is_recovery: bool,
+    ) -> tuple[str, str, RecoveryClaimContext] | None:
+        """Persist and fence a Propose dispatch before provider I/O."""
+        actions = getattr(uow, "orchestration_external_actions", None)
+        claims = getattr(uow, "claims", None)
+        if actions is None or claims is None:
+            return None
+        attempt_id = str(uuid4())
+        action_key = f"propose:{run.run_id}:{attempt_id}"
+        details = dict(run.stop_details or {})
+        details["propose_attempt"] = {
+            "attempt_id": attempt_id,
+            "status": "IN_PROGRESS",
+            "provider": provider,
+            "issue_number": issue_number,
+            "change_name": change_name,
+            "action_key": action_key,
+            "recovery": is_recovery,
+            "recorded_at": utc_now().isoformat(),
+        }
+        claim = claims.acquire_or_reacquire(
+            claim_key=f"run:{run.run_id}",
+            owner_instance_id=f"propose:{uuid4()}",
+            lease_seconds=3600,
+        )
+        if claim is None:
+            return None
+        claim_context = RecoveryClaimContext(
+            claim_key=claim.claim_key,
+            owner_instance_id=claim.owner_instance_id,
+            fence_token=claim.fence_token,
+            lease_expires_at=claim.lease_expires_at,
+        )
+        try:
+            run.stop_details = details
+            uow.orchestration_runs.save(run)
+            actions.reserve(
+                OrchestrationExternalAction(
+                    run_id=run.run_id,
+                    action_key=action_key,
+                    action_type=ExternalActionType.OPENSPEC_PROPOSE_DISPATCH,
+                    target_identity=f"{run.project_id}:{issue_number}:{change_name}:{provider}",
+                    request_fingerprint=hashlib.sha256(
+                        f"{run.run_id}:{change_name}:{issue_number}:{provider}".encode()
+                    ).hexdigest(),
+                    generation=run.current_generation,
+                    status=ExternalActionStatus.RESERVED,
+                )
+            )
+            uow.flush()
+            claims.commit_fenced_dispatch_intent(
+                claim_key=claim_context.claim_key,
+                owner_instance_id=claim_context.owner_instance_id,
+                fence_token=claim_context.fence_token,
+                action_key=action_key,
+                authorization=DispatchAuthorization(
+                    action_key=action_key,
+                    is_authorized=True,
+                    authorization_reason=(
+                        "Explicit operator authorization for Propose recovery."
+                        if is_recovery
+                        else "Original Propose dispatch for this Run."
+                    ),
+                    is_retry=is_recovery,
+                ),
+            )
+        except Exception as exc:
+            logger.warning("Propose dispatch preparation failed: %s", exc)
+            uow.rollback()
+            claims.release_claim(claim_context)
+            uow.commit()
+            return None
+        return attempt_id, action_key, claim_context
+
+    def _finish_propose_dispatch(
+        self,
+        uow: Any,
+        run: OrchestrationRun,
+        attempt_id: str,
+        action_key: str,
+        claim_context: RecoveryClaimContext,
+        attempt_status: str,
+        error_message: str | None,
+    ) -> None:
+        """Persist only observed results; cancellation remains ambiguous."""
+        details = dict(run.stop_details or {})
+        attempt = dict(details.get("propose_attempt") or {})
+        if attempt.get("attempt_id") == attempt_id:
+            attempt["status"] = attempt_status
+            if error_message:
+                attempt["error"] = redact_secrets(error_message)[:1000]
+            attempt["finished_at"] = utc_now().isoformat()
+            details["propose_attempt"] = attempt
             run.stop_details = details
             uow.orchestration_runs.save(run)
         terminal_status = {
@@ -2838,21 +3119,27 @@ class NativeOrchestrationCoordinator:
         issue_title: str,
         issue_body: str,
         project_id: str | None = None,
+        continue_existing: bool = False,
     ) -> dict[str, Any]:
-        """Dispatch thinking agent to execute official OpenSpec Propose workflow."""
+        """Dispatch native Propose or native Continue for an incomplete proposal."""
+        operation = "continue" if continue_existing else "propose"
         wf = self.agent_runner.resolve_workflow(
             worktree_path=worktree_path,
             provider=provider,
-            operation="propose",
+            operation=operation,
             change_name=change_name,
         )
         prompt = (
-            f"Execute official OpenSpec Propose for change '{change_name}'.\n"
+            f"Execute official OpenSpec {'Continue' if continue_existing else 'Propose'} for change '{change_name}'.\n"
             f"Workflow dispatch command: {wf.dispatch_command}\n\n"
             f"Remote Request #{issue_number}: {issue_title}\n"
             f"Description:\n{issue_body}\n"
-            f"Generate canonical change planning artifacts under openspec/changes/{change_name}/: "
-            f"proposal.md, specs/, design.md, and tasks.md."
+            + (
+                f"Continue the existing native change workflow and preserve every valid artifact under "
+                f"openspec/changes/{change_name}/; complete only the missing canonical planning artifacts."
+                if continue_existing
+                else f"Generate canonical change planning artifacts under openspec/changes/{change_name}/: proposal.md, specs/, design.md, and tasks.md."
+            )
         )
         res = await self.agent_runner.run(
             worktree_path=worktree_path,

@@ -37,7 +37,7 @@ class ImplementerResult:
 
 class ImplementerRunnerInterface:
     async def run(
-        self, worktree_path: Path, prompt_context: str, timeout_seconds: int
+        self, worktree_path: Path, prompt_context: str, timeout_seconds: float | None = None
     ) -> ImplementerResult:
         raise NotImplementedError
 
@@ -89,7 +89,7 @@ class CliImplementerRunner(ImplementerRunnerInterface):
         return replace(self.profile, args=tuple(args))
 
     async def run(
-        self, worktree_path: Path, prompt_context: str, timeout_seconds: int
+        self, worktree_path: Path, prompt_context: str, timeout_seconds: float | None = None
     ) -> ImplementerResult:
         start = asyncio.get_running_loop().time()
         confinement = AgentProcessConfinement(allowed_worktree_path=str(worktree_path))
@@ -366,7 +366,7 @@ class MockImplementerRunner(ImplementerRunnerInterface):
         self.timed_out = timed_out
 
     async def run(
-        self, worktree_path: Path, prompt_context: str, timeout_seconds: int
+        self, worktree_path: Path, prompt_context: str, timeout_seconds: float | None = None
     ) -> ImplementerResult:
         del prompt_context, timeout_seconds
         if self.exit_code == 0 and not self.timed_out:
