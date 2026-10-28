@@ -1095,3 +1095,41 @@ async def test_agent_reports_incomplete_propose_without_false_completion(mock_en
     assert "design.md" in result["message"]
     assert "tasks.md" in result["message"]
     coordinator.agent_runner.run.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_agent_claims_complete_but_openspec_still_has_pending_planning(mock_env):
+    coordinator, _, _, repo_dir = mock_env
+    coordinator.agent_runner.run = AsyncMock(
+        return_value=AgentExecutionResult(
+            exit_code=0,
+            timed_out=False,
+            stdout=["Report"],
+            stderr=[],
+            duration_ms=7,
+            final_response=(
+                'MINIME_WORKFLOW_RESULT: {"status":"COMPLETE",'
+                '"summary":"Propose done","pending":[]}'
+            ),
+            final_response_status="COMPLETE",
+            workflow_handoff_required=True,
+            workflow_handoff=AgentWorkflowHandoff("COMPLETE", "Propose done", ()),
+        )
+    )
+    coordinator.openspec_adapter.planning_status = MagicMock(
+        return_value={"status": "INCOMPLETE", "reason": "still pending", "pending": ["tasks"]}
+    )
+    result = await coordinator._run_propose(
+        worktree_path=repo_dir,
+        provider="antigravity",
+        change_name="req-101-add-caching-layer",
+        issue_number=101,
+        issue_title="Add caching layer",
+        issue_body="We need redis caching layer",
+        project_id="proj-1",
+    )
+    assert result["status"] == "INCOMPLETE"
+    assert "tasks" in result["message"]
+    coordinator.openspec_adapter.planning_status.assert_called_once_with(
+        "req-101-add-caching-layer", repo_dir
+    )
