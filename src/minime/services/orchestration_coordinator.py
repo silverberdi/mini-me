@@ -3173,7 +3173,14 @@ class NativeOrchestrationCoordinator:
             workflow=wf,
         )
         report = getattr(res, "workflow_handoff", None)
-        if getattr(res, "workflow_handoff_required", False) and report is not None and report.status != "COMPLETE":
+        if (
+            getattr(res, "workflow_handoff_required", False)
+            and report is not None
+            and report.status != "COMPLETE"
+            and getattr(res, "exit_code", None) == 0
+            and not getattr(res, "timed_out", False)
+            and getattr(res, "final_response_status", None) == "COMPLETE"
+        ):
             return {
                 "status": "INCOMPLETE",
                 "message": (
