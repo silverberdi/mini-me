@@ -671,7 +671,7 @@ class NativeOrchestrationCoordinator:
                     return False
             elif not isinstance(attempt, dict) or attempt.get("attempt_id") != prior_attempt_id:
                 return False
-        else:
+        elif stage == "propose":
             if run.current_stage not in {OrchestrationStage.PROPOSING, OrchestrationStage.VALIDATING}:
                 return False
             if prior_attempt_id is not None and (
@@ -680,6 +680,26 @@ class NativeOrchestrationCoordinator:
                 return False
             if prior_attempt_id is None and attempt is not None:
                 return False
+        elif stage == "proposal_review":
+            if run.current_stage != OrchestrationStage.PROPOSAL_REVIEW:
+                return False
+            review_attempt = details.get("proposal_review")
+            if prior_attempt_id is not None and (
+                not isinstance(review_attempt, dict)
+                or review_attempt.get("attempt_id") != prior_attempt_id
+            ):
+                return False
+        elif stage == "code_review":
+            if run.current_stage != OrchestrationStage.CODE_REVIEW:
+                return False
+            code_review_attempt = details.get("code_review")
+            if prior_attempt_id is not None and (
+                not isinstance(code_review_attempt, dict)
+                or code_review_attempt.get("attempt_id") != prior_attempt_id
+            ):
+                return False
+        else:
+            return False
         actions = getattr(uow, "operator_actions", None)
         if actions is None or actions.get_by_request_id(authorization_reference) is not None:
             return False
@@ -728,6 +748,8 @@ class NativeOrchestrationCoordinator:
         operator_clarification: str | None = None,
         explore_recovery_authorization_id: str | None = None,
         propose_recovery_authorization_id: str | None = None,
+        proposal_review_recovery_authorization_id: str | None = None,
+        code_review_recovery_authorization_id: str | None = None,
         thinker_provider: str = "antigravity",
         implementer_provider: str = "codex",
         reviewer_provider: str = "antigravity",
@@ -1388,15 +1410,22 @@ class NativeOrchestrationCoordinator:
         if active_run.current_stage == OrchestrationStage.PROPOSAL_REVIEW:
             stored_review = (active_run.stop_details or {}).get("proposal_review")
             current_hashes = self._compute_proposal_artifacts_hashes(worktree_path, change_name)
+            hashes_match = (
+                isinstance(stored_review, dict)
+                and stored_review.get("artifact_hashes") == current_hashes
+            )
 
             # Check if there is an existing valid approval matching current artifacts
             if (
-                isinstance(stored_review, dict)
+                hashes_match
                 and stored_review.get("status") == "approved"
-                and stored_review.get("artifact_hashes") == current_hashes
+                and stored_review.get("verdict") == "READY_TO_MERGE"
             ):
                 self._update_stage(uow, active_run, OrchestrationStage.READY_TO_APPLY)
-            elif isinstance(stored_review, dict) and stored_review.get("status") in {"changes_required", "invalid_response", "provider_error"}:
+            elif (
+                hashes_match
+                and stored_review.get("status") in {"changes_required", "invalid_response", "provider_error"}
+            ):
                 status = stored_review.get("status")
                 if status == "changes_required":
                     msg = f"Independent proposal review requested changes: {stored_review.get('summary', 'see findings')}. Worktree preserved."
@@ -1410,10 +1439,25 @@ class NativeOrchestrationCoordinator:
                     current_stage=OrchestrationStage.PROPOSAL_REVIEW,
                     message=msg,
                 )
+            elif (
+                hashes_match
+                and stored_review.get("status") == "approved"
+                and stored_review.get("verdict") != "READY_TO_MERGE"
+            ):
+                return OrchestrationCoordinationResult(
+                    status="PAUSED",
+                    run_id=active_run.run_id,
+                    current_stage=OrchestrationStage.PROPOSAL_REVIEW,
+                    message="Independent proposal review recorded invalid approval verdict without READY_TO_MERGE. Worktree preserved.",
+                )
             else:
-                # If there was an in-progress or ambiguous dispatch without definitive result
-                if isinstance(stored_review, dict) and stored_review.get("status") == "dispatched":
-                    if not propose_recovery_authorization_id:
+                # Hashes changed (artifacts updated by operator) OR first dispatch OR dispatched
+                effective_auth_id = proposal_review_recovery_authorization_id or propose_recovery_authorization_id
+                if (
+                    isinstance(stored_review, dict)
+                    and stored_review.get("status") == "dispatched"
+                ):
+                    if not effective_auth_id:
                         return OrchestrationCoordinationResult(
                             status="PAUSED",
                             run_id=active_run.run_id,
@@ -1421,20 +1465,26 @@ class NativeOrchestrationCoordinator:
                             message="Proposal review recovery authorization is required before re-dispatch.",
                         )
                     operator_actions = getattr(uow, "operator_actions", None)
-                    if operator_actions:
-                        consumed = operator_actions.consume_single_use(
-                            propose_recovery_authorization_id,
+                    if not operator_actions:
+                        return OrchestrationCoordinationResult(
+                            status="PAUSED",
                             run_id=active_run.run_id,
-                            action_type=OperatorActionType.RETRY,
-                            expected_parameters={"single_use": True, "stage": "proposal_review"},
+                            current_stage=OrchestrationStage.PROPOSAL_REVIEW,
+                            message="Operator action store is unavailable for recovery authorization. Worktree preserved.",
                         )
-                        if consumed is None:
-                            return OrchestrationCoordinationResult(
-                                status="PAUSED",
-                                run_id=active_run.run_id,
-                                current_stage=OrchestrationStage.PROPOSAL_REVIEW,
-                                message="Proposal review recovery authorization is missing, mismatched, or already consumed.",
-                            )
+                    consumed = operator_actions.consume_single_use(
+                        effective_auth_id,
+                        run_id=active_run.run_id,
+                        action_type=OperatorActionType.RETRY,
+                        expected_parameters={"single_use": True, "stage": "proposal_review"},
+                    )
+                    if consumed is None:
+                        return OrchestrationCoordinationResult(
+                            status="PAUSED",
+                            run_id=active_run.run_id,
+                            current_stage=OrchestrationStage.PROPOSAL_REVIEW,
+                            message="Proposal review recovery authorization is missing, mismatched, or already consumed.",
+                        )
 
                 # Record dispatch intent before executing I/O
                 attempt_id = str(uuid4())
@@ -1474,7 +1524,7 @@ class NativeOrchestrationCoordinator:
                     if hasattr(uow, "commit"):
                         uow.commit()
 
-                if res_dict.get("status") != "approved":
+                if res_dict.get("status") != "approved" or res_dict.get("verdict") != "READY_TO_MERGE":
                     status = res_dict.get("status")
                     if status == "changes_required":
                         msg = f"Independent proposal review requested changes: {res_dict.get('summary', 'see findings')}. Worktree preserved."
@@ -1588,13 +1638,20 @@ class NativeOrchestrationCoordinator:
                     message=f"Unable to observe candidate Git state: {exc}. Worktree preserved.",
                 )
             stored_code_review = (active_run.stop_details or {}).get("code_review")
-            if (
+            sha_matches = (
                 isinstance(stored_code_review, dict)
-                and stored_code_review.get("status") == "approved"
                 and stored_code_review.get("candidate_sha") == candidate_sha
+            )
+            if (
+                sha_matches
+                and stored_code_review.get("status") == "approved"
+                and stored_code_review.get("verdict") == "READY_TO_MERGE"
             ):
                 self._update_stage(uow, active_run, OrchestrationStage.READY_FOR_PR)
-            elif isinstance(stored_code_review, dict) and stored_code_review.get("status") in {"changes_required", "invalid_response", "provider_error"}:
+            elif (
+                sha_matches
+                and stored_code_review.get("status") in {"changes_required", "invalid_response", "provider_error"}
+            ):
                 status = stored_code_review.get("status")
                 if status == "changes_required":
                     msg = f"Independent code review requested changes: {stored_code_review.get('summary', 'see findings')}. Worktree preserved."
@@ -1608,10 +1665,25 @@ class NativeOrchestrationCoordinator:
                     current_stage=OrchestrationStage.CODE_REVIEW,
                     message=msg,
                 )
+            elif (
+                sha_matches
+                and stored_code_review.get("status") == "approved"
+                and stored_code_review.get("verdict") != "READY_TO_MERGE"
+            ):
+                return OrchestrationCoordinationResult(
+                    status="PAUSED",
+                    run_id=active_run.run_id,
+                    current_stage=OrchestrationStage.CODE_REVIEW,
+                    message="Independent code review recorded invalid approval verdict without READY_TO_MERGE. Worktree preserved.",
+                )
             else:
-                # In-progress or ambiguous dispatch
-                if isinstance(stored_code_review, dict) and stored_code_review.get("status") == "dispatched":
-                    if not propose_recovery_authorization_id:
+                # SHA changed (new candidate commits made) OR first dispatch OR dispatched
+                effective_code_auth_id = code_review_recovery_authorization_id or propose_recovery_authorization_id
+                if (
+                    isinstance(stored_code_review, dict)
+                    and stored_code_review.get("status") == "dispatched"
+                ):
+                    if not effective_code_auth_id:
                         return OrchestrationCoordinationResult(
                             status="PAUSED",
                             run_id=active_run.run_id,
@@ -1619,20 +1691,26 @@ class NativeOrchestrationCoordinator:
                             message="Code review recovery authorization is required before re-dispatch.",
                         )
                     operator_actions = getattr(uow, "operator_actions", None)
-                    if operator_actions:
-                        consumed = operator_actions.consume_single_use(
-                            propose_recovery_authorization_id,
+                    if not operator_actions:
+                        return OrchestrationCoordinationResult(
+                            status="PAUSED",
                             run_id=active_run.run_id,
-                            action_type=OperatorActionType.RETRY,
-                            expected_parameters={"single_use": True, "stage": "code_review"},
+                            current_stage=OrchestrationStage.CODE_REVIEW,
+                            message="Operator action store is unavailable for recovery authorization. Worktree preserved.",
                         )
-                        if consumed is None:
-                            return OrchestrationCoordinationResult(
-                                status="PAUSED",
-                                run_id=active_run.run_id,
-                                current_stage=OrchestrationStage.CODE_REVIEW,
-                                message="Code review recovery authorization is missing, mismatched, or already consumed.",
-                            )
+                    consumed = operator_actions.consume_single_use(
+                        effective_code_auth_id,
+                        run_id=active_run.run_id,
+                        action_type=OperatorActionType.RETRY,
+                        expected_parameters={"single_use": True, "stage": "code_review"},
+                    )
+                    if consumed is None:
+                        return OrchestrationCoordinationResult(
+                            status="PAUSED",
+                            run_id=active_run.run_id,
+                            current_stage=OrchestrationStage.CODE_REVIEW,
+                            message="Code review recovery authorization is missing, mismatched, or already consumed.",
+                        )
 
                 attempt_id = str(uuid4())
                 details = dict(active_run.stop_details or {})
@@ -1672,7 +1750,7 @@ class NativeOrchestrationCoordinator:
                     if hasattr(uow, "commit"):
                         uow.commit()
 
-                if c_dict.get("status") != "approved":
+                if c_dict.get("status") != "approved" or c_dict.get("verdict") != "READY_TO_MERGE":
                     status = c_dict.get("status")
                     if status == "changes_required":
                         msg = f"Independent code review requested changes: {c_dict.get('summary', 'see findings')}. Worktree preserved."

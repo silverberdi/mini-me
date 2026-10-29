@@ -631,6 +631,8 @@ class ProjectRequestRunPayload(BaseModel):
     operator_clarification: str | None = None
     explore_recovery_authorization_id: str | None = None
     propose_recovery_authorization_id: str | None = None
+    proposal_review_recovery_authorization_id: str | None = None
+    code_review_recovery_authorization_id: str | None = None
     thinker_provider: str | None = None
     implementer_provider: str | None = None
     reviewer_provider: str | None = None
@@ -711,6 +713,8 @@ async def run_project_request(
         operator_clarification=clarification,
         explore_recovery_authorization_id=body.explore_recovery_authorization_id,
         propose_recovery_authorization_id=body.propose_recovery_authorization_id,
+        proposal_review_recovery_authorization_id=body.proposal_review_recovery_authorization_id,
+        code_review_recovery_authorization_id=body.code_review_recovery_authorization_id,
         thinker_provider=agent_runner.provider_for_role("thinker"),
         implementer_provider=agent_runner.provider_for_role("implementer"),
         reviewer_provider=agent_runner.provider_for_role("reviewer"),
@@ -861,6 +865,124 @@ def authorize_propose_recovery(
     )
     if not accepted:
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Propose recovery authorization was rejected")
+    return {"action_request_id": action_request_id, "run_id": run_id, "status": "ACCEPTED"}
+
+
+@app.post(
+    "/api/v1/projects/{project_id}/runs/{run_id}/proposal-review-recovery-authorizations",
+    tags=["requests"],
+)
+def authorize_proposal_review_recovery(
+    project_id: str,
+    run_id: str,
+    operator: AuthenticatedOperatorDep,
+    payload: ExploreRecoveryAuthorizationPayload,
+    uow: UowDep,
+) -> dict[str, Any]:
+    """Record a single authenticated decision to continue incomplete proposal review."""
+    project = uow.projects.get_by_id(project_id)
+    run = uow.orchestration_runs.get_by_id(run_id)
+    if project is None or run is None or run.project_id != project_id or not run.is_active:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Active Run not found")
+    details = dict(run.stop_details or {})
+    attempt = details.get("proposal_review")
+    if payload.prior_attempt_id is not None and (
+        not isinstance(attempt, dict) or attempt.get("attempt_id") != payload.prior_attempt_id
+    ):
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Proposal review attempt does not match Run")
+    if run.current_stage.value != "PROPOSAL_REVIEW":
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Run is not in Proposal Review stage")
+    from minime.adapters.github import GitHubAdapter
+    from minime.services.agent_runner import CliAgentRunner
+    from minime.services.orchestration_coordinator import NativeOrchestrationCoordinator
+    from minime.services.worktree_manager import WorktreeManager
+
+    binding = uow.project_managed_repository_bindings.get_by_project_id(project_id)
+    if binding is None or not binding.managed_repository_root:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Verified managed repository binding is required")
+    coordinator = NativeOrchestrationCoordinator(
+        uow_factory=lambda: uow,
+        github_adapter=GitHubAdapter(),
+        worktree_manager=WorktreeManager(Path(binding.managed_repository_root), uow=uow),
+        agent_runner=CliAgentRunner(),
+    )
+    issue_number = int(details.get("issue_number") or (attempt or {}).get("issue_number") or 0)
+    provider = coordinator._configured_provider(project, "reviewer")
+    if issue_number <= 0 or not provider:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Run lacks authoritative Issue/provider binding")
+    action_request_id = payload.action_request_id or str(uuid4())
+    accepted = coordinator.register_recovery_authorization(
+        project_id=project_id,
+        run_id=run_id,
+        authorization_reference=action_request_id,
+        actor_identity=operator.email,
+        source_interface="api",
+        issue_number=issue_number,
+        provider=provider,
+        prior_attempt_id=payload.prior_attempt_id,
+        stage="proposal_review",
+    )
+    if not accepted:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Proposal review recovery authorization was rejected")
+    return {"action_request_id": action_request_id, "run_id": run_id, "status": "ACCEPTED"}
+
+
+@app.post(
+    "/api/v1/projects/{project_id}/runs/{run_id}/code-review-recovery-authorizations",
+    tags=["requests"],
+)
+def authorize_code_review_recovery(
+    project_id: str,
+    run_id: str,
+    operator: AuthenticatedOperatorDep,
+    payload: ExploreRecoveryAuthorizationPayload,
+    uow: UowDep,
+) -> dict[str, Any]:
+    """Record a single authenticated decision to continue incomplete code review."""
+    project = uow.projects.get_by_id(project_id)
+    run = uow.orchestration_runs.get_by_id(run_id)
+    if project is None or run is None or run.project_id != project_id or not run.is_active:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Active Run not found")
+    details = dict(run.stop_details or {})
+    attempt = details.get("code_review")
+    if payload.prior_attempt_id is not None and (
+        not isinstance(attempt, dict) or attempt.get("attempt_id") != payload.prior_attempt_id
+    ):
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Code review attempt does not match Run")
+    if run.current_stage.value != "CODE_REVIEW":
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Run is not in Code Review stage")
+    from minime.adapters.github import GitHubAdapter
+    from minime.services.agent_runner import CliAgentRunner
+    from minime.services.orchestration_coordinator import NativeOrchestrationCoordinator
+    from minime.services.worktree_manager import WorktreeManager
+
+    binding = uow.project_managed_repository_bindings.get_by_project_id(project_id)
+    if binding is None or not binding.managed_repository_root:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Verified managed repository binding is required")
+    coordinator = NativeOrchestrationCoordinator(
+        uow_factory=lambda: uow,
+        github_adapter=GitHubAdapter(),
+        worktree_manager=WorktreeManager(Path(binding.managed_repository_root), uow=uow),
+        agent_runner=CliAgentRunner(),
+    )
+    issue_number = int(details.get("issue_number") or (attempt or {}).get("issue_number") or 0)
+    provider = coordinator._configured_provider(project, "reviewer")
+    if issue_number <= 0 or not provider:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Run lacks authoritative Issue/provider binding")
+    action_request_id = payload.action_request_id or str(uuid4())
+    accepted = coordinator.register_recovery_authorization(
+        project_id=project_id,
+        run_id=run_id,
+        authorization_reference=action_request_id,
+        actor_identity=operator.email,
+        source_interface="api",
+        issue_number=issue_number,
+        provider=provider,
+        prior_attempt_id=payload.prior_attempt_id,
+        stage="code_review",
+    )
+    if not accepted:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Code review recovery authorization was rejected")
     return {"action_request_id": action_request_id, "run_id": run_id, "status": "ACCEPTED"}
 
 

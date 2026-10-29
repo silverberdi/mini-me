@@ -352,3 +352,242 @@ async def test_proposal_artifact_hash_change_invalidates_previous_approval(base_
     assert res.status == "PAUSED"
     assert res.current_stage == OrchestrationStage.PROPOSAL_REVIEW
     assert "Independent proposal review requested changes: New specs have issues" in res.message
+
+
+@pytest.mark.asyncio
+async def test_proposal_changes_required_with_changed_hashes_triggers_new_review(base_setup):
+    uow, candidate_worktree, change_dir = base_setup
+    old_hashes = {"proposal.md": "old_hash", "design.md": "old_hash", "tasks.md": "old_hash"}
+    run = OrchestrationRun(
+        project_id="mini-me",
+        run_id="run-test-hash-change",
+        change_name="gacela-05-ui-self-hosted",
+        base_sha="base_sha_123",
+        current_stage=OrchestrationStage.PROPOSAL_REVIEW,
+        stop_details=make_stop_details({
+            "proposal_review": {
+                "status": "changes_required",
+                "verdict": "CHANGES_REQUIRED",
+                "summary": "Fix section 2",
+                "artifact_hashes": old_hashes,
+            },
+        }),
+    )
+    uow.orchestration_runs.save(run)
+
+    coordinator = NativeOrchestrationCoordinator(
+        github_adapter=MagicMock(),
+        worktree_manager=MagicMock(),
+        agent_runner=MagicMock(),
+        uow_factory=lambda: uow,
+    )
+    coordinator.worktree_manager.create_request_worktree = AsyncMock(
+        return_value=WorktreeInfo(path=candidate_worktree, branch_name="feature/f5", base_sha="base_sha_123")
+    )
+    # The new review approves after operator updated the proposal files
+    mock_res = make_mock_execution('```json\n{"verdict":"READY_TO_MERGE","summary":"Approved"}\n```')
+    coordinator.agent_runner.run = AsyncMock(return_value=mock_res)
+    coordinator._run_apply = AsyncMock(return_value=False)
+
+    await coordinator.execute_project_request("mini-me")
+    updated_run = uow.orchestration_runs.get_by_id("run-test-hash-change")
+    assert updated_run.current_stage == OrchestrationStage.IMPLEMENTING
+    # Agent runner was invoked because hashes changed, superseding the old rejection
+    coordinator.agent_runner.run.assert_called_once()
+
+
+@pytest.mark.asyncio
+async def test_corrupted_approved_verdict_pauses_fail_closed(base_setup):
+    uow, candidate_worktree, change_dir = base_setup
+    current_hashes = NativeOrchestrationCoordinator._compute_proposal_artifacts_hashes(
+        candidate_worktree, "gacela-05-ui-self-hosted"
+    )
+    run = OrchestrationRun(
+        project_id="mini-me",
+        run_id="run-test-corrupted",
+        change_name="gacela-05-ui-self-hosted",
+        base_sha="base_sha_123",
+        current_stage=OrchestrationStage.PROPOSAL_REVIEW,
+        stop_details=make_stop_details({
+            "proposal_review": {
+                "status": "approved",
+                "verdict": "CHANGES_REQUIRED",  # Corrupted: approved status but conflicting verdict
+                "artifact_hashes": current_hashes,
+            },
+        }),
+    )
+    uow.orchestration_runs.save(run)
+
+    coordinator = NativeOrchestrationCoordinator(
+        github_adapter=MagicMock(),
+        worktree_manager=MagicMock(),
+        agent_runner=MagicMock(),
+        uow_factory=lambda: uow,
+    )
+    coordinator.worktree_manager.create_request_worktree = AsyncMock(
+        return_value=WorktreeInfo(path=candidate_worktree, branch_name="feature/f5", base_sha="base_sha_123")
+    )
+    res = await coordinator.execute_project_request("mini-me")
+    assert res.status == "PAUSED"
+    assert res.current_stage == OrchestrationStage.PROPOSAL_REVIEW
+    assert "invalid approval verdict without READY_TO_MERGE" in res.message
+
+
+@pytest.mark.asyncio
+async def test_register_recovery_authorization_for_review_stages(base_setup):
+    uow, candidate_worktree, change_dir = base_setup
+    run = OrchestrationRun(
+        project_id="mini-me",
+        run_id="run-test-auth",
+        change_name="gacela-05-ui-self-hosted",
+        base_sha="base_sha_123",
+        current_stage=OrchestrationStage.PROPOSAL_REVIEW,
+        stop_details=make_stop_details({"proposal_review": {"attempt_id": "att-123"}}),
+    )
+    uow.orchestration_runs.save(run)
+
+    coordinator = NativeOrchestrationCoordinator(
+        github_adapter=MagicMock(),
+        worktree_manager=MagicMock(),
+        agent_runner=MagicMock(),
+        uow_factory=lambda: uow,
+    )
+
+    # 1. Valid proposal_review registration succeeds
+    ok = coordinator.register_recovery_authorization(
+        project_id="mini-me",
+        run_id="run-test-auth",
+        authorization_reference="auth-prop-1",
+        actor_identity="operator@example.com",
+        source_interface="test",
+        issue_number=173,
+        provider="antigravity",
+        prior_attempt_id="att-123",
+        stage="proposal_review",
+    )
+    assert ok is True
+
+    # 2. Stage mismatch (registering code_review while in PROPOSAL_REVIEW) returns False
+    ok_mismatch = coordinator.register_recovery_authorization(
+        project_id="mini-me",
+        run_id="run-test-auth",
+        authorization_reference="auth-prop-2",
+        actor_identity="operator@example.com",
+        source_interface="test",
+        issue_number=173,
+        provider="antigravity",
+        prior_attempt_id=None,
+        stage="code_review",
+    )
+    assert ok_mismatch is False
+
+    # 3. Code review in CODE_REVIEW stage succeeds
+    run.current_stage = OrchestrationStage.CODE_REVIEW
+    run.stop_details["code_review"] = {"attempt_id": "att-code-123"}
+    uow.orchestration_runs.save(run)
+
+    ok_code = coordinator.register_recovery_authorization(
+        project_id="mini-me",
+        run_id="run-test-auth",
+        authorization_reference="auth-code-1",
+        actor_identity="operator@example.com",
+        source_interface="test",
+        issue_number=173,
+        provider="antigravity",
+        prior_attempt_id="att-code-123",
+        stage="code_review",
+    )
+    assert ok_code is True
+
+
+@pytest.mark.asyncio
+async def test_recovery_without_operator_actions_pauses_fail_closed(base_setup):
+    uow, candidate_worktree, change_dir = base_setup
+    current_hashes = NativeOrchestrationCoordinator._compute_proposal_artifacts_hashes(
+        candidate_worktree, "gacela-05-ui-self-hosted"
+    )
+    run = OrchestrationRun(
+        project_id="mini-me",
+        run_id="run-test-no-ops",
+        change_name="gacela-05-ui-self-hosted",
+        base_sha="base_sha_123",
+        current_stage=OrchestrationStage.PROPOSAL_REVIEW,
+        stop_details=make_stop_details({
+            "proposal_review": {
+                "status": "dispatched",
+                "artifact_hashes": current_hashes,
+            },
+        }),
+    )
+    uow.orchestration_runs.save(run)
+    # Remove operator_actions to simulate broken/unsupported store
+    del uow.operator_actions
+
+    coordinator = NativeOrchestrationCoordinator(
+        github_adapter=MagicMock(),
+        worktree_manager=MagicMock(),
+        agent_runner=MagicMock(),
+        uow_factory=lambda: uow,
+    )
+    coordinator.worktree_manager.create_request_worktree = AsyncMock(
+        return_value=WorktreeInfo(path=candidate_worktree, branch_name="feature/f5", base_sha="base_sha_123")
+    )
+
+    res = await coordinator.execute_project_request(
+        "mini-me", propose_recovery_authorization_id="some-token"
+    )
+    assert res.status == "PAUSED"
+    assert res.current_stage == OrchestrationStage.PROPOSAL_REVIEW
+    assert "Operator action store is unavailable" in res.message
+
+
+def test_reconcile_f2_project_profiles_preserves_fallback(monkeypatch):
+    import scripts.reconcile_f2_project_profiles as reconcile_module
+
+    initial_profiles = {
+        "thinking": {"agent_id": "codex", "model_id": "gpt-6.1-sol", "effort": "high", "workflows": ["/custom-think"], "skills": ["skill-a"]},
+        "execution": {"agent_id": "codex", "model_id": "gpt-6.1-sol", "effort": "high", "workflows": ["/custom-exec"], "skills": ["skill-b"]},
+        "independent_review": {"agent_id": "antigravity", "model_id": "claude-sonnet-5-5-medium", "effort": "medium", "workflows": ["/opsx-verify"], "skills": []},
+        "fallback": {"agent_id": "codex", "model_id": "gpt-5.6-sol", "effort": "custom_effort", "workflows": ["/custom-fallback"], "skills": ["skill-c"]},
+    }
+    mock_project = MagicMock(agent_profiles=initial_profiles)
+    mock_service = MagicMock()
+    mock_service.get_project.return_value = mock_project
+    mock_session = MagicMock()
+
+    monkeypatch.setattr(reconcile_module.db_manager, "session", MagicMock(return_value=MagicMock(__enter__=MagicMock(return_value=mock_session), __exit__=MagicMock(return_value=None))))
+    monkeypatch.setattr(reconcile_module, "PostgresPersistenceUnitOfWork", MagicMock())
+    monkeypatch.setattr(reconcile_module, "ProjectService", MagicMock(return_value=mock_service))
+
+    ok = reconcile_module.reconcile()
+    assert ok is True
+
+    # Validate patch sent to update_configuration
+    patch = mock_service.update_configuration.call_args[0][1]
+    assert patch.agent_profiles is not None
+    # 1. Independent review is antigravity + gemini-3.8-flash-medium
+    rev = patch.agent_profiles["independent_review"]
+    assert rev.agent_id == "antigravity"
+    assert rev.model_id == "gemini-3.8-flash-medium"
+    assert rev.effort == "medium"
+
+    # 2. Thinking & execution are codex + gpt-5.6-luna with preserved workflows/skills
+    th = patch.agent_profiles["thinking"]
+    assert th.agent_id == "codex"
+    assert th.model_id == "gpt-5.6-luna"
+    assert th.workflows == ["/custom-think"]
+    assert th.skills == ["skill-a"]
+
+    ex = patch.agent_profiles["execution"]
+    assert ex.agent_id == "codex"
+    assert ex.model_id == "gpt-5.6-luna"
+    assert ex.workflows == ["/custom-exec"]
+    assert ex.skills == ["skill-b"]
+
+    # 3. Fallback is 100% preserved
+    fb = patch.agent_profiles["fallback"]
+    assert fb.agent_id == "codex"
+    assert fb.model_id == "gpt-5.6-sol"
+    assert fb.effort == "custom_effort"
+    assert fb.workflows == ["/custom-fallback"]
+    assert fb.skills == ["skill-c"]
