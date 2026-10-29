@@ -41,7 +41,7 @@ if len(sys.argv) > 2:
 else:
     child = subprocess.Popen([sys.executable, sys.argv[0], pidfile, "x"])
     with open(pidfile, "w") as f:
-        f.write(str(os.getpid()) + " " + str(child.pid))
+        f.write(str(child.pid) + " " + str(os.getpgrp()))
     time.sleep(60)"""
 
 
