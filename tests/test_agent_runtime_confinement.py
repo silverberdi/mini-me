@@ -786,6 +786,26 @@ def test_unknown_error_does_not_become_environment_failure():
     assert parsed.result_class == ProviderResultClass.UNKNOWN_ERROR
 
 
+@pytest.mark.skipif(
+    not AgentProcessConfinement.is_host_confinement_available(),
+    reason="long-lived lifecycle proof requires an OS confinement mechanism",
+)
+def test_agent_workflow_without_total_timeout_remains_alive_until_normal_exit(tmp_path: Path):
+    confinement, worktree, _runtime = _confinement(tmp_path)
+    result = asyncio.run(
+        confinement.run_confined_async_subprocess(
+            [sys.executable, "-c", "import time; time.sleep(0.15); print('complete')"],
+            cwd=str(worktree),
+            input_bytes=None,
+            timeout_seconds=None,
+            env=os.environ.copy(),
+        )
+    )
+    assert result.returncode == 0
+    assert result.timed_out is False
+    assert b"complete" in result.stdout
+
+
 @pytest.mark.parametrize("runner_type", [CliImplementerRunner, CliReviewerRunner])
 def test_missing_kernel_confinement_is_environment_failure_before_cli_preflight(
     tmp_path: Path, monkeypatch, runner_type

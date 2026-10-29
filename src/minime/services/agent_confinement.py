@@ -503,6 +503,17 @@ class AgentProcessConfinement:
 
     SANDBOX_RUNTIME_ROOT = "/run/minime-agent"
 
+    @staticmethod
+    def _set_parent_death_signal() -> None:
+        """Make the Linux confinement wrapper die with its worker parent."""
+        if platform.system().lower() != "linux":
+            return
+        import ctypes
+
+        libc = ctypes.CDLL(None, use_errno=True)
+        if libc.prctl(1, signal.SIGKILL, 0, 0, 0) != 0:
+            os._exit(127)
+
     def __init__(
         self,
         allowed_worktree_path: str,
@@ -1160,7 +1171,15 @@ class AgentProcessConfinement:
                 )
             if unshare_network:
                 wrapped.append("--unshare-net")
-            wrapped.extend(["--unshare-pid", "--chdir", self.allowed_worktree_path, *command_args])
+            wrapped.extend(
+                [
+                    "--die-with-parent",
+                    "--unshare-pid",
+                    "--chdir",
+                    self.allowed_worktree_path,
+                    *command_args,
+                ]
+            )
             return wrapped
 
         if self.confinement_mechanism == "darwin_sandbox":
@@ -1184,7 +1203,7 @@ class AgentProcessConfinement:
         cwd: str,
         *,
         input_bytes: bytes | None,
-        timeout_seconds: int,
+        timeout_seconds: float | None = None,
         env: dict[str, str] | None = None,
         codex_auth_source: str | None = None,
         antigravity_auth_source: str | None = None,
@@ -1208,6 +1227,11 @@ class AgentProcessConfinement:
                     stderr=asyncio.subprocess.PIPE,
                     env=runtime_state.environment,
                     start_new_session=True,
+                    preexec_fn=(
+                        self._set_parent_death_signal
+                        if self.confinement_mechanism == "bubblewrap"
+                        else None
+                    ),
                 )
                 from minime.services.progress_watchdog import (
                     ProgressWatchdog,
@@ -1217,8 +1241,6 @@ class AgentProcessConfinement:
 
                 watchdog = ProgressWatchdog(
                     worktree_path=self.allowed_worktree_path,
-                    inactivity_threshold_seconds=min(180.0, float(timeout_seconds)),
-                    stall_timeout_seconds=float(timeout_seconds),
                 )
                 timed_out = False
                 stdout_chunks: list[bytes] = []
@@ -1284,9 +1306,12 @@ class AgentProcessConfinement:
                                 await self._terminate_process_group(process)
                                 break
 
-                            # Explicit authorized security condition: confinement hard timeout exceeded
+                            # A caller may still provide a bounded timeout for a
+                            # genuinely bounded technical operation. Agent
+                            # workflows pass None: elapsed wall-clock time is
+                            # never a workflow termination authority.
                             elapsed = time.monotonic() - start_time
-                            if timeout_seconds and elapsed >= float(timeout_seconds):
+                            if timeout_seconds is not None and elapsed >= float(timeout_seconds):
                                 timed_out = True
                                 logger.warning(
                                     f"Process PID {process.pid} exceeded authorized confinement security timeout "

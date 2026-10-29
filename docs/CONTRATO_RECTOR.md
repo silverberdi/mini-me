@@ -5,6 +5,8 @@
 **Naturaleza:** instalación personal única, no producto comercial. El **programa original de reconstrucción F1–F6 mantiene exactamente seis fases y un Change OpenSpec por fase**. Por decisión posterior del operador se agregan **F7 (capacidades funcionales diferidas) y F8 (migración visual a Angular)** como extensión **futura, deshabilitada y no ejecutable aún**. Una fase futura requerirá su propio Change OpenSpec autorizado en su momento, sin micro-Changes.
 **Estado:** actualización contractual documental sobre el contrato base aprobado. F1–F4 forman el historial de entregas; F5 es el siguiente Change. Esta actualización no autoriza crear Changes, desplegar, migrar, iniciar scheduler, consumir agentes, fusionar PRs ni ejecutar F7/F8.
 
+**Excepción correctiva PR #196:** por autorización expresa del operador, PR #196 puede reparar el ejecutor común que bloquea la autoejecución de F5. Esta excepción no es una fase, Change ni alcance funcional de F5: no crea otro Run, altera sus artefactos, habilita F6–F8 ni relaja la regla general de un Change por fase. Su alcance queda limitado a seguridad de despacho, continuidad, evidencia, concurrencia, redacción y retiro de rutas redundantes del runtime existente; toda modificación sigue vinculada al mismo PR, sus hallazgos y su revisión independiente.
+
 ## 1. La gacela, no el paquidermo
 
 mini me debe ser una aplicación pequeña, rápida, mantenible, extensible y, sobre todo, útil. Coordina agentes para convertir requerimientos externos en implementaciones verificadas, revisadas, fusionadas y archivadas mediante los workflows oficiales de OpenSpec. No programa ni razona en lugar de los agentes.

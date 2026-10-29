@@ -29,7 +29,7 @@ class ReviewerResult:
 
 class ReviewerRunnerInterface:
     async def run(
-        self, worktree_path: Path, prompt_context: str, timeout_seconds: int
+        self, worktree_path: Path, prompt_context: str, timeout_seconds: float | None = None
     ) -> ReviewerResult:
         raise NotImplementedError
 
@@ -64,7 +64,7 @@ class CliReviewerRunner(ReviewerRunnerInterface):
         return raw_cmd
 
     async def run(
-        self, worktree_path: Path, prompt_context: str, timeout_seconds: int
+        self, worktree_path: Path, prompt_context: str, timeout_seconds: float | None = None
     ) -> ReviewerResult:
         start = asyncio.get_running_loop().time()
         confinement = AgentProcessConfinement(allowed_worktree_path=str(worktree_path))
@@ -196,7 +196,7 @@ class MockReviewerRunner(ReviewerRunnerInterface):
         self.timed_out = timed_out
 
     async def run(
-        self, worktree_path: Path, prompt_context: str, timeout_seconds: int
+        self, worktree_path: Path, prompt_context: str, timeout_seconds: float | None = None
     ) -> ReviewerResult:
         del worktree_path, prompt_context, timeout_seconds
         return ReviewerResult(

@@ -2515,6 +2515,16 @@ class InMemoryPersistenceUnitOfWork(PersistenceUnitOfWork):
     def rollback(self) -> None:
         self.rolled_back = True
 
+    def renew_claim_heartbeat_isolated(
+        self, context: RecoveryClaimContext, lease_seconds: int
+    ) -> bool:
+        return self.claims.renew_heartbeat(
+            context.claim_key,
+            context.owner_instance_id,
+            context.fence_token,
+            lease_seconds,
+        )
+
 
 @pytest.fixture
 def in_memory_uow() -> InMemoryPersistenceUnitOfWork:

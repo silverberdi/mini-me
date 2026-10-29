@@ -47,6 +47,45 @@ class ResolvedWorkflow:
 
 
 @dataclass(frozen=True)
+class AgentWorkflowHandoff:
+    """The agent's terminal answer, not authority over OpenSpec artifacts."""
+
+    status: str
+    summary: str
+    pending: tuple[str, ...]
+
+
+def parse_agent_workflow_handoff(answer: str) -> AgentWorkflowHandoff | None:
+    """Accept one explicit handoff in the authoritative final message only."""
+    prefix = "MINIME_WORKFLOW_RESULT:"
+    lines = [line.strip()[len(prefix):].strip() for line in answer.splitlines()
+             if line.strip().startswith(prefix)]
+    if len(lines) != 1:
+        return None
+    try:
+        payload = json.loads(lines[0])
+    except (ValueError, TypeError):
+        return None
+    if not isinstance(payload, dict) or set(payload) != {"status", "summary", "pending"}:
+        return None
+    status = payload["status"]
+    summary = payload["summary"]
+    pending = payload["pending"]
+    if status not in {"COMPLETE", "INCOMPLETE", "HUMAN_REQUIRED"}:
+        return None
+    if not isinstance(summary, str) or not summary.strip() or len(summary) > 2000:
+        return None
+    if not isinstance(pending, list) or len(pending) > 30 or not all(
+        isinstance(item, str) and bool(item.strip()) and len(item) <= 1000
+        for item in pending
+    ):
+        return None
+    if (status == "COMPLETE" and pending) or (status != "COMPLETE" and not pending):
+        return None
+    return AgentWorkflowHandoff(status=status, summary=summary.strip(), pending=tuple(pending))
+
+
+@dataclass(frozen=True)
 class AgentExecutionResult:
     exit_code: int
     timed_out: bool
@@ -64,6 +103,8 @@ class AgentExecutionResult:
     final_response: str | None = None
     final_response_status: str | None = None
     final_response_source: str | None = None
+    workflow_handoff: AgentWorkflowHandoff | None = None
+    workflow_handoff_required: bool = False
 
     @property
     def full_output(self) -> str:
@@ -266,6 +307,7 @@ class CliAgentRunner:
                 "explore": "openspec-explore",
                 "propose": "openspec-propose",
                 "apply": "openspec-apply-change",
+                "continue": "openspec-continue-change",
                 "verify": "openspec-verify-change",
                 "sync": "openspec-sync-specs",
                 "archive": "openspec-archive-change",
@@ -493,7 +535,7 @@ class CliAgentRunner:
         self,
         worktree_path: Path,
         prompt_context: str,
-        timeout_seconds: int = 300,
+        timeout_seconds: float | None = None,
         project_id: str | None = None,
         role: str = "implementer",
         provider: str = "antigravity",
@@ -568,6 +610,26 @@ class CliAgentRunner:
             if schema_path:
                 schema_path.unlink(missing_ok=True)
 
+        # Ask the agent once, in the original dispatch, whether it finished.
+        # Explore and Verify already have their own authoritative verdict formats.
+        handoff_required = bool(
+            workflow is not None
+            and workflow.operation in {"propose", "continue", "apply", "sync", "archive"}
+            and output_schema is None
+        )
+        if handoff_required:
+            prompt_context += (
+                "\n\nAt the end of this SAME agent invocation, report whether your "
+                "OpenSpec work finished. Add exactly one standalone line "
+                "starting MINIME_WORKFLOW_RESULT: followed by a compact single-line JSON "
+                'object with exactly these keys: {"status":"COMPLETE|INCOMPLETE|HUMAN_REQUIRED",'
+                '"summary":"brief factual explanation","pending":["specific remaining work or question"]}. '
+                "Use an empty pending array ONLY for COMPLETE. For INCOMPLETE and "
+                "HUMAN_REQUIRED include at least one concrete pending item. COMPLETE means "
+                "you finished the requested workflow, not that OpenSpec validation passed; "
+                "the coordinator will ask the installed OpenSpec CLI separately. "
+                "Do not invent successful actions, tests, or evidence. No second model call.\n"
+            )
         cmd = self._command_for_prompt(prompt_context, profile)
         if not cmd:
             cleanup_structured_output()
@@ -713,6 +775,12 @@ class CliAgentRunner:
                 final_response=final_response,
                 final_response_status=final_response_status,
                 final_response_source=final_response_source,
+                workflow_handoff=(
+                    parse_agent_workflow_handoff(final_response or "")
+                    if handoff_required and final_response_status == "COMPLETE"
+                    else None
+                ),
+                workflow_handoff_required=handoff_required,
             )
         finally:
             cleanup_structured_output()

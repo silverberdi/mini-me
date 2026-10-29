@@ -171,26 +171,51 @@ async def test_watchdog_preserves_alive_silent_zero_cpu_process_without_terminat
             pass
 
 
-def test_watchdog_terminates_only_on_positive_verifiable_deadlock(tmp_path: Path):
-    """Verify that STALLED is authorized only upon positive verifiable deadlock evidence."""
+def test_watchdog_requires_explicit_verified_deadlock_before_termination(tmp_path: Path):
+    """Ordinary child process states and silence never authorize killing the agent."""
     watchdog = ProgressWatchdog(
         worktree_path=tmp_path,
         inactivity_threshold_seconds=0.05,
         stall_timeout_seconds=0.1,
         check_interval_seconds=0.02,
     )
-    time.sleep(0.12)
+    watchdog.last_activity_at -= 1
+    watchdog.check_process_tree_activity = lambda pid: False
 
-    # Alive process without positive deadlock is NOT marked STALLED under silence
-    watchdog.detect_positive_deadlock = lambda pid: (False, "normal sleep")
-    state = watchdog.evaluate_tick(pid=12345)
-    assert state == WatchdogState.SUSPECTED_STALL
-    assert "INACTIVITY_STALL_DIAGNOSED" in (watchdog.diagnostic_reason or "")
+    # Repeated idle observations, including potentially defunct descendants,
+    # are not proof that the live parent is irrecoverably deadlocked.
+    deadlocked, reason = watchdog.detect_positive_deadlock(pid=12345)
+    assert deadlocked is False
+    assert "preserving" in reason
+    for _ in range(watchdog.min_deadlock_confirmation_probes + 2):
+        assert watchdog.evaluate_tick(pid=12345) == WatchdogState.SUSPECTED_STALL
 
-    # When positive deadlock evidence is verified (e.g. defunct/zombie in tree)
-    watchdog.detect_positive_deadlock = lambda pid: (True, "zombie/defunct process detected in tree (count=1)")
-    state_deadlock = watchdog.evaluate_tick(pid=12345)
-    assert state_deadlock == WatchdogState.STALLED
+    # Only a separately verified irrecoverable condition authorizes termination.
+    watchdog.mark_positive_deadlock("verified irrecoverable condition")
+    for _ in range(watchdog.min_deadlock_confirmation_probes - 1):
+        assert watchdog.evaluate_tick(pid=12345) == WatchdogState.SUSPECTED_STALL
+        assert "POSITIVE_DEADLOCK_UNCONFIRMED" in (watchdog.diagnostic_reason or "")
+    assert watchdog.evaluate_tick(pid=12345) == WatchdogState.STALLED
     assert "POSITIVE_DEADLOCK_CONFIRMED" in (watchdog.diagnostic_reason or "")
+
+
+def test_watchdog_deadlock_confirmation_resets_on_uncertainty(tmp_path: Path):
+    watchdog = ProgressWatchdog(
+        worktree_path=tmp_path,
+        inactivity_threshold_seconds=0.01,
+        stall_timeout_seconds=0.02,
+        min_deadlock_confirmation_probes=3,
+    )
+    watchdog.last_activity_at -= 1
+    watchdog.check_process_tree_activity = lambda pid: False
+    observations = iter([(True, "transient"), (False, "normal wait"),
+                         (True, "transient"), (True, "transient"), (True, "confirmed")])
+    watchdog.detect_positive_deadlock = lambda pid: next(observations)
+    assert watchdog.evaluate_tick(pid=12345) == WatchdogState.SUSPECTED_STALL
+    assert watchdog.evaluate_tick(pid=12345) == WatchdogState.SUSPECTED_STALL
+    assert watchdog._deadlock_confirmation_count == 0
+    assert watchdog.evaluate_tick(pid=12345) == WatchdogState.SUSPECTED_STALL
+    assert watchdog.evaluate_tick(pid=12345) == WatchdogState.SUSPECTED_STALL
+    assert watchdog.evaluate_tick(pid=12345) == WatchdogState.STALLED
 
 

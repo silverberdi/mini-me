@@ -169,6 +169,7 @@ def base_coordinator_env(tmp_path: Path):
 
     agent_runner.run = successful_agent_run
     openspec_mock = MagicMock()
+    openspec_mock.planning_status = MagicMock(return_value={"status": "PASS", "pending": []})
     openspec_mock.validate_change_strict = MagicMock(
         return_value={"status": "PASS", "returncode": 0}
     )
