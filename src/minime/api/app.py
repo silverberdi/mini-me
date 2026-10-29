@@ -2257,14 +2257,7 @@ def get_dashboard_page() -> Response:
     )
 
 
-for _shell_path in ("/trabajo", "/trabajo-actual", "/proyectos", "/backlog"):
-    app.add_api_route(
-        _shell_path,
-        get_dashboard_page,
-        methods=["GET", "HEAD"],
-        tags=["dashboard-ui"],
-        response_model=None,
-    )
+
 
 
 @app.api_route("/sw.js", methods=["GET", "HEAD"], include_in_schema=False)
