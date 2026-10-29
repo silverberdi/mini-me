@@ -6,39 +6,65 @@ TBD - created by archiving change 017-pwa-control-center. Update Purpose after a
 ## Requirements
 
 ### Requirement: PWA Application Shell and Navigation
-The system SHALL provide a modern Progressive Web App shell displaying brand identity, real-time backend connection status, scheduler mode indicator (`RUN`/`DRAIN`/`WAIT`), database health, and configurable auto-refresh controls (5s, 10s, 30s, or manual).
+The system SHALL provide one Spanish PWA with exactly five independent routed views: Dashboard, Trabajo, Trabajo actual, Proyectos and Backlog. Only Dashboard and Proyectos SHALL be primary navigation destinations. Dashboard SHALL link to Trabajo and Trabajo actual; Trabajo SHALL link to Trabajo actual; selected project detail SHALL link to its Backlog. Deep links, refresh, back and forward SHALL preserve authorized context. One bootstrap and one refresh lifecycle SHALL serve all views, with manual and 5s/10s/30s refresh options and no mutation during polling.
 
 #### Scenario: View application shell with live health indicators
-Given the PWA Control Center is loaded in a web browser
-When the application initializes
-Then the system SHALL render the brand header, current scheduler mode badge, database health indicator, and auto-refresh dropdown.
+- **WHEN** the authenticated PWA initializes
+- **THEN** it renders the brand header, backend connection state, compact health indicators and manual/5s/10s/30s refresh controls; scheduler and database health show only verified observations, with unavailable or stale sources explicitly labeled.
 
 #### Scenario: Toggle auto-refresh interval
-Given the PWA Control Center is actively polling at 10s intervals
-When the operator selects a 5s interval from the refresh dropdown
-Then the polling timer SHALL adjust to 5s and trigger an immediate data fetch.
+- **WHEN** the operator selects 5s while the PWA is polling at 10s
+- **THEN** the single polling timer changes to 5s and performs an immediate read without sending a mutation.
+
+#### Scenario: Navigate five independent views
+- **WHEN** the operator follows Dashboard → Trabajo → Trabajo actual and Proyectos → selected project → Backlog
+- **THEN** each destination has its own URL and content, with exactly two primary destinations and no stacked Home screens.
+
+#### Scenario: Reload a contextual deep link
+- **WHEN** an authenticated operator reloads or traverses browser history for a project, Request, Run or stage link
+- **THEN** the same authorized selection is restored and missing or forbidden identities produce an explicit error without silently selecting another Run.
+
+#### Scenario: Change refresh interval without duplication
+- **WHEN** the operator changes from 10s to 5s while switching views
+- **THEN** a single refresh lifecycle uses 5s, performs an immediate read and neither duplicates listeners nor starts work.
 
 ### Requirement: KPI Summary Overview Grid
-The system SHALL render an operational KPI grid displaying current system state, attention count (human gates / active blockers), active in-flight executions count, and total completed/merged changes.
+The system SHALL present Dashboard for an explicitly identified project in focus, with analog project and current Request/task progress gauges, model quota gauges, completed-Request effectiveness, and compact human attention and operational health. Every measured value SHALL expose source, unit, scope, observation time and freshness. Percentages SHALL require a verified numerator and denominator; absent data SHALL be labeled No disponible, never zero or fabricated. Administrative ACTIVE SHALL NOT imply a global executor selection or a started Run.
 
 #### Scenario: Render KPI summary with active executions
-Given an orchestration run is currently in progress
-And one run is paused at a `NEEDS_HUMAN` gate
-When the overview KPI grid renders
-Then the `SYSTEM STATE` card SHALL indicate active status
-And the `ATTENTION REQUIRED` card SHALL display count `1`
-And the `ACTIVE EXECUTIONS` card SHALL display count `1`.
+- **WHEN** authoritative observations identify an active Run and one unresolved HUMAN_REQUIRED for the focused project
+- **THEN** Dashboard shows the actual work state and attention count of one with source and freshness, links to Trabajo actual, and displays progress only where verified counts and denominators exist; a legacy NEEDS_HUMAN label alone does not establish a human request.
 
-### Requirement: Autonomous Queue Prioritization Telemetry
-The system SHALL render the autonomous queue prioritization panel showing ranked candidate changes, calculated priority scores, starvation aging bonuses, dependency states, and explainable admission refusal reasons (`ROADMAP_PREDECESSOR_INCOMPLETE`, `PROVIDER_DRAIN`, `GLOBAL_CONCURRENCY_LIMIT`, etc.).
+#### Scenario: Progress with and without a denominator
+- **WHEN** Request tasks have verified completed/applicable counts but project objectives have no authoritative denominator
+- **THEN** only Request progress shows a percentage with its counts and source, and the project gauge shows No disponible with a reason.
 
-#### Scenario: Inspect ranked queue candidates and explainability
-Given two candidate items in the work queue where Item A has higher priority score than Item B
-When the queue panel renders
-Then Item A SHALL be displayed above Item B
-And expanding Item A SHALL display its base score, starvation aging bonus, total score, and admission eligibility.
+#### Scenario: Quota is not subscription capacity
+- **WHEN** model usage provides tokens or cost but no verified quota limit and period
+- **THEN** the gauge area shows measured units or No disponible, without quota percentages, invented renewal dates or attributing usage to a default model.
 
-#### Scenario: Display blocked reason for ineligible queue item
-Given a queue item for change `017-pwa-control-center` blocked by an incomplete predecessor stage
-When the queue candidate item is inspected
-Then the system SHALL render a `BLOCKED` badge with the refusal code `ROADMAP_PREDECESSOR_INCOMPLETE`.
+#### Scenario: Inspect real quota by model
+- **WHEN** a provider publishes verified model usage, limit, period and renewal
+- **THEN** the operator sees consumed and remaining quota for that model with the source, period and observation time.
+
+#### Scenario: Health and attention are distinct
+- **WHEN** scheduler state, provider capacity or health is unavailable, stale, intentionally disabled or WAITING_CAPACITY
+- **THEN** the compact health area describes that fact, distinguishes physical scheduler state from logical admission, and does not create a HUMAN_REQUIRED notification without a real request.
+
+### Requirement: Effectiveness Dimensions for Completed Requests
+The system SHALL provide selectable line-chart dimensions for quality/autonomy, time, and measured AI resources per completed Request, with separate scales and explicit missing-data states. Quality SHALL distinguish avoidable clarification/correction iterations from mandatory authorization gates; time SHALL distinguish total, active and waiting duration; resources SHALL preserve provider/model attribution and actual measured units.
+
+#### Scenario: Compare measured history
+- **WHEN** the operator changes the effectiveness dimension over completed Requests
+- **THEN** the graph shows attributable observations on the selected scale without combining incompatible units or penalizing mandatory approvals as avoidable corrections.
+
+#### Scenario: Instrumentation is absent
+- **WHEN** no verified observations support a selected dimension
+- **THEN** the graph is empty with an explanation Pendiente de datos — F7, and no demonstration points or inferred durations appear.
+
+### Requirement: Honest Global Pause Control
+The system SHALL display Pausar mini me with its deferred semantics, but SHALL keep it non-actionable with Disponible en F7 when global deferred-pause authority is absent.
+
+#### Scenario: Pause lacks authority
+- **WHEN** the operator inspects Pausar mini me without a supported backend capability
+- **THEN** its accessible explanation says pause would occur after the full Change, PR2 and closure, and no pause request or success confirmation is emitted.
