@@ -1,0 +1,7 @@
+{
+  "name": "mini-me-pwa",
+  "private": true,
+  "version": "0.1.0",
+  "scripts": { "build:css": "tailwindcss -i ./src/minime/static/css/tailwind.input.css -o ./src/minime/static/css/tailwind.css --minify" },
+  "devDependencies": { "tailwindcss": "3.4.17" }
+}

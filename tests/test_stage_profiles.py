@@ -262,13 +262,14 @@ def test_stage_profile_rejects_unallowed_provider():
         resolve_stage_profile(proj, "APPLY")
 
 
-def test_stage_profile_requires_deepseek_direct_for_code_review(default_project):
+def test_stage_profile_requires_deepseek_direct_for_code_review(default_project, monkeypatch):
     """A primary CLI cannot substitute for the independent DeepSeek reviewer."""
+    monkeypatch.delenv("DEEPSEEK_API_KEY", raising=False)
     with pytest.raises(StageProfileError, match="CODE_REVIEW_(WAITING|REQUIRES_DEEPSEEK_DIRECT)"):
         resolve_stage_profile(
             default_project,
             "REVIEW",
-            implementer_provider="codex",  # default REVIEW uses codex
+            implementer_provider="codex",
         )
 
 
