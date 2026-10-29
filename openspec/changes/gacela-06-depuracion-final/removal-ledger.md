@@ -9,7 +9,7 @@ Estado: `COMPLETE` — inventario final, reconciliación del fixture y pruebas p
 | Issue / Change | #174 / `gacela-06-depuracion-final` |
 | Worktree | `/opt/minime/repos/mini-me/.minime/worktrees/request-174-f6-depuración-final-ejecutada-por-mini-m` |
 | Branch | `request-174-f6-depuración-final-ejecutada-por-mini-m` |
-| Base / Candidate SHA | `82748f465b560ea41159f76ad98fe9b8c6d80b3a` / `df51a2d01608138e39efbc26733ef3cf1de1574a` |
+| Base / Candidate SHA | `82748f465b560ea41159f76ad98fe9b8c6d80b3a` / `61115dc3ade35f8c4999e08880176226c17088f9` |
 | Workflow | `openspec status` + `openspec instructions apply`; schema `spec-driven` |
 | Store | local nearest repo |
 
@@ -47,4 +47,4 @@ Invocaciones reales observables ejecutadas contra las interfaces autorizadas en 
 | Obsolete API Scheduler | `GET /api/v1/scheduler` | HTTP 401 / Denied | Prefijo de scheduler bloqueado. |
 | Obsolete API Queue | `GET /api/v1/queue` | HTTP 401 / Denied | Cola legacy no expuesta sin autorización. |
 | Fixture Postcondition | `GitHubAdapter.verify_repository` | HTTP 404 (NOT_FOUND) | Repositorio remoto `silverberdi/mini-me-r01-e2e-20261014` ausente en GitHub. |
-| Candidate Bound | Git HEAD | SHA `df51a2d016` | Toda la evidencia observada está ligada a la identidad inmutable del candidato. |
+| Candidate Bound | Git HEAD | SHA `61115dc3ad` | Toda la evidencia observada está ligada a la identidad inmutable del candidato. |
