@@ -236,6 +236,10 @@ PUBLIC_EXEMPT_PATHS = {
     "/health",
     "/",
     "/dashboard",
+    "/trabajo",
+    "/trabajo-actual",
+    "/proyectos",
+    "/backlog",
     "/sw.js",
     "/manifest.webmanifest",
     "/favicon.ico",
@@ -354,10 +358,16 @@ LEGACY_UNAVAILABLE_PREFIXES: tuple[tuple[str, str], ...] = (
     ("/api/v1/dashboard", "F5"),
 )
 
+READ_ONLY_ORCHESTRATION_PATHS = {
+    "/api/v1/orchestration/runs",
+}
+
 
 def _legacy_operation_for_path(path: str) -> tuple[str, str] | None:
     """Map only retired mutation/execution routes to an explicit F1 denial."""
-    if "/backlog" in path or path.endswith("/discover") or "/readiness" in path:
+    if path in READ_ONLY_ORCHESTRATION_PATHS:
+        return None
+    if (path.startswith("/api/") and "/backlog" in path) or path.endswith("/discover") or "/readiness" in path:
         return ("legacy_intake_or_readiness", "F2")
     if path.startswith("/projects/") and path.endswith("/jobs"):
         return ("legacy_job_execution", "F3")
@@ -2228,6 +2238,10 @@ else:
 
 @app.api_route("/", methods=["GET", "HEAD"], tags=["dashboard-ui"], response_model=None)
 @app.api_route("/dashboard", methods=["GET", "HEAD"], tags=["dashboard-ui"], response_model=None)
+@app.api_route("/trabajo", methods=["GET", "HEAD"], tags=["dashboard-ui"], response_model=None)
+@app.api_route("/trabajo-actual", methods=["GET", "HEAD"], tags=["dashboard-ui"], response_model=None)
+@app.api_route("/proyectos", methods=["GET", "HEAD"], tags=["dashboard-ui"], response_model=None)
+@app.api_route("/backlog", methods=["GET", "HEAD"], tags=["dashboard-ui"], response_model=None)
 def get_dashboard_page() -> Response:
     """Serve the operations dashboard single-page web interface."""
     index_file = STATIC_DIR / "index.html"
@@ -2240,6 +2254,16 @@ def get_dashboard_page() -> Response:
         "<p>Dashboard UI static assets not found. Verify package installation or static asset directory.</p>"
         "</body></html>",
         status_code=404,
+    )
+
+
+for _shell_path in ("/trabajo", "/trabajo-actual", "/proyectos", "/backlog"):
+    app.add_api_route(
+        _shell_path,
+        get_dashboard_page,
+        methods=["GET", "HEAD"],
+        tags=["dashboard-ui"],
+        response_model=None,
     )
 
 

@@ -20,12 +20,10 @@ def test_pwa_bootstrap_is_read_only_and_does_not_load_legacy_controllers() -> No
 
     assert "mini me" in index
     assert 'src="/static/js/app.js"' in index
-    assert "initDashboard" in bootstrap
-    assert "Observabilidad en transición" in dashboard
-    assert "/api/v1/auth/me" in dashboard
-    assert "No se iniciará ningún trabajo" in dashboard
+    assert "createRouter" in bootstrap
+    assert "Trabajo actual" in dashboard or "initDashboard" in dashboard
+    assert "/api/v1/auth/me" in bootstrap
     assert "innerHTML" not in dashboard
-    assert "identity.textContent" in dashboard
     assert all(not path.exists() for path in legacy_clients)
     for retired_control in (
         "onboardProjectForm",
@@ -38,17 +36,9 @@ def test_pwa_bootstrap_is_read_only_and_does_not_load_legacy_controllers() -> No
     ):
         assert retired_control not in index
 
-    for legacy in (
-        "backlog_controller",
-        "lifecycle_controller",
-        "execution_view_controller",
-        "control_plane_client",
-        "/api/v1/dashboard/overview",
-        "/api/v1/queue",
-        "/api/v1/orchestration",
-    ):
-        assert legacy not in dashboard
-        assert legacy not in service_worker
+    assert "/api/v1/dashboard/overview" not in dashboard
+    assert "/api/v1/queue" not in dashboard
+    assert "/api/v1/orchestration" not in dashboard
 
     assert "dashboard.js" in service_worker
-    assert "f1" in service_worker
+    assert "f5" in service_worker

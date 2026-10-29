@@ -30,14 +30,14 @@ def test_pwa_client_contracts_and_accessible_shell() -> None:
     sw = (STATIC / "sw.js").read_text()
     assert 'rel="manifest"' in index and 'type="module"' in index
     assert 'id="googleLoginLink"' in index
-    assert 'id="authenticatedContent"' in index
+    assert 'id="app"' in index
     assert "onboardProjectForm" not in index
     assert "discoverBacklogBtn" not in index
     assert "actionDialog" not in index
     assert {
         path.relative_to(STATIC).as_posix()
         for path in (STATIC / "js").rglob("*.js")
-    } == {"js/app.js", "js/dashboard.js"}
+    } == {"js/app.js", "js/dashboard.js", "js/client.js", "js/router.js", "js/refresh.js", "js/views.js"}
     assert "CACHEABLE_PATHS" in sw and "SHELL_ASSETS" in sw
     assert 'const CACHE_PREFIX = "minime-pwa-shell-"' in sw
     assert "/api/" not in sw

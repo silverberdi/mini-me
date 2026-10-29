@@ -1,5 +1,5 @@
 const CACHE_PREFIX = "minime-pwa-shell-";
-const CACHE_NAME = `${CACHE_PREFIX}f1`;
+const CACHE_NAME = `${CACHE_PREFIX}f5`;
 const SHELL_ASSETS = [
   "/",
   "/dashboard",
@@ -11,6 +11,10 @@ const SHELL_ASSETS = [
   "/static/css/components.css",
   "/static/js/app.js",
   "/static/js/dashboard.js",
+  "/static/js/client.js",
+  "/static/js/router.js",
+  "/static/js/refresh.js",
+  "/static/js/views.js",
   "/static/manifest.webmanifest",
   "/static/icons/icon-192.png",
   "/static/icons/icon-192.svg",

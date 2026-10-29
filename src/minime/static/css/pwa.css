@@ -1,3 +1,26 @@
 @import url("/static/css/tokens.css");
 @import url("/static/css/layout.css");
 @import url("/static/css/components.css");
+
+.app-layout { display: grid; grid-template-columns: 180px minmax(0, 1fr); min-height: calc(100vh - var(--header-height)); }
+.primary-nav { display: grid; align-content: start; gap: 8px; padding: 20px 12px; background: var(--bg-panel); border-right: 1px solid var(--border-color); }
+.primary-nav a, .nav-brand { color: var(--text-main); text-decoration: none; }
+.primary-nav a { padding: 10px 12px; border-radius: var(--radius-sm); font-weight: 700; }
+.primary-nav a:hover, .primary-nav a:focus-visible { background: var(--bg-hover); color: var(--color-primary); }
+.nav-actions { display: flex; align-items: center; flex-wrap: wrap; justify-content: flex-end; gap: 8px; }
+.refresh-control { display: inline-flex; align-items: center; gap: 6px; color: var(--text-muted); }
+.refresh-control select { min-height: 36px; }
+.view-stack { display: grid; gap: 16px; max-width: 1440px; margin: 0 auto; }
+.view-heading { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+.view-heading h1, .view-stack > h1 { font-size: clamp(1.4rem, 2vw, 2rem); }
+.view-heading select { min-height: 40px; }
+.kpi-grid { display: grid; gap: 12px; grid-template-columns: repeat(4, minmax(0, 1fr)); }
+.panel { padding: 16px; border: 1px solid var(--border-color); border-radius: var(--radius-md); background: var(--bg-panel); box-shadow: var(--shadow-panel); }
+.panel h2 { margin-bottom: 8px; font-size: 1rem; }
+.panel p { margin: 6px 0; }
+.human-form { display: grid; gap: 10px; margin-top: 12px; }
+.human-form textarea { width: 100%; padding: 10px; color: var(--text-main); background: var(--bg-card); border: 1px solid var(--border-color); border-radius: var(--radius-sm); }
+.login-container { display: grid; place-items: center; min-height: 100vh; padding: 24px; background: var(--bg-app); color: var(--text-main); }
+.login-card { width: min(440px, 100%); padding: 28px; border: 1px solid var(--border-color); border-radius: var(--radius-lg); background: var(--bg-panel); }
+@media (max-width: 767px) { .app-layout { display: block; } .primary-nav { display: flex; position: sticky; top: var(--header-height); z-index: 90; border-right: 0; border-bottom: 1px solid var(--border-color); padding: 8px; } .primary-nav a { flex: 1; text-align: center; } .nav-actions { width: 100%; justify-content: flex-start; } .kpi-grid { grid-template-columns: 1fr 1fr; } .view-stack { gap: 12px; } }
+@media (max-width: 420px) { .kpi-grid { grid-template-columns: 1fr; } .brand-sub { display: none; } }
