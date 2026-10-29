@@ -503,6 +503,17 @@ class AgentProcessConfinement:
 
     SANDBOX_RUNTIME_ROOT = "/run/minime-agent"
 
+    @staticmethod
+    def _set_parent_death_signal() -> None:
+        """Make the Linux confinement wrapper die with its worker parent."""
+        if platform.system().lower() != "linux":
+            return
+        import ctypes
+
+        libc = ctypes.CDLL(None, use_errno=True)
+        if libc.prctl(1, signal.SIGKILL, 0, 0, 0) != 0:
+            os._exit(127)
+
     def __init__(
         self,
         allowed_worktree_path: str,
@@ -1160,7 +1171,15 @@ class AgentProcessConfinement:
                 )
             if unshare_network:
                 wrapped.append("--unshare-net")
-            wrapped.extend(["--unshare-pid", "--chdir", self.allowed_worktree_path, *command_args])
+            wrapped.extend(
+                [
+                    "--die-with-parent",
+                    "--unshare-pid",
+                    "--chdir",
+                    self.allowed_worktree_path,
+                    *command_args,
+                ]
+            )
             return wrapped
 
         if self.confinement_mechanism == "darwin_sandbox":
@@ -1208,6 +1227,11 @@ class AgentProcessConfinement:
                     stderr=asyncio.subprocess.PIPE,
                     env=runtime_state.environment,
                     start_new_session=True,
+                    preexec_fn=(
+                        self._set_parent_death_signal
+                        if self.confinement_mechanism == "bubblewrap"
+                        else None
+                    ),
                 )
                 from minime.services.progress_watchdog import (
                     ProgressWatchdog,
