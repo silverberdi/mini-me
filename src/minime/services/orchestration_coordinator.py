@@ -1496,7 +1496,11 @@ class NativeOrchestrationCoordinator:
                         effective_auth_id,
                         run_id=active_run.run_id,
                         action_type=OperatorActionType.RETRY,
-                        expected_parameters={"single_use": True, "stage": "proposal_review"},
+                        expected_parameters={
+                            "single_use": True,
+                            "stage": "proposal_review",
+                            "prior_attempt_id": (stored_review or {}).get("attempt_id"),
+                        },
                     )
                     if consumed is None:
                         return OrchestrationCoordinationResult(
@@ -1710,7 +1714,11 @@ class NativeOrchestrationCoordinator:
                         effective_code_auth_id,
                         run_id=active_run.run_id,
                         action_type=OperatorActionType.RETRY,
-                        expected_parameters={"single_use": True, "stage": "code_review"},
+                        expected_parameters={
+                            "single_use": True,
+                            "stage": "code_review",
+                            "prior_attempt_id": (stored_code_review or {}).get("attempt_id"),
+                        },
                     )
                     if consumed is None:
                         return OrchestrationCoordinationResult(

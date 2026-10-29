@@ -800,3 +800,49 @@ async def test_reentry_proposal_review_technical_failure_with_auth_redispatches(
     coordinator.agent_runner.run.assert_called_once()
     updated_run = uow.orchestration_runs.get_by_id("run-test-retry")
     assert updated_run.current_stage == OrchestrationStage.IMPLEMENTING
+
+
+@pytest.mark.asyncio
+async def test_recovery_authorization_binds_prior_attempt_id(base_setup):
+    uow, candidate_worktree, change_dir = base_setup
+    run = OrchestrationRun(
+        project_id="mini-me",
+        run_id="run-test-bind",
+        change_name="gacela-05-ui-self-hosted",
+        base_sha="base_sha_123",
+        current_stage=OrchestrationStage.PROPOSAL_REVIEW,
+        stop_details=make_stop_details(
+            {
+                "proposal_review": {
+                    "status": "dispatched",
+                    "attempt_id": "prev-attempt-1",
+                },
+            }
+        ),
+    )
+    uow.orchestration_runs.save(run)
+    uow.operator_actions = MagicMock()
+    uow.operator_actions.consume_single_use.return_value = MagicMock()
+
+    coordinator = NativeOrchestrationCoordinator(
+        github_adapter=MagicMock(),
+        worktree_manager=MagicMock(),
+        agent_runner=MagicMock(),
+        uow_factory=lambda: uow,
+    )
+    coordinator.worktree_manager.create_request_worktree = AsyncMock(
+        return_value=WorktreeInfo(
+            path=candidate_worktree, branch_name="feature/f5", base_sha="base_sha_123"
+        )
+    )
+    mock_res = make_mock_execution(
+        '```json\n{"verdict":"READY_TO_MERGE","summary":"Approved"}\n```'
+    )
+    coordinator.agent_runner.run = AsyncMock(return_value=mock_res)
+    coordinator._run_apply = AsyncMock(return_value=False)
+
+    await coordinator.execute_project_request(
+        "mini-me", proposal_review_recovery_authorization_id="auth-bind"
+    )
+    _, kwargs = uow.operator_actions.consume_single_use.call_args
+    assert kwargs["expected_parameters"]["prior_attempt_id"] == "prev-attempt-1"
