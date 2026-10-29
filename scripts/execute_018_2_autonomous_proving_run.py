@@ -3,6 +3,11 @@
 import os
 from pathlib import Path
 
+from minime.services.discovery_service import WorkDiscoveryService
+from minime.services.orchestration_service import OrchestrationService
+from minime.services.readiness_service import ReadinessService
+from minime.services.scheduler_service import SchedulerService
+
 from minime.adapters.github import GitHubAdapter
 from minime.db.repository import PostgresPersistenceUnitOfWork
 from minime.db.session import db_manager
@@ -13,11 +18,7 @@ from minime.domain.enums import (
     ProviderHealthStatus,
 )
 from minime.domain.models import Project, ProjectBinding, ProviderHealth
-from minime.services.discovery_service import WorkDiscoveryService
 from minime.services.efficiency_telemetry_service import EfficiencyTelemetryService
-from minime.services.orchestration_service import OrchestrationService
-from minime.services.readiness_service import ReadinessService
-from minime.services.scheduler_service import SchedulerService
 
 
 def _bootstrap_env() -> None:

@@ -9,7 +9,6 @@ from typing import Sequence, Union
 import sqlalchemy as sa
 from alembic import op
 
-
 revision: str = "gacela01_retire_legacy_admission_state"
 down_revision: Union[str, None] = "r02_contract_review_budget_identity"
 branch_labels: Union[str, Sequence[str], None] = None

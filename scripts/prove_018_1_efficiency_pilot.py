@@ -14,6 +14,8 @@ Validates all 018.1 Hard Efficiency Gates:
 import sys
 from pathlib import Path
 
+from minime.services.task_classifier import TaskClassifier
+
 from minime.db.repository import PostgresPersistenceUnitOfWork
 from minime.domain.enums import (
     AttemptProductivityClass,
@@ -38,7 +40,6 @@ from minime.services.continuation_engine import ContinuationContext, Continuatio
 from minime.services.efficiency_telemetry_service import EfficiencyTelemetryService
 from minime.services.lightweight_reconciliation_service import LightweightReconciliationService
 from minime.services.provider_policy_service import ProviderPolicyService
-from minime.services.task_classifier import TaskClassifier
 
 
 def run_pilot():
