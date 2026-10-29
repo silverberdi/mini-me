@@ -1,6 +1,9 @@
+import asyncio
+
 from minime.db.repository import PostgresPersistenceUnitOfWork
 from minime.db.session import db_manager
 from minime.domain.models import ProjectAgentProfile, ProjectConfigurationPatch
+from minime.services.project_catalog_service import ProjectCatalogService
 from minime.services.project_service import ProjectService
 
 
@@ -46,7 +49,8 @@ def reconcile() -> bool:
             agent_id="codex",
             model_id="gpt-5.6-luna",
             effort=raw_exec.get("effort") or "medium",
-            workflows=raw_exec.get("workflows") or ["$openspec-apply-change", "$openspec-update-change"],
+            workflows=raw_exec.get("workflows")
+            or ["$openspec-apply-change", "$openspec-update-change"],
             skills=raw_exec.get("skills") or ["openspec-apply-change", "openspec-update-change"],
         )
 
@@ -72,10 +76,22 @@ def reconcile() -> bool:
             "fallback": fallback_profile,
         }
 
+        # Validate against the live F2 catalog (models, efforts, roles, and
+        # native workflows) before persisting, exactly as `minime project update`
+        # does. Fail closed rather than persist a profile the account cannot run.
+        workspace_root = service.verified_managed_workspace_root("mini-me")
+        asyncio.run(
+            ProjectCatalogService().validate_project_profiles(
+                updated_profiles, project_root=workspace_root
+            )
+        )
+
         patch = ProjectConfigurationPatch(agent_profiles=updated_profiles)
         updated = service.update_configuration("mini-me", patch)
         session.commit()
-        print("SUCCESS: Project mini-me profiles reconciled via ProjectService.update_configuration().")
+        print(
+            "SUCCESS: Project mini-me profiles reconciled via ProjectService.update_configuration()."
+        )
         print(updated.agent_profiles)
         return True
 

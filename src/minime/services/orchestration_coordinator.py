@@ -65,6 +65,19 @@ _SENSITIVE_RESPONSE_KEYS = (
     "token",
 )
 
+# Semantic roles used by the coordinator map to persisted profile keys. Keep a
+# single source of truth so provider and model resolution can never drift apart.
+_ROLE_TO_PROFILE_KEY = {"reviewer": "independent_review"}
+
+# Review reentry outcomes, produced by a single fail-closed classifier shared by
+# the proposal-review and code-review stages.
+_REVIEW_ADVANCE = "advance"
+_REVIEW_REJECTED = "rejected"
+_REVIEW_CORRUPT = "corrupt"
+_REVIEW_TECHNICAL_FAILURE = "technical_failure"
+_REVIEW_AMBIGUOUS = "ambiguous"
+_REVIEW_STALE = "stale"
+
 
 def _quarantine_response_content(raw_response: str) -> str:
     """Retain rejected JSON diagnostically while masking sensitive fields."""
@@ -145,12 +158,12 @@ class GitOperationError(RuntimeError):
         self.result = result
 
 
-
 class ReviewResult(dict):
     """Structured review execution result that maintains boolean truthiness compatibility."""
 
     def __bool__(self) -> bool:
         return self.get("status") == "approved"
+
 
 class NativeOrchestrationCoordinator:
     """Coordinates the end-to-end lifecycle of remote requests through native OpenSpec."""
@@ -240,14 +253,24 @@ class NativeOrchestrationCoordinator:
         try:
             result = await self._run_claimed(uow, claim, work)
         except asyncio.CancelledError:
-            self._finish_native_dispatch(uow, run, operation, attempt_id, action_key, claim, "AMBIGUOUS", None)
+            self._finish_native_dispatch(
+                uow, run, operation, attempt_id, action_key, claim, "AMBIGUOUS", None
+            )
             raise
         except Exception as exc:
-            self._finish_native_dispatch(uow, run, operation, attempt_id, action_key, claim, "AMBIGUOUS", str(exc))
+            self._finish_native_dispatch(
+                uow, run, operation, attempt_id, action_key, claim, "AMBIGUOUS", str(exc)
+            )
             raise
         status = "COMPLETE" if complete(result) else "FAILED"
         self._finish_native_dispatch(
-            uow, run, operation, attempt_id, action_key, claim, status,
+            uow,
+            run,
+            operation,
+            attempt_id,
+            action_key,
+            claim,
+            status,
             None if status == "COMPLETE" else result.get("message"),
         )
         return result
@@ -672,7 +695,10 @@ class NativeOrchestrationCoordinator:
             elif not isinstance(attempt, dict) or attempt.get("attempt_id") != prior_attempt_id:
                 return False
         elif stage == "propose":
-            if run.current_stage not in {OrchestrationStage.PROPOSING, OrchestrationStage.VALIDATING}:
+            if run.current_stage not in {
+                OrchestrationStage.PROPOSING,
+                OrchestrationStage.VALIDATING,
+            }:
                 return False
             if prior_attempt_id is not None and (
                 not isinstance(attempt, dict) or attempt.get("attempt_id") != prior_attempt_id
@@ -925,6 +951,11 @@ class NativeOrchestrationCoordinator:
             if locked_run is not None:
                 active_run = locked_run
 
+        # Capture the stage this execution *entered* at. Review stages are
+        # transition points: if a run enters already sitting on a review stage,
+        # that is a resume and must fail closed on absent/ambiguous evidence.
+        entry_stage = active_run.current_stage
+
         # Step 3: Git Workspace Isolation
         base_branch = "main"
         worktree_info = await self.worktree_manager.create_request_worktree(
@@ -992,9 +1023,7 @@ class NativeOrchestrationCoordinator:
             explore_base_context = dict(explore_context)
             explore_base_context.pop("operator_clarification", None)
             explore_base_context_sha = hashlib.sha256(
-                json.dumps(
-                    explore_base_context, ensure_ascii=False, sort_keys=True
-                ).encode("utf-8")
+                json.dumps(explore_base_context, ensure_ascii=False, sort_keys=True).encode("utf-8")
             ).hexdigest()
             expected_explore_wf: ResolvedWorkflow | None = None
             try:
@@ -1024,8 +1053,7 @@ class NativeOrchestrationCoordinator:
                 and stored_explore.get("base_context_sha256") == explore_base_context_sha
             )
             same_context = (
-                checkpoint_verified
-                and stored_explore.get("context_sha256") == explore_context_sha
+                checkpoint_verified and stored_explore.get("context_sha256") == explore_context_sha
             )
             authorized_clarification = (
                 checkpoint_verified
@@ -1038,14 +1066,8 @@ class NativeOrchestrationCoordinator:
             # ambiguous. Never turn an ordinary resumed API call into another
             # paid inference. Recovery is explicit, Run-bound and one-use.
             recovery_needed = (
-                (stored_explore is not None and not (
-                    same_context or authorized_clarification
-                ))
-                or (
-                    stored_explore is None
-                    and stage_before_explore == OrchestrationStage.EXPLORING
-                )
-            )
+                stored_explore is not None and not (same_context or authorized_clarification)
+            ) or (stored_explore is None and stage_before_explore == OrchestrationStage.EXPLORING)
             if recovery_needed:
                 if not explore_recovery_authorization_id:
                     return OrchestrationCoordinationResult(
@@ -1149,7 +1171,9 @@ class NativeOrchestrationCoordinator:
                             evidence.response_output.encode("utf-8")
                         ).hexdigest(),
                         "attempt_id": dispatch[0],
-                        "human_payload": self._safe_human_payload(explore_result.get("human_payload")),
+                        "human_payload": self._safe_human_payload(
+                            explore_result.get("human_payload")
+                        ),
                         "duration_ms": getattr(evidence, "duration_ms", None),
                         "recorded_at": utc_now().isoformat(),
                     }
@@ -1191,27 +1215,27 @@ class NativeOrchestrationCoordinator:
                 )
             complete_proposal = (
                 isinstance(planning, dict) and planning.get("status") == "PASS"
-            ) or (
-                planning is None and self._proposal_artifacts_present(worktree_path, change_name)
-            )
+            ) or (planning is None and self._proposal_artifacts_present(worktree_path, change_name))
             propose_recovery_needed = (
                 active_run.current_stage == OrchestrationStage.PROPOSING
-                and (stored_propose_attempt is not None or self._proposal_artifacts_any(worktree_path, change_name))
+                and (
+                    stored_propose_attempt is not None
+                    or self._proposal_artifacts_any(worktree_path, change_name)
+                )
             ) or (
-                active_run.current_stage == OrchestrationStage.VALIDATING
-                and not complete_proposal
+                active_run.current_stage == OrchestrationStage.VALIDATING and not complete_proposal
             )
             stored_propose_gate = (active_run.stop_details or {}).get("propose_human_required")
             verified_propose_human_gate = (
                 propose_recovery_needed
                 and isinstance(stored_propose_gate, dict)
                 and isinstance(stored_propose_attempt, dict)
-                and stored_propose_gate.get("attempt_id") == stored_propose_attempt.get("attempt_id")
+                and stored_propose_gate.get("attempt_id")
+                == stored_propose_attempt.get("attempt_id")
                 and stored_propose_attempt.get("status") == "COMPLETE"
             )
-            if (
-                verified_propose_human_gate
-                and not (isinstance(operator_clarification, str) and operator_clarification.strip())
+            if verified_propose_human_gate and not (
+                isinstance(operator_clarification, str) and operator_clarification.strip()
             ):
                 # A power interruption or refresh must not hide a genuine
                 # human question or spend another model invocation to rediscover it.
@@ -1220,7 +1244,9 @@ class NativeOrchestrationCoordinator:
                     run_id=active_run.run_id,
                     current_stage=OrchestrationStage.PROPOSING,
                     message="Propose is awaiting an operator clarification.",
-                    human_payload=self._safe_human_payload(stored_propose_gate.get("human_payload")),
+                    human_payload=self._safe_human_payload(
+                        stored_propose_gate.get("human_payload")
+                    ),
                 )
             if propose_recovery_needed and not propose_recovery_authorization_id:
                 return OrchestrationCoordinationResult(
@@ -1410,60 +1436,54 @@ class NativeOrchestrationCoordinator:
         if active_run.current_stage == OrchestrationStage.PROPOSAL_REVIEW:
             stored_review = (active_run.stop_details or {}).get("proposal_review")
             current_hashes = self._compute_proposal_artifacts_hashes(worktree_path, change_name)
-            hashes_match = (
-                isinstance(stored_review, dict)
-                and stored_review.get("artifact_hashes") == current_hashes
+            action = self._classify_review_reentry(
+                stored_review,
+                identity_matches=(
+                    isinstance(stored_review, dict)
+                    and stored_review.get("artifact_hashes") == current_hashes
+                ),
+                is_resume=(entry_stage == OrchestrationStage.PROPOSAL_REVIEW),
             )
 
-            # Check if there is an existing valid approval matching current artifacts
-            if (
-                hashes_match
-                and stored_review.get("status") == "approved"
-                and stored_review.get("verdict") == "READY_TO_MERGE"
-            ):
+            if action == _REVIEW_ADVANCE:
                 self._update_stage(uow, active_run, OrchestrationStage.READY_TO_APPLY)
-            elif (
-                hashes_match
-                and stored_review.get("status") in {"changes_required", "invalid_response", "provider_error"}
-            ):
-                status = stored_review.get("status")
-                if status == "changes_required":
-                    msg = f"Independent proposal review requested changes: {stored_review.get('summary', 'see findings')}. Worktree preserved."
-                elif status == "provider_error":
-                    msg = f"Independent proposal review provider failed: {stored_review.get('error', 'unknown error')}. Worktree preserved."
-                else:
-                    msg = f"Independent proposal review produced invalid response: {stored_review.get('error', 'malformed output')}. Worktree preserved."
+            elif action == _REVIEW_REJECTED:
                 return OrchestrationCoordinationResult(
                     status="PAUSED",
                     run_id=active_run.run_id,
                     current_stage=OrchestrationStage.PROPOSAL_REVIEW,
-                    message=msg,
+                    message=self._review_pause_message("proposal", stored_review),
                 )
-            elif (
-                hashes_match
-                and stored_review.get("status") == "approved"
-                and stored_review.get("verdict") != "READY_TO_MERGE"
-            ):
+            elif action == _REVIEW_CORRUPT:
                 return OrchestrationCoordinationResult(
                     status="PAUSED",
                     run_id=active_run.run_id,
                     current_stage=OrchestrationStage.PROPOSAL_REVIEW,
-                    message="Independent proposal review recorded invalid approval verdict without READY_TO_MERGE. Worktree preserved.",
+                    message="Independent proposal review recorded an invalid approval verdict without READY_TO_MERGE. Worktree preserved.",
                 )
             else:
-                # Hashes changed (artifacts updated by operator) OR first dispatch OR dispatched
-                effective_auth_id = proposal_review_recovery_authorization_id or propose_recovery_authorization_id
-                if (
-                    isinstance(stored_review, dict)
-                    and stored_review.get("status") == "dispatched"
-                ):
-                    if not effective_auth_id:
-                        return OrchestrationCoordinationResult(
-                            status="PAUSED",
-                            run_id=active_run.run_id,
-                            current_stage=OrchestrationStage.PROPOSAL_REVIEW,
-                            message="Proposal review recovery authorization is required before re-dispatch.",
-                        )
+                # _REVIEW_STALE, _REVIEW_TECHNICAL_FAILURE, or _REVIEW_AMBIGUOUS.
+                # Re-dispatch freely only when the prior review is stale; a
+                # technical failure or ambiguous record needs a single-use,
+                # Run-bound recovery authorization before spending again.
+                needs_auth = action in {_REVIEW_TECHNICAL_FAILURE, _REVIEW_AMBIGUOUS}
+                effective_auth_id = (
+                    proposal_review_recovery_authorization_id or propose_recovery_authorization_id
+                )
+                if needs_auth and not effective_auth_id:
+                    msg = (
+                        self._review_pause_message("proposal", stored_review)
+                        + " Recovery authorization is required to retry."
+                        if action == _REVIEW_TECHNICAL_FAILURE
+                        else "Proposal review recovery authorization is required before re-dispatch."
+                    )
+                    return OrchestrationCoordinationResult(
+                        status="PAUSED",
+                        run_id=active_run.run_id,
+                        current_stage=OrchestrationStage.PROPOSAL_REVIEW,
+                        message=msg,
+                    )
+                if needs_auth:
                     operator_actions = getattr(uow, "operator_actions", None)
                     if not operator_actions:
                         return OrchestrationCoordinationResult(
@@ -1506,14 +1526,15 @@ class NativeOrchestrationCoordinator:
                     worktree_path, reviewer_provider, change_name, project_id=project_id, uow=uow
                 )
                 details = dict(active_run.stop_details or {})
-                if isinstance(review_res, dict):
-                    res_dict = dict(review_res)
-                else:
-                    res_dict = {
+                res_dict = (
+                    dict(review_res)
+                    if isinstance(review_res, dict)
+                    else {
                         "status": "approved" if review_res else "changes_required",
                         "verdict": "READY_TO_MERGE" if review_res else None,
                         "findings": [],
                     }
+                )
                 details["proposal_review"] = {
                     "attempt_id": attempt_id,
                     **res_dict,
@@ -1524,21 +1545,15 @@ class NativeOrchestrationCoordinator:
                     if hasattr(uow, "commit"):
                         uow.commit()
 
-                if res_dict.get("status") != "approved" or res_dict.get("verdict") != "READY_TO_MERGE":
-                    status = res_dict.get("status")
-                    if status == "changes_required":
-                        msg = f"Independent proposal review requested changes: {res_dict.get('summary', 'see findings')}. Worktree preserved."
-                    elif status == "provider_error":
-                        msg = f"Independent proposal review provider failed: {res_dict.get('error', 'unknown error')}. Worktree preserved."
-                    elif status == "invalid_response":
-                        msg = f"Independent proposal review produced invalid response: {res_dict.get('error', 'malformed output')}. Worktree preserved."
-                    else:
-                        msg = "Independent proposal review did not approve proposal. Worktree preserved."
+                if (
+                    res_dict.get("status") != "approved"
+                    or res_dict.get("verdict") != "READY_TO_MERGE"
+                ):
                     return OrchestrationCoordinationResult(
                         status="PAUSED",
                         run_id=active_run.run_id,
                         current_stage=OrchestrationStage.PROPOSAL_REVIEW,
-                        message=msg,
+                        message=self._review_pause_message("proposal", res_dict),
                     )
                 self._update_stage(uow, active_run, OrchestrationStage.READY_TO_APPLY)
 
@@ -1638,58 +1653,51 @@ class NativeOrchestrationCoordinator:
                     message=f"Unable to observe candidate Git state: {exc}. Worktree preserved.",
                 )
             stored_code_review = (active_run.stop_details or {}).get("code_review")
-            sha_matches = (
-                isinstance(stored_code_review, dict)
-                and stored_code_review.get("candidate_sha") == candidate_sha
+            action = self._classify_review_reentry(
+                stored_code_review,
+                identity_matches=(
+                    isinstance(stored_code_review, dict)
+                    and stored_code_review.get("candidate_sha") == candidate_sha
+                ),
+                is_resume=(entry_stage == OrchestrationStage.CODE_REVIEW),
             )
-            if (
-                sha_matches
-                and stored_code_review.get("status") == "approved"
-                and stored_code_review.get("verdict") == "READY_TO_MERGE"
-            ):
+
+            if action == _REVIEW_ADVANCE:
                 self._update_stage(uow, active_run, OrchestrationStage.READY_FOR_PR)
-            elif (
-                sha_matches
-                and stored_code_review.get("status") in {"changes_required", "invalid_response", "provider_error"}
-            ):
-                status = stored_code_review.get("status")
-                if status == "changes_required":
-                    msg = f"Independent code review requested changes: {stored_code_review.get('summary', 'see findings')}. Worktree preserved."
-                elif status == "provider_error":
-                    msg = f"Independent code review provider failed: {stored_code_review.get('error', 'unknown error')}. Worktree preserved."
-                else:
-                    msg = f"Independent code review produced invalid response: {stored_code_review.get('error', 'malformed output')}. Worktree preserved."
+            elif action == _REVIEW_REJECTED:
                 return OrchestrationCoordinationResult(
                     status="PAUSED",
                     run_id=active_run.run_id,
                     current_stage=OrchestrationStage.CODE_REVIEW,
-                    message=msg,
+                    message=self._review_pause_message("code", stored_code_review),
                 )
-            elif (
-                sha_matches
-                and stored_code_review.get("status") == "approved"
-                and stored_code_review.get("verdict") != "READY_TO_MERGE"
-            ):
+            elif action == _REVIEW_CORRUPT:
                 return OrchestrationCoordinationResult(
                     status="PAUSED",
                     run_id=active_run.run_id,
                     current_stage=OrchestrationStage.CODE_REVIEW,
-                    message="Independent code review recorded invalid approval verdict without READY_TO_MERGE. Worktree preserved.",
+                    message="Independent code review recorded an invalid approval verdict without READY_TO_MERGE. Worktree preserved.",
                 )
             else:
-                # SHA changed (new candidate commits made) OR first dispatch OR dispatched
-                effective_code_auth_id = code_review_recovery_authorization_id or propose_recovery_authorization_id
-                if (
-                    isinstance(stored_code_review, dict)
-                    and stored_code_review.get("status") == "dispatched"
-                ):
-                    if not effective_code_auth_id:
-                        return OrchestrationCoordinationResult(
-                            status="PAUSED",
-                            run_id=active_run.run_id,
-                            current_stage=OrchestrationStage.CODE_REVIEW,
-                            message="Code review recovery authorization is required before re-dispatch.",
-                        )
+                # _REVIEW_STALE, _REVIEW_TECHNICAL_FAILURE, or _REVIEW_AMBIGUOUS.
+                needs_auth = action in {_REVIEW_TECHNICAL_FAILURE, _REVIEW_AMBIGUOUS}
+                effective_code_auth_id = (
+                    code_review_recovery_authorization_id or propose_recovery_authorization_id
+                )
+                if needs_auth and not effective_code_auth_id:
+                    msg = (
+                        self._review_pause_message("code", stored_code_review)
+                        + " Recovery authorization is required to retry."
+                        if action == _REVIEW_TECHNICAL_FAILURE
+                        else "Code review recovery authorization is required before re-dispatch."
+                    )
+                    return OrchestrationCoordinationResult(
+                        status="PAUSED",
+                        run_id=active_run.run_id,
+                        current_stage=OrchestrationStage.CODE_REVIEW,
+                        message=msg,
+                    )
+                if needs_auth:
                     operator_actions = getattr(uow, "operator_actions", None)
                     if not operator_actions:
                         return OrchestrationCoordinationResult(
@@ -1728,18 +1736,24 @@ class NativeOrchestrationCoordinator:
                         uow.commit()
 
                 code_review_res = await self._run_code_review(
-                    worktree_path, reviewer_provider, change_name, project_id=project_id, candidate_sha=candidate_sha, uow=uow
+                    worktree_path,
+                    reviewer_provider,
+                    change_name,
+                    project_id=project_id,
+                    candidate_sha=candidate_sha,
+                    uow=uow,
                 )
                 details = dict(active_run.stop_details or {})
-                if isinstance(code_review_res, dict):
-                    c_dict = dict(code_review_res)
-                else:
-                    c_dict = {
+                c_dict = (
+                    dict(code_review_res)
+                    if isinstance(code_review_res, dict)
+                    else {
                         "status": "approved" if code_review_res else "changes_required",
                         "candidate_sha": candidate_sha,
                         "verdict": "READY_TO_MERGE" if code_review_res else None,
                         "findings": [],
                     }
+                )
                 details["code_review"] = {
                     "attempt_id": attempt_id,
                     **c_dict,
@@ -1751,27 +1765,21 @@ class NativeOrchestrationCoordinator:
                         uow.commit()
 
                 if c_dict.get("status") != "approved" or c_dict.get("verdict") != "READY_TO_MERGE":
-                    status = c_dict.get("status")
-                    if status == "changes_required":
-                        msg = f"Independent code review requested changes: {c_dict.get('summary', 'see findings')}. Worktree preserved."
-                    elif status == "provider_error":
-                        msg = f"Independent code review provider failed: {c_dict.get('error', 'unknown error')}. Worktree preserved."
-                    elif status == "invalid_response":
-                        msg = f"Independent code review produced invalid response: {c_dict.get('error', 'malformed output')}. Worktree preserved."
-                    else:
-                        msg = "Independent code review requested changes. Worktree preserved."
                     return OrchestrationCoordinationResult(
                         status="PAUSED",
                         run_id=active_run.run_id,
                         current_stage=OrchestrationStage.CODE_REVIEW,
-                        message=msg,
+                        message=self._review_pause_message("code", c_dict),
                     )
                 self._update_stage(uow, active_run, OrchestrationStage.READY_FOR_PR)
 
         # Step 10: Implementation PR (PR1)
         pr1_url = (active_run.stop_details or {}).get("pr1_url")
         pr1_number = (active_run.stop_details or {}).get("pr1_number")
-        if active_run.current_stage in (OrchestrationStage.READY_FOR_PR, OrchestrationStage.PR1_PENDING):
+        if active_run.current_stage in (
+            OrchestrationStage.READY_FOR_PR,
+            OrchestrationStage.PR1_PENDING,
+        ):
             complexity = (active_run.stop_details or {}).get("complexity", "moderate")
 
             # If PR1 is not yet created, ensure commit and get candidate SHA
@@ -1885,7 +1893,9 @@ class NativeOrchestrationCoordinator:
                         current_stage=OrchestrationStage.PR1_PENDING,
                         message=f"GitHub did not confirm creation of PR1: {pr_error}. Worktree preserved.",
                     )
-                opened_data = opened_pr_res.data if hasattr(opened_pr_res, "data") else opened_pr_res
+                opened_data = (
+                    opened_pr_res.data if hasattr(opened_pr_res, "data") else opened_pr_res
+                )
                 pr1_number = (
                     opened_data.get("number")
                     if isinstance(opened_data, dict)
@@ -1913,7 +1923,9 @@ class NativeOrchestrationCoordinator:
                     if hasattr(uow, "commit"):
                         uow.commit()
             else:
-                candidate_sha = active_run.candidate_sha or await self._get_git_head_sha(worktree_path)
+                candidate_sha = active_run.candidate_sha or await self._get_git_head_sha(
+                    worktree_path
+                )
 
         # Differentiated Merge Policy for PR1
         if active_run.current_stage == OrchestrationStage.PR1_PENDING:
@@ -1964,7 +1976,11 @@ class NativeOrchestrationCoordinator:
             self._update_stage(uow, active_run, OrchestrationStage.PR1_MERGED)
 
         # Step 11: Fresh Documentation Worktree & Sync/Archive (PR2)
-        if active_run.current_stage not in (OrchestrationStage.PR1_MERGED, OrchestrationStage.DOC_CLOSING, OrchestrationStage.PR2_PENDING):
+        if active_run.current_stage not in (
+            OrchestrationStage.PR1_MERGED,
+            OrchestrationStage.DOC_CLOSING,
+            OrchestrationStage.PR2_PENDING,
+        ):
             return OrchestrationCoordinationResult(
                 status="PAUSED",
                 run_id=active_run.run_id,
@@ -2095,7 +2111,9 @@ class NativeOrchestrationCoordinator:
                     pr1_url=pr1_url,
                     message="GitHub did not confirm creation of PR2. Worktree preserved.",
                 )
-            opened_doc_data = opened_doc_res.data if hasattr(opened_doc_res, "data") else opened_doc_res
+            opened_doc_data = (
+                opened_doc_res.data if hasattr(opened_doc_res, "data") else opened_doc_res
+            )
             pr2_number = (
                 opened_doc_data.get("number")
                 if isinstance(opened_doc_data, dict)
@@ -2355,9 +2373,8 @@ class NativeOrchestrationCoordinator:
             return False
         # Diagnostic output may be abbreviated for display. The authoritative
         # provider response is checked separately through final_response_status.
-        if (
-            getattr(result, "structured_output_missing", False)
-            or getattr(result, "structured_output_too_large", False)
+        if getattr(result, "structured_output_missing", False) or getattr(
+            result, "structured_output_too_large", False
         ):
             return False
         if getattr(result, "final_response_status", None) not in (None, "COMPLETE"):
@@ -2568,9 +2585,23 @@ class NativeOrchestrationCoordinator:
             uow.commit()
 
     @staticmethod
+    def _profile_key_for_role(role: str) -> str:
+        """Resolve a semantic role to its persisted profile key.
+
+        ``reviewer`` is the coordinator's semantic role; the persisted F2 key is
+        ``independent_review``. Centralizing the mapping keeps provider and model
+        resolution consistent everywhere instead of patching each caller.
+        """
+        return _ROLE_TO_PROFILE_KEY.get(role, role)
+
+    @staticmethod
     def _configured_provider(project: Any, role: str) -> str | None:
         profiles = getattr(project, "agent_profiles", {}) if project else {}
-        raw = profiles.get(role) if isinstance(profiles, dict) else None
+        raw = (
+            profiles.get(_ROLE_TO_PROFILE_KEY.get(role, role))
+            if isinstance(profiles, dict)
+            else None
+        )
         if hasattr(raw, "model_dump"):
             raw = raw.model_dump()
         return str(raw.get("agent_id") or "").strip().lower() if isinstance(raw, dict) else None
@@ -2579,9 +2610,11 @@ class NativeOrchestrationCoordinator:
     def _configured_model(cls, uow: Any, project_id: str, role: str) -> str | None:
         project = uow.projects.get_by_id(project_id) if hasattr(uow, "projects") else None
         profiles = getattr(project, "agent_profiles", {}) if project else {}
-        raw = profiles.get(role) if isinstance(profiles, dict) else None
-        if raw is None and role == "reviewer":
-            raw = profiles.get("independent_review")
+        raw = (
+            profiles.get(_ROLE_TO_PROFILE_KEY.get(role, role))
+            if isinstance(profiles, dict)
+            else None
+        )
         if hasattr(raw, "model_dump"):
             raw = raw.model_dump()
         return str(raw.get("model_id") or "").strip() or None if isinstance(raw, dict) else None
@@ -2994,11 +3027,13 @@ class NativeOrchestrationCoordinator:
                 }
             return {
                 "status": "HUMAN_REQUIRED",
-                "human_payload": self._safe_human_payload({
-                    "question": f"¿Cómo debe resolverse la ambigüedad en el Issue #{issue_number}?",
-                    "options": options,
-                    "agent_output": output[:1000],
-                }),
+                "human_payload": self._safe_human_payload(
+                    {
+                        "question": f"¿Cómo debe resolverse la ambigüedad en el Issue #{issue_number}?",
+                        "options": options,
+                        "agent_output": output[:1000],
+                    }
+                ),
                 "execution": res,
             }
         return {"status": "READY_TO_PROPOSE", "execution": res}
@@ -3139,12 +3174,14 @@ class NativeOrchestrationCoordinator:
                 return {
                     "status": "HUMAN_REQUIRED",
                     "message": message,
-                    "human_payload": self._safe_human_payload({
-                        "question": report.pending[0],
-                        "options": [],
-                        "pending": list(report.pending),
-                        "agent_output": report.summary,
-                    }),
+                    "human_payload": self._safe_human_payload(
+                        {
+                            "question": report.pending[0],
+                            "options": [],
+                            "pending": list(report.pending),
+                            "agent_output": report.summary,
+                        }
+                    ),
                     "execution": res,
                 }
             return {"status": "INCOMPLETE", "message": message}
@@ -3201,6 +3238,52 @@ class NativeOrchestrationCoordinator:
         return self._execution_is_successful(result)
 
     @staticmethod
+    def _classify_review_reentry(
+        stored: Any,
+        *,
+        identity_matches: bool,
+        is_resume: bool,
+    ) -> str:
+        """Classify a review-stage reentry into one fail-closed action.
+
+        The invariant: an approval is reusable only when it binds exactly to the
+        current content. Any other durable state either pauses, or — when it is
+        ambiguous or stale — requires an explicit governed re-dispatch.
+        """
+        if not isinstance(stored, dict):
+            # No durable review evidence. A fresh dispatch is safe only on the
+            # pass that just entered the stage; on a resume it is ambiguous
+            # (e.g. a legacy run whose review was never recorded).
+            return _REVIEW_AMBIGUOUS if is_resume else _REVIEW_STALE
+        status = stored.get("status")
+        if status == "dispatched":
+            # An in-flight attempt with no definitive result is ambiguous no
+            # matter what identity it recorded.
+            return _REVIEW_AMBIGUOUS
+        if not identity_matches:
+            # Content changed after the prior review: that review is stale.
+            return _REVIEW_STALE
+        if status == "approved":
+            return _REVIEW_ADVANCE if stored.get("verdict") == "READY_TO_MERGE" else _REVIEW_CORRUPT
+        if status == "changes_required":
+            return _REVIEW_REJECTED
+        if status in {"provider_error", "invalid_response"}:
+            return _REVIEW_TECHNICAL_FAILURE
+        return _REVIEW_AMBIGUOUS
+
+    @staticmethod
+    def _review_pause_message(kind: str, result: dict[str, Any]) -> str:
+        """Build a single honest pause message for a non-approved review result."""
+        status = result.get("status")
+        if status == "changes_required":
+            return f"Independent {kind} review requested changes: {result.get('summary', 'see findings')}. Worktree preserved."
+        if status == "provider_error":
+            return f"Independent {kind} review provider failed: {result.get('error', 'unknown error')}. Worktree preserved."
+        if status == "invalid_response":
+            return f"Independent {kind} review produced invalid response: {result.get('error', 'malformed output')}. Worktree preserved."
+        return f"Independent {kind} review did not approve. Worktree preserved."
+
+    @staticmethod
     def _compute_proposal_artifacts_hashes(worktree_path: Path, change_name: str) -> dict[str, str]:
         """Compute stable SHA256 hashes of all proposal planning artifacts."""
         change_dir = worktree_path / "openspec" / "changes" / change_name
@@ -3251,7 +3334,9 @@ class NativeOrchestrationCoordinator:
             "READY_TO_MERGE only with an empty findings list; otherwise use CHANGES_REQUIRED "
             "with concrete findings."
         )
-        model = self._configured_model(uow, project_id, "reviewer") if (uow and project_id) else None
+        model = (
+            self._configured_model(uow, project_id, "reviewer") if (uow and project_id) else None
+        )
         artifact_hashes = self._compute_proposal_artifacts_hashes(worktree_path, change_name)
         res = await self.agent_runner.run(
             worktree_path=worktree_path,
@@ -3267,41 +3352,49 @@ class NativeOrchestrationCoordinator:
             "recorded_at": utc_now().isoformat(),
         }
         if not self._execution_is_successful(res):
-            return ReviewResult({
-                **base_record,
-                "status": "provider_error",
-                "verdict": None,
-                "findings": [],
-                "error": getattr(res, "error_message", None) or "Reviewer agent execution failed",
-            })
+            return ReviewResult(
+                {
+                    **base_record,
+                    "status": "provider_error",
+                    "verdict": None,
+                    "findings": [],
+                    "error": getattr(res, "error_message", None)
+                    or "Reviewer agent execution failed",
+                }
+            )
         try:
             parsed = parse_review_verdict(res.response_output)
             findings_data = [
-                f.model_dump() if hasattr(f, "model_dump") else dict(f)
-                for f in parsed.findings
+                f.model_dump() if hasattr(f, "model_dump") else dict(f) for f in parsed.findings
             ]
             if parsed.verdict.value == "READY_TO_MERGE":
-                return ReviewResult({
+                return ReviewResult(
+                    {
+                        **base_record,
+                        "status": "approved",
+                        "verdict": parsed.verdict.value,
+                        "findings": [],
+                    }
+                )
+            return ReviewResult(
+                {
                     **base_record,
-                    "status": "approved",
+                    "status": "changes_required",
                     "verdict": parsed.verdict.value,
-                    "findings": [],
-                })
-            return ReviewResult({
-                **base_record,
-                "status": "changes_required",
-                "verdict": parsed.verdict.value,
-                "findings": findings_data,
-                "summary": parsed.summary,
-            })
+                    "findings": findings_data,
+                    "summary": parsed.summary,
+                }
+            )
         except MalformedReviewOutputError as exc:
-            return ReviewResult({
-                **base_record,
-                "status": "invalid_response",
-                "verdict": None,
-                "findings": [],
-                "error": str(exc),
-            })
+            return ReviewResult(
+                {
+                    **base_record,
+                    "status": "invalid_response",
+                    "verdict": None,
+                    "findings": [],
+                    "error": str(exc),
+                }
+            )
 
     async def _run_apply(
         self,
@@ -3474,7 +3567,9 @@ class NativeOrchestrationCoordinator:
             "findings only on verified success, otherwise CHANGES_REQUIRED with "
             "concrete findings and required corrections. Do not use APPROVED prose."
         )
-        model = self._configured_model(uow, project_id, "reviewer") if (uow and project_id) else None
+        model = (
+            self._configured_model(uow, project_id, "reviewer") if (uow and project_id) else None
+        )
         res = await self.agent_runner.run(
             worktree_path=worktree_path,
             prompt_context=prompt,
@@ -3489,41 +3584,49 @@ class NativeOrchestrationCoordinator:
             "recorded_at": utc_now().isoformat(),
         }
         if not self._execution_is_successful(res):
-            return ReviewResult({
-                **base_record,
-                "status": "provider_error",
-                "verdict": None,
-                "findings": [],
-                "error": getattr(res, "error_message", None) or "Reviewer agent execution failed",
-            })
+            return ReviewResult(
+                {
+                    **base_record,
+                    "status": "provider_error",
+                    "verdict": None,
+                    "findings": [],
+                    "error": getattr(res, "error_message", None)
+                    or "Reviewer agent execution failed",
+                }
+            )
         try:
             parsed = parse_review_verdict(res.response_output)
             findings_data = [
-                f.model_dump() if hasattr(f, "model_dump") else dict(f)
-                for f in parsed.findings
+                f.model_dump() if hasattr(f, "model_dump") else dict(f) for f in parsed.findings
             ]
             if parsed.verdict.value == "READY_TO_MERGE":
-                return ReviewResult({
+                return ReviewResult(
+                    {
+                        **base_record,
+                        "status": "approved",
+                        "verdict": parsed.verdict.value,
+                        "findings": [],
+                    }
+                )
+            return ReviewResult(
+                {
                     **base_record,
-                    "status": "approved",
+                    "status": "changes_required",
                     "verdict": parsed.verdict.value,
-                    "findings": [],
-                })
-            return ReviewResult({
-                **base_record,
-                "status": "changes_required",
-                "verdict": parsed.verdict.value,
-                "findings": findings_data,
-                "summary": parsed.summary,
-            })
+                    "findings": findings_data,
+                    "summary": parsed.summary,
+                }
+            )
         except MalformedReviewOutputError as exc:
-            return ReviewResult({
-                **base_record,
-                "status": "invalid_response",
-                "verdict": None,
-                "findings": [],
-                "error": str(exc),
-            })
+            return ReviewResult(
+                {
+                    **base_record,
+                    "status": "invalid_response",
+                    "verdict": None,
+                    "findings": [],
+                    "error": str(exc),
+                }
+            )
 
     async def _run_sync_and_archive(
         self,
