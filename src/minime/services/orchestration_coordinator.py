@@ -145,6 +145,13 @@ class GitOperationError(RuntimeError):
         self.result = result
 
 
+
+class ReviewResult(dict):
+    """Structured review execution result that maintains boolean truthiness compatibility."""
+
+    def __bool__(self) -> bool:
+        return self.get("status") == "approved"
+
 class NativeOrchestrationCoordinator:
     """Coordinates the end-to-end lifecycle of remote requests through native OpenSpec."""
 
@@ -642,7 +649,7 @@ class NativeOrchestrationCoordinator:
         stage: str,
     ) -> bool:
         """Register one authenticated, Run-bound recovery decision for a native stage."""
-        if stage not in {"explore", "propose"}:
+        if stage not in {"explore", "propose", "proposal_review", "code_review"}:
             return False
         uow = self.uow_factory()
         run = (
@@ -1389,6 +1396,20 @@ class NativeOrchestrationCoordinator:
                 and stored_review.get("artifact_hashes") == current_hashes
             ):
                 self._update_stage(uow, active_run, OrchestrationStage.READY_TO_APPLY)
+            elif isinstance(stored_review, dict) and stored_review.get("status") in {"changes_required", "invalid_response", "provider_error"}:
+                status = stored_review.get("status")
+                if status == "changes_required":
+                    msg = f"Independent proposal review requested changes: {stored_review.get('summary', 'see findings')}. Worktree preserved."
+                elif status == "provider_error":
+                    msg = f"Independent proposal review provider failed: {stored_review.get('error', 'unknown error')}. Worktree preserved."
+                else:
+                    msg = f"Independent proposal review produced invalid response: {stored_review.get('error', 'malformed output')}. Worktree preserved."
+                return OrchestrationCoordinationResult(
+                    status="PAUSED",
+                    run_id=active_run.run_id,
+                    current_stage=OrchestrationStage.PROPOSAL_REVIEW,
+                    message=msg,
+                )
             else:
                 # If there was an in-progress or ambiguous dispatch without definitive result
                 if isinstance(stored_review, dict) and stored_review.get("status") == "dispatched":
@@ -1399,6 +1420,21 @@ class NativeOrchestrationCoordinator:
                             current_stage=OrchestrationStage.PROPOSAL_REVIEW,
                             message="Proposal review recovery authorization is required before re-dispatch.",
                         )
+                    operator_actions = getattr(uow, "operator_actions", None)
+                    if operator_actions:
+                        consumed = operator_actions.consume_single_use(
+                            propose_recovery_authorization_id,
+                            run_id=active_run.run_id,
+                            action_type=OperatorActionType.RETRY,
+                            expected_parameters={"single_use": True, "stage": "proposal_review"},
+                        )
+                        if consumed is None:
+                            return OrchestrationCoordinationResult(
+                                status="PAUSED",
+                                run_id=active_run.run_id,
+                                current_stage=OrchestrationStage.PROPOSAL_REVIEW,
+                                message="Proposal review recovery authorization is missing, mismatched, or already consumed.",
+                            )
 
                 # Record dispatch intent before executing I/O
                 attempt_id = str(uuid4())
@@ -1420,9 +1456,17 @@ class NativeOrchestrationCoordinator:
                     worktree_path, reviewer_provider, change_name, project_id=project_id, uow=uow
                 )
                 details = dict(active_run.stop_details or {})
+                if isinstance(review_res, dict):
+                    res_dict = dict(review_res)
+                else:
+                    res_dict = {
+                        "status": "approved" if review_res else "changes_required",
+                        "verdict": "READY_TO_MERGE" if review_res else None,
+                        "findings": [],
+                    }
                 details["proposal_review"] = {
                     "attempt_id": attempt_id,
-                    **review_res,
+                    **res_dict,
                 }
                 active_run.stop_details = details
                 if hasattr(uow, "orchestration_runs"):
@@ -1430,14 +1474,14 @@ class NativeOrchestrationCoordinator:
                     if hasattr(uow, "commit"):
                         uow.commit()
 
-                if review_res.get("status") != "approved":
-                    status = review_res.get("status")
+                if res_dict.get("status") != "approved":
+                    status = res_dict.get("status")
                     if status == "changes_required":
-                        msg = f"Independent proposal review requested changes: {review_res.get('summary', 'see findings')}. Worktree preserved."
+                        msg = f"Independent proposal review requested changes: {res_dict.get('summary', 'see findings')}. Worktree preserved."
                     elif status == "provider_error":
-                        msg = f"Independent proposal review provider failed: {review_res.get('error', 'unknown error')}. Worktree preserved."
+                        msg = f"Independent proposal review provider failed: {res_dict.get('error', 'unknown error')}. Worktree preserved."
                     elif status == "invalid_response":
-                        msg = f"Independent proposal review produced invalid response: {review_res.get('error', 'malformed output')}. Worktree preserved."
+                        msg = f"Independent proposal review produced invalid response: {res_dict.get('error', 'malformed output')}. Worktree preserved."
                     else:
                         msg = "Independent proposal review did not approve proposal. Worktree preserved."
                     return OrchestrationCoordinationResult(
@@ -1518,6 +1562,15 @@ class NativeOrchestrationCoordinator:
             # Step 9: Post-Verify Routing & Code Review
             complexity = active_run.stop_details.get("complexity", "moderate")
             if complexity == "high":
+                try:
+                    await self._ensure_candidate_commit(worktree_path, issue_number)
+                except GitOperationError as exc:
+                    return OrchestrationCoordinationResult(
+                        status="PAUSED",
+                        run_id=active_run.run_id,
+                        current_stage=OrchestrationStage.VERIFYING,
+                        message=f"Unable to commit candidate changes before code review: {exc}. Worktree preserved.",
+                    )
                 self._update_stage(uow, active_run, OrchestrationStage.CODE_REVIEW)
             else:
                 self._update_stage(uow, active_run, OrchestrationStage.READY_FOR_PR)
@@ -1525,6 +1578,7 @@ class NativeOrchestrationCoordinator:
         # Independent Code Review Stage (Dedicated reentry block)
         if active_run.current_stage == OrchestrationStage.CODE_REVIEW:
             try:
+                await self._ensure_candidate_commit(worktree_path, issue_number)
                 candidate_sha = await self._get_git_head_sha(worktree_path)
             except GitOperationError as exc:
                 return OrchestrationCoordinationResult(
@@ -1540,6 +1594,20 @@ class NativeOrchestrationCoordinator:
                 and stored_code_review.get("candidate_sha") == candidate_sha
             ):
                 self._update_stage(uow, active_run, OrchestrationStage.READY_FOR_PR)
+            elif isinstance(stored_code_review, dict) and stored_code_review.get("status") in {"changes_required", "invalid_response", "provider_error"}:
+                status = stored_code_review.get("status")
+                if status == "changes_required":
+                    msg = f"Independent code review requested changes: {stored_code_review.get('summary', 'see findings')}. Worktree preserved."
+                elif status == "provider_error":
+                    msg = f"Independent code review provider failed: {stored_code_review.get('error', 'unknown error')}. Worktree preserved."
+                else:
+                    msg = f"Independent code review produced invalid response: {stored_code_review.get('error', 'malformed output')}. Worktree preserved."
+                return OrchestrationCoordinationResult(
+                    status="PAUSED",
+                    run_id=active_run.run_id,
+                    current_stage=OrchestrationStage.CODE_REVIEW,
+                    message=msg,
+                )
             else:
                 # In-progress or ambiguous dispatch
                 if isinstance(stored_code_review, dict) and stored_code_review.get("status") == "dispatched":
@@ -1550,6 +1618,21 @@ class NativeOrchestrationCoordinator:
                             current_stage=OrchestrationStage.CODE_REVIEW,
                             message="Code review recovery authorization is required before re-dispatch.",
                         )
+                    operator_actions = getattr(uow, "operator_actions", None)
+                    if operator_actions:
+                        consumed = operator_actions.consume_single_use(
+                            propose_recovery_authorization_id,
+                            run_id=active_run.run_id,
+                            action_type=OperatorActionType.RETRY,
+                            expected_parameters={"single_use": True, "stage": "code_review"},
+                        )
+                        if consumed is None:
+                            return OrchestrationCoordinationResult(
+                                status="PAUSED",
+                                run_id=active_run.run_id,
+                                current_stage=OrchestrationStage.CODE_REVIEW,
+                                message="Code review recovery authorization is missing, mismatched, or already consumed.",
+                            )
 
                 attempt_id = str(uuid4())
                 details = dict(active_run.stop_details or {})
@@ -1570,9 +1653,18 @@ class NativeOrchestrationCoordinator:
                     worktree_path, reviewer_provider, change_name, project_id=project_id, candidate_sha=candidate_sha, uow=uow
                 )
                 details = dict(active_run.stop_details or {})
+                if isinstance(code_review_res, dict):
+                    c_dict = dict(code_review_res)
+                else:
+                    c_dict = {
+                        "status": "approved" if code_review_res else "changes_required",
+                        "candidate_sha": candidate_sha,
+                        "verdict": "READY_TO_MERGE" if code_review_res else None,
+                        "findings": [],
+                    }
                 details["code_review"] = {
                     "attempt_id": attempt_id,
-                    **code_review_res,
+                    **c_dict,
                 }
                 active_run.stop_details = details
                 if hasattr(uow, "orchestration_runs"):
@@ -1580,14 +1672,14 @@ class NativeOrchestrationCoordinator:
                     if hasattr(uow, "commit"):
                         uow.commit()
 
-                if code_review_res.get("status") != "approved":
-                    status = code_review_res.get("status")
+                if c_dict.get("status") != "approved":
+                    status = c_dict.get("status")
                     if status == "changes_required":
-                        msg = f"Independent code review requested changes: {code_review_res.get('summary', 'see findings')}. Worktree preserved."
+                        msg = f"Independent code review requested changes: {c_dict.get('summary', 'see findings')}. Worktree preserved."
                     elif status == "provider_error":
-                        msg = f"Independent code review provider failed: {code_review_res.get('error', 'unknown error')}. Worktree preserved."
+                        msg = f"Independent code review provider failed: {c_dict.get('error', 'unknown error')}. Worktree preserved."
                     elif status == "invalid_response":
-                        msg = f"Independent code review produced invalid response: {code_review_res.get('error', 'malformed output')}. Worktree preserved."
+                        msg = f"Independent code review produced invalid response: {c_dict.get('error', 'malformed output')}. Worktree preserved."
                     else:
                         msg = "Independent code review requested changes. Worktree preserved."
                     return OrchestrationCoordinationResult(
@@ -1599,157 +1691,151 @@ class NativeOrchestrationCoordinator:
                 self._update_stage(uow, active_run, OrchestrationStage.READY_FOR_PR)
 
         # Step 10: Implementation PR (PR1)
-        if active_run.current_stage not in (OrchestrationStage.READY_FOR_PR, OrchestrationStage.PR1_PENDING):
-            return OrchestrationCoordinationResult(
-                status="PAUSED",
-                run_id=active_run.run_id,
-                current_stage=active_run.current_stage,
-                message=f"Implementation PR1 cannot start from stage {active_run.current_stage.value}. Worktree preserved.",
-            )
+        pr1_url = (active_run.stop_details or {}).get("pr1_url")
+        pr1_number = (active_run.stop_details or {}).get("pr1_number")
+        if active_run.current_stage in (OrchestrationStage.READY_FOR_PR, OrchestrationStage.PR1_PENDING):
+            complexity = (active_run.stop_details or {}).get("complexity", "moderate")
 
-        pr1_url = active_run.stop_details.get("pr1_url")
-        pr1_number = active_run.stop_details.get("pr1_number")
-        complexity = active_run.stop_details.get("complexity", "moderate")
-
-        # If PR1 is not yet created, ensure commit and get candidate SHA
-        if not pr1_number:
-            try:
-                await self._ensure_candidate_commit(worktree_path, issue_number)
-            except GitOperationError as exc:
-                return OrchestrationCoordinationResult(
-                    status="PAUSED",
-                    run_id=active_run.run_id,
-                    current_stage=OrchestrationStage.READY_FOR_PR,
-                    message=f"Unable to persist candidate Git state: {exc}. Worktree preserved.",
-                )
-        try:
-            candidate_sha = await self._get_git_head_sha(worktree_path)
-        except GitOperationError as exc:
-            return OrchestrationCoordinationResult(
-                status="PAUSED",
-                run_id=active_run.run_id,
-                current_stage=active_run.current_stage,
-                message=f"Unable to observe candidate Git state: {exc}. Worktree preserved.",
-            )
-        active_run.candidate_sha = candidate_sha
-
-        if not pr1_number:
-            self._update_stage(uow, active_run, OrchestrationStage.PR1_PENDING)
-            test_evidence = str(active_run.stop_details.get("test_evidence") or "").strip()
-            if not test_evidence:
-                return OrchestrationCoordinationResult(
-                    status="PAUSED",
-                    run_id=active_run.run_id,
-                    current_stage=OrchestrationStage.PR1_PENDING,
-                    message="Verified test evidence is required before preparing PR1. Worktree preserved.",
-                )
-            prep_input = PrPreparationInput(
-                project_id=project_id,
-                repository=repository,
-                pr_type="implementation",
-                issue_number=issue_number,
-                issue_title=issue_title,
-                base_branch=base_branch,
-                candidate_branch=worktree_info.branch_name,
-                candidate_sha=candidate_sha,
-                change_name=change_name,
-                change_summary=f"Implementation of request #{issue_number}: {issue_title}",
-                test_evidence=test_evidence,
-                complexity=complexity,
-            )
-            if self.semantic_pr_agent:
+            # If PR1 is not yet created, ensure commit and get candidate SHA
+            if not pr1_number:
                 try:
-                    semantic_title, semantic_body = await self._prepare_semantic_pr_content(
-                        worktree_path=worktree_path,
-                        provider=thinker_provider,
-                        project_id=project_id,
+                    await self._ensure_candidate_commit(worktree_path, issue_number)
+                except GitOperationError as exc:
+                    return OrchestrationCoordinationResult(
+                        status="PAUSED",
                         run_id=active_run.run_id,
-                        pr_input=prep_input,
-                        request_body=issue_body,
+                        current_stage=OrchestrationStage.READY_FOR_PR,
+                        message=f"Unable to persist candidate Git state: {exc}. Worktree preserved.",
                     )
-                except (NativeOpenSpecWorkflowUnavailable, ValueError, OSError) as exc:
+                try:
+                    candidate_sha = await self._get_git_head_sha(worktree_path)
+                except GitOperationError as exc:
+                    return OrchestrationCoordinationResult(
+                        status="PAUSED",
+                        run_id=active_run.run_id,
+                        current_stage=active_run.current_stage,
+                        message=f"Unable to observe candidate Git state: {exc}. Worktree preserved.",
+                    )
+                active_run.candidate_sha = candidate_sha
+
+                self._update_stage(uow, active_run, OrchestrationStage.PR1_PENDING)
+                test_evidence = str(active_run.stop_details.get("test_evidence") or "").strip()
+                if not test_evidence:
                     return OrchestrationCoordinationResult(
                         status="PAUSED",
                         run_id=active_run.run_id,
                         current_stage=OrchestrationStage.PR1_PENDING,
-                        message=f"Semantic PR1 content was not verified: {exc}. Worktree preserved.",
+                        message="Verified test evidence is required before preparing PR1. Worktree preserved.",
                     )
-                prep_input = dataclass_replace(
-                    prep_input, semantic_title=semantic_title, semantic_body=semantic_body
-                )
-            prepared_pr = self.pr_preparer.prepare_pull_request(prep_input)
-
-            # Push branch
-            try:
-                await self._push_branch(worktree_path, worktree_info.branch_name)
-            except GitOperationError as exc:
-                return OrchestrationCoordinationResult(
-                    status="PAUSED",
-                    run_id=active_run.run_id,
-                    current_stage=OrchestrationStage.PR1_PENDING,
-                    message=f"Unable to publish PR1 branch: {exc}. Worktree preserved.",
-                )
-
-            # Open PR via GitHubAdapter
-            opened_pr_call = (
-                self.github_adapter.create_pull_request(
+                prep_input = PrPreparationInput(
+                    project_id=project_id,
                     repository=repository,
-                    branch=worktree_info.branch_name,
-                    base=base_branch,
-                    title=prepared_pr.title,
-                    body=prepared_pr.body,
-                    head_sha=candidate_sha,
-                    draft=False,
+                    pr_type="implementation",
+                    issue_number=issue_number,
+                    issue_title=issue_title,
+                    base_branch=base_branch,
+                    candidate_branch=worktree_info.branch_name,
+                    candidate_sha=candidate_sha,
+                    change_name=change_name,
+                    change_summary=f"Implementation of request #{issue_number}: {issue_title}",
+                    test_evidence=test_evidence,
+                    complexity=complexity,
                 )
-                if hasattr(self.github_adapter, "_repo")
-                else self.github_adapter.create_pull_request(
-                    base=base_branch,
-                    head=worktree_info.branch_name,
-                    title=prepared_pr.title,
-                    body=prepared_pr.body,
+                if self.semantic_pr_agent:
+                    try:
+                        semantic_title, semantic_body = await self._prepare_semantic_pr_content(
+                            worktree_path=worktree_path,
+                            provider=thinker_provider,
+                            project_id=project_id,
+                            run_id=active_run.run_id,
+                            pr_input=prep_input,
+                            request_body=issue_body,
+                        )
+                    except (NativeOpenSpecWorkflowUnavailable, ValueError, OSError) as exc:
+                        return OrchestrationCoordinationResult(
+                            status="PAUSED",
+                            run_id=active_run.run_id,
+                            current_stage=OrchestrationStage.PR1_PENDING,
+                            message=f"Semantic PR1 content was not verified: {exc}. Worktree preserved.",
+                        )
+                    prep_input = dataclass_replace(
+                        prep_input, semantic_title=semantic_title, semantic_body=semantic_body
+                    )
+                prepared_pr = self.pr_preparer.prepare_pull_request(prep_input)
+
+                # Push branch
+                try:
+                    await self._push_branch(worktree_path, worktree_info.branch_name)
+                except GitOperationError as exc:
+                    return OrchestrationCoordinationResult(
+                        status="PAUSED",
+                        run_id=active_run.run_id,
+                        current_stage=OrchestrationStage.PR1_PENDING,
+                        message=f"Unable to publish PR1 branch: {exc}. Worktree preserved.",
+                    )
+
+                # Open PR via GitHubAdapter
+                opened_pr_call = (
+                    self.github_adapter.create_pull_request(
+                        repository=repository,
+                        branch=worktree_info.branch_name,
+                        base=base_branch,
+                        title=prepared_pr.title,
+                        body=prepared_pr.body,
+                        head_sha=candidate_sha,
+                        draft=False,
+                    )
+                    if hasattr(self.github_adapter, "_repo")
+                    else self.github_adapter.create_pull_request(
+                        base=base_branch,
+                        head=worktree_info.branch_name,
+                        title=prepared_pr.title,
+                        body=prepared_pr.body,
+                    )
                 )
-            )
-            opened_pr_res = (
-                await opened_pr_call if inspect.isawaitable(opened_pr_call) else opened_pr_call
-            )
-            if not self._external_success(opened_pr_res):
-                pr_error = (
-                    getattr(opened_pr_res, "error_message", None)
-                    or "remote response was not successful"
+                opened_pr_res = (
+                    await opened_pr_call if inspect.isawaitable(opened_pr_call) else opened_pr_call
                 )
-                return OrchestrationCoordinationResult(
-                    status="PAUSED",
-                    run_id=active_run.run_id,
-                    current_stage=OrchestrationStage.PR1_PENDING,
-                    message=f"GitHub did not confirm creation of PR1: {pr_error}. Worktree preserved.",
+                if not self._external_success(opened_pr_res):
+                    pr_error = (
+                        getattr(opened_pr_res, "error_message", None)
+                        or "remote response was not successful"
+                    )
+                    return OrchestrationCoordinationResult(
+                        status="PAUSED",
+                        run_id=active_run.run_id,
+                        current_stage=OrchestrationStage.PR1_PENDING,
+                        message=f"GitHub did not confirm creation of PR1: {pr_error}. Worktree preserved.",
+                    )
+                opened_data = opened_pr_res.data if hasattr(opened_pr_res, "data") else opened_pr_res
+                pr1_number = (
+                    opened_data.get("number")
+                    if isinstance(opened_data, dict)
+                    else getattr(opened_data, "number", None)
                 )
-            opened_data = opened_pr_res.data if hasattr(opened_pr_res, "data") else opened_pr_res
-            pr1_number = (
-                opened_data.get("number")
-                if isinstance(opened_data, dict)
-                else getattr(opened_data, "number", None)
-            )
-            pr1_url = (
-                opened_data.get("html_url")
-                if isinstance(opened_data, dict)
-                else getattr(opened_data, "html_url", None)
-            )
-            if not pr1_number or not await self._confirm_pr_open(
-                repository, pr1_number, worktree_info.branch_name, base_branch, candidate_sha
-            ):
-                return OrchestrationCoordinationResult(
-                    status="PAUSED",
-                    run_id=active_run.run_id,
-                    current_stage=OrchestrationStage.PR1_PENDING,
-                    pr1_url=pr1_url,
-                    message="PR1 identity or remote head/base state was not confirmed.",
+                pr1_url = (
+                    opened_data.get("html_url")
+                    if isinstance(opened_data, dict)
+                    else getattr(opened_data, "html_url", None)
                 )
-            active_run.stop_details["pr1_number"] = pr1_number
-            active_run.stop_details["pr1_url"] = pr1_url
-            if hasattr(uow, "orchestration_runs"):
-                uow.orchestration_runs.save(active_run)
-                if hasattr(uow, "commit"):
-                    uow.commit()
+                if not pr1_number or not await self._confirm_pr_open(
+                    repository, pr1_number, worktree_info.branch_name, base_branch, candidate_sha
+                ):
+                    return OrchestrationCoordinationResult(
+                        status="PAUSED",
+                        run_id=active_run.run_id,
+                        current_stage=OrchestrationStage.PR1_PENDING,
+                        pr1_url=pr1_url,
+                        message="PR1 identity or remote head/base state was not confirmed.",
+                    )
+                active_run.stop_details["pr1_number"] = pr1_number
+                active_run.stop_details["pr1_url"] = pr1_url
+                if hasattr(uow, "orchestration_runs"):
+                    uow.orchestration_runs.save(active_run)
+                    if hasattr(uow, "commit"):
+                        uow.commit()
+            else:
+                candidate_sha = active_run.candidate_sha or await self._get_git_head_sha(worktree_path)
 
         # Differentiated Merge Policy for PR1
         if active_run.current_stage == OrchestrationStage.PR1_PENDING:
@@ -2416,6 +2502,8 @@ class NativeOrchestrationCoordinator:
         project = uow.projects.get_by_id(project_id) if hasattr(uow, "projects") else None
         profiles = getattr(project, "agent_profiles", {}) if project else {}
         raw = profiles.get(role) if isinstance(profiles, dict) else None
+        if raw is None and role == "reviewer":
+            raw = profiles.get("independent_review")
         if hasattr(raw, "model_dump"):
             raw = raw.model_dump()
         return str(raw.get("model_id") or "").strip() or None if isinstance(raw, dict) else None
@@ -3057,7 +3145,7 @@ class NativeOrchestrationCoordinator:
         change_name: str,
         project_id: str | None = None,
         uow: Any = None,
-    ) -> dict[str, Any]:
+    ) -> ReviewResult:
         """Execute independent read-only proposal review for high complexity changes."""
         change_dir = worktree_path / "openspec" / "changes" / change_name
         proposal_text = (
@@ -3101,13 +3189,13 @@ class NativeOrchestrationCoordinator:
             "recorded_at": utc_now().isoformat(),
         }
         if not self._execution_is_successful(res):
-            return {
+            return ReviewResult({
                 **base_record,
                 "status": "provider_error",
                 "verdict": None,
                 "findings": [],
                 "error": getattr(res, "error_message", None) or "Reviewer agent execution failed",
-            }
+            })
         try:
             parsed = parse_review_verdict(res.response_output)
             findings_data = [
@@ -3115,27 +3203,27 @@ class NativeOrchestrationCoordinator:
                 for f in parsed.findings
             ]
             if parsed.verdict.value == "READY_TO_MERGE":
-                return {
+                return ReviewResult({
                     **base_record,
                     "status": "approved",
                     "verdict": parsed.verdict.value,
                     "findings": [],
-                }
-            return {
+                })
+            return ReviewResult({
                 **base_record,
                 "status": "changes_required",
                 "verdict": parsed.verdict.value,
                 "findings": findings_data,
                 "summary": parsed.summary,
-            }
+            })
         except MalformedReviewOutputError as exc:
-            return {
+            return ReviewResult({
                 **base_record,
                 "status": "invalid_response",
                 "verdict": None,
                 "findings": [],
                 "error": str(exc),
-            }
+            })
 
     async def _run_apply(
         self,
@@ -3296,7 +3384,7 @@ class NativeOrchestrationCoordinator:
         project_id: str | None = None,
         candidate_sha: str | None = None,
         uow: Any = None,
-    ) -> dict[str, Any]:
+    ) -> ReviewResult:
         """Execute independent read-only code review for high-complexity changes."""
         diff_result = await self._git_run(worktree_path, ["diff", "HEAD~1..HEAD"])
         diff = diff_result.stdout
@@ -3323,13 +3411,13 @@ class NativeOrchestrationCoordinator:
             "recorded_at": utc_now().isoformat(),
         }
         if not self._execution_is_successful(res):
-            return {
+            return ReviewResult({
                 **base_record,
                 "status": "provider_error",
                 "verdict": None,
                 "findings": [],
                 "error": getattr(res, "error_message", None) or "Reviewer agent execution failed",
-            }
+            })
         try:
             parsed = parse_review_verdict(res.response_output)
             findings_data = [
@@ -3337,27 +3425,27 @@ class NativeOrchestrationCoordinator:
                 for f in parsed.findings
             ]
             if parsed.verdict.value == "READY_TO_MERGE":
-                return {
+                return ReviewResult({
                     **base_record,
                     "status": "approved",
                     "verdict": parsed.verdict.value,
                     "findings": [],
-                }
-            return {
+                })
+            return ReviewResult({
                 **base_record,
                 "status": "changes_required",
                 "verdict": parsed.verdict.value,
                 "findings": findings_data,
                 "summary": parsed.summary,
-            }
+            })
         except MalformedReviewOutputError as exc:
-            return {
+            return ReviewResult({
                 **base_record,
                 "status": "invalid_response",
                 "verdict": None,
                 "findings": [],
                 "error": str(exc),
-            }
+            })
 
     async def _run_sync_and_archive(
         self,

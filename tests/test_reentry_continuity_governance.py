@@ -243,7 +243,7 @@ async def test_pr1_reentry_with_existing_pr_skips_commit(base_setup):
         change_name="gacela-05-ui-self-hosted",
         base_sha="base_sha_123",
         current_stage=OrchestrationStage.PR1_PENDING,
-        stop_details=make_stop_details({"pr1_number": 195, "pr1_url": "https://github.com/org/repo/pull/195"}),
+        stop_details=make_stop_details({"pr1_number": 195, "pr1_url": "https://github.com/org/repo/pull/195", "complexity": "high"}),
     )
     uow.orchestration_runs.save(run)
 
