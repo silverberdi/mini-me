@@ -7,7 +7,7 @@
     "start": "ng serve",
     "build": "ng build --configuration production",
     "watch": "ng build --watch --configuration development",
-    "test": "echo \"Unit tests for Angular\""
+    "test": "node --test tests/*.test.mjs"
   },
   "dependencies": {
     "@angular/animations": "^18.2.0",

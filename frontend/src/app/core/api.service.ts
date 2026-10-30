@@ -22,6 +22,10 @@ export class ApiService {
   }
 
   private async request<T>(path: string, options: RequestInit = {}): Promise<ApiResponse<T>> {
+    const method = (options.method || "GET").toUpperCase();
+    if (method !== "GET" && typeof navigator !== "undefined" && !navigator.onLine) {
+      return { ok: false, offline: true, status: 0, data: null, error: "Acción no disponible sin conexión" };
+    }
     try {
       const response = await fetch(path, {
         credentials: "same-origin",

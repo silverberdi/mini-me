@@ -80,8 +80,8 @@ import { ThemeService } from './core/theme.service';
     </header>
 
     <!-- Offline Banner -->
-    <div *ngIf="!refresh.isConnected()" class="bg-rose-500/20 border-b border-rose-500/30 text-rose-200 text-xs py-2 px-4 text-center">
-      Sin conexión con el servidor mini me. Los datos en memoria no reflejan la última versión; no se permiten mutaciones.
+    <div *ngIf="!refresh.isConnected()" class="bg-rose-500/20 border-b border-rose-500/30 text-rose-200 text-xs py-2 px-4 text-center" role="status" aria-live="polite">
+      Sin conexión con el servidor mini me. Las observaciones retenidas están obsoletas desde {{ refresh.lastUpdated() | date:'HH:mm:ss' }}; no se permiten mutaciones ni se encolan acciones.
     </div>
 
     <!-- Main Navigation & Content Layout -->

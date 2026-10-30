@@ -1,11 +1,11 @@
-import { Injectable, signal, computed, effect } from "@angular/core";
+import { Injectable, signal, computed, effect, OnDestroy } from "@angular/core";
 import { ApiService } from "./api.service";
 import { Project, OrchestrationRun, RequestItem } from "./models";
 
 @Injectable({
   providedIn: "root"
 })
-export class RefreshService {
+export class RefreshService implements OnDestroy {
   private timer: any = null;
   private abortController: AbortController | null = null;
   private generation = 0;
@@ -15,6 +15,7 @@ export class RefreshService {
   readonly isConnected = signal<boolean>(true);
   readonly isRefreshing = signal<boolean>(false);
   readonly lastUpdated = signal<Date | null>(null);
+  readonly stale = signal<boolean>(false);
 
   readonly selectedProjectId = signal<string | null>(null);
   readonly projects = signal<Project[]>([]);
@@ -33,6 +34,8 @@ export class RefreshService {
   });
 
   constructor(private api: ApiService) {
+    window.addEventListener('online', this.onOnline);
+    window.addEventListener('offline', this.onOffline);
     effect(() => {
       const sec = this.interval();
       this.setupTimer(sec);
@@ -83,10 +86,12 @@ export class RefreshService {
         return;
       }
 
-      if (projRes.offline || runsRes.offline) {
+      if (projRes.offline || runsRes.offline || (reqsRes?.offline ?? false)) {
         this.isConnected.set(false);
+        this.stale.set(this.lastUpdated() !== null);
       } else {
         this.isConnected.set(true);
+        this.stale.set(false);
       }
 
       if (projRes.ok && Array.isArray(projRes.data)) {
@@ -101,7 +106,9 @@ export class RefreshService {
         this.requests.set(reqsRes.data);
       }
 
-      this.lastUpdated.set(new Date());
+      if (!projRes.offline && !runsRes.offline) {
+        this.lastUpdated.set(new Date());
+      }
     } finally {
       if (currentGen === this.generation) {
         this.isRefreshing.set(false);
@@ -115,5 +122,20 @@ export class RefreshService {
       this.timer = null;
     }
     this.abortController?.abort();
+  }
+
+  private onOnline = () => {
+    void this.read();
+  };
+
+  private onOffline = () => {
+    this.isConnected.set(false);
+    this.stale.set(this.lastUpdated() !== null);
+  };
+
+  ngOnDestroy(): void {
+    this.stop();
+    window.removeEventListener('online', this.onOnline);
+    window.removeEventListener('offline', this.onOffline);
   }
 }
