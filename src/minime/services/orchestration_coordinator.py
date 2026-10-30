@@ -1649,6 +1649,11 @@ class NativeOrchestrationCoordinator:
             try:
                 await self._ensure_candidate_commit(worktree_path, issue_number)
                 candidate_sha = await self._get_git_head_sha(worktree_path)
+                active_run.current_candidate_sha = candidate_sha
+                if hasattr(uow, "orchestration_runs"):
+                    uow.orchestration_runs.save(active_run)
+                    if hasattr(uow, "commit"):
+                        uow.commit()
             except GitOperationError as exc:
                 return OrchestrationCoordinationResult(
                     status="PAUSED",
