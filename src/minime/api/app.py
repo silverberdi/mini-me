@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import logging
 import os
 from contextlib import asynccontextmanager
@@ -21,13 +22,14 @@ from fastapi.responses import (
     Response,
 )
 from fastapi.staticfiles import StaticFiles
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from minime.config import load_config
 from minime.db.repository import PostgresPersistenceUnitOfWork
 from minime.db.session import db_manager
 from minime.domain.enums import (
     AuthEventType,
+    EventType,
     OperatorActionType,
     OperatorAuthDecision,
 )
@@ -39,6 +41,7 @@ from minime.domain.models import (
     Change,
     ContextDiscoveryReport,
     EfficiencyTelemetryView,
+    Event,
     Job,
     JobLog,
     OperatorActionRecord,
@@ -75,7 +78,6 @@ from minime.services.status_service import StatusService
 from minime.services.validation_authority_service import ValidationAuthorityService
 
 logger = logging.getLogger(__name__)
-
 
 
 @asynccontextmanager
@@ -232,7 +234,6 @@ def get_context_service(uow: UowDep) -> ContextDiscoveryService:
 ContextServiceDep = Annotated[ContextDiscoveryService, Depends(get_context_service)]
 
 
-
 PUBLIC_EXEMPT_PATHS = {
     "/health",
     "/",
@@ -275,7 +276,9 @@ async def auth_middleware(request: Request, call_next):
         unavailable = _legacy_operation_for_path(request.url.path)
         if unavailable is not None:
             operation, phase = unavailable
-            return JSONResponse(status_code=status.HTTP_410_GONE, content=unavailable_payload(operation, phase))
+            return JSONResponse(
+                status_code=status.HTTP_410_GONE, content=unavailable_payload(operation, phase)
+            )
         return await call_next(request)
 
     path = request.url.path
@@ -347,7 +350,9 @@ async def auth_middleware(request: Request, call_next):
     unavailable = _legacy_operation_for_path(request.url.path)
     if unavailable is not None:
         operation, phase = unavailable
-        return JSONResponse(status_code=status.HTTP_410_GONE, content=unavailable_payload(operation, phase))
+        return JSONResponse(
+            status_code=status.HTTP_410_GONE, content=unavailable_payload(operation, phase)
+        )
     return await call_next(request)
 
 
@@ -368,7 +373,11 @@ def _legacy_operation_for_path(path: str) -> tuple[str, str] | None:
     """Map only retired mutation/execution routes to an explicit F1 denial."""
     if path in READ_ONLY_ORCHESTRATION_PATHS:
         return None
-    if (path.startswith("/api/") and "/backlog" in path) or path.endswith("/discover") or "/readiness" in path:
+    if (
+        (path.startswith("/api/") and "/backlog" in path)
+        or path.endswith("/discover")
+        or "/readiness" in path
+    ):
         return ("legacy_intake_or_readiness", "F2")
     if path.startswith("/projects/") and path.endswith("/jobs"):
         return ("legacy_job_execution", "F3")
@@ -452,7 +461,9 @@ async def project_agent_catalog(
 
 
 @app.get("/api/v1/projects", tags=["projects"])
-def list_project_configurations(_operator: AuthenticatedOperatorDep, uow: UowDep) -> list[dict[str, Any]]:
+def list_project_configurations(
+    _operator: AuthenticatedOperatorDep, uow: UowDep
+) -> list[dict[str, Any]]:
     service = ProjectService(uow)
     return [service.public_project_payload(project) for project in service.list_projects()]
 
@@ -465,16 +476,16 @@ async def create_project_configuration(
 ) -> dict[str, Any]:
     """Create a configuration-only Brownfield registration; Greenfield needs ZIP bootstrap."""
     try:
-        await ProjectCatalogService().validate_project_profiles(
-            configuration.agent_profiles
-        )
+        await ProjectCatalogService().validate_project_profiles(configuration.agent_profiles)
         service = ProjectService(uow)
         return service.public_project_payload(service.create_configured_project(configuration))
     except ValueError as exc:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
 
 
-@app.post("/api/v1/projects/greenfield/bootstrap", status_code=status.HTTP_202_ACCEPTED, tags=["projects"])
+@app.post(
+    "/api/v1/projects/greenfield/bootstrap", status_code=status.HTTP_202_ACCEPTED, tags=["projects"]
+)
 async def bootstrap_greenfield_project(
     operator: AuthenticatedOperatorDep,
     uow: UowDep,
@@ -533,7 +544,11 @@ async def update_project_configuration(
         return service.public_project_payload(service.update_configuration(project_id, patch))
     except ValueError as exc:
         message = str(exc)
-        code = status.HTTP_404_NOT_FOUND if message.endswith("not found") else status.HTTP_400_BAD_REQUEST
+        code = (
+            status.HTTP_404_NOT_FOUND
+            if message.endswith("not found")
+            else status.HTTP_400_BAD_REQUEST
+        )
         raise HTTPException(status_code=code, detail=message) from exc
 
 
@@ -560,11 +575,15 @@ def observe_project_bootstrap_merge(
         return ProjectService(uow).observe_bootstrap_merge(project_id)
     except ValueError as exc:
         message = str(exc)
-        code = status.HTTP_404_NOT_FOUND if message.endswith("not found") else status.HTTP_409_CONFLICT
+        code = (
+            status.HTTP_404_NOT_FOUND if message.endswith("not found") else status.HTTP_409_CONFLICT
+        )
         raise HTTPException(status_code=code, detail=message) from exc
 
 
-@app.post("/api/v1/projects/{project_id}/context", status_code=status.HTTP_202_ACCEPTED, tags=["projects"])
+@app.post(
+    "/api/v1/projects/{project_id}/context", status_code=status.HTTP_202_ACCEPTED, tags=["projects"]
+)
 async def add_project_context(
     project_id: str,
     payload: dict[str, Any],
@@ -595,27 +614,199 @@ def observe_project_context_merge(
         return ProjectService(uow).observe_context_merge(project_id)
     except ValueError as exc:
         message = str(exc)
-        code = status.HTTP_404_NOT_FOUND if message.endswith("not found") else status.HTTP_409_CONFLICT
+        code = (
+            status.HTTP_404_NOT_FOUND if message.endswith("not found") else status.HTTP_409_CONFLICT
+        )
         raise HTTPException(status_code=code, detail=message) from exc
 
 
 @app.post("/api/v1/projects/{project_id}/pause", tags=["projects"])
-def pause_project(project_id: str, _operator: AuthenticatedOperatorDep, uow: UowDep) -> dict[str, Any]:
+def pause_project(
+    project_id: str,
+    _operator: AuthenticatedOperatorDep,
+    uow: UowDep,
+    defer_if_active: bool = Query(True, description="Defer pause if an active run is in progress"),
+) -> dict[str, Any]:
     try:
         service = ProjectService(uow)
+        has_active_run = False
+        if hasattr(uow, "orchestration_runs"):
+            runs = (
+                uow.orchestration_runs.list_by_project(project_id)
+                if hasattr(uow.orchestration_runs, "list_by_project")
+                else []
+            )
+            has_active_run = any(getattr(r, "is_active", False) for r in runs)
+
+        if has_active_run and defer_if_active:
+            return service.pause_project(project_id, defer_if_active=True)
+
+        service.pause_project(project_id, defer_if_active=False)
         return service.public_project_payload(service.set_lifecycle(project_id, active=False))
     except ValueError as exc:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
 
 
-@app.post("/api/v1/projects/{project_id}/activate", tags=["projects"])
-def activate_project(project_id: str, _operator: AuthenticatedOperatorDep, uow: UowDep) -> dict[str, Any]:
+@app.post("/api/v1/projects/{project_id}/resume", tags=["projects"])
+def resume_project(
+    project_id: str, _operator: AuthenticatedOperatorDep, uow: UowDep
+) -> dict[str, Any]:
     try:
         service = ProjectService(uow)
+        return service.resume_project(project_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
+
+
+@app.post("/api/v1/system/pause", tags=["system"])
+def pause_system(
+    _operator: AuthenticatedOperatorDep,
+    uow: UowDep,
+    defer_if_active: bool = Query(True, description="Defer pause if an active run is in progress"),
+) -> dict[str, Any]:
+    service = ProjectService(uow)
+    return service.pause_global(defer_if_active=defer_if_active)
+
+
+@app.post("/api/v1/system/resume", tags=["system"])
+def resume_system(
+    _operator: AuthenticatedOperatorDep, uow: UowDep
+) -> dict[str, Any]:
+    service = ProjectService(uow)
+    return service.resume_global()
+
+
+class DocumentContextUpdateRequest(BaseModel):
+    path: str = Field(..., description="Relative path within project repository")
+    content: str = Field(..., description="New file content")
+    expected_version: str | None = Field(
+        None, description="SHA256 hex digest of existing content for optimistic concurrency"
+    )
+
+
+@app.patch("/api/v1/projects/{project_id}/context/document", tags=["projects"])
+def update_project_document_context(
+    project_id: str,
+    payload: DocumentContextUpdateRequest,
+    _operator: AuthenticatedOperatorDep,
+    uow: UowDep,
+) -> dict[str, Any]:
+    target_project = uow.projects.get_by_id(project_id)
+    if target_project is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Project {project_id} not found",
+        )
+
+    rel_path = payload.path.strip()
+    if not rel_path or rel_path.startswith("/") or ".." in Path(rel_path).parts:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Invalid document path: path traversal or absolute path detected",
+        )
+
+    norm_path = Path(rel_path)
+    allowed_extensions = {".md", ".yaml", ".yml", ".json", ".txt"}
+    if norm_path.suffix.lower() not in allowed_extensions:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"File extension {norm_path.suffix} is not authorized for document context editing",
+        )
+
+    first_part = norm_path.parts[0] if norm_path.parts else ""
+    if first_part not in ("docs", "openspec", "README.md", "AGENTS.md"):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Document context editing restricted to docs/, openspec/, or project documentation files",
+        )
+
+    base_dir = Path("/opt/minime/repos") / project_id
+    if not base_dir.exists():
+        base_dir = Path("/tmp/minime_repos") / project_id
+        base_dir.mkdir(parents=True, exist_ok=True)
+    target_file = (base_dir / norm_path).resolve()
+    if not str(target_file).startswith(str(base_dir.resolve())):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Path escapes project repository boundary",
+        )
+
+    current_content = ""
+    current_sha = hashlib.sha256(b"").hexdigest()
+    if target_file.exists():
+        try:
+            current_content = target_file.read_text(encoding="utf-8")
+            current_sha = hashlib.sha256(current_content.encode("utf-8")).hexdigest()
+        except Exception as exc:
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail=f"Failed to read existing document: {exc}",
+            ) from exc
+
+    if payload.expected_version and payload.expected_version != current_sha:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=f"Optimistic concurrency conflict: expected {payload.expected_version}, found {current_sha}",
+        )
+
+    try:
+        target_file.parent.mkdir(parents=True, exist_ok=True)
+        target_file.write_text(payload.content, encoding="utf-8")
+        new_sha = hashlib.sha256(payload.content.encode("utf-8")).hexdigest()
+    except Exception as exc:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to write document content: {exc}",
+        ) from exc
+
+    if hasattr(uow, "events"):
+        evt = Event(
+            event_type=EventType.PROJECT_UPDATED,
+            project_id=project_id,
+            payload={
+                "action": "document_context_edit",
+                "path": rel_path,
+                "previous_version": current_sha,
+                "new_version": new_sha,
+                "operator": getattr(_operator, "username", getattr(_operator, "email", "operator")),
+            },
+        )
+        uow.events.save(evt)
+        uow.commit()
+
+    return {
+        "status": "UPDATED",
+        "project_id": project_id,
+        "path": rel_path,
+        "version": new_sha,
+        "updated_at": datetime.now(UTC).isoformat(),
+    }
+
+
+@app.post("/api/v1/projects/{project_id}/executor", tags=["projects"])
+def set_project_executor(
+    project_id: str, _operator: AuthenticatedOperatorDep, uow: UowDep
+) -> dict[str, Any]:
+    try:
+        service = ProjectService(uow)
+        return service.set_executor_project(project_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
+
+
+@app.post("/api/v1/projects/{project_id}/activate", tags=["projects"])
+def activate_project(
+    project_id: str, _operator: AuthenticatedOperatorDep, uow: UowDep
+) -> dict[str, Any]:
+    try:
+        service = ProjectService(uow)
+        service.resume_project(project_id)
         return service.public_project_payload(service.set_lifecycle(project_id, active=True))
     except ValueError as exc:
         message = str(exc)
-        code = status.HTTP_404_NOT_FOUND if message.endswith("not found") else status.HTTP_409_CONFLICT
+        code = (
+            status.HTTP_404_NOT_FOUND if message.endswith("not found") else status.HTTP_409_CONFLICT
+        )
         raise HTTPException(status_code=code, detail=message) from exc
 
 
@@ -671,6 +862,181 @@ def list_project_requests(
     }
 
 
+class CreateProjectRequestPayload(BaseModel):
+    title: str = Field(..., min_length=1)
+    description: str = Field(..., min_length=1)
+    acceptance_criteria: str = Field(..., min_length=1)
+
+
+class EditProjectRequestPayload(BaseModel):
+    title: str | None = None
+    body: str | None = None
+    expected_version: str | None = None
+    idempotency_key: str | None = None
+
+
+class MutateProjectRequestPayload(BaseModel):
+    expected_version: str | None = None
+    idempotency_key: str | None = None
+
+
+@app.post(
+    "/api/v1/projects/{project_id}/requests", status_code=status.HTTP_201_CREATED, tags=["requests"]
+)
+def create_project_request(
+    project_id: str,
+    payload: CreateProjectRequestPayload,
+    _operator: AuthenticatedOperatorDep,
+    uow: UowDep,
+) -> dict[str, Any]:
+    """Create a new human request governed by F4 normalization."""
+    from minime.domain.exceptions import RequestMutationNotAllowedError
+    from minime.services.request_lifecycle_service import RequestLifecycleService
+
+    svc = RequestLifecycleService(uow=uow)
+    try:
+        res = svc.create_request(
+            project_id=project_id,
+            title=payload.title,
+            description=payload.description,
+            acceptance_criteria=payload.acceptance_criteria,
+        )
+        return {"project_id": project_id, "request": res}
+    except ValueError as exc:
+        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(exc))
+    except RequestMutationNotAllowedError as exc:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc))
+    except Exception as exc:
+        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=str(exc))
+
+
+@app.patch("/api/v1/projects/{project_id}/requests/{issue_number}", tags=["requests"])
+def edit_project_request(
+    project_id: str,
+    issue_number: int,
+    payload: EditProjectRequestPayload,
+    _operator: AuthenticatedOperatorDep,
+    uow: UowDep,
+) -> dict[str, Any]:
+    """Edit an unadmitted request with optimistic concurrency."""
+    from minime.domain.exceptions import RequestMutationNotAllowedError
+    from minime.services.request_lifecycle_service import RequestLifecycleService
+
+    svc = RequestLifecycleService(uow=uow)
+    try:
+        res = svc.edit_request(
+            project_id=project_id,
+            issue_number=issue_number,
+            title=payload.title,
+            body=payload.body,
+            expected_version=payload.expected_version,
+            idempotency_key=payload.idempotency_key,
+        )
+        return {"project_id": project_id, "issue_number": issue_number, "request": res}
+    except RequestMutationNotAllowedError as exc:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc))
+    except Exception as exc:
+        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=str(exc))
+
+
+@app.post("/api/v1/projects/{project_id}/requests/{issue_number}/deactivate", tags=["requests"])
+def deactivate_project_request(
+    project_id: str,
+    issue_number: int,
+    _operator: AuthenticatedOperatorDep,
+    uow: UowDep,
+    payload: MutateProjectRequestPayload | None = None,
+) -> dict[str, Any]:
+    """Deactivate an unadmitted request, excluding it from FIFO."""
+    from minime.domain.exceptions import RequestMutationNotAllowedError
+    from minime.services.request_lifecycle_service import RequestLifecycleService
+
+    svc = RequestLifecycleService(uow=uow)
+    p = payload or MutateProjectRequestPayload()
+    try:
+        res = svc.deactivate_request(
+            project_id=project_id,
+            issue_number=issue_number,
+            expected_version=p.expected_version,
+            idempotency_key=p.idempotency_key,
+        )
+        return {"project_id": project_id, "issue_number": issue_number, "request": res}
+    except RequestMutationNotAllowedError as exc:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc))
+    except Exception as exc:
+        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=str(exc))
+
+
+@app.post("/api/v1/projects/{project_id}/requests/{issue_number}/reactivate", tags=["requests"])
+def reactivate_project_request(
+    project_id: str,
+    issue_number: int,
+    _operator: AuthenticatedOperatorDep,
+    uow: UowDep,
+    payload: MutateProjectRequestPayload | None = None,
+) -> dict[str, Any]:
+    """Reactivate a previously disabled request."""
+    from minime.domain.exceptions import RequestMutationNotAllowedError
+    from minime.services.request_lifecycle_service import RequestLifecycleService
+
+    svc = RequestLifecycleService(uow=uow)
+    p = payload or MutateProjectRequestPayload()
+    try:
+        res = svc.reactivate_request(
+            project_id=project_id,
+            issue_number=issue_number,
+            expected_version=p.expected_version,
+            idempotency_key=p.idempotency_key,
+        )
+        return {"project_id": project_id, "issue_number": issue_number, "request": res}
+    except RequestMutationNotAllowedError as exc:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc))
+    except Exception as exc:
+        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=str(exc))
+
+
+@app.delete("/api/v1/projects/{project_id}/requests/{issue_number}", tags=["requests"])
+def soft_delete_project_request(
+    project_id: str,
+    issue_number: int,
+    _operator: AuthenticatedOperatorDep,
+    uow: UowDep,
+    payload: MutateProjectRequestPayload | None = None,
+) -> dict[str, Any]:
+    """Soft-delete an unadmitted request, preserving audit trail."""
+    from minime.domain.exceptions import RequestMutationNotAllowedError
+    from minime.services.request_lifecycle_service import RequestLifecycleService
+
+    svc = RequestLifecycleService(uow=uow)
+    p = payload or MutateProjectRequestPayload()
+    try:
+        res = svc.soft_delete_request(
+            project_id=project_id,
+            issue_number=issue_number,
+            expected_version=p.expected_version,
+            idempotency_key=p.idempotency_key,
+        )
+        return {"project_id": project_id, "issue_number": issue_number, "request": res}
+    except RequestMutationNotAllowedError as exc:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc))
+    except Exception as exc:
+        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=str(exc))
+
+
+@app.get("/api/v1/projects/{project_id}/requests/{issue_number}/metrics", tags=["requests"])
+def get_project_request_metrics(
+    project_id: str,
+    issue_number: int,
+    _operator: AuthenticatedOperatorDep,
+    uow: UowDep,
+) -> dict[str, Any]:
+    """Honest measurable metrics distinguishing unavailable from zero."""
+    from minime.services.projection_service import ProjectionService
+
+    svc = ProjectionService(uow=uow)
+    return svc.project_request_metrics(project_id, issue_number)
+
+
 @app.post("/api/v1/projects/{project_id}/requests/run", tags=["requests"])
 async def run_project_request(
     project_id: str,
@@ -695,7 +1061,10 @@ async def run_project_request(
     if hasattr(uow, "project_managed_repository_bindings"):
         binding = uow.project_managed_repository_bindings.get_by_project_id(project_id)
     if binding is None or not binding.managed_repository_root:
-        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Verified managed repository binding is required")
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="Verified managed repository binding is required",
+        )
     repo_root = Path(binding.managed_repository_root)
 
     wt_manager = WorktreeManager(project_root=repo_root, uow=uow)
@@ -707,7 +1076,10 @@ async def run_project_request(
             budget_service=BudgetService(uow),
         )
     except (ValueError, OSError) as exc:
-        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=f"Verified F2 agent profiles unavailable: {exc}") from exc
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=f"Verified F2 agent profiles unavailable: {exc}",
+        ) from exc
 
     coordinator = NativeOrchestrationCoordinator(
         uow_factory=lambda: uow,
@@ -776,7 +1148,9 @@ def authorize_explore_recovery(
                 detail="Legacy recovery is allowed only for an Explore Run without prior evidence",
             )
     elif not isinstance(attempt, dict) or attempt.get("attempt_id") != payload.prior_attempt_id:
-        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Explore attempt does not match Run")
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT, detail="Explore attempt does not match Run"
+        )
     from minime.adapters.github import GitHubAdapter
     from minime.services.agent_runner import CliAgentRunner
     from minime.services.orchestration_coordinator import NativeOrchestrationCoordinator
@@ -784,7 +1158,10 @@ def authorize_explore_recovery(
 
     binding = uow.project_managed_repository_bindings.get_by_project_id(project_id)
     if binding is None or not binding.managed_repository_root:
-        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Verified managed repository binding is required")
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="Verified managed repository binding is required",
+        )
     coordinator = NativeOrchestrationCoordinator(
         uow_factory=lambda: uow,
         github_adapter=GitHubAdapter(),
@@ -815,7 +1192,10 @@ def authorize_explore_recovery(
         stage="explore",
     )
     if not accepted:
-        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Explore recovery authorization was rejected")
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="Explore recovery authorization was rejected",
+        )
     return {"action_request_id": action_request_id, "run_id": run_id, "status": "ACCEPTED"}
 
 
@@ -840,9 +1220,13 @@ def authorize_propose_recovery(
     if payload.prior_attempt_id is not None and (
         not isinstance(attempt, dict) or attempt.get("attempt_id") != payload.prior_attempt_id
     ):
-        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Propose attempt does not match Run")
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT, detail="Propose attempt does not match Run"
+        )
     if run.current_stage.value != "PROPOSING":
-        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Run is not in Proposing stage")
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT, detail="Run is not in Proposing stage"
+        )
     from minime.adapters.github import GitHubAdapter
     from minime.services.agent_runner import CliAgentRunner
     from minime.services.orchestration_coordinator import NativeOrchestrationCoordinator
@@ -850,7 +1234,10 @@ def authorize_propose_recovery(
 
     binding = uow.project_managed_repository_bindings.get_by_project_id(project_id)
     if binding is None or not binding.managed_repository_root:
-        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Verified managed repository binding is required")
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="Verified managed repository binding is required",
+        )
     coordinator = NativeOrchestrationCoordinator(
         uow_factory=lambda: uow,
         github_adapter=GitHubAdapter(),
@@ -860,7 +1247,10 @@ def authorize_propose_recovery(
     issue_number = int(details.get("issue_number") or (attempt or {}).get("issue_number") or 0)
     provider = coordinator._configured_provider(project, "thinking")
     if issue_number <= 0 or not provider:
-        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Run lacks authoritative Issue/provider binding")
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="Run lacks authoritative Issue/provider binding",
+        )
     action_request_id = payload.action_request_id or str(uuid4())
     accepted = coordinator.register_recovery_authorization(
         project_id=project_id,
@@ -874,7 +1264,10 @@ def authorize_propose_recovery(
         stage="propose",
     )
     if not accepted:
-        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Propose recovery authorization was rejected")
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="Propose recovery authorization was rejected",
+        )
     return {"action_request_id": action_request_id, "run_id": run_id, "status": "ACCEPTED"}
 
 
@@ -899,9 +1292,14 @@ def authorize_proposal_review_recovery(
     if payload.prior_attempt_id is not None and (
         not isinstance(attempt, dict) or attempt.get("attempt_id") != payload.prior_attempt_id
     ):
-        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Proposal review attempt does not match Run")
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="Proposal review attempt does not match Run",
+        )
     if run.current_stage.value != "PROPOSAL_REVIEW":
-        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Run is not in Proposal Review stage")
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT, detail="Run is not in Proposal Review stage"
+        )
     from minime.adapters.github import GitHubAdapter
     from minime.services.agent_runner import CliAgentRunner
     from minime.services.orchestration_coordinator import NativeOrchestrationCoordinator
@@ -909,7 +1307,10 @@ def authorize_proposal_review_recovery(
 
     binding = uow.project_managed_repository_bindings.get_by_project_id(project_id)
     if binding is None or not binding.managed_repository_root:
-        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Verified managed repository binding is required")
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="Verified managed repository binding is required",
+        )
     coordinator = NativeOrchestrationCoordinator(
         uow_factory=lambda: uow,
         github_adapter=GitHubAdapter(),
@@ -919,7 +1320,10 @@ def authorize_proposal_review_recovery(
     issue_number = int(details.get("issue_number") or (attempt or {}).get("issue_number") or 0)
     provider = coordinator._configured_provider(project, "reviewer")
     if issue_number <= 0 or not provider:
-        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Run lacks authoritative Issue/provider binding")
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="Run lacks authoritative Issue/provider binding",
+        )
     action_request_id = payload.action_request_id or str(uuid4())
     accepted = coordinator.register_recovery_authorization(
         project_id=project_id,
@@ -933,7 +1337,10 @@ def authorize_proposal_review_recovery(
         stage="proposal_review",
     )
     if not accepted:
-        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Proposal review recovery authorization was rejected")
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="Proposal review recovery authorization was rejected",
+        )
     return {"action_request_id": action_request_id, "run_id": run_id, "status": "ACCEPTED"}
 
 
@@ -958,9 +1365,13 @@ def authorize_code_review_recovery(
     if payload.prior_attempt_id is not None and (
         not isinstance(attempt, dict) or attempt.get("attempt_id") != payload.prior_attempt_id
     ):
-        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Code review attempt does not match Run")
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT, detail="Code review attempt does not match Run"
+        )
     if run.current_stage.value != "CODE_REVIEW":
-        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Run is not in Code Review stage")
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT, detail="Run is not in Code Review stage"
+        )
     from minime.adapters.github import GitHubAdapter
     from minime.services.agent_runner import CliAgentRunner
     from minime.services.orchestration_coordinator import NativeOrchestrationCoordinator
@@ -968,7 +1379,10 @@ def authorize_code_review_recovery(
 
     binding = uow.project_managed_repository_bindings.get_by_project_id(project_id)
     if binding is None or not binding.managed_repository_root:
-        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Verified managed repository binding is required")
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="Verified managed repository binding is required",
+        )
     coordinator = NativeOrchestrationCoordinator(
         uow_factory=lambda: uow,
         github_adapter=GitHubAdapter(),
@@ -978,7 +1392,10 @@ def authorize_code_review_recovery(
     issue_number = int(details.get("issue_number") or (attempt or {}).get("issue_number") or 0)
     provider = coordinator._configured_provider(project, "reviewer")
     if issue_number <= 0 or not provider:
-        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Run lacks authoritative Issue/provider binding")
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="Run lacks authoritative Issue/provider binding",
+        )
     action_request_id = payload.action_request_id or str(uuid4())
     accepted = coordinator.register_recovery_authorization(
         project_id=project_id,
@@ -992,7 +1409,10 @@ def authorize_code_review_recovery(
         stage="code_review",
     )
     if not accepted:
-        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Code review recovery authorization was rejected")
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="Code review recovery authorization was rejected",
+        )
     return {"action_request_id": action_request_id, "run_id": run_id, "status": "ACCEPTED"}
 
 
@@ -1016,7 +1436,10 @@ async def ack_project_request(
 
     binding = uow.project_managed_repository_bindings.get_by_project_id(project_id)
     if binding is None or not binding.managed_repository_root:
-        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Verified managed repository binding is required")
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="Verified managed repository binding is required",
+        )
     wt_manager = WorktreeManager(project_root=Path(binding.managed_repository_root), uow=uow)
     github = GitHubAdapter()
     try:
@@ -1026,7 +1449,10 @@ async def ack_project_request(
             budget_service=BudgetService(uow),
         )
     except (ValueError, OSError) as exc:
-        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=f"Verified F2 agent profiles unavailable: {exc}") from exc
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=f"Verified F2 agent profiles unavailable: {exc}",
+        ) from exc
 
     coordinator = NativeOrchestrationCoordinator(
         uow_factory=lambda: uow,
@@ -1248,7 +1674,9 @@ def get_project_context_endpoint(
     try:
         return context_service.discover_context_pure(project_id)
     except ValueError as e:
-        code = status.HTTP_404_NOT_FOUND if str(e).endswith("not found.") else status.HTTP_409_CONFLICT
+        code = (
+            status.HTTP_404_NOT_FOUND if str(e).endswith("not found.") else status.HTTP_409_CONFLICT
+        )
         raise HTTPException(status_code=code, detail=str(e)) from e
 
 
@@ -1321,7 +1749,9 @@ def prepare_backlog_item_endpoint(
     request: Request,
 ) -> dict[str, Any]:
     """Prepare canonical execution artifacts (GitHub Issue, Project Item, OpenSpec change)."""
-    raise HTTPException(status_code=status.HTTP_410_GONE, detail=unavailable_payload("legacy_intake", "F2"))
+    raise HTTPException(
+        status_code=status.HTTP_410_GONE, detail=unavailable_payload("legacy_intake", "F2")
+    )
 
 
 @app.post("/api/v1/projects/{project_id}/backlog/{item_key}/answer", tags=["backlog"])
@@ -1393,7 +1823,9 @@ def evaluate_readiness(
     uow: UowDep,
     current_active_change: str | None = None,
 ) -> dict[str, Any]:
-    raise HTTPException(status_code=status.HTTP_410_GONE, detail=unavailable_payload("legacy_readiness", "F2"))
+    raise HTTPException(
+        status_code=status.HTTP_410_GONE, detail=unavailable_payload("legacy_readiness", "F2")
+    )
 
 
 @app.post("/projects/{project_id}/jobs", status_code=status.HTTP_202_ACCEPTED)
@@ -1402,7 +1834,9 @@ async def run_project_job(
     req: JobRunRequest,
     uow: UowDep,
 ) -> Job:
-    raise HTTPException(status_code=status.HTTP_410_GONE, detail=unavailable_payload("legacy_job_execution", "F3"))
+    raise HTTPException(
+        status_code=status.HTTP_410_GONE, detail=unavailable_payload("legacy_job_execution", "F3")
+    )
 
 
 @app.get("/projects/{project_id}/jobs")
@@ -1748,7 +2182,9 @@ def admit_orchestration(
     req: OrchestrationAdmitRequest,
     uow: Annotated[PersistenceUnitOfWork, Depends(get_uow)],
 ) -> dict[str, Any]:
-    raise HTTPException(status_code=status.HTTP_410_GONE, detail=unavailable_payload("legacy_orchestration", "F3"))
+    raise HTTPException(
+        status_code=status.HTTP_410_GONE, detail=unavailable_payload("legacy_orchestration", "F3")
+    )
 
 
 @app.get("/api/v1/openspec/integrity", tags=["openspec"])
@@ -1784,7 +2220,9 @@ def start_orchestration(
     req: OrchestrationStartRequest,
     uow: Annotated[PersistenceUnitOfWork, Depends(get_uow)],
 ) -> dict[str, Any]:
-    raise HTTPException(status_code=status.HTTP_410_GONE, detail=unavailable_payload("legacy_orchestration", "F3"))
+    raise HTTPException(
+        status_code=status.HTTP_410_GONE, detail=unavailable_payload("legacy_orchestration", "F3")
+    )
 
 
 @app.post("/api/v1/orchestration/resume", tags=["orchestration"])
@@ -1793,7 +2231,9 @@ def resume_orchestration(
     uow: Annotated[PersistenceUnitOfWork, Depends(get_uow)],
 ) -> dict[str, Any]:
     """Resume an existing orchestration run from its persisted checkpoint."""
-    raise HTTPException(status_code=status.HTTP_410_GONE, detail=unavailable_payload("legacy_orchestration", "F3"))
+    raise HTTPException(
+        status_code=status.HTTP_410_GONE, detail=unavailable_payload("legacy_orchestration", "F3")
+    )
 
 
 @app.get("/api/v1/orchestration/{run_id}/status", tags=["orchestration"])
@@ -1801,7 +2241,9 @@ def get_orchestration_status(
     run_id: str,
     uow: Annotated[PersistenceUnitOfWork, Depends(get_uow)],
 ) -> dict[str, Any]:
-    raise HTTPException(status_code=status.HTTP_410_GONE, detail=unavailable_payload("legacy_orchestration", "F3"))
+    raise HTTPException(
+        status_code=status.HTTP_410_GONE, detail=unavailable_payload("legacy_orchestration", "F3")
+    )
 
 
 @app.get("/api/v1/orchestration/runs", tags=["orchestration"])
@@ -1829,7 +2271,9 @@ def list_orchestration_runs(
 def get_dashboard_overview(
     uow: Annotated[PersistenceUnitOfWork, Depends(get_uow)],
 ) -> dict[str, Any]:
-    raise HTTPException(status_code=status.HTTP_410_GONE, detail=unavailable_payload("legacy_dashboard", "F5"))
+    raise HTTPException(
+        status_code=status.HTTP_410_GONE, detail=unavailable_payload("legacy_dashboard", "F5")
+    )
 
 
 @app.get("/api/v1/dashboard/changes/{project_id}/{change_name}", tags=["dashboard"])
@@ -1839,7 +2283,9 @@ def get_dashboard_change_detail(
     uow: Annotated[PersistenceUnitOfWork, Depends(get_uow)],
     run_id: str | None = None,
 ) -> dict[str, Any]:
-    raise HTTPException(status_code=status.HTTP_410_GONE, detail=unavailable_payload("legacy_dashboard", "F5"))
+    raise HTTPException(
+        status_code=status.HTTP_410_GONE, detail=unavailable_payload("legacy_dashboard", "F5")
+    )
 
 
 @app.get("/api/v1/dashboard/runs/{run_id}", tags=["dashboard"])
@@ -1847,7 +2293,9 @@ def get_dashboard_run_detail(
     run_id: str,
     uow: Annotated[PersistenceUnitOfWork, Depends(get_uow)],
 ) -> dict[str, Any]:
-    raise HTTPException(status_code=status.HTTP_410_GONE, detail=unavailable_payload("legacy_dashboard", "F5"))
+    raise HTTPException(
+        status_code=status.HTTP_410_GONE, detail=unavailable_payload("legacy_dashboard", "F5")
+    )
 
 
 @app.get("/api/v1/dashboard/events", tags=["dashboard"])
@@ -1858,7 +2306,9 @@ def get_dashboard_events(
     run_id: str | None = None,
     limit: Annotated[int, Query(ge=1, le=500)] = 100,
 ) -> list[dict[str, Any]]:
-    raise HTTPException(status_code=status.HTTP_410_GONE, detail=unavailable_payload("legacy_dashboard", "F5"))
+    raise HTTPException(
+        status_code=status.HTTP_410_GONE, detail=unavailable_payload("legacy_dashboard", "F5")
+    )
 
 
 # -----------------------------------------------------------------------------
@@ -1879,7 +2329,9 @@ def get_change_efficiency_telemetry(
     change_name: str,
     uow: Annotated[PersistenceUnitOfWork, Depends(get_uow)],
 ) -> EfficiencyTelemetryView:
-    raise HTTPException(status_code=status.HTTP_410_GONE, detail=unavailable_payload("legacy_dashboard", "F5"))
+    raise HTTPException(
+        status_code=status.HTTP_410_GONE, detail=unavailable_payload("legacy_dashboard", "F5")
+    )
 
 
 @app.get(
@@ -1895,7 +2347,9 @@ def list_project_efficiency_metrics(
     uow: Annotated[PersistenceUnitOfWork, Depends(get_uow)],
     limit: Annotated[int, Query(ge=1, le=100)] = 50,
 ) -> list[ProviderEfficiencyMetrics]:
-    raise HTTPException(status_code=status.HTTP_410_GONE, detail=unavailable_payload("legacy_dashboard", "F5"))
+    raise HTTPException(
+        status_code=status.HTTP_410_GONE, detail=unavailable_payload("legacy_dashboard", "F5")
+    )
 
 
 # -----------------------------------------------------------------------------
@@ -1911,6 +2365,7 @@ async def build_preview_image() -> dict[str, Any]:
         detail=unavailable_payload("container_preview", "F5"),
     )
 
+
 @app.post("/api/v1/previews/start", tags=["previews"])
 async def start_preview_container() -> dict[str, Any]:
     """F1 never launches containers from a compatibility endpoint."""
@@ -1918,6 +2373,7 @@ async def start_preview_container() -> dict[str, Any]:
         status_code=status.HTTP_410_GONE,
         detail=unavailable_payload("container_preview", "F5"),
     )
+
 
 @app.get("/api/v1/previews/{preview_id}", tags=["previews"])
 def get_preview_session(
@@ -1988,6 +2444,7 @@ async def teardown_preview_session(
         detail=unavailable_payload("container_preview", "F5"),
     )
 
+
 @app.post("/api/v1/previews/reconcile", tags=["previews"])
 async def reconcile_orphan_previews() -> dict[str, Any]:
     """F1 must not inspect or mutate Docker state."""
@@ -1995,6 +2452,7 @@ async def reconcile_orphan_previews() -> dict[str, Any]:
         status_code=status.HTTP_410_GONE,
         detail=unavailable_payload("container_preview", "F5"),
     )
+
 
 @app.get("/api/v1/validations/scenarios/{project_id}/{change_name}", tags=["validations"])
 def get_validation_scenarios_endpoint(
@@ -2025,13 +2483,13 @@ def get_validation_scenarios_endpoint(
 
 
 @app.post("/api/v1/validations/submit", tags=["validations"])
-def submit_validation(
-) -> dict[str, Any]:
+def submit_validation() -> dict[str, Any]:
     """F1 keeps no candidate-validation writer before the F5 UI exists."""
     raise HTTPException(
         status_code=status.HTTP_410_GONE,
         detail=unavailable_payload("candidate_validation", "F5"),
     )
+
 
 @app.get("/api/v1/validations/authority/{project_id}/{change_name}", tags=["validations"])
 def get_candidate_validation_authority_endpoint(
@@ -2080,7 +2538,9 @@ def discover_actions_endpoint(
     run_id: str,
     uow: Annotated[PersistenceUnitOfWork, Depends(get_uow)],
 ) -> list[ActionDescriptor]:
-    raise HTTPException(status_code=status.HTTP_410_GONE, detail=unavailable_payload("legacy_control_plane", "F3"))
+    raise HTTPException(
+        status_code=status.HTTP_410_GONE, detail=unavailable_payload("legacy_control_plane", "F3")
+    )
 
 
 @app.get(
@@ -2092,7 +2552,9 @@ def discover_control_plane_actions_endpoint(
     run_id: str,
     uow: Annotated[PersistenceUnitOfWork, Depends(get_uow)],
 ) -> list[ActionDescriptor]:
-    raise HTTPException(status_code=status.HTTP_410_GONE, detail=unavailable_payload("legacy_control_plane", "F3"))
+    raise HTTPException(
+        status_code=status.HTTP_410_GONE, detail=unavailable_payload("legacy_control_plane", "F3")
+    )
 
 
 @app.post(
@@ -2106,7 +2568,9 @@ def execute_action_endpoint(
     request_body: OperatorActionRequest,
     uow: Annotated[PersistenceUnitOfWork, Depends(get_uow)],
 ) -> OperatorActionResult:
-    raise HTTPException(status_code=status.HTTP_410_GONE, detail=unavailable_payload("legacy_control_plane", "F3"))
+    raise HTTPException(
+        status_code=status.HTTP_410_GONE, detail=unavailable_payload("legacy_control_plane", "F3")
+    )
 
 
 @app.post(
@@ -2119,7 +2583,9 @@ def execute_action_generic_endpoint(
     request_body: OperatorActionRequest,
     uow: Annotated[PersistenceUnitOfWork, Depends(get_uow)],
 ) -> OperatorActionResult:
-    raise HTTPException(status_code=status.HTTP_410_GONE, detail=unavailable_payload("legacy_control_plane", "F3"))
+    raise HTTPException(
+        status_code=status.HTTP_410_GONE, detail=unavailable_payload("legacy_control_plane", "F3")
+    )
 
 
 @app.post(
@@ -2131,7 +2597,9 @@ def execute_control_plane_action_endpoint(
     request_body: OperatorActionRequest,
     uow: Annotated[PersistenceUnitOfWork, Depends(get_uow)],
 ) -> OperatorActionResult:
-    raise HTTPException(status_code=status.HTTP_410_GONE, detail=unavailable_payload("legacy_control_plane", "F3"))
+    raise HTTPException(
+        status_code=status.HTTP_410_GONE, detail=unavailable_payload("legacy_control_plane", "F3")
+    )
 
 
 @app.get(
@@ -2144,7 +2612,9 @@ def get_action_history_endpoint(
     uow: Annotated[PersistenceUnitOfWork, Depends(get_uow)],
     limit: int = 50,
 ) -> list[OperatorActionRecord]:
-    raise HTTPException(status_code=status.HTTP_410_GONE, detail=unavailable_payload("legacy_control_plane", "F3"))
+    raise HTTPException(
+        status_code=status.HTTP_410_GONE, detail=unavailable_payload("legacy_control_plane", "F3")
+    )
 
 
 # -----------------------------------------------------------------------------
@@ -2504,7 +2974,9 @@ else:
 @app.api_route("/", methods=["GET", "HEAD"], tags=["dashboard-ui"], response_model=None)
 @app.api_route("/dashboard", methods=["GET", "HEAD"], tags=["dashboard-ui"], response_model=None)
 @app.api_route("/trabajo", methods=["GET", "HEAD"], tags=["dashboard-ui"], response_model=None)
-@app.api_route("/trabajo-actual", methods=["GET", "HEAD"], tags=["dashboard-ui"], response_model=None)
+@app.api_route(
+    "/trabajo-actual", methods=["GET", "HEAD"], tags=["dashboard-ui"], response_model=None
+)
 @app.api_route("/proyectos", methods=["GET", "HEAD"], tags=["dashboard-ui"], response_model=None)
 @app.api_route("/backlog", methods=["GET", "HEAD"], tags=["dashboard-ui"], response_model=None)
 def get_dashboard_page() -> Response:
@@ -2520,9 +2992,6 @@ def get_dashboard_page() -> Response:
         "</body></html>",
         status_code=404,
     )
-
-
-
 
 
 @app.api_route("/sw.js", methods=["GET", "HEAD"], include_in_schema=False)

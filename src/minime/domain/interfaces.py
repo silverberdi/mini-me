@@ -31,6 +31,7 @@ from minime.domain.models import (
     CapacityWindow,
     Change,
     CheckResult,
+    DeferredTransition,
     DispatchAuthorization,
     DurableSaga,
     Event,
@@ -634,6 +635,20 @@ class OrchestrationCandidateRepositoryInterface(ABC):
     def supersede(self, candidate_id: str, superseded_by_id: str) -> None: ...
 
 
+
+class DeferredTransitionRepositoryInterface(ABC):
+    @abstractmethod
+    def save(self, transition: DeferredTransition) -> None: ...
+
+    @abstractmethod
+    def get_by_id(self, transition_id: str) -> DeferredTransition | None: ...
+
+    @abstractmethod
+    def get_pending_by_project(self, project_id: str) -> list[DeferredTransition]: ...
+
+    @abstractmethod
+    def list_pending(self) -> list[DeferredTransition]: ...
+
 class DurableSagaRepositoryInterface(ABC):
     @abstractmethod
     def save(self, saga: DurableSaga) -> None: ...
@@ -848,6 +863,7 @@ class PersistenceUnitOfWork(ABC):
     recovery_decisions: RecoveryDecisionRepositoryInterface
     external_action_attempts: ExternalActionAttemptRepositoryInterface
     durable_sagas: DurableSagaRepositoryInterface
+    deferred_transitions: DeferredTransitionRepositoryInterface
 
     @abstractmethod
     def commit(self) -> None: ...
@@ -1157,6 +1173,26 @@ class GitHubAdapterInterface(ABC):
             reason_code=ExternalReasonCode.UNSUPPORTED,
         )
 
+
+
+    def update_issue_state(
+        self,
+        repository: str,
+        issue_number: int,
+        *,
+        state: str | None = None,
+        labels: list[str] | None = None,
+        title: str | None = None,
+        body: str | None = None,
+        expected_version: str | None = None,
+        idempotency_key: str | None = None,
+    ) -> ExternalActionResult[dict[str, Any]]:
+        return ExternalActionResult[dict[str, Any]](
+            outcome=ExternalOutcome.UNKNOWN,
+            value={},
+            source_adapter="interface",
+            reason_code=ExternalReasonCode.UNSUPPORTED,
+        )
 
 class AuthorizedOperatorRepositoryInterface(ABC):
     @abstractmethod

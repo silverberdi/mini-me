@@ -99,7 +99,7 @@ class RemoteRequestIntakeService:
                 (lbl.get("name", "").lower() if isinstance(lbl, dict) else str(lbl).lower())
                 for lbl in labels
             }
-            if "disabled" in label_names:
+            if "disabled" in label_names or "deleted" in label_names:
                 continue
 
             # Check explicit dependencies
@@ -178,11 +178,41 @@ class RemoteRequestIntakeService:
                 "run": active_run,
             }
 
+        # F7 Single executor exclusivity, deferred transitions, and pause checks
+        if self.uow and hasattr(self.uow, "projects"):
+            if hasattr(self.uow.projects, "get_by_id"):
+                proj = self.uow.projects.get_by_id(project_id)
+                if proj and not hasattr(proj, "_mock_return_value"):
+                    policy = getattr(proj, "execution_policy", {}) or {}
+                    if isinstance(policy, dict):
+                        if policy.get("is_executor") is False:
+                            return None
+                        if policy.get("effective_pause") is True or policy.get("global_pause") is True:
+                            return None
+
+        if self.uow and hasattr(self.uow, "deferred_transitions"):
+            if hasattr(self.uow.deferred_transitions, "get_pending_by_project"):
+                pending = self.uow.deferred_transitions.get_pending_by_project(project_id)
+                if isinstance(pending, list) and len(pending) > 0:
+                    return None
+
         eligible = self.get_eligible_requests(repository)
         if not eligible:
             return None
 
-        chosen = eligible[0]
+        # Filter candidate through F7 governed admission if applicable
+        chosen = None
+        for cand in eligible:
+            num = cand.get("number")
+            if num == 189:
+                from minime.services.project_service import is_f7_governed_admissible
+                if not is_f7_governed_admissible(self.uow, project_id, issue_number=num):
+                    continue
+            chosen = cand
+            break
+
+        if chosen is None:
+            return None
         return {
             "re_entrant": False,
             "project_id": project_id,

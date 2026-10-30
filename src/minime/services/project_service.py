@@ -4,12 +4,14 @@ from __future__ import annotations
 
 from pathlib import Path
 from typing import Any
+from uuid import uuid4
 
 from minime.domain.enums import EventType, ProjectOnboardingStatus, ProjectStatus, ProjectType
 from minime.domain.interfaces import (
     PersistenceUnitOfWork,
 )
 from minime.domain.models import (
+    DeferredTransition,
     Event,
     Project,
     ProjectConfigurationInput,
@@ -690,3 +692,269 @@ class ProjectService:
             "reasons": [redact_secrets(reason) for reason in project.onboarding_reasons],
             "checkpoint": checkpoint,
         }
+
+    def get_executor_project(self) -> Project | None:
+        projects = self.uow.projects.list_all() if hasattr(self.uow.projects, "list_all") else []
+        for p in projects:
+            if (p.execution_policy or {}).get("is_executor"):
+                return p
+        return projects[0] if projects else None
+
+    def set_executor_project(
+        self, project_id: str, *, defer_if_active: bool = True
+    ) -> dict[str, Any]:
+        target = self.uow.projects.get_by_id(project_id)
+        if target is None:
+            raise ValueError(f"Project {project_id} not found")
+
+        current_executor = self.get_executor_project()
+        has_active_run = False
+        if current_executor and hasattr(self.uow, "orchestration_runs"):
+            runs = (
+                self.uow.orchestration_runs.list_by_project(current_executor.project_id)
+                if hasattr(self.uow.orchestration_runs, "list_by_project")
+                else []
+            )
+            has_active_run = any(getattr(r, "is_active", False) for r in runs)
+
+        if has_active_run and defer_if_active and current_executor and current_executor.project_id != project_id:
+            transition = DeferredTransition(
+                id=str(uuid4()),
+                project_id=current_executor.project_id,
+                transition_type="change_executor",
+                target_project_id=project_id,
+                payload={"target_project_id": project_id},
+                status="PENDING",
+            )
+            if hasattr(self.uow, "deferred_transitions"):
+                self.uow.deferred_transitions.save(transition)
+            # Remove legacy unmanaged field if present
+            policy = dict(current_executor.execution_policy or {})
+            policy.pop("deferred_transition", None)
+            current_executor.execution_policy = policy
+            current_executor.updated_at = utc_now()
+            self.uow.projects.save(current_executor)
+            self.uow.commit()
+            return {
+                "status": "DEFERRED",
+                "message": f"Change to executor {project_id} deferred until active run completes.",
+                "target_project_id": project_id,
+                "transition_id": transition.id,
+            }
+
+        projects = self.uow.projects.list_all() if hasattr(self.uow.projects, "list_all") else []
+        now = utc_now()
+        for p_item in projects:
+            policy = dict(p_item.execution_policy or {})
+            policy["is_executor"] = (p_item.project_id == project_id)
+            policy.pop("deferred_transition", None)
+            p_item.execution_policy = policy
+            p_item.updated_at = now
+            self.uow.projects.save(p_item)
+
+        if hasattr(self.uow, "deferred_transitions"):
+            pending = self.uow.deferred_transitions.get_pending_by_project(project_id)
+            for t in pending:
+                if t.transition_type == "change_executor":
+                    t.status = "APPLIED"
+                    t.applied_at = now
+                    self.uow.deferred_transitions.save(t)
+
+        self.uow.commit()
+        return {
+            "status": "APPLIED",
+            "message": f"Project {project_id} is now the selected executor.",
+            "target_project_id": project_id,
+        }
+
+    def pause_project(self, project_id: str, *, defer_if_active: bool = True) -> dict[str, Any]:
+        target = self.uow.projects.get_by_id(project_id)
+        if target is None:
+            raise ValueError(f"Project {project_id} not found")
+
+        has_active_run = False
+        if hasattr(self.uow, "orchestration_runs"):
+            runs = (
+                self.uow.orchestration_runs.list_by_project(project_id)
+                if hasattr(self.uow.orchestration_runs, "list_by_project")
+                else []
+            )
+            has_active_run = any(getattr(r, "is_active", False) for r in runs)
+
+        if has_active_run and defer_if_active:
+            transition = DeferredTransition(
+                id=str(uuid4()),
+                project_id=project_id,
+                transition_type="project_pause",
+                payload={"project_id": project_id},
+                status="PENDING",
+            )
+            if hasattr(self.uow, "deferred_transitions"):
+                self.uow.deferred_transitions.save(transition)
+            self.uow.commit()
+            return {
+                "status": "DEFERRED",
+                "message": "Project pause deferred until active run completes.",
+                "project_id": project_id,
+                "transition_id": transition.id,
+            }
+
+        # Immediate pause distinct from F2 administrative is_active
+        policy = dict(target.execution_policy or {})
+        policy["effective_pause"] = True
+        target.execution_policy = policy
+        target.updated_at = utc_now()
+        self.uow.projects.save(target)
+        self.uow.commit()
+        return {
+            "status": "APPLIED",
+            "message": f"Project {project_id} is effectively paused.",
+            "project_id": project_id,
+        }
+
+    def resume_project(self, project_id: str) -> dict[str, Any]:
+        target = self.uow.projects.get_by_id(project_id)
+        if target is None:
+            raise ValueError(f"Project {project_id} not found")
+
+        policy = dict(target.execution_policy or {})
+        policy["effective_pause"] = False
+        target.execution_policy = policy
+        target.updated_at = utc_now()
+        self.uow.projects.save(target)
+
+        if hasattr(self.uow, "deferred_transitions"):
+            pending = self.uow.deferred_transitions.get_pending_by_project(project_id)
+            for t in pending:
+                if t.transition_type == "project_pause":
+                    t.status = "CANCELLED"
+                    self.uow.deferred_transitions.save(t)
+
+        self.uow.commit()
+        return {
+            "status": "RESUMED",
+            "message": f"Project {project_id} execution resumed.",
+            "project_id": project_id,
+        }
+
+    def pause_global(self, *, defer_if_active: bool = True) -> dict[str, Any]:
+        active_project = None
+        if hasattr(self.uow, "orchestration_runs"):
+            projects = self.uow.projects.list_all() if hasattr(self.uow.projects, "list_all") else []
+            for p_item in projects:
+                runs = (
+                    self.uow.orchestration_runs.list_by_project(p_item.project_id)
+                    if hasattr(self.uow.orchestration_runs, "list_by_project")
+                    else []
+                )
+                if any(getattr(r, "is_active", False) for r in runs):
+                    active_project = p_item.project_id
+                    break
+
+        if active_project and defer_if_active:
+            transition = DeferredTransition(
+                id=str(uuid4()),
+                project_id=active_project,
+                transition_type="global_pause",
+                payload={},
+                status="PENDING",
+            )
+            if hasattr(self.uow, "deferred_transitions"):
+                self.uow.deferred_transitions.save(transition)
+            self.uow.commit()
+            return {
+                "status": "DEFERRED",
+                "message": "Global pause deferred until active run completes.",
+                "transition_id": transition.id,
+            }
+
+        projects = self.uow.projects.list_all() if hasattr(self.uow.projects, "list_all") else []
+        now = utc_now()
+        for p_item in projects:
+            policy = dict(p_item.execution_policy or {})
+            policy["global_pause"] = True
+            p_item.execution_policy = policy
+            p_item.updated_at = now
+            self.uow.projects.save(p_item)
+        self.uow.commit()
+        return {
+            "status": "APPLIED",
+            "message": "Global pause applied immediately.",
+        }
+
+    def resume_global(self) -> dict[str, Any]:
+        projects = self.uow.projects.list_all() if hasattr(self.uow.projects, "list_all") else []
+        now = utc_now()
+        for p_item in projects:
+            policy = dict(p_item.execution_policy or {})
+            policy.pop("global_pause", None)
+            p_item.execution_policy = policy
+            p_item.updated_at = now
+            self.uow.projects.save(p_item)
+
+        if hasattr(self.uow, "deferred_transitions"):
+            pending = self.uow.deferred_transitions.list_pending()
+            for t in pending:
+                if t.transition_type == "global_pause":
+                    t.status = "CANCELLED"
+                    self.uow.deferred_transitions.save(t)
+
+        self.uow.commit()
+        return {
+            "status": "RESUMED",
+            "message": "Global execution resumed.",
+        }
+
+
+def is_f7_governed_admissible(
+    uow: Any,
+    project_id: str,
+    issue_number: int = 189,
+    change_name: str = "gacela-07-capacidades-diferidas",
+) -> bool:
+    """Durably verify explicit authorization for Issue #189 and Change gacela-07-capacidades-diferidas,
+    plus F6 closure and removal of disabled through the governed path before admission or execution.
+    """
+    if hasattr(uow, "orchestration_runs"):
+        runs = (
+            uow.orchestration_runs.list_by_project(project_id)
+            if hasattr(uow.orchestration_runs, "list_by_project")
+            else []
+        )
+        f6_closed = any(
+            (getattr(r, "stop_details", {}) or {}).get("issue_number") == 174
+            and getattr(r, "stop_outcome", None) == "COMPLETED"
+            for r in runs
+        )
+        if not f6_closed:
+            return False
+
+        change_matches = {
+            "gacela-07-capacidades-diferidas",
+            "req-189-f7-capacidades-funcionales-posteriores-a",
+        }
+        has_run_auth = any(
+            (getattr(r, "stop_details", {}) or {}).get("issue_number") == issue_number
+            and (
+                getattr(r, "change_name", "") in change_matches
+                or (getattr(r, "stop_details", {}) or {}).get("change_name") in change_matches
+            )
+            for r in runs
+        )
+        if has_run_auth:
+            return True
+
+    if hasattr(uow, "projects"):
+        p = uow.projects.get_by_id(project_id) if hasattr(uow.projects, "get_by_id") else None
+        if p:
+            policy = getattr(p, "execution_policy", {}) or {}
+            f7_auth = policy.get("f7_authorization") or {}
+            auth_issue = f7_auth.get("issue_number") or policy.get("authorized_issue_number")
+            auth_change = f7_auth.get("change_name") or policy.get("authorized_change_name")
+            if auth_issue == issue_number and (
+                auth_change in ("gacela-07-capacidades-diferidas", "req-189-f7-capacidades-funcionales-posteriores-a")
+                or not auth_change
+            ):
+                return True
+    return False
+

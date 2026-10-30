@@ -1649,6 +1649,11 @@ class NativeOrchestrationCoordinator:
             try:
                 await self._ensure_candidate_commit(worktree_path, issue_number)
                 candidate_sha = await self._get_git_head_sha(worktree_path)
+                active_run.current_candidate_sha = candidate_sha
+                if hasattr(uow, "orchestration_runs"):
+                    uow.orchestration_runs.save(active_run)
+                    if hasattr(uow, "commit"):
+                        uow.commit()
             except GitOperationError as exc:
                 return OrchestrationCoordinationResult(
                     status="PAUSED",
@@ -2224,21 +2229,39 @@ class NativeOrchestrationCoordinator:
         active_run.stop_outcome = OrchestrationStopOutcome.COMPLETED
         self._update_stage(uow, active_run, OrchestrationStage.COMPLETED)
 
-        # Admit the next FIFO request immediately after closure confirmation.
-        # Admission creates only a durable ADMITTED checkpoint; a later explicit
-        # request run resumes it and performs provider preflight before any agent.
-        next_request = intake_service.select_next_request(project_id, repository)
-        next_run = self._admit_next_fifo_request(
-            uow=uow,
-            project_id=project_id,
-            repository=repository,
-            completed_run_id=active_run.run_id,
-            next_request=next_request,
-        )
-        active_run.stop_details["next_fifo_request"] = (
-            next_request.get("issue_number") if next_request else None
-        )
-        active_run.stop_details["next_fifo_run_id"] = next_run.run_id if next_run else None
+        # Apply any pending deferred transitions for this project or global pause
+        applied_transitions = self._apply_deferred_transitions(uow, project_id)
+        if applied_transitions:
+            active_run.stop_details["applied_transitions"] = applied_transitions
+
+        # Check if project remains the selected executor and is not paused
+        can_admit_next = True
+        if hasattr(uow, "projects"):
+            current_p = uow.projects.get_by_id(project_id)
+            if current_p:
+                pol = getattr(current_p, "execution_policy", {}) or {}
+                if not pol.get("is_executor", False) or pol.get("effective_pause", False) or pol.get("global_pause", False):
+                    can_admit_next = False
+        if hasattr(uow, "deferred_transitions"):
+            if uow.deferred_transitions.get_pending_by_project(project_id):
+                can_admit_next = False
+
+        if can_admit_next:
+            next_request = intake_service.select_next_request(project_id, repository)
+            next_run = self._admit_next_fifo_request(
+                uow=uow,
+                project_id=project_id,
+                repository=repository,
+                completed_run_id=active_run.run_id,
+                next_request=next_request,
+            )
+            active_run.stop_details["next_fifo_request"] = (
+                next_request.get("issue_number") if next_request else None
+            )
+            active_run.stop_details["next_fifo_run_id"] = next_run.run_id if next_run else None
+        else:
+            active_run.stop_details["next_fifo_request"] = None
+            active_run.stop_details["next_fifo_run_id"] = None
         if hasattr(uow, "orchestration_runs"):
             uow.orchestration_runs.save(active_run)
             if hasattr(uow, "commit"):
@@ -2252,6 +2275,63 @@ class NativeOrchestrationCoordinator:
             pr2_url=pr2_url,
             message=f"Request #{issue_number} successfully implemented, verified, merged, and closed.",
         )
+
+    @staticmethod
+    def _apply_deferred_transitions(uow: PersistenceUnitOfWork, project_id: str) -> list[str]:
+        applied = []
+        if not hasattr(uow, "deferred_transitions") or not hasattr(uow, "projects"):
+            return applied
+
+        pending = list(uow.deferred_transitions.get_pending_by_project(project_id))
+        pending_all = uow.deferred_transitions.list_pending()
+        for t in pending_all:
+            if t not in pending and t.transition_type == "global_pause":
+                pending.append(t)
+
+        now = utc_now()
+        for transition in pending:
+            if transition.transition_type == "change_executor" and transition.target_project_id:
+                projects = uow.projects.list_all() if hasattr(uow.projects, "list_all") else []
+                for p_item in projects:
+                    pol = dict(p_item.execution_policy or {})
+                    pol["is_executor"] = (p_item.project_id == transition.target_project_id)
+                    p_item.execution_policy = pol
+                    p_item.updated_at = now
+                    uow.projects.save(p_item)
+                transition.status = "APPLIED"
+                transition.applied_at = now
+                uow.deferred_transitions.save(transition)
+                applied.append(f"change_executor->{transition.target_project_id}")
+
+            elif transition.transition_type == "project_pause":
+                p_item = uow.projects.get_by_id(transition.project_id)
+                if p_item:
+                    pol = dict(p_item.execution_policy or {})
+                    pol["effective_pause"] = True
+                    p_item.execution_policy = pol
+                    p_item.updated_at = now
+                    uow.projects.save(p_item)
+                transition.status = "APPLIED"
+                transition.applied_at = now
+                uow.deferred_transitions.save(transition)
+                applied.append(f"project_pause->{transition.project_id}")
+
+            elif transition.transition_type == "global_pause":
+                projects = uow.projects.list_all() if hasattr(uow.projects, "list_all") else []
+                for p_item in projects:
+                    pol = dict(p_item.execution_policy or {})
+                    pol["global_pause"] = True
+                    p_item.execution_policy = pol
+                    p_item.updated_at = now
+                    uow.projects.save(p_item)
+                transition.status = "APPLIED"
+                transition.applied_at = now
+                uow.deferred_transitions.save(transition)
+                applied.append("global_pause")
+
+        if applied and hasattr(uow, "commit"):
+            uow.commit()
+        return applied
 
     @staticmethod
     def _admit_next_fifo_request(

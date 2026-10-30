@@ -4163,7 +4163,9 @@ class WorktreeManager:
             runs_repo = getattr(self.uow, "orchestration_runs", None)
             run = runs_repo.get_by_id(run_id) if runs_repo and hasattr(runs_repo, "get_by_id") else None
             candidate_sha = (
-                getattr(run, "candidate_sha", None) or getattr(run, "current_candidate_sha", None)
+                getattr(run, "candidate_sha", None)
+                or getattr(run, "current_candidate_sha", None)
+                or ((getattr(run, "stop_details", {}) or {}).get("code_review") or {}).get("candidate_sha")
                 if run
                 else None
             )

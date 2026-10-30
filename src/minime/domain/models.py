@@ -7,7 +7,7 @@ import json
 import re
 import subprocess
 import uuid
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from decimal import Decimal
 from typing import Any, Generic, TypeVar
@@ -1937,3 +1937,15 @@ def evaluate_dispatch_authorization(
         is_authorized=False,
         authorization_reason=f"Unhandled action status '{action.status.value}'.",
     )
+
+
+@dataclass
+class DeferredTransition:
+    id: str
+    project_id: str
+    transition_type: str
+    target_project_id: str | None = None
+    payload: dict[str, Any] = field(default_factory=dict)
+    status: str = "PENDING"
+    created_at: datetime = field(default_factory=utc_now)
+    applied_at: datetime | None = None

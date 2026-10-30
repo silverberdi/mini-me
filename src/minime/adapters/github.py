@@ -2483,3 +2483,110 @@ class GitHubAdapter(GitHubAdapterInterface):
             data=False,
             error_message="Remote branch deletion unobservable after DELETE attempt.",
         )
+
+    def update_issue_state(
+        self,
+        repository: str,
+        issue_number: int,
+        *,
+        state: str | None = None,
+        labels: list[str] | None = None,
+        title: str | None = None,
+        body: str | None = None,
+        expected_version: str | None = None,
+        idempotency_key: str | None = None,
+    ) -> ExternalActionResult[dict[str, Any]]:
+        repo = self._repo(repository)
+
+        # 1. Re-read before write: verify remote issue state and ETag/version
+        try:
+            get_resp = self._request("GET", f"/repos/{repo}/issues/{issue_number}")
+            if get_resp.status_code != 200:
+                return ExternalActionResult(
+                    outcome=ExternalOutcome.FAILURE,
+                    source_adapter="github_rest",
+                    reason_code=ExternalReasonCode.UNOBSERVABLE,
+                    retry_safety=RetrySafety.SAFE,
+                    error_message=f"Failed to re-read issue #{issue_number} before write: HTTP {get_resp.status_code}",
+                    operation_key=idempotency_key,
+                )
+            current_issue = get_resp.json()
+            remote_etag = get_resp.headers.get("ETag") or current_issue.get("updated_at")
+
+            # Remote version/ETag optimistic concurrency check
+            if expected_version is not None and expected_version not in (remote_etag, current_issue.get("updated_at")):
+                return ExternalActionResult(
+                    outcome=ExternalOutcome.FAILURE,
+                    source_adapter="github_rest",
+                    reason_code=ExternalReasonCode.CONFLICT,
+                    retry_safety=RetrySafety.SAFE,
+                    error_message=f"Remote version conflict on issue #{issue_number}: expected {expected_version}, found {remote_etag}",
+                    operation_key=idempotency_key,
+                )
+        except Exception as exc:
+            return ExternalActionResult(
+                outcome=ExternalOutcome.FAILURE,
+                source_adapter="github_rest",
+                reason_code=ExternalReasonCode.UNOBSERVABLE,
+                retry_safety=RetrySafety.SAFE,
+                error_message=f"Re-read error: {exc}",
+                operation_key=idempotency_key,
+            )
+
+        payload: dict[str, Any] = {}
+        if state is not None:
+            payload["state"] = state
+        if labels is not None:
+            payload["labels"] = labels
+        if title is not None:
+            payload["title"] = title
+        if body is not None:
+            payload["body"] = body
+
+        req_headers = {}
+        if remote_etag:
+            req_headers["If-Match"] = remote_etag
+
+        try:
+            resp = self._request("PATCH", f"/repos/{repo}/issues/{issue_number}", json=payload, headers=req_headers)
+            if resp.status_code == 200:
+                data = resp.json()
+                return ExternalActionResult(
+                    outcome=ExternalOutcome.SUCCESS,
+                    source_adapter="github_rest",
+                    reason_code=ExternalReasonCode.EXECUTION_SUCCESS,
+                    retry_safety=RetrySafety.SAFE,
+                    data=data,
+                    observed_evidence={
+                        "remote_etag": resp.headers.get("ETag") or data.get("updated_at"),
+                        "status_code": 200,
+                    },
+                    operation_key=idempotency_key,
+                )
+            if resp.status_code == 412:
+                return ExternalActionResult(
+                    outcome=ExternalOutcome.FAILURE,
+                    source_adapter="github_rest",
+                    reason_code=ExternalReasonCode.CONFLICT,
+                    retry_safety=RetrySafety.SAFE,
+                    error_message=f"Precondition Failed: issue #{issue_number} was mutated concurrently.",
+                    operation_key=idempotency_key,
+                )
+            return ExternalActionResult(
+                outcome=ExternalOutcome.FAILURE,
+                source_adapter="github_rest",
+                reason_code=ExternalReasonCode.CONFLICT,
+                retry_safety=RetrySafety.SAFE,
+                error_message=f"Failed to update issue state: HTTP {resp.status_code} {resp.text}",
+                operation_key=idempotency_key,
+            )
+        except Exception as exc:
+            return ExternalActionResult(
+                outcome=ExternalOutcome.FAILURE,
+                source_adapter="github_rest",
+                reason_code=ExternalReasonCode.UNOBSERVABLE,
+                retry_safety=RetrySafety.SAFE,
+                error_message=str(exc),
+                operation_key=idempotency_key,
+            )
+
