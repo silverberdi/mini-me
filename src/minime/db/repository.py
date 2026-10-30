@@ -258,7 +258,7 @@ def project_model_to_domain(model: ProjectModel) -> Project:
         agent_profiles=getattr(model, "agent_profiles", None) or {},
         execution_policy=getattr(model, "execution_policy", None) or {},
         onboarding_checkpoint=getattr(model, "onboarding_checkpoint", None) or {},
-        status=ProjectStatus(model.status),
+        status=ProjectStatus.ARCHIVED if str(model.status).upper() == "RETIRED" else ProjectStatus(model.status),
         created_at=model.created_at,
         updated_at=model.updated_at,
     )

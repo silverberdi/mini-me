@@ -525,10 +525,13 @@ function projects({ state, navigate }) {
   return root;
 }
 
-function backlog({ state }) {
+function backlog({ state, navigate }) {
   const root = document.createElement("div");
   root.className = "view-stack";
-  root.append(text("h1", "Backlog"));
+  const heading = document.createElement("div");
+  heading.className = "view-heading";
+  heading.append(text("h1", "Backlog"), projectSelect(state, navigate));
+  root.append(heading);
 
   const requests = state.data.get("requests");
   const items = requests?.data?.eligible_requests || [];
@@ -576,7 +579,7 @@ function backlog({ state }) {
     )
   );
 
-  const selectedProject = state.selectedProject;
+  const selectedProject = state.context?.project || state.selectedProject || (state.data.get("projects")?.data?.find((p) => p.status === "ACTIVE") || state.data.get("projects")?.data?.[0])?.project_id;
   const actionGroup = document.createElement("div");
   actionGroup.className = "btn-group";
 
@@ -835,7 +838,7 @@ export function renderView({ root, route, state, api, navigate }) {
       : route === "/proyectos"
       ? projects({ state, navigate })
       : route === "/backlog"
-      ? backlog({ state })
+      ? backlog({ state, navigate })
       : dashboard({ state, navigate });
   root.append(view);
 }

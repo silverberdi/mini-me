@@ -1,5 +1,5 @@
 const CACHE_PREFIX = "minime-pwa-shell-";
-const CACHE_NAME = `${CACHE_PREFIX}f5`;
+const CACHE_NAME = `${CACHE_PREFIX}f7`; // f5 baseline bump
 const SHELL_ASSETS = [
   "/",
   "/dashboard",
