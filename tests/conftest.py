@@ -53,6 +53,7 @@ from minime.domain.interfaces import (
     CapacityWindowRepositoryInterface,
     ChangeRepositoryInterface,
     CheckResultRepositoryInterface,
+    DeferredTransitionRepositoryInterface,
     DurableSagaRepositoryInterface,
     EventRepositoryInterface,
     EvidenceDiagnosticRepositoryInterface,
@@ -97,6 +98,7 @@ from minime.domain.models import (
     CapacityWindow,
     Change,
     CheckResult,
+    DeferredTransition,
     DurableSaga,
     Event,
     EvidenceDiagnostic,
@@ -2114,6 +2116,29 @@ class InMemoryIntakeWorkspaceOwnershipRepository:
         self._store.pop(workspace_id, None)
 
 
+
+class InMemoryDeferredTransitionRepository(DeferredTransitionRepositoryInterface):
+    def __init__(self) -> None:
+        self._transitions: dict[str, DeferredTransition] = {}
+
+    def save(self, transition: DeferredTransition) -> None:
+        self._transitions[transition.id] = transition
+
+    def get_by_id(self, transition_id: str) -> DeferredTransition | None:
+        return self._transitions.get(transition_id)
+
+    def get_pending_by_project(self, project_id: str) -> list[DeferredTransition]:
+        return [
+            t for t in self._transitions.values()
+            if t.project_id == project_id and t.status == "PENDING"
+        ]
+
+    def list_pending(self) -> list[DeferredTransition]:
+        return [
+            t for t in self._transitions.values()
+            if t.status == "PENDING"
+        ]
+
 class InMemoryDurableSagaRepository(DurableSagaRepositoryInterface):
     def __init__(self):
         self._store: dict[str, DurableSaga] = {}
@@ -2454,6 +2479,7 @@ class InMemoryExternalActionAttemptRepository(ExternalActionAttemptRepositoryInt
 class InMemoryPersistenceUnitOfWork(PersistenceUnitOfWork):
     def __init__(self):
         self.durable_sagas = InMemoryDurableSagaRepository()
+        self.deferred_transitions = InMemoryDeferredTransitionRepository()
         self.projects = InMemoryProjectRepository()
         self.changes = InMemoryChangeRepository()
         self.bindings = InMemoryProjectBindingRepository(self)

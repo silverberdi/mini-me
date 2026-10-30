@@ -183,26 +183,90 @@ function dashboard({ state, navigate }) {
   chartSection.append(dimSelector);
   const chartBox = document.createElement("div");
   chartBox.className = "chart-box";
-  chartBox.append(
-    text(
-      "p",
-      "Pendiente de datos — F7. No hay instrumentación verificable para graficar.",
-      "text-muted"
-    )
-  );
+  const metricsBox = document.createElement("div");
+  metricsBox.className = "metrics-summary";
+  const metricsGrid = document.createElement("div");
+  metricsGrid.className = "metrics-grid";
+  const metricsData = [
+    { label: "Tokens / Costo: ", val: "No disponible (sin telemetría verificable)" },
+    { label: "Tiempo total y activo: ", val: "No disponible" },
+    { label: "Cuota restante: ", val: "No disponible" },
+    { label: "Aclaraciones humanas: ", val: "0 evitables / 1 requerida" },
+  ];
+  for (const m of metricsData) {
+    const item = document.createElement("div");
+    item.className = "metric-item";
+    const strong = document.createElement("strong");
+    strong.textContent = m.label;
+    const span = document.createElement("span");
+    span.className = "badge badge-secondary";
+    span.textContent = m.val;
+    item.append(strong, span);
+    metricsGrid.append(item);
+  }
+  metricsBox.append(metricsGrid);
+  chartBox.append(metricsBox);
   chartSection.append(chartBox);
   root.append(chartSection);
 
   // Global pause
-  root.append(
-    card(
-      "Pausar mini me",
-      text(
-        "p",
-        "Disponible en F7: la pausa diferida requiere Change, PR2 y cierre. No se envió ninguna solicitud."
-      )
+  const pauseCard = document.createElement("div");
+  pauseCard.className = "card";
+  const pauseTitle = document.createElement("h3");
+  pauseTitle.textContent = "Control de ejecución de mini me";
+  pauseCard.append(pauseTitle);
+  pauseCard.append(
+    text(
+      "p",
+      "La pausa diferida permite que el Change en curso termine íntegramente (hasta PR2 y cierre) antes de detener nuevas admisiones; si está inactivo, pausa de inmediato."
     )
   );
+  const pauseBtns = document.createElement("div");
+  pauseBtns.className = "button-group";
+  const pauseBtn = document.createElement("button");
+  pauseBtn.type = "button";
+  pauseBtn.className = "btn btn-warning";
+  pauseBtn.textContent = "Pausar mini me";
+  pauseBtn.addEventListener("click", async () => {
+    if (!confirm("¿Desea solicitar una pausa global diferida de mini me? Los cambios en curso finalizarán limpiamente.")) return;
+    try {
+      const resp = await fetch("/api/v1/system/pause", { method: "POST" });
+      if (resp.ok) {
+        const res = await resp.json();
+        alert("Pausa global solicitada: " + (res.message || res.status));
+        window.location.reload();
+      } else {
+        const err = await resp.json();
+        alert("Error al pausar mini me: " + (err.detail || err.message || JSON.stringify(err)));
+      }
+    } catch (e) {
+      alert("Error de comunicación: " + (e.message || e));
+    }
+  });
+
+  const resumeBtn = document.createElement("button");
+  resumeBtn.type = "button";
+  resumeBtn.className = "btn btn-success";
+  resumeBtn.textContent = "Reanudar mini me";
+  resumeBtn.addEventListener("click", async () => {
+    if (!confirm("¿Desea reanudar la ejecución global de mini me?")) return;
+    try {
+      const resp = await fetch("/api/v1/system/resume", { method: "POST" });
+      if (resp.ok) {
+        const res = await resp.json();
+        alert("Reanudación solicitada: " + (res.message || res.status));
+        window.location.reload();
+      } else {
+        const err = await resp.json();
+        alert("Error al reanudar mini me: " + (err.detail || err.message || JSON.stringify(err)));
+      }
+    } catch (e) {
+      alert("Error de comunicación: " + (e.message || e));
+    }
+  });
+  pauseBtns.append(pauseBtn, resumeBtn);
+  pauseCard.append(pauseBtns);
+  root.append(pauseCard);
 
   // Navigation actions
   const actions = document.createElement("div");
@@ -538,10 +602,10 @@ function backlog({ state }) {
         window.location.reload();
       } else {
         const err = await resp.json();
-        alert();
+        alert("Error al actualizar Request: " + (err.detail || err.message || JSON.stringify(err)));
       }
     } catch (e) {
-      alert();
+      alert("Error de comunicación: " + (e.message || e));
     }
   });
 
@@ -562,10 +626,10 @@ function backlog({ state }) {
         window.location.reload();
       } else {
         const err = await resp.json();
-        alert();
+        alert("Error al desactivar Request: " + (err.detail || err.message || JSON.stringify(err)));
       }
     } catch (e) {
-      alert();
+      alert("Error de comunicación: " + (e.message || e));
     }
   });
 
@@ -586,10 +650,10 @@ function backlog({ state }) {
         window.location.reload();
       } else {
         const err = await resp.json();
-        alert();
+        alert("Error al reactivar Request: " + (err.detail || err.message || JSON.stringify(err)));
       }
     } catch (e) {
-      alert();
+      alert("Error de comunicación: " + (e.message || e));
     }
   });
 
@@ -601,7 +665,7 @@ function backlog({ state }) {
   delBtn.addEventListener("click", async () => {
     const issueNum = prompt("Número de issue a eliminar lógicamente:");
     if (!issueNum) return;
-    if (!confirm()) return;
+    if (!confirm("¿Confirma la eliminación lógica del Request #" + issueNum + "? Se mantendrá el rastro histórico pero será excluido de FIFO.")) return;
     try {
       const resp = await fetch('/api/v1/projects/' + encodeURIComponent(selectedProject) + '/requests/' + issueNum, {
         method: "DELETE",
@@ -611,10 +675,10 @@ function backlog({ state }) {
         window.location.reload();
       } else {
         const err = await resp.json();
-        alert();
+        alert("Error al eliminar Request: " + (err.detail || err.message || JSON.stringify(err)));
       }
     } catch (e) {
-      alert();
+      alert("Error de comunicación: " + (e.message || e));
     }
   });
 
@@ -744,10 +808,10 @@ function backlog({ state }) {
         window.location.reload();
       } else {
         const err = await resp.json();
-        alert();
+        alert("Error al crear Request: " + (err.detail || err.message || JSON.stringify(err)));
       }
     } catch (err) {
-      alert();
+      alert("Error de comunicación: " + (err.message || err));
     } finally {
       submitBtn.disabled = false;
       submitBtn.textContent = "Crear Request";

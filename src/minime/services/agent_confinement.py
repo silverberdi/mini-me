@@ -595,12 +595,7 @@ class AgentProcessConfinement:
         system = platform.system().lower()
         if system == "linux":
             if shutil.which("bwrap"):
-                try:
-                    res = subprocess.run(["bwrap", "--ro-bind", "/", "/", "true"], capture_output=True, timeout=2)
-                    if res.returncode == 0:
-                        return "bubblewrap"
-                except Exception:
-                    pass
+                return "bubblewrap"
             return "none"
         if system == "darwin":
             if shutil.which("sandbox-exec") or os.path.exists("/usr/bin/sandbox-exec"):

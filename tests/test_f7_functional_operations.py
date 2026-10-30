@@ -60,10 +60,28 @@ class DummyRunRepo:
         self._runs.append(r)
 
 
+class DummyDeferredTransitionRepo:
+    def __init__(self):
+        self._transitions = {}
+
+    def save(self, transition):
+        self._transitions[transition.id] = transition
+
+    def get_by_id(self, transition_id):
+        return self._transitions.get(transition_id)
+
+    def get_pending_by_project(self, project_id):
+        return [t for t in self._transitions.values() if t.project_id == project_id and t.status == "PENDING"]
+
+    def list_pending(self):
+        return [t for t in self._transitions.values() if t.status == "PENDING"]
+
+
 class DummyUoW:
     def __init__(self):
         self.projects = DummyProjectRepo()
         self.orchestration_runs = DummyRunRepo()
+        self.deferred_transitions = DummyDeferredTransitionRepo()
 
     def commit(self):
         pass
@@ -96,9 +114,16 @@ def test_f7_deferred_executor_transition():
     assert res["status"] == "DEFERRED"
 
     assert svc.get_executor_project().project_id == "proj-a"
-    proj_a = uow.projects.get_by_id("proj-a")
-    assert "deferred_transition" in proj_a.execution_policy
-    assert proj_a.execution_policy["deferred_transition"]["target_project_id"] == "proj-b"
+    pending = uow.deferred_transitions.get_pending_by_project("proj-a")
+    assert len(pending) == 1
+    assert pending[0].target_project_id == "proj-b"
+    assert pending[0].transition_type == "change_executor"
+
+    # Also verify deferred project pause
+    res_pause = svc.pause_project("proj-a", defer_if_active=True)
+    assert res_pause["status"] == "DEFERRED"
+    pending_pauses = [t for t in uow.deferred_transitions.get_pending_by_project("proj-a") if t.transition_type == "project_pause"]
+    assert len(pending_pauses) == 1
 
 
 def test_f7_soft_deleted_issues_are_excluded_from_fifo():
@@ -455,8 +480,9 @@ def test_f7_real_provider_e2e_lifecycle_and_governance():
         session.delete(persisted)
         session.commit()
 
+    worktree_root = Path(__file__).resolve().parent.parent
     git_rev = subprocess.run(
-        ["git", "rev-parse", "HEAD"], capture_output=True, text=True, check=True
+        ["git", "rev-parse", "HEAD"], cwd=str(worktree_root), capture_output=True, text=True, check=True
     )
     immutable_sha = git_rev.stdout.strip()
     assert len(immutable_sha) == 40
@@ -531,10 +557,62 @@ def test_f7_api_and_ui_integration(monkeypatch):
         resp_metrics = client.get("/api/v1/projects/proj-a/requests/195/metrics")
         assert resp_metrics.status_code == 200
         assert resp_metrics.json()["progress"]["status"] == "unavailable"
+
+        # 7. API: Project & System Pause/Resume
+        resp_pause = client.post("/api/v1/projects/proj-a/pause")
+        assert resp_pause.status_code == 200
+        assert resp_pause.json()["status"] in ("APPLIED", "PAUSED")
+
+        resp_resume = client.post("/api/v1/projects/proj-a/resume")
+        assert resp_resume.status_code == 200
+        assert resp_resume.json()["status"] == "RESUMED"
+
+        resp_sys_pause = client.post("/api/v1/system/pause")
+        assert resp_sys_pause.status_code == 200
+
+        resp_sys_resume = client.post("/api/v1/system/resume")
+        assert resp_sys_resume.status_code == 200
+
+        # 8. API: Document Context Versioned Update (Task 4.3)
+        # 8a. Path traversal rejection
+        resp_bad_path = client.patch(
+            "/api/v1/projects/proj-a/context/document",
+            json={"path": "../evil.md", "content": "hack"},
+        )
+        assert resp_bad_path.status_code == 400
+
+        # 8b. Unauthorized directory rejection
+        resp_bad_dir = client.patch(
+            "/api/v1/projects/proj-a/context/document",
+            json={"path": "src/bad.py", "content": "hack"},
+        )
+        assert resp_bad_dir.status_code in (400, 403)
+
+        # 8c. Valid document update
+        test_doc_path = "docs/F7_TEST_CONTEXT.md"
+        resp_doc = client.patch(
+            "/api/v1/projects/proj-a/context/document",
+            json={"path": test_doc_path, "content": "# Test Context\nVersion 1"},
+        )
+        assert resp_doc.status_code == 200
+        doc_data = resp_doc.json()
+        assert doc_data["status"] == "UPDATED"
+
+        # 8d. Optimistic concurrency conflict
+        resp_conflict = client.patch(
+            "/api/v1/projects/proj-a/context/document",
+            json={"path": test_doc_path, "content": "# Conflict", "expected_version": "stale-sha"},
+        )
+        assert resp_conflict.status_code == 409
+
+        # Clean up test file if created
+        test_file_path = Path(".") / test_doc_path
+        if test_file_path.exists():
+            test_file_path.unlink()
     finally:
         app.dependency_overrides.clear()
 
-    # 7. UI Static Verification: verify views.js has enabled forms and action buttons
+    # 9. UI Static Verification: verify views.js has enabled forms and robust error handling
     views_path = Path(__file__).parents[1] / "src" / "minime" / "static" / "js" / "views.js"
     views_code = views_path.read_text(encoding="utf-8")
     assert "Crear Request" in views_code
@@ -543,3 +621,32 @@ def test_f7_api_and_ui_integration(monkeypatch):
     assert "Desactivar Request" in views_code
     assert "Reactivar Request" in views_code
     assert "Eliminar lógicamente" in views_code
+    assert "alert()" not in views_code
+    assert "confirm()" not in views_code
+
+
+def test_f7_remote_intake_admission_governance():
+    uow = DummyUoW()
+    mock_gh = MagicMock(spec=GitHubAdapter)
+    mock_gh.list_issues.return_value = ExternalActionResult(
+        outcome=ExternalOutcome.SUCCESS,
+        source_adapter="github",
+        reason_code=ExternalReasonCode.EXECUTION_SUCCESS,
+        data=[
+            {"number": 189, "title": "Req 189", "labels": [], "created_at": "2026-10-30T00:00:00Z"},
+        ],
+    )
+
+    intake = RemoteRequestIntakeService(github_adapter=mock_gh, uow=uow)
+
+    # 1. Non-executor project cannot admit work
+    res_non_exec = intake.select_next_request("proj-b", "org/b")
+    assert res_non_exec is None
+
+    # 2. Project with pending deferred transitions cannot admit work
+    from minime.domain.models import DeferredTransition
+    uow.deferred_transitions.save(
+        DeferredTransition(id="t1", project_id="proj-a", transition_type="change_executor", status="PENDING")
+    )
+    res_pending = intake.select_next_request("proj-a", "org/a")
+    assert res_pending is None

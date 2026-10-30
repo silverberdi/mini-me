@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import logging
 import os
 from contextlib import asynccontextmanager
@@ -28,6 +29,7 @@ from minime.db.repository import PostgresPersistenceUnitOfWork
 from minime.db.session import db_manager
 from minime.domain.enums import (
     AuthEventType,
+    EventType,
     OperatorActionType,
     OperatorAuthDecision,
 )
@@ -39,6 +41,7 @@ from minime.domain.models import (
     Change,
     ContextDiscoveryReport,
     EfficiencyTelemetryView,
+    Event,
     Job,
     JobLog,
     OperatorActionRecord,
@@ -619,13 +622,165 @@ def observe_project_context_merge(
 
 @app.post("/api/v1/projects/{project_id}/pause", tags=["projects"])
 def pause_project(
+    project_id: str,
+    _operator: AuthenticatedOperatorDep,
+    uow: UowDep,
+    defer_if_active: bool = Query(True, description="Defer pause if an active run is in progress"),
+) -> dict[str, Any]:
+    try:
+        service = ProjectService(uow)
+        has_active_run = False
+        if hasattr(uow, "orchestration_runs"):
+            runs = (
+                uow.orchestration_runs.list_by_project(project_id)
+                if hasattr(uow.orchestration_runs, "list_by_project")
+                else []
+            )
+            has_active_run = any(getattr(r, "is_active", False) for r in runs)
+
+        if has_active_run and defer_if_active:
+            return service.pause_project(project_id, defer_if_active=True)
+
+        service.pause_project(project_id, defer_if_active=False)
+        return service.public_project_payload(service.set_lifecycle(project_id, active=False))
+    except ValueError as exc:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
+
+
+@app.post("/api/v1/projects/{project_id}/resume", tags=["projects"])
+def resume_project(
     project_id: str, _operator: AuthenticatedOperatorDep, uow: UowDep
 ) -> dict[str, Any]:
     try:
         service = ProjectService(uow)
-        return service.public_project_payload(service.set_lifecycle(project_id, active=False))
+        return service.resume_project(project_id)
     except ValueError as exc:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
+
+
+@app.post("/api/v1/system/pause", tags=["system"])
+def pause_system(
+    _operator: AuthenticatedOperatorDep,
+    uow: UowDep,
+    defer_if_active: bool = Query(True, description="Defer pause if an active run is in progress"),
+) -> dict[str, Any]:
+    service = ProjectService(uow)
+    return service.pause_global(defer_if_active=defer_if_active)
+
+
+@app.post("/api/v1/system/resume", tags=["system"])
+def resume_system(
+    _operator: AuthenticatedOperatorDep, uow: UowDep
+) -> dict[str, Any]:
+    service = ProjectService(uow)
+    return service.resume_global()
+
+
+class DocumentContextUpdateRequest(BaseModel):
+    path: str = Field(..., description="Relative path within project repository")
+    content: str = Field(..., description="New file content")
+    expected_version: str | None = Field(
+        None, description="SHA256 hex digest of existing content for optimistic concurrency"
+    )
+
+
+@app.patch("/api/v1/projects/{project_id}/context/document", tags=["projects"])
+def update_project_document_context(
+    project_id: str,
+    payload: DocumentContextUpdateRequest,
+    _operator: AuthenticatedOperatorDep,
+    uow: UowDep,
+) -> dict[str, Any]:
+    target_project = uow.projects.get_by_id(project_id)
+    if target_project is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Project {project_id} not found",
+        )
+
+    rel_path = payload.path.strip()
+    if not rel_path or rel_path.startswith("/") or ".." in Path(rel_path).parts:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Invalid document path: path traversal or absolute path detected",
+        )
+
+    norm_path = Path(rel_path)
+    allowed_extensions = {".md", ".yaml", ".yml", ".json", ".txt"}
+    if norm_path.suffix.lower() not in allowed_extensions:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"File extension {norm_path.suffix} is not authorized for document context editing",
+        )
+
+    first_part = norm_path.parts[0] if norm_path.parts else ""
+    if first_part not in ("docs", "openspec", "README.md", "AGENTS.md"):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Document context editing restricted to docs/, openspec/, or project documentation files",
+        )
+
+    base_dir = Path("/opt/minime/repos") / project_id
+    if not base_dir.exists():
+        base_dir = Path("/tmp/minime_repos") / project_id
+        base_dir.mkdir(parents=True, exist_ok=True)
+    target_file = (base_dir / norm_path).resolve()
+    if not str(target_file).startswith(str(base_dir.resolve())):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Path escapes project repository boundary",
+        )
+
+    current_content = ""
+    current_sha = hashlib.sha256(b"").hexdigest()
+    if target_file.exists():
+        try:
+            current_content = target_file.read_text(encoding="utf-8")
+            current_sha = hashlib.sha256(current_content.encode("utf-8")).hexdigest()
+        except Exception as exc:
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail=f"Failed to read existing document: {exc}",
+            ) from exc
+
+    if payload.expected_version and payload.expected_version != current_sha:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=f"Optimistic concurrency conflict: expected {payload.expected_version}, found {current_sha}",
+        )
+
+    try:
+        target_file.parent.mkdir(parents=True, exist_ok=True)
+        target_file.write_text(payload.content, encoding="utf-8")
+        new_sha = hashlib.sha256(payload.content.encode("utf-8")).hexdigest()
+    except Exception as exc:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to write document content: {exc}",
+        ) from exc
+
+    if hasattr(uow, "events"):
+        evt = Event(
+            event_type=EventType.PROJECT_UPDATED,
+            project_id=project_id,
+            payload={
+                "action": "document_context_edit",
+                "path": rel_path,
+                "previous_version": current_sha,
+                "new_version": new_sha,
+                "operator": getattr(_operator, "username", getattr(_operator, "email", "operator")),
+            },
+        )
+        uow.events.save(evt)
+        uow.commit()
+
+    return {
+        "status": "UPDATED",
+        "project_id": project_id,
+        "path": rel_path,
+        "version": new_sha,
+        "updated_at": datetime.now(UTC).isoformat(),
+    }
 
 
 @app.post("/api/v1/projects/{project_id}/executor", tags=["projects"])
@@ -645,6 +800,7 @@ def activate_project(
 ) -> dict[str, Any]:
     try:
         service = ProjectService(uow)
+        service.resume_project(project_id)
         return service.public_project_payload(service.set_lifecycle(project_id, active=True))
     except ValueError as exc:
         message = str(exc)

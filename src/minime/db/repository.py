@@ -27,6 +27,7 @@ from minime.db.models import (
     CapacityWindowModel,
     ChangeModel,
     CheckResultModel,
+    DeferredTransitionModel,
     DurableSagaModel,
     EventModel,
     EvidenceDiagnosticModel,
@@ -123,6 +124,7 @@ from minime.domain.interfaces import (
     CapacityWindowRepositoryInterface,
     ChangeRepositoryInterface,
     CheckResultRepositoryInterface,
+    DeferredTransitionRepositoryInterface,
     DurableSagaRepositoryInterface,
     EventRepositoryInterface,
     EvidenceDiagnosticRepositoryInterface,
@@ -173,6 +175,7 @@ from minime.domain.models import (
     CapacityWindow,
     Change,
     CheckResult,
+    DeferredTransition,
     DispatchAuthorization,
     DurableSaga,
     Event,
@@ -3307,6 +3310,69 @@ class PostgresCandidateRemediationRepository:
         return [candidate_remediation_model_to_domain(m) for m in self.session.scalars(stmt).all()]
 
 
+
+class PostgresDeferredTransitionRepository(DeferredTransitionRepositoryInterface):
+    def __init__(self, session: Session):
+        self.session = session
+
+    def save(self, transition: DeferredTransition) -> None:
+        existing = self.session.get(DeferredTransitionModel, transition.id)
+        if existing:
+            existing.project_id = transition.project_id
+            existing.transition_type = transition.transition_type
+            existing.target_project_id = transition.target_project_id
+            existing.payload = transition.payload
+            existing.status = transition.status
+            existing.applied_at = transition.applied_at
+        else:
+            model = DeferredTransitionModel(
+                id=transition.id,
+                project_id=transition.project_id,
+                transition_type=transition.transition_type,
+                target_project_id=transition.target_project_id,
+                payload=transition.payload,
+                status=transition.status,
+                created_at=transition.created_at,
+                applied_at=transition.applied_at,
+            )
+            self.session.add(model)
+
+    def get_by_id(self, transition_id: str) -> DeferredTransition | None:
+        model = self.session.get(DeferredTransitionModel, transition_id)
+        return self._to_domain(model) if model else None
+
+    def get_pending_by_project(self, project_id: str) -> list[DeferredTransition]:
+        stmt = (
+            select(DeferredTransitionModel)
+            .where(
+                DeferredTransitionModel.project_id == project_id,
+                DeferredTransitionModel.status == "PENDING",
+            )
+            .order_by(DeferredTransitionModel.created_at.asc())
+        )
+        return [self._to_domain(m) for m in self.session.scalars(stmt).all()]
+
+    def list_pending(self) -> list[DeferredTransition]:
+        stmt = (
+            select(DeferredTransitionModel)
+            .where(DeferredTransitionModel.status == "PENDING")
+            .order_by(DeferredTransitionModel.created_at.asc())
+        )
+        return [self._to_domain(m) for m in self.session.scalars(stmt).all()]
+
+    @staticmethod
+    def _to_domain(model: DeferredTransitionModel) -> DeferredTransition:
+        return DeferredTransition(
+            id=model.id,
+            project_id=model.project_id,
+            transition_type=model.transition_type,
+            target_project_id=model.target_project_id,
+            payload=model.payload or {},
+            status=model.status,
+            created_at=model.created_at,
+            applied_at=model.applied_at,
+        )
+
 class PostgresDurableSagaRepository(DurableSagaRepositoryInterface):
     def __init__(self, session: Session):
         self.session = session
@@ -5532,6 +5598,7 @@ class PostgresPersistenceUnitOfWork(PersistenceUnitOfWork):
         )
         self.intake_workspace_ownerships = PostgresIntakeWorkspaceOwnershipRepository(session)
         self.durable_sagas = PostgresDurableSagaRepository(session)
+        self.deferred_transitions = PostgresDeferredTransitionRepository(session)
         self.claims = PostgresRecoveryClaimRepository(session)
         self.recovery_decisions = PostgresRecoveryDecisionRepository(session)
         self.external_action_attempts = PostgresExternalActionAttemptRepository(session)
