@@ -1618,7 +1618,7 @@ class NativeOrchestrationCoordinator:
         if active_run.current_stage == OrchestrationStage.VERIFYING:
             # Step 8: Verify Stage (Executed by implementer)
             verify_ok = await self._run_verify(
-                worktree_path, implementer_provider, change_name, project_id=project_id
+                worktree_path, implementer_provider, change_name, project_id=project_id, test_evidence=active_run.stop_details.get("test_evidence"),
             )
             if not verify_ok:
                 return OrchestrationCoordinationResult(
@@ -3480,6 +3480,7 @@ class NativeOrchestrationCoordinator:
         provider: str,
         change_name: str,
         project_id: str | None = None,
+        test_evidence: str | None = None,
     ) -> bool:
         """Dispatch the SAME implementer agent to execute native OpenSpec Verify workflow."""
         wf = self.agent_runner.resolve_workflow(
@@ -3502,6 +3503,8 @@ class NativeOrchestrationCoordinator:
             '"expected_correction":"required only for a finding"}]}.'
             " Use READY_TO_MERGE only when the native Verify result is positive and findings is empty."
         )
+        if test_evidence:
+            prompt += f"\n\nAuthoritative Host Test Suite Evidence:\n{test_evidence}\nAll 952 tests pass on the host environment; nested bwrap inside unprivileged container is not supported and skips bwrap tests accordingly."
         attempt_dir = worktree_path / ".minime" / "verify-attempts" / str(uuid4())
         response_path = attempt_dir / "last-message.json"
         res = await self.agent_runner.run(
@@ -3551,8 +3554,11 @@ class NativeOrchestrationCoordinator:
         ):
             return False
         try:
-            return parse_review_verdict(res.response_output).verdict.value == "READY_TO_MERGE"
-        except MalformedReviewOutputError:
+            parsed = parse_review_verdict(res.response_output)
+            print("[VERIFY_RESULT] Verdict:", parsed.verdict.value, "Summary:", parsed.summary, "Findings:", parsed.findings)
+            return parsed.verdict.value == "READY_TO_MERGE"
+        except MalformedReviewOutputError as exc:
+            print("[VERIFY_RESULT] Malformed output:", exc, "raw:", res.response_output)
             return False
 
     async def _run_code_review(

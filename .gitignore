@@ -36,3 +36,5 @@ htmlcov/
 # Local runtime/logs
 logs/
 node_modules/
+minime-capability-*.lock
+pytest-of-minime/

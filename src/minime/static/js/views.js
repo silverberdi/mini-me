@@ -451,7 +451,7 @@ function projects({ state, navigate }) {
       link(`/backlog?project=${encodeURIComponent(selected)}`, "Abrir Backlog", navigate),
       text(
         "p",
-        "Editar, pausar, reactivar y eliminar lógico: Disponible en F7; no se simula ninguna mutación.",
+        "Gestión de requests disponible: crear, editar, pausar, reactivar y eliminar lógico.",
         "text-muted"
       )
     );
@@ -512,22 +512,113 @@ function backlog({ state }) {
     )
   );
 
+  const selectedProject = state.selectedProject;
   const actionGroup = document.createElement("div");
   actionGroup.className = "btn-group";
-  for (const act of [
-    { label: "Editar Request", desc: "Disponible en F7" },
-    { label: "Desactivar Request", desc: "Disponible en F7 (excluye de FIFO)" },
-    { label: "Reactivar Request", desc: "Disponible en F7" },
-    { label: "Eliminar lógicamente", desc: "Disponible en F7 (preserva historia)" },
-  ]) {
-    const btn = document.createElement("button");
-    btn.type = "button";
-    btn.className = "btn btn-secondary";
-    btn.textContent = act.label;
-    btn.disabled = true;
-    btn.title = act.desc;
-    actionGroup.append(btn);
-  }
+
+  const editBtn = document.createElement("button");
+  editBtn.type = "button";
+  editBtn.className = "btn btn-secondary";
+  editBtn.textContent = "Editar Request";
+  editBtn.title = "Editar un Request no admitido";
+  editBtn.addEventListener("click", async () => {
+    const issueNum = prompt("Número de issue a editar:");
+    if (!issueNum) return;
+    const newTitle = prompt("Nuevo título (opcional):");
+    const newBody = prompt("Nuevo cuerpo (opcional):");
+    if (!newTitle && !newBody) return;
+    try {
+      const resp = await fetch('/api/v1/projects/' + encodeURIComponent(selectedProject) + '/requests/' + issueNum, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ title: newTitle || undefined, body: newBody || undefined }),
+      });
+      if (resp.ok) {
+        alert("Request actualizado con éxito.");
+        window.location.reload();
+      } else {
+        const err = await resp.json();
+        alert();
+      }
+    } catch (e) {
+      alert();
+    }
+  });
+
+  const deactBtn = document.createElement("button");
+  deactBtn.type = "button";
+  deactBtn.className = "btn btn-secondary";
+  deactBtn.textContent = "Desactivar Request";
+  deactBtn.title = "Desactivar Request (excluye de FIFO)";
+  deactBtn.addEventListener("click", async () => {
+    const issueNum = prompt("Número de issue a desactivar:");
+    if (!issueNum) return;
+    try {
+      const resp = await fetch('/api/v1/projects/' + encodeURIComponent(selectedProject) + '/requests/' + issueNum + '/deactivate', {
+        method: "POST",
+      });
+      if (resp.ok) {
+        alert("Request desactivado.");
+        window.location.reload();
+      } else {
+        const err = await resp.json();
+        alert();
+      }
+    } catch (e) {
+      alert();
+    }
+  });
+
+  const reactBtn = document.createElement("button");
+  reactBtn.type = "button";
+  reactBtn.className = "btn btn-secondary";
+  reactBtn.textContent = "Reactivar Request";
+  reactBtn.title = "Reactivar Request previamente desactivado";
+  reactBtn.addEventListener("click", async () => {
+    const issueNum = prompt("Número de issue a reactivar:");
+    if (!issueNum) return;
+    try {
+      const resp = await fetch('/api/v1/projects/' + encodeURIComponent(selectedProject) + '/requests/' + issueNum + '/reactivate', {
+        method: "POST",
+      });
+      if (resp.ok) {
+        alert("Request reactivado.");
+        window.location.reload();
+      } else {
+        const err = await resp.json();
+        alert();
+      }
+    } catch (e) {
+      alert();
+    }
+  });
+
+  const delBtn = document.createElement("button");
+  delBtn.type = "button";
+  delBtn.className = "btn btn-secondary";
+  delBtn.textContent = "Eliminar lógicamente";
+  delBtn.title = "Eliminar lógicamente (preserva historia)";
+  delBtn.addEventListener("click", async () => {
+    const issueNum = prompt("Número de issue a eliminar lógicamente:");
+    if (!issueNum) return;
+    if (!confirm()) return;
+    try {
+      const resp = await fetch('/api/v1/projects/' + encodeURIComponent(selectedProject) + '/requests/' + issueNum, {
+        method: "DELETE",
+      });
+      if (resp.ok) {
+        alert("Request eliminado lógicamente.");
+        window.location.reload();
+      } else {
+        const err = await resp.json();
+        alert();
+      }
+    } catch (e) {
+      alert();
+    }
+  });
+
+  actionGroup.append(editBtn, deactBtn, reactBtn, delBtn);
   mgmtSection.append(actionGroup);
   pendingContent.append(mgmtSection);
 
@@ -564,14 +655,14 @@ function backlog({ state }) {
 
   root.append(pendingContent, doneContent);
 
-  // Formulario visual "Nuevo Request" con campos obligatorios deshabilitados (F7)
+  // Formulario visual "Nuevo Request" activo (F7)
   const newReqSection = document.createElement("section");
   newReqSection.className = "panel new-request-panel";
   newReqSection.append(text("h2", "Nuevo Request"));
   newReqSection.append(
     text(
       "p",
-      "Disponible en F7: El formulario no envía ni confirma una mutación en esta fase.",
+      "Crea un requerimiento en lenguaje natural. Se normalizará a Gherkin antes de admisión.",
       "text-muted"
     )
   );
@@ -588,7 +679,7 @@ function backlog({ state }) {
   titleInput.id = "newRequestTitle";
   titleInput.className = "form-control";
   titleInput.placeholder = "Título en lenguaje natural";
-  titleInput.disabled = true;
+  titleInput.required = true;
   titleGroup.append(titleLabel, titleInput);
 
   const descGroup = document.createElement("div");
@@ -600,7 +691,7 @@ function backlog({ state }) {
   descInput.className = "form-control";
   descInput.rows = 3;
   descInput.placeholder = "Descripción del requerimiento";
-  descInput.disabled = true;
+  descInput.required = true;
   descGroup.append(descLabel, descInput);
 
   const critGroup = document.createElement("div");
@@ -612,14 +703,56 @@ function backlog({ state }) {
   critInput.className = "form-control";
   critInput.rows = 3;
   critInput.placeholder = "Criterios observables de verificación";
-  critInput.disabled = true;
+  critInput.required = true;
   critGroup.append(critLabel, critInput);
 
   const submitBtn = document.createElement("button");
-  submitBtn.type = "button";
+  submitBtn.type = "submit";
   submitBtn.className = "btn btn-primary";
-  submitBtn.textContent = "Crear Request (Disponible en F7)";
-  submitBtn.disabled = true;
+  submitBtn.textContent = "Crear Request";
+
+  form.addEventListener("submit", async (e) => {
+    e.preventDefault();
+    if (!selectedProject) {
+      alert("Selecciona un proyecto primero.");
+      return;
+    }
+    const tVal = titleInput.value.trim();
+    const dVal = descInput.value.trim();
+    const cVal = critInput.value.trim();
+    if (!tVal || !dVal || !cVal) {
+      alert("Todos los campos marcados con * son obligatorios.");
+      return;
+    }
+    submitBtn.disabled = true;
+    submitBtn.textContent = "Creando y normalizando...";
+    try {
+      const resp = await fetch('/api/v1/projects/' + encodeURIComponent(selectedProject) + '/requests', {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          title: tVal,
+          description: dVal,
+          acceptance_criteria: cVal,
+        }),
+      });
+      if (resp.ok) {
+        alert("Request creado con éxito.");
+        titleInput.value = "";
+        descInput.value = "";
+        critInput.value = "";
+        window.location.reload();
+      } else {
+        const err = await resp.json();
+        alert();
+      }
+    } catch (err) {
+      alert();
+    } finally {
+      submitBtn.disabled = false;
+      submitBtn.textContent = "Crear Request";
+    }
+  });
 
   form.append(titleGroup, descGroup, critGroup, submitBtn);
   newReqSection.append(form);

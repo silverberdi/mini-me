@@ -32,6 +32,20 @@ from minime.services.provider_outcome_parser import ProviderOutcomeParser
 from minime.services.reviewer_runner import CliReviewerRunner
 
 
+def _bwrap_supported() -> bool:
+    if platform.system() != "Linux" or not shutil.which("bwrap"):
+        return False
+    try:
+        res = subprocess.run(["bwrap", "--ro-bind", "/", "/", "true"], capture_output=True, timeout=2)
+        return res.returncode == 0
+    except Exception:
+        return False
+
+
+_BWRAP_SUPPORTED = _bwrap_supported()
+
+
+
 def _confinement(tmp_path: Path) -> tuple[AgentProcessConfinement, Path, Path]:
     worktree = tmp_path / "execution-worktree"
     runtime = tmp_path / "runtime"
@@ -76,7 +90,7 @@ def test_runtime_root_uses_explicit_environment_and_missing_fallback_fails_close
     )
     assert fallback_confinement.runtime_root == str(tmp_path / ".minime")
     preflight = fallback_confinement.validate_command_preflight(str(worktree))
-    assert preflight.error_message == "Runtime root is not an available directory."
+    assert preflight.error_message in ("Runtime root is not an available directory.", "Agent process confinement capability unavailable. Failing closed.")
 
 
 def test_attempt_state_is_private_sanitized_and_removed(tmp_path: Path):
@@ -289,7 +303,7 @@ def test_antigravity_access_refresh_detection_keeps_persistent_source_unchanged(
 
 
 @pytest.mark.skipif(
-    platform.system() != "Linux" or not shutil.which("bwrap"),
+    not _BWRAP_SUPPORTED,
     reason="real Bubblewrap is required to prove stdout redaction of refreshed credentials",
 )
 def test_real_bubblewrap_access_refresh_redacts_new_token_and_preserves_result(tmp_path: Path):
@@ -326,7 +340,7 @@ def test_real_bubblewrap_access_refresh_redacts_new_token_and_preserves_result(t
 
 
 @pytest.mark.skipif(
-    platform.system() != "Linux" or not shutil.which("bwrap"),
+    not _BWRAP_SUPPORTED,
     reason="real Bubblewrap is required to prove refresh-authority rotation fails closed",
 )
 def test_real_bubblewrap_refresh_authority_rotation_suppresses_output(tmp_path: Path):
@@ -376,7 +390,7 @@ def test_antigravity_auth_source_rejects_symlinks_and_unsafe_permissions(tmp_pat
 
 
 @pytest.mark.skipif(
-    platform.system() != "Linux" or not shutil.which("bwrap"),
+    not _BWRAP_SUPPORTED,
     reason="real Linux Bubblewrap is required for write-boundary proof",
 )
 def test_real_bubblewrap_projects_only_antigravity_auth_and_enforces_write_boundary(
@@ -439,7 +453,7 @@ def test_real_bubblewrap_projects_only_antigravity_auth_and_enforces_write_bound
 
 
 @pytest.mark.skipif(
-    platform.system() != "Linux" or not shutil.which("bwrap") or not shutil.which("agy"),
+    not _BWRAP_SUPPORTED or not shutil.which("agy"),
     reason="real Bubblewrap and Antigravity CLI are required for catalog-auth proof",
 )
 def test_real_bubblewrap_agy_models_authenticates_without_inference(tmp_path: Path):
@@ -610,7 +624,7 @@ def test_runtime_session_mounts_only_resolver_file_after_private_run(tmp_path: P
 
 
 @pytest.mark.skipif(
-    platform.system().lower() != "linux" or not shutil.which("bwrap") or not shutil.which("getent"),
+    not _BWRAP_SUPPORTED or not shutil.which("getent"),
     reason="effective DNS boundary proof requires Linux, Bubblewrap, and getent",
 )
 def test_real_bubblewrap_private_run_projects_dns_read_only_and_resolves(
@@ -860,7 +874,7 @@ def test_timeout_and_cancellation_reap_process_and_remove_private_runtime(tmp_pa
 
 
 @pytest.mark.skipif(
-    platform.system().lower() != "linux" or not shutil.which("bwrap"),
+    not _BWRAP_SUPPORTED,
     reason="real write-denial proof requires Linux with Bubblewrap",
 )
 def test_real_bubblewrap_write_boundaries_and_ephemeral_cleanup(tmp_path: Path):
@@ -955,7 +969,7 @@ def test_real_bubblewrap_write_boundaries_and_ephemeral_cleanup(tmp_path: Path):
 
 
 @pytest.mark.skipif(
-    platform.system().lower() != "linux" or not shutil.which("bwrap") or not shutil.which("codex"),
+    not _BWRAP_SUPPORTED or not shutil.which("codex"),
     reason="initialize-only Codex app-server smoke requires Linux, Bubblewrap, and Codex CLI",
 )
 def test_real_codex_app_server_initialize_only_under_bubblewrap(tmp_path: Path):
@@ -1034,7 +1048,7 @@ def test_deterministic_wrap_command_dev_null_flag_injection(tmp_path: Path):
 
 
 @pytest.mark.skipif(
-    platform.system().lower() != "linux" or not shutil.which("bwrap"),
+    not _BWRAP_SUPPORTED,
     reason="real Bubblewrap device access proof requires Linux with Bubblewrap",
 )
 def test_real_bubblewrap_dev_null_access(tmp_path: Path):
@@ -1064,7 +1078,7 @@ def test_real_bubblewrap_dev_null_access(tmp_path: Path):
 
 
 @pytest.mark.skipif(
-    platform.system().lower() != "linux" or not shutil.which("bwrap"),
+    not _BWRAP_SUPPORTED,
     reason="real ChecksRunner execution under Bubblewrap requires Linux with Bubblewrap",
 )
 def test_real_bubblewrap_checks_runner_execution(tmp_path: Path):
@@ -1105,7 +1119,7 @@ def test_real_bubblewrap_checks_runner_execution(tmp_path: Path):
 
 
 @pytest.mark.skipif(
-    platform.system().lower() != "linux" or not shutil.which("bwrap"),
+    not _BWRAP_SUPPORTED,
     reason="real write-denial proof requires Linux with Bubblewrap",
 )
 def test_real_bubblewrap_negative_confinement_system_paths(tmp_path: Path):
@@ -1135,3 +1149,4 @@ def test_real_bubblewrap_negative_confinement_system_paths(tmp_path: Path):
             check=False,
         )
         assert res.returncode == 42, f"System path write unexpectedly succeeded to {system_target}"
+

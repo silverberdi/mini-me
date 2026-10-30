@@ -42,3 +42,7 @@ class ManagedWorkspaceGuardDeniedError(DomainError):
 class UnsafeIntakeWorkspaceStateError(DomainError):
     """Raised when an intake workspace exhibits unsafe, dirty, or unmanifested file states."""
 
+
+
+class RequestMutationNotAllowedError(DomainError):
+    """Raised when mutation of an admitted, active, or completed request is attempted outside HUMAN_REQUIRED."""

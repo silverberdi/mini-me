@@ -24,7 +24,7 @@ class SchemaInvariantResult:
     reason: str | None = None
 
 
-EXPECTED_ALEMBIC_HEAD = "f2_retire_project_legacy_context"
+EXPECTED_ALEMBIC_HEAD = "f7_deferred_transitions_and_governance"
 
 
 def verify_physical_schema_invariants(engine: Engine) -> SchemaInvariantResult:

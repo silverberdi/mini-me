@@ -99,7 +99,7 @@ class RemoteRequestIntakeService:
                 (lbl.get("name", "").lower() if isinstance(lbl, dict) else str(lbl).lower())
                 for lbl in labels
             }
-            if "disabled" in label_names:
+            if "disabled" in label_names or "deleted" in label_names:
                 continue
 
             # Check explicit dependencies

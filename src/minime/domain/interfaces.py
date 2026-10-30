@@ -1158,6 +1158,26 @@ class GitHubAdapterInterface(ABC):
         )
 
 
+
+    def update_issue_state(
+        self,
+        repository: str,
+        issue_number: int,
+        *,
+        state: str | None = None,
+        labels: list[str] | None = None,
+        title: str | None = None,
+        body: str | None = None,
+        expected_version: str | None = None,
+        idempotency_key: str | None = None,
+    ) -> ExternalActionResult[dict[str, Any]]:
+        return ExternalActionResult[dict[str, Any]](
+            outcome=ExternalOutcome.UNKNOWN,
+            value={},
+            source_adapter="interface",
+            reason_code=ExternalReasonCode.UNSUPPORTED,
+        )
+
 class AuthorizedOperatorRepositoryInterface(ABC):
     @abstractmethod
     def save(self, operator: AuthorizedOperator) -> None: ...

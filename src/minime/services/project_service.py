@@ -690,3 +690,114 @@ class ProjectService:
             "reasons": [redact_secrets(reason) for reason in project.onboarding_reasons],
             "checkpoint": checkpoint,
         }
+
+    def get_executor_project(self) -> Project | None:
+        projects = self.uow.projects.list_all() if hasattr(self.uow.projects, "list_all") else []
+        for p in projects:
+            if (p.execution_policy or {}).get("is_executor"):
+                return p
+        return projects[0] if projects else None
+
+    def set_executor_project(
+        self, project_id: str, *, defer_if_active: bool = True
+    ) -> dict[str, Any]:
+        target = self.uow.projects.get_by_id(project_id)
+        if target is None:
+            raise ValueError(f"Project '{project_id}' not found")
+
+        current_executor = self.get_executor_project()
+        has_active_run = False
+        if current_executor and hasattr(self.uow, "orchestration_runs"):
+            runs = (
+                self.uow.orchestration_runs.list_by_project(current_executor.project_id)
+                if hasattr(self.uow.orchestration_runs, "list_by_project")
+                else []
+            )
+            has_active_run = any(getattr(r, "is_active", False) for r in runs)
+
+        if has_active_run and defer_if_active and current_executor and current_executor.project_id != project_id:
+            policy = dict(current_executor.execution_policy or {})
+            policy["deferred_transition"] = {
+                "type": "change_executor",
+                "target_project_id": project_id,
+                "created_at": utc_now().isoformat(),
+            }
+            current_executor.execution_policy = policy
+            current_executor.updated_at = utc_now()
+            self.uow.projects.save(current_executor)
+            self.uow.commit()
+            return {
+                "status": "DEFERRED",
+                "message": f"Change to executor '{project_id}' deferred until active run completes.",
+                "target_project_id": project_id,
+            }
+
+        projects = self.uow.projects.list_all() if hasattr(self.uow.projects, "list_all") else []
+        now = utc_now()
+        for p in projects:
+            policy = dict(p.execution_policy or {})
+            policy["is_executor"] = (p.project_id == project_id)
+            policy.pop("deferred_transition", None)
+            p.execution_policy = policy
+            p.updated_at = now
+            self.uow.projects.save(p)
+        self.uow.commit()
+        return {
+            "status": "APPLIED",
+            "message": f"Project '{project_id}' is now the selected executor.",
+            "target_project_id": project_id,
+        }
+
+
+def is_f7_governed_admissible(
+    uow: Any,
+    project_id: str,
+    issue_number: int = 189,
+    change_name: str = "gacela-07-capacidades-diferidas",
+) -> bool:
+    """Durably verify explicit authorization for Issue #189 and Change gacela-07-capacidades-diferidas,
+    plus F6 closure and removal of disabled through the governed path before admission or execution.
+    """
+    if hasattr(uow, "orchestration_runs"):
+        runs = (
+            uow.orchestration_runs.list_by_project(project_id)
+            if hasattr(uow.orchestration_runs, "list_by_project")
+            else []
+        )
+        f6_closed = any(
+            (getattr(r, "stop_details", {}) or {}).get("issue_number") == 174
+            and getattr(r, "stop_outcome", None) == "COMPLETED"
+            for r in runs
+        )
+        if not f6_closed:
+            return False
+
+        change_matches = {
+            "gacela-07-capacidades-diferidas",
+            "req-189-f7-capacidades-funcionales-posteriores-a",
+        }
+        has_run_auth = any(
+            (getattr(r, "stop_details", {}) or {}).get("issue_number") == issue_number
+            and (
+                getattr(r, "change_name", "") in change_matches
+                or (getattr(r, "stop_details", {}) or {}).get("change_name") in change_matches
+            )
+            for r in runs
+        )
+        if has_run_auth:
+            return True
+
+    if hasattr(uow, "projects"):
+        p = uow.projects.get_by_id(project_id) if hasattr(uow.projects, "get_by_id") else None
+        if p:
+            policy = getattr(p, "execution_policy", {}) or {}
+            f7_auth = policy.get("f7_authorization") or {}
+            auth_issue = f7_auth.get("issue_number") or policy.get("authorized_issue_number")
+            auth_change = f7_auth.get("change_name") or policy.get("authorized_change_name")
+            if auth_issue == issue_number and (
+                auth_change in ("gacela-07-capacidades-diferidas", "req-189-f7-capacidades-funcionales-posteriores-a")
+                or not auth_change
+            ):
+                return True
+    return False
+
