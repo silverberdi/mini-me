@@ -10,6 +10,7 @@ import logging
 import os
 import re
 import stat
+import unicodedata
 import uuid
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
@@ -4101,7 +4102,9 @@ class WorktreeManager:
     @staticmethod
     def slugify_request_title(title: str, max_length: int = 40) -> str:
         """Convert an issue title to a clean kebab-case slug."""
-        cleaned = re.sub(r"[^\w\s-]", "", title).strip().lower()
+        normalized = unicodedata.normalize("NFKD", title)
+        ascii_title = normalized.encode("ascii", "ignore").decode("ascii")
+        cleaned = re.sub(r"[^\w\s-]", "", ascii_title).strip().lower()
         slug = re.sub(r"[-\s]+", "-", cleaned).strip("-")
         return slug[:max_length].rstrip("-") or "change"
 
