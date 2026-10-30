@@ -6,19 +6,19 @@ TBD - created by archiving change 017-pwa-control-center. Update Purpose after a
 ## Requirements
 
 ### Requirement: PWA Application Shell and Navigation
-The system SHALL provide one Spanish PWA with exactly five independent routed views: Dashboard, Trabajo, Trabajo actual, Proyectos and Backlog. Only Dashboard and Proyectos SHALL be primary navigation destinations. Dashboard SHALL link to Trabajo and Trabajo actual; Trabajo SHALL link to Trabajo actual; selected project detail SHALL link to its Backlog. Deep links, refresh, back and forward SHALL preserve authorized context. One bootstrap and one refresh lifecycle SHALL serve all views, with manual and 5s/10s/30s refresh options and no mutation during polling.
+The system SHALL provide one Spanish web application with exactly five independent routed views: Dashboard, Trabajo, Trabajo actual, Proyectos and Backlog. Only Dashboard and Proyectos SHALL be primary navigation destinations. Dashboard SHALL link to Trabajo and Trabajo actual; Trabajo SHALL link to Trabajo actual; selected project detail SHALL link to its Backlog. Deep links, refresh, back and forward SHALL preserve authorized context. One bootstrap and one refresh lifecycle SHALL serve all views, with manual and 5s/10s/30s refresh options and no mutation during polling. A future frontend implementation MAY replace the legacy JavaScript view layer with Angular and TypeScript, but SHALL preserve these observable routes, navigation destinations and lifecycle guarantees without enabling F8 by this planning Change.
 
 #### Scenario: View application shell with live health indicators
-- **WHEN** the authenticated PWA initializes
+- **WHEN** the authenticated application initializes
 - **THEN** it renders the brand header, backend connection state, compact health indicators and manual/5s/10s/30s refresh controls; scheduler and database health show only verified observations, with unavailable or stale sources explicitly labeled.
 
 #### Scenario: Toggle auto-refresh interval
-- **WHEN** the operator selects 5s while the PWA is polling at 10s
+- **WHEN** the operator selects 5s while the application is polling at 10s
 - **THEN** the single polling timer changes to 5s and performs an immediate read without sending a mutation.
 
 #### Scenario: Navigate five independent views
 - **WHEN** the operator follows Dashboard → Trabajo → Trabajo actual and Proyectos → selected project → Backlog
-- **THEN** each destination has its own URL and content, with exactly two primary destinations and no stacked Home screens.
+- **THEN** each destination has its own URL and content, with exactly two primary destinations and no stacked Home screens, regardless of whether the current frontend is legacy JavaScript or the future Angular implementation.
 
 #### Scenario: Reload a contextual deep link
 - **WHEN** an authenticated operator reloads or traverses browser history for a project, Request, Run or stage link
@@ -29,7 +29,7 @@ The system SHALL provide one Spanish PWA with exactly five independent routed vi
 - **THEN** a single refresh lifecycle uses 5s, performs an immediate read and neither duplicates listeners nor starts work.
 
 ### Requirement: KPI Summary Overview Grid
-The system SHALL present Dashboard for an explicitly identified project in focus, with analog project and current Request/task progress gauges, model quota gauges, completed-Request effectiveness, and compact human attention and operational health. Every measured value SHALL expose source, unit, scope, observation time and freshness. Percentages SHALL require a verified numerator and denominator; absent data SHALL be labeled No disponible, never zero or fabricated. Administrative ACTIVE SHALL NOT imply a global executor selection or a started Run.
+The system SHALL present Dashboard for an explicitly identified project in focus, with analog project and current Request/task progress gauges, model quota gauges, completed-Request effectiveness, and compact human attention and operational health. Every measured value SHALL expose source, unit, scope, observation time and freshness. Percentages SHALL require a verified numerator and denominator; absent data SHALL be labeled No disponible, never zero or fabricated. Administrative ACTIVE SHALL NOT imply a global executor selection or a started Run. A frontend migration SHALL preserve the same verified data semantics and SHALL NOT move KPI authority or calculations into the client.
 
 #### Scenario: Render KPI summary with active executions
 - **WHEN** authoritative observations identify an active Run and one unresolved HUMAN_REQUIRED for the focused project
@@ -52,7 +52,7 @@ The system SHALL present Dashboard for an explicitly identified project in focus
 - **THEN** the compact health area describes that fact, distinguishes physical scheduler state from logical admission, and does not create a HUMAN_REQUIRED notification without a real request.
 
 ### Requirement: Effectiveness Dimensions for Completed Requests
-The system SHALL provide selectable line-chart dimensions for quality/autonomy, time, and measured AI resources per completed Request, with separate scales and explicit missing-data states. Quality SHALL distinguish avoidable clarification/correction iterations from mandatory authorization gates; time SHALL distinguish total, active and waiting duration; resources SHALL preserve provider/model attribution and actual measured units.
+The system SHALL provide selectable line-chart dimensions for quality/autonomy, time, and measured AI resources per completed Request, with separate scales and explicit missing-data states. Quality SHALL distinguish avoidable clarification/correction iterations from mandatory authorization gates; time SHALL distinguish total, active and waiting duration; resources SHALL preserve provider/model attribution and actual measured units. A future frontend migration SHALL preserve the chart's three dimensions, traceability and missing-data semantics without inventing client-side measurements.
 
 #### Scenario: Compare measured history
 - **WHEN** the operator changes the effectiveness dimension over completed Requests
@@ -63,7 +63,7 @@ The system SHALL provide selectable line-chart dimensions for quality/autonomy, 
 - **THEN** the graph is empty with an explanation Pendiente de datos — F7, and no demonstration points or inferred durations appear.
 
 ### Requirement: Honest Global Pause Control
-The system SHALL display Pausar mini me with its deferred semantics, but SHALL keep it non-actionable with Disponible en F7 when global deferred-pause authority is absent.
+The system SHALL display Pausar mini me with its deferred semantics, but SHALL keep it non-actionable with Disponible en F7 when global deferred-pause authority is absent. A future frontend migration SHALL preserve this disabled state and explanation and SHALL NOT add pause authority.
 
 #### Scenario: Pause lacks authority
 - **WHEN** the operator inspects Pausar mini me without a supported backend capability
