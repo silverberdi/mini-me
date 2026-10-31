@@ -219,7 +219,7 @@ class OpenCodeAdapter:
         *,
         project_id: str,
         managed_worktree_path: str | Path,
-        confinement_factory=AgentProcessConfinement,
+        confinement_factory=None,
         preflight: OpenCodePreflight | None = None,
         recorder: CandidateEvidenceRecorder | None = None,
     ) -> None:
@@ -228,7 +228,7 @@ class OpenCodeAdapter:
         if not managed_worktree_path:
             raise ValueError("A verified non-empty managed_worktree_path is required.")
         self.managed_worktree_path = Path(managed_worktree_path).resolve()
-        self._confinement_factory = confinement_factory
+        self._confinement_factory = confinement_factory or AgentProcessConfinement
         self._preflight = preflight
         self._recorder = recorder
 
@@ -311,8 +311,27 @@ class OpenCodeAdapter:
                 if not model_str.startswith(f"{self.config.provider}/"):
                     model_str = f"{self.config.provider}/{model_str}"
                 args.extend(["--model", model_str])
-        if request.prompt and request.prompt not in args:
-            args.append(request.prompt)
+        skill_name = {
+            "explore": "openspec-explore",
+            "propose": "openspec-propose",
+            "apply": "openspec-apply-change",
+            "verify": "openspec-verify-change",
+        }[operation]
+        workflow_dispatch_cmd = "$" + skill_name
+        workflow_instruction = (
+            f"Execute official native OpenSpec workflow for '{operation}' "
+            f"using {workflow[0]} (workflow command: {workflow_dispatch_cmd})."
+        )
+        if request.prompt:
+            if workflow_dispatch_cmd not in request.prompt and workflow[0] not in request.prompt:
+                effective_prompt = f"{workflow_instruction}\n\n{request.prompt}"
+            else:
+                effective_prompt = request.prompt
+        else:
+            effective_prompt = workflow_instruction
+
+        if effective_prompt not in args:
+            args.append(effective_prompt)
         extra_env = {"SHELL": "/bin/bash"}
         if self.config.api_key_env and self.config.api_key_env in os.environ:
             extra_env[self.config.api_key_env] = os.environ[self.config.api_key_env]

@@ -565,6 +565,53 @@ class CliAgentRunner:
                 workflow=workflow,
             )
 
+        if provider.lower() == "opencode":
+            from minime.config import OpenCodeCapabilityConfig
+            from minime.services.opencode_adapter import OpenCodeAdapter, OpenCodeRequest, _git_head
+
+            app_cfg = load_config()
+            proj_id = project_id or "default"
+            proj_cfg = app_cfg.projects.get(proj_id) if hasattr(app_cfg, "projects") else None
+            opencode_cfg = proj_cfg.opencode if proj_cfg else OpenCodeCapabilityConfig()
+
+            opencode_role = "independent_review" if role in ("reviewer", "independent_review") else "execution"
+            operation = workflow.operation if workflow and workflow.operation in {"explore", "propose", "apply", "verify"} else "apply"
+            candidate_sha = _git_head(Path(worktree_path)) or ""
+
+            adapter = OpenCodeAdapter(
+                opencode_cfg,
+                project_id=proj_id,
+                managed_worktree_path=worktree_path,
+            )
+            request = OpenCodeRequest(
+                project_id=proj_id,
+                role=opencode_role,
+                operation=operation,
+                worktree_path=Path(worktree_path),
+                candidate_sha=candidate_sha,
+                prompt=prompt_context,
+            )
+            outcome = await adapter.dispatch(request)
+
+            if output_last_message_path and outcome.evidence.stdout:
+                last_line = outcome.evidence.stdout[-1]
+                output_path = Path(output_last_message_path)
+                output_path.parent.mkdir(parents=True, exist_ok=True)
+                output_path.write_text(last_line, encoding="utf-8")
+
+            return AgentExecutionResult(
+                exit_code=outcome.evidence.exit_code if outcome.evidence.exit_code is not None else (0 if outcome.accepted else -1),
+                timed_out=outcome.evidence.timed_out,
+                stdout=list(outcome.evidence.stdout),
+                stderr=list(outcome.evidence.stderr),
+                duration_ms=0,
+                preflight_error=outcome.evidence.failure_reason if not outcome.accepted else None,
+                workflow=workflow,
+                final_response=outcome.evidence.stdout[-1] if outcome.evidence.stdout else None,
+                final_response_status="COMPLETE" if outcome.accepted else "MISSING",
+                final_response_source="structured_file" if output_last_message_path else "stdout",
+            )
+
         profile = self._profile_for(role, provider)
         if profile is None:
             return AgentExecutionResult(

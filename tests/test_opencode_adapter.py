@@ -492,3 +492,95 @@ async def test_workflow_command_enforced_across_all_operations(tmp_path, monkeyp
         assert res.accepted
         expected_rel_path = f".agents/skills/{skill_folder}/SKILL.md"
         assert res.evidence.workflow_path == expected_rel_path
+
+
+@pytest.mark.asyncio
+async def test_agent_runner_dispatches_opencode_adapter(tmp_path, monkeypatch):
+    from minime.config import AppConfig
+    from minime.services.agent_runner import CliAgentRunner
+
+    _ = _git_worktree(tmp_path)
+    skill_dir = tmp_path / ".agents" / "skills" / "openspec-apply-change"
+    skill_dir.mkdir(parents=True, exist_ok=True)
+    (skill_dir / "SKILL.md").write_text("# Skill\n")
+
+    monkeypatch.setattr("minime.services.opencode_adapter.shutil.which", lambda _: "/bin/true")
+    runner = CliAgentRunner(invocation=["/bin/true"])
+
+    # Disabled by default
+    res = await runner.run(
+        worktree_path=tmp_path,
+        prompt_context="echo COMPLETE",
+        provider="opencode",
+        role="implementer",
+    )
+    assert res.exit_code == -1
+    assert res.preflight_error == "OPENCODE_NOT_AUTHORIZED"
+
+    # Authorized in config
+    from minime.config import ProjectConfig
+    monkeypatch.setattr(
+        "minime.services.agent_runner.load_config",
+        lambda: AppConfig(
+            projects={
+                "test-proj": ProjectConfig(repository="test/repo",
+                    opencode=OpenCodeCapabilityConfig(
+                        enabled=True,
+                        roles=["execution"],
+                        args=["run", "--test"],
+                    )
+                )
+            }
+        ),
+    )
+    monkeypatch.setattr(
+        "minime.services.opencode_adapter.AgentProcessConfinement",
+        FakeConfinement,
+    )
+    res_auth = await runner.run(
+        worktree_path=tmp_path,
+        prompt_context="COMPLETE",
+        project_id="test-proj",
+        provider="opencode",
+        role="implementer",
+    )
+    assert res_auth.exit_code == 0
+    assert res_auth.preflight_error is None
+
+
+@pytest.mark.asyncio
+async def test_reproducible_non_paid_opencode_e2e(tmp_path, monkeypatch):
+    sha = _git_worktree(tmp_path)
+    skill_dir = tmp_path / ".agents" / "skills" / "openspec-apply-change"
+    skill_dir.mkdir(parents=True, exist_ok=True)
+    (skill_dir / "SKILL.md").write_text("# Apply change\n")
+
+    monkeypatch.setattr("minime.services.opencode_adapter.shutil.which", lambda _: "/bin/true")
+
+    adapter = OpenCodeAdapter(
+        OpenCodeCapabilityConfig(
+            enabled=True,
+            executable="/bin/true",
+            provider="openrouter",
+            model="deepseek/deepseek-chat",
+            roles=["execution"],
+        ),
+        project_id="test-proj",
+        managed_worktree_path=tmp_path,
+        confinement_factory=FakeConfinement,
+    )
+    outcome = await adapter.dispatch(
+        OpenCodeRequest(
+            project_id="test-proj",
+            role="execution",
+            operation="apply",
+            worktree_path=tmp_path,
+            candidate_sha=sha,
+            prompt="COMPLETE",
+        )
+    )
+    assert outcome.accepted
+    assert outcome.evidence.authoritative
+    assert outcome.evidence.candidate_sha == sha
+    assert outcome.evidence.workflow_path == ".agents/skills/openspec-apply-change/SKILL.md"
+    assert outcome.evidence.workflow_sha256 is not None
