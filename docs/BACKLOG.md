@@ -12,7 +12,7 @@
 | 6 | [#174](https://github.com/silverberdi/mini-me/issues/174) | `gacela-06-depuracion-final` reservado | Limpieza técnica final sin funciones nuevas | **mini me** después de F5 |
 | 7 | [#189](https://github.com/silverberdi/mini-me/issues/189) | `request-189-f7-capacidades-funcionales-posteriores-a` | Gestión de Requests, pausa diferida, proyecto ejecutor único, métricas y edición segura faltantes | Histórico cerrado |
 | 8 | [#190](https://github.com/silverberdi/mini-me/issues/190) | **NO creado/NO autorizado** | Angular + TypeScript + Tailwind, migración de frontend sin modificar backend | **disabled**, F8 futuro |
-| 9 | [#204](https://github.com/silverberdi/mini-me/issues/204) | **NO creado/NO autorizado** | OpenCode como adaptador CLI universal para modelos API externos (OpenRouter, DeepSeek, Minimax, Claude, etc.) | **disabled**, F9 futuro |
+| 9 | [#204](https://github.com/silverberdi/mini-me/issues/204) | `req-204-f9-opencode-cli-como-adaptadorharness-de` | OpenCode como adaptador CLI universal para modelos API externos (OpenRouter, DeepSeek, Minimax, Claude, etc.) | **autorizado**, F9 en verificación |
 
 ## Alcance acordado de F5
 
@@ -42,7 +42,7 @@ Migrar exclusivamente la UI a Angular + TypeScript + Tailwind, conservando rutas
 - Integrar **OpenCode** como un adaptador CLI ejecutable universal (comodín) en el host, dotando a modelos externos conectados por API (**OpenRouter / OR**, DeepSeek Directo, Minimax, Claude, etc.) de capacidad de ejecución interactiva en el worktree del proyecto.
 - Ejecución de herramientas locales (lectura/edición de archivos, ejecución de bash/linters/tests) y compatibilidad con los workflows oficiales de OpenSpec (`propose`, `explore`, `apply`, `verify`).
 - Cualquier modelo API puede operar legítimamente como implementer (`execution`) o reviewer (`independent_review`) dentro del marco de proyectos F2 sin construir runners paralelos dentro del núcleo de mini me.
-- Etiquetada como **disabled; no existe Change F9 autorizado**.
+- **Autorizada expresamente por el operador para Issue #204** (`req-204-f9-opencode-cli-como-adaptadorharness-de`).
 
 ## Reglas de admisión y cierre
 
