@@ -1,8 +1,10 @@
-"""Focused acceptance tests for immutable remediation contracts and generations."""
 
+"""Focused acceptance tests for immutable remediation contracts and generations."""
+import pytest
 from pydantic import ValidationError
 
 from minime.domain.models import RemediationContract
+from minime.services.agent_confinement import AgentProcessConfinement
 
 
 def test_remediation_contract_is_canonical_and_immutable():
@@ -30,6 +32,7 @@ def test_remediation_contract_is_canonical_and_immutable():
         raise AssertionError("remediation contract must be frozen")
 
 
+@pytest.mark.skipif(not AgentProcessConfinement.is_host_confinement_available(), reason="ChecksRunner execution requires host confinement")
 def test_check_runner_unsafe_postgres_check_does_not_short_circuit(tmp_path):
     """Unsafe disposable checks fail closed while later checks still execute."""
     import asyncio

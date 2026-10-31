@@ -609,6 +609,18 @@ class AgentProcessConfinement:
     @classmethod
     def is_host_confinement_available(cls) -> bool:
         """Report platform capability without constructing a worktree sandbox."""
+        system = platform.system().lower()
+        if system == "linux":
+            bwrap = shutil.which("bwrap")
+            if not bwrap:
+                return False
+            try:
+                probe = subprocess.run(
+                    [bwrap, "--ro-bind", "/", "/", "true"], capture_output=True, timeout=2
+                )
+                return probe.returncode == 0
+            except (OSError, subprocess.TimeoutExpired):
+                return False
         return cls._detect_confinement_mechanism() != "none"
 
     def validate_command_preflight(
@@ -682,6 +694,8 @@ class AgentProcessConfinement:
         base_env: dict[str, str] | None = None,
         codex_auth_source: str | None = None,
         antigravity_auth_source: str | None = None,
+        *,
+        extra_env: dict[str, str] | None = None,
     ) -> Iterator[AgentRuntimeState]:
         """Create one private runtime with only explicitly authorized provider credentials."""
         temp_parent = self._validate_temp_parent(
@@ -722,12 +736,20 @@ class AgentProcessConfinement:
                 }
             )
 
+            if extra_env:
+                for k, v in extra_env.items():
+                    safe_env[k] = v
+
             auth_copy: Path | None = None
             initial_auth_digest: str | None = None
             antigravity_auth_copy: Path | None = None
             initial_antigravity_auth_digest: str | None = None
             initial_antigravity_auth_bytes: bytes | None = None
             sensitive_values: tuple[str, ...] = ()
+            if extra_env:
+                for v in extra_env.values():
+                    if len(v) >= 8:
+                        sensitive_values = tuple(sorted(set(sensitive_values) | {v}, key=len, reverse=True))
             if codex_auth_source is not None:
                 auth_copy = subdirs["codex"] / "auth.json"
                 self._copy_codex_auth(codex_auth_source, auth_copy)
@@ -1053,24 +1075,27 @@ class AgentProcessConfinement:
 
         def is_beneath(path: Path, root: Path) -> bool:
             try:
-                return os.path.commonpath((str(path), str(root))) == str(root)
-            except ValueError:
+                if os.path.commonpath((str(path), str(root))) == str(root):
+                    return True
+                return os.path.commonpath((str(path.resolve()), str(root.resolve()))) == str(root.resolve())
+            except (ValueError, OSError):
                 return False
 
-        if is_beneath(lexical_target, run_path):
+        if is_beneath(lexical_target, run_path) or is_beneath(lexical_target, Path(run_root)):
             destination = lexical_target
-        elif is_beneath(target, run_path):
+        elif is_beneath(target, run_path) or is_beneath(target, Path(run_root)):
             destination = target
         else:
             return None
-        if destination == run_path:
-            raise AgentConfinementError(
-                "Host DNS resolver target conflicts with the private agent runtime."
-            )
-        if is_beneath(destination, Path(AgentProcessConfinement.SANDBOX_RUNTIME_ROOT)):
-            raise AgentConfinementError(
-                "Host DNS resolver target conflicts with the private agent runtime."
-            )
+        if run_root == "/run":
+            if destination == run_path:
+                raise AgentConfinementError(
+                    "Host DNS resolver target conflicts with the private agent runtime."
+                )
+            if is_beneath(destination, Path(AgentProcessConfinement.SANDBOX_RUNTIME_ROOT)):
+                raise AgentConfinementError(
+                    "Host DNS resolver target conflicts with the private agent runtime."
+                )
         return str(target), str(destination)
 
     @staticmethod
@@ -1109,6 +1134,7 @@ class AgentProcessConfinement:
         cmd: Sequence[str] | str,
         runtime_state: AgentRuntimeState | None = None,
         *,
+        read_only_worktree: bool = False,
         unshare_network: bool = False,
         secure_cache_path: str | Path | None = None,
         job_id: str | None = None,
@@ -1133,6 +1159,7 @@ class AgentProcessConfinement:
                 ) from err
 
         if self.confinement_mechanism == "bubblewrap":
+            worktree_mount = "--ro-bind" if read_only_worktree else "--bind"
             wrapped = [
                 "bwrap",
                 "--ro-bind",
@@ -1140,7 +1167,7 @@ class AgentProcessConfinement:
                 "/",
                 "--dev",
                 "/dev",
-                "--bind",
+                worktree_mount,
                 self.allowed_worktree_path,
                 self.allowed_worktree_path,
                 "--ro-bind",
@@ -1208,6 +1235,8 @@ class AgentProcessConfinement:
         codex_auth_source: str | None = None,
         antigravity_auth_source: str | None = None,
         unshare_network: bool = False,
+        read_only_worktree: bool = False,
+        extra_env: dict[str, str] | None = None,
     ) -> AgentProcessResult:
         """Run an async subprocess, guaranteeing process and private-state cleanup."""
         preflight = self.validate_command_preflight(cwd=cwd)
@@ -1216,9 +1245,14 @@ class AgentProcessConfinement:
         runtime_state = None
         try:
             with self.runtime_session(
-                env, codex_auth_source, antigravity_auth_source
+                env, codex_auth_source, antigravity_auth_source, extra_env=extra_env
             ) as runtime_state:
-                command = self.wrap_command(cmd, runtime_state, unshare_network=unshare_network)
+                command = self.wrap_command(
+                    cmd,
+                    runtime_state,
+                    unshare_network=unshare_network,
+                    read_only_worktree=read_only_worktree,
+                )
                 process = await asyncio.create_subprocess_exec(
                     *command,
                     cwd=self.allowed_worktree_path,
@@ -1274,9 +1308,10 @@ class AgentProcessConfinement:
                         watchdog.record_activity(sig)
                     return truncated
 
-                if input_bytes and process.stdin:
-                    process.stdin.write(input_bytes)
-                    await process.stdin.drain()
+                if process.stdin:
+                    if input_bytes:
+                        process.stdin.write(input_bytes)
+                        await process.stdin.drain()
                     process.stdin.close()
 
                 stdout_task = asyncio.create_task(

@@ -542,6 +542,8 @@ class CliAgentRunner:
         workflow: ResolvedWorkflow | None = None,
         output_schema: dict[str, Any] | None = None,
         output_last_message_path: Path | None = None,
+        candidate_author: str | None = None,
+        reviewer_identity: str | None = None,
     ) -> AgentExecutionResult:
         """Execute agent under confinement with capacity preflight."""
         # 1. Capacity preflight
@@ -563,6 +565,77 @@ class CliAgentRunner:
                 preflight_error=preflight_check.error_message,
                 environment_error=env_err,
                 workflow=workflow,
+            )
+
+        if provider.lower() == "opencode":
+            import subprocess
+
+            from minime.config import OpenCodeCapabilityConfig
+            from minime.services.opencode_adapter import OpenCodeAdapter, OpenCodeRequest, _git_head
+
+            app_cfg = load_config()
+            proj_id = project_id or "default"
+            proj_cfg = app_cfg.projects.get(proj_id) if hasattr(app_cfg, "projects") else None
+            opencode_cfg = proj_cfg.opencode if proj_cfg else OpenCodeCapabilityConfig()
+
+            opencode_role = "independent_review" if role in ("reviewer", "independent_review") else "execution"
+            operation = workflow.operation if workflow and workflow.operation in {"explore", "propose", "apply", "verify"} else "apply"
+            candidate_sha = _git_head(Path(worktree_path)) or ""
+
+            verified_candidate_author = candidate_author
+            if verified_candidate_author is None:
+                try:
+                    res_author = subprocess.run(
+                        ["git", "-C", str(worktree_path), "log", "-1", "--format=%an <%ae>"],
+                        capture_output=True,
+                        text=True,
+                        check=False,
+                    )
+                    verified_candidate_author = res_author.stdout.strip() or "candidate-author"
+                except Exception:
+                    verified_candidate_author = "candidate-author"
+
+            verified_reviewer_identity = reviewer_identity
+            if verified_reviewer_identity is None and opencode_role == "independent_review":
+                rev_id = f"opencode:{opencode_cfg.provider or 'reviewer'}"
+                if rev_id == verified_candidate_author:
+                    rev_id = f"{rev_id}-independent"
+                verified_reviewer_identity = rev_id
+
+            adapter = OpenCodeAdapter(
+                opencode_cfg,
+                project_id=proj_id,
+                managed_worktree_path=worktree_path,
+            )
+            request = OpenCodeRequest(
+                project_id=proj_id,
+                role=opencode_role,
+                operation=operation,
+                worktree_path=Path(worktree_path),
+                candidate_sha=candidate_sha,
+                candidate_author=verified_candidate_author,
+                reviewer_identity=verified_reviewer_identity,
+                prompt=prompt_context,
+            )
+            outcome = await adapter.dispatch(request)
+
+            if output_last_message_path and outcome.evidence.stdout:
+                last_line = outcome.evidence.stdout[-1]
+                output_path = Path(output_last_message_path)
+                output_path.parent.mkdir(parents=True, exist_ok=True)
+                output_path.write_text(last_line, encoding="utf-8")
+
+            return AgentExecutionResult(
+                exit_code=outcome.evidence.exit_code if outcome.evidence.exit_code is not None else (0 if outcome.accepted else -1),
+                timed_out=outcome.evidence.timed_out,
+                stdout=list(outcome.evidence.stdout),
+                stderr=list(outcome.evidence.stderr),
+                duration_ms=0,
+                preflight_error=outcome.evidence.failure_reason if not outcome.accepted else None,
+                workflow=workflow,
+                final_response=outcome.evidence.stdout[-1] if outcome.evidence.stdout else None,
+                final_response_status="COMPLETE" if outcome.accepted else "MISSING",
+                final_response_source="structured_file" if output_last_message_path else "stdout",
             )
 
         profile = self._profile_for(role, provider)

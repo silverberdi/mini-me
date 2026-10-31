@@ -3426,12 +3426,14 @@ class NativeOrchestrationCoordinator:
             self._configured_model(uow, project_id, "reviewer") if (uow and project_id) else None
         )
         artifact_hashes = self._compute_proposal_artifacts_hashes(worktree_path, change_name)
+        reviewer_id = f"{provider}:{model or 'reviewer'}"
         res = await self.agent_runner.run(
             worktree_path=worktree_path,
             prompt_context=prompt,
             project_id=project_id,
             role="reviewer",
             provider=provider,
+            reviewer_identity=reviewer_id,
         )
         base_record = {
             "reviewer_provider": provider,
@@ -3658,12 +3660,14 @@ class NativeOrchestrationCoordinator:
         model = (
             self._configured_model(uow, project_id, "reviewer") if (uow and project_id) else None
         )
+        reviewer_id = f"{provider}:{model or 'reviewer'}"
         res = await self.agent_runner.run(
             worktree_path=worktree_path,
             prompt_context=prompt,
             project_id=project_id,
             role="reviewer",
             provider=provider,
+            reviewer_identity=reviewer_id,
         )
         base_record = {
             "reviewer_provider": provider,

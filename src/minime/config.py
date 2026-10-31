@@ -305,6 +305,33 @@ class ProjectDeploymentConfig(BaseModel):
     )
 
 
+class OpenCodeCapabilityConfig(BaseModel):
+    """Project-scoped OpenCode capability; authorization is intentionally opt-in."""
+
+    enabled: bool = False
+    executable: str = "opencode"
+    provider: str | None = None
+    model: str | None = None
+    api_key_env: str | None = None
+    roles: list[str] = Field(default_factory=list)
+    args: list[str] = Field(default_factory=list)
+    timeout_seconds: float = Field(default=900.0, gt=0)
+
+    @field_validator("roles")
+    @classmethod
+    def _supported_roles(cls, value: list[str]) -> list[str]:
+        normalized = [role.strip() for role in value]
+        unsupported = sorted(set(normalized) - {"execution", "independent_review"})
+        if unsupported:
+            raise ValueError(
+                "OpenCode capability supports only execution and independent_review roles: "
+                + ", ".join(unsupported)
+            )
+        if len(normalized) != len(set(normalized)):
+            raise ValueError("OpenCode capability roles must be unique")
+        return normalized
+
+
 class ProjectConfig(BaseModel):
     enabled: bool = True
     repository: str  # owner/repo or local/remote path
@@ -317,6 +344,7 @@ class ProjectConfig(BaseModel):
         default_factory=lambda: ["codex", "antigravity", "deepseek"]
     )
     openrouter_drain_allowed: bool = False
+    opencode: OpenCodeCapabilityConfig = Field(default_factory=OpenCodeCapabilityConfig)
     deployment: ProjectDeploymentConfig = Field(default_factory=ProjectDeploymentConfig)
     stage_profiles: dict[str, StageProfileConfig] = Field(default_factory=dict)
 

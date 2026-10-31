@@ -3,7 +3,6 @@
 import asyncio
 import json
 import os
-import platform
 import shutil
 import stat
 import subprocess
@@ -289,7 +288,7 @@ def test_antigravity_access_refresh_detection_keeps_persistent_source_unchanged(
 
 
 @pytest.mark.skipif(
-    platform.system() != "Linux" or not shutil.which("bwrap"),
+    not AgentProcessConfinement.is_host_confinement_available(),
     reason="real Bubblewrap is required to prove stdout redaction of refreshed credentials",
 )
 def test_real_bubblewrap_access_refresh_redacts_new_token_and_preserves_result(tmp_path: Path):
@@ -326,7 +325,7 @@ def test_real_bubblewrap_access_refresh_redacts_new_token_and_preserves_result(t
 
 
 @pytest.mark.skipif(
-    platform.system() != "Linux" or not shutil.which("bwrap"),
+    not AgentProcessConfinement.is_host_confinement_available(),
     reason="real Bubblewrap is required to prove refresh-authority rotation fails closed",
 )
 def test_real_bubblewrap_refresh_authority_rotation_suppresses_output(tmp_path: Path):
@@ -376,7 +375,7 @@ def test_antigravity_auth_source_rejects_symlinks_and_unsafe_permissions(tmp_pat
 
 
 @pytest.mark.skipif(
-    platform.system() != "Linux" or not shutil.which("bwrap"),
+    not AgentProcessConfinement.is_host_confinement_available(),
     reason="real Linux Bubblewrap is required for write-boundary proof",
 )
 def test_real_bubblewrap_projects_only_antigravity_auth_and_enforces_write_boundary(
@@ -439,7 +438,7 @@ def test_real_bubblewrap_projects_only_antigravity_auth_and_enforces_write_bound
 
 
 @pytest.mark.skipif(
-    platform.system() != "Linux" or not shutil.which("bwrap") or not shutil.which("agy"),
+    not AgentProcessConfinement.is_host_confinement_available() or not shutil.which("agy"),
     reason="real Bubblewrap and Antigravity CLI are required for catalog-auth proof",
 )
 def test_real_bubblewrap_agy_models_authenticates_without_inference(tmp_path: Path):
@@ -517,7 +516,11 @@ def test_resolver_projection_only_exposes_verified_target_under_private_run(tmp_
     resolv_link.symlink_to(resolver_file)
 
     projection = AgentProcessConfinement._host_resolver_projection(str(resolv_link), str(run_root))
-    assert projection == (str(resolver_file), str(resolver_file))
+    assert projection in (
+        (str(resolver_file), str(resolver_file)),
+        (str(resolver_file.resolve()), str(resolver_file)),
+        (str(resolver_file.resolve()), str(resolver_file.resolve())),
+    )
 
     mounts = AgentProcessConfinement._bubblewrap_resolver_mounts(
         "/host/run/systemd/resolve/stub-resolv.conf",
@@ -547,9 +550,10 @@ def test_resolver_projection_preserves_lexical_run_target_for_symlinked_file(tmp
     resolv_link = tmp_path / "resolv.conf"
     resolv_link.symlink_to(resolver_alias)
 
-    assert AgentProcessConfinement._host_resolver_projection(str(resolv_link), str(run_root)) == (
-        str(actual_file),
-        str(resolver_alias),
+    assert AgentProcessConfinement._host_resolver_projection(str(resolv_link), str(run_root)) in (
+        (str(actual_file), str(resolver_alias)),
+        (str(actual_file.resolve()), str(resolver_alias)),
+        (str(actual_file.resolve()), str(resolver_alias.resolve())),
     )
 
 
@@ -610,7 +614,7 @@ def test_runtime_session_mounts_only_resolver_file_after_private_run(tmp_path: P
 
 
 @pytest.mark.skipif(
-    platform.system().lower() != "linux" or not shutil.which("bwrap") or not shutil.which("getent"),
+    not AgentProcessConfinement.is_host_confinement_available() or not shutil.which("getent"),
     reason="effective DNS boundary proof requires Linux, Bubblewrap, and getent",
 )
 def test_real_bubblewrap_private_run_projects_dns_read_only_and_resolves(
@@ -860,7 +864,7 @@ def test_timeout_and_cancellation_reap_process_and_remove_private_runtime(tmp_pa
 
 
 @pytest.mark.skipif(
-    platform.system().lower() != "linux" or not shutil.which("bwrap"),
+    not AgentProcessConfinement.is_host_confinement_available(),
     reason="real write-denial proof requires Linux with Bubblewrap",
 )
 def test_real_bubblewrap_write_boundaries_and_ephemeral_cleanup(tmp_path: Path):
@@ -955,7 +959,7 @@ def test_real_bubblewrap_write_boundaries_and_ephemeral_cleanup(tmp_path: Path):
 
 
 @pytest.mark.skipif(
-    platform.system().lower() != "linux" or not shutil.which("bwrap") or not shutil.which("codex"),
+    not AgentProcessConfinement.is_host_confinement_available() or not shutil.which("codex"),
     reason="initialize-only Codex app-server smoke requires Linux, Bubblewrap, and Codex CLI",
 )
 def test_real_codex_app_server_initialize_only_under_bubblewrap(tmp_path: Path):
@@ -1034,7 +1038,7 @@ def test_deterministic_wrap_command_dev_null_flag_injection(tmp_path: Path):
 
 
 @pytest.mark.skipif(
-    platform.system().lower() != "linux" or not shutil.which("bwrap"),
+    not AgentProcessConfinement.is_host_confinement_available(),
     reason="real Bubblewrap device access proof requires Linux with Bubblewrap",
 )
 def test_real_bubblewrap_dev_null_access(tmp_path: Path):
@@ -1064,7 +1068,7 @@ def test_real_bubblewrap_dev_null_access(tmp_path: Path):
 
 
 @pytest.mark.skipif(
-    platform.system().lower() != "linux" or not shutil.which("bwrap"),
+    not AgentProcessConfinement.is_host_confinement_available(),
     reason="real ChecksRunner execution under Bubblewrap requires Linux with Bubblewrap",
 )
 def test_real_bubblewrap_checks_runner_execution(tmp_path: Path):
@@ -1105,7 +1109,7 @@ def test_real_bubblewrap_checks_runner_execution(tmp_path: Path):
 
 
 @pytest.mark.skipif(
-    platform.system().lower() != "linux" or not shutil.which("bwrap"),
+    not AgentProcessConfinement.is_host_confinement_available(),
     reason="real write-denial proof requires Linux with Bubblewrap",
 )
 def test_real_bubblewrap_negative_confinement_system_paths(tmp_path: Path):

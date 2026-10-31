@@ -119,7 +119,7 @@ Las **seis fases del programa original F1–F6** y sus Changes se preservan. F7/
 | 6 | [#174](https://github.com/silverberdi/mini-me/issues/174) | gacela-06-depuracion-final | Eliminar código y DB obsoletos restantes, ejecutado por **mini me** |
 | 7 — futuro, disabled | [#189](https://github.com/silverberdi/mini-me/issues/189) | **por autorizar/crear** | Integrar funciones UI pendientes, pausa diferida, único proyecto ejecutor, gestión segura de Requests y métricas faltantes |
 | 8 — futuro, disabled | [#190](https://github.com/silverberdi/mini-me/issues/190) | **por autorizar/crear** | Migrar frontend a Angular + TypeScript + Tailwind conservando contratos y E2E |
-| 9 — futuro, disabled | [#204](https://github.com/silverberdi/mini-me/issues/204) | **por autorizar/crear** | OpenCode como CLI comodín/harness desacoplado para modelos API (OpenRouter, DeepSeek, Minimax, Claude, etc.) |
+| 9 — autorizado | [#204](https://github.com/silverberdi/mini-me/issues/204) | req-204-f9-opencode-cli-como-adaptadorharness-de | OpenCode como CLI comodín/harness desacoplado para modelos API (OpenRouter, DeepSeek, Minimax, Claude, etc.) |
 
 ### Fase 1 — Depuración inicial
 
@@ -153,9 +153,9 @@ Tras F6, implementar bajo el contrato de [#189](https://github.com/silverberdi/m
 
 Migrar la capa visual de F5/F7 a **Angular + TypeScript + Tailwind**; garantizar paridad visual/funcional/seguridad/responsive con E2E auténticos antes de retirar el frontend modular anterior. FastAPI, APIs, control de permisos, OpenSpec y reglas de negocio permanecen. [#190](https://github.com/silverberdi/mini-me/issues/190) está **disabled; no existe Change F8 autorizado**.
 
-### Fase 9 — OpenCode CLI comodín para modelos API externos (no autorizada)
+### Fase 9 — OpenCode CLI comodín para modelos API externos (autorizada para #204)
 
-Integrar OpenCode como un adaptador CLI ejecutable universal (comodín) en la máquina anfitriona, dotando a modelos externos conectados por API (OpenRouter, DeepSeek Directo, Minimax, Claude, etc.) de capacidad de ejecución interactiva en el worktree del proyecto. Esto incluye ejecución de herramientas locales (lectura/edición de archivos, ejecución de bash/linters/tests) y compatibilidad con los workflows oficiales de OpenSpec, permitiendo que cualquier modelo API opere legítimamente como implementer (`execution`) o reviewer (`independent_review`) dentro del marco de proyectos F2 sin construir runners paralelos dentro del núcleo de mini me. [#204](https://github.com/silverberdi/mini-me/issues/204) está **disabled; no existe Change F9 autorizado**.
+Integrar OpenCode como un adaptador CLI ejecutable universal (comodín) en la máquina anfitriona, dotando a modelos externos conectados por API (OpenRouter, DeepSeek Directo, Minimax, Claude, etc.) de capacidad de ejecución interactiva en el worktree del proyecto. Esto incluye ejecución de herramientas locales (lectura/edición de archivos, ejecución de bash/linters/tests) y compatibilidad con los workflows oficiales de OpenSpec, permitiendo que cualquier modelo API opere legítimamente como implementer (`execution`) o reviewer (`independent_review`) dentro del marco de proyectos F2 sin construir runners paralelos dentro del núcleo de mini me. Autorizada expresamente por el operador para el Issue #204 (`req-204-f9-opencode-cli-como-adaptadorharness-de`), manteniéndose deshabilitada por defecto en proyectos no configurados.
 
 Criterio común de cierre: cumplimiento funcional, pruebas pertinentes reales, PR de implementación revisado y merge humano, sync/archive nativos, PR documental fusionado y ticket cerrado (respetando la transición desde la infraestructura existente en F1–F2). Las fases 5–6 añaden **prueba material de autoejecución**. El usuario no es mensajero entre agentes. No habilitar scheduler ni gastar cuota al aprobar documentos.
 
