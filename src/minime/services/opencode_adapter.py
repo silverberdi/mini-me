@@ -218,14 +218,16 @@ class OpenCodeAdapter:
         config: OpenCodeCapabilityConfig,
         *,
         project_id: str,
-        managed_worktree_path: str | Path | None = None,
+        managed_worktree_path: str | Path,
         confinement_factory=AgentProcessConfinement,
         preflight: OpenCodePreflight | None = None,
         recorder: CandidateEvidenceRecorder | None = None,
     ) -> None:
         self.config = config
         self.project_id = project_id
-        self.managed_worktree_path = Path(managed_worktree_path).resolve() if managed_worktree_path else None
+        if not managed_worktree_path:
+            raise ValueError("A verified non-empty managed_worktree_path is required.")
+        self.managed_worktree_path = Path(managed_worktree_path).resolve()
         self._confinement_factory = confinement_factory
         self._preflight = preflight
         self._recorder = recorder
@@ -289,7 +291,7 @@ class OpenCodeAdapter:
             return self._refuse(request, "WORKTREE_UNAVAILABLE")
         if not worktree.is_dir():
             return self._refuse(request, "WORKTREE_UNAVAILABLE")
-        if self.managed_worktree_path and worktree != self.managed_worktree_path:
+        if worktree != self.managed_worktree_path:
             return self._refuse(request, "WORKTREE_BINDING_MISMATCH")
         actual_sha = _git_head(worktree)
         if not actual_sha or actual_sha != request.candidate_sha:
@@ -301,20 +303,20 @@ class OpenCodeAdapter:
         if not executable:
             return self._refuse(request, "EXECUTABLE_MISSING")
         executable_sha = _sha256_file(Path(executable))
+        skill_name = {
+            "explore": "openspec-explore",
+            "propose": "openspec-propose",
+            "apply": "openspec-apply-change",
+            "verify": "openspec-verify-change",
+        }.get(operation)
+
         args = list(self.config.args)
         if not args:
             args = ["run"]
             if self.config.provider and self.config.model:
                 args.extend(["--model", f"{self.config.provider}/{self.config.model}"])
-            # Pass official OpenSpec workflow skill dispatch command
-            skill_name = {
-                "explore": "openspec-explore",
-                "propose": "openspec-propose",
-                "apply": "openspec-apply-change",
-                "verify": "openspec-verify-change",
-            }.get(operation)
-            if skill_name:
-                args.extend(["--command", f"${skill_name}"])
+        if skill_name and "--command" not in args:
+            args.extend(["--command", f"${skill_name}"])
         extra_env = {"SHELL": "/bin/bash"}
         if self.config.api_key_env and self.config.api_key_env in os.environ:
             extra_env[self.config.api_key_env] = os.environ[self.config.api_key_env]

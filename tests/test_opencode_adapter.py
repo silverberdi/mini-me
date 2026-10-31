@@ -49,7 +49,7 @@ class FakeConfinement:
 async def test_disabled_capability_refuses_before_cli_lookup(tmp_path, monkeypatch):
     recorder = Recorder()
     monkeypatch.setattr("minime.services.opencode_adapter.shutil.which", lambda _: pytest.fail("not called"))
-    adapter = OpenCodeAdapter(OpenCodeCapabilityConfig(), project_id="p", recorder=recorder)
+    adapter = OpenCodeAdapter(OpenCodeCapabilityConfig(), project_id="p", managed_worktree_path="/tmp", recorder=recorder)
     outcome = await adapter.dispatch(
         OpenCodeRequest("p", "execution", "apply", tmp_path, "0" * 40)
     )
@@ -63,7 +63,7 @@ async def test_binding_mismatch_has_no_filesystem_effect(tmp_path):
     sha = _git_worktree(tmp_path)
     target = tmp_path / "marker"
     adapter = OpenCodeAdapter(
-        OpenCodeCapabilityConfig(enabled=True, roles=["execution"]), project_id="project-a"
+        OpenCodeCapabilityConfig(enabled=True, roles=["execution"]), project_id="project-a", managed_worktree_path=tmp_path
     )
     outcome = await adapter.dispatch(OpenCodeRequest("project-b", "execution", "apply", tmp_path, sha))
     assert not outcome.accepted
@@ -80,7 +80,7 @@ async def test_execution_is_confined_and_attributed(tmp_path, monkeypatch):
         return PreflightResult(ok=True)
     adapter = OpenCodeAdapter(
         OpenCodeCapabilityConfig(enabled=True, roles=["execution"], args=["--stdio"]),
-        project_id="p", confinement_factory=FakeConfinement, preflight=preflight,
+        project_id="p", managed_worktree_path=tmp_path, confinement_factory=FakeConfinement, preflight=preflight,
     )
     outcome = await adapter.dispatch(OpenCodeRequest("p", "execution", "apply", tmp_path, sha, prompt="go"))
     assert outcome.accepted
@@ -94,6 +94,7 @@ async def test_independent_review_is_read_only_and_cannot_self_review(tmp_path, 
     sha = _git_worktree(tmp_path)
     adapter = OpenCodeAdapter(
         OpenCodeCapabilityConfig(enabled=True, roles=["independent_review"]), project_id="p",
+        managed_worktree_path=tmp_path,
         confinement_factory=FakeConfinement,
     )
     monkeypatch.setattr("minime.services.opencode_adapter.shutil.which", lambda _: "/bin/true")
@@ -112,7 +113,8 @@ async def test_independent_review_is_read_only_and_cannot_self_review(tmp_path, 
 async def test_missing_cli_and_candidate_mismatch_fail_closed(tmp_path, monkeypatch):
     sha = _git_worktree(tmp_path)
     adapter = OpenCodeAdapter(
-        OpenCodeCapabilityConfig(enabled=True, roles=["execution"]), project_id="p"
+        OpenCodeCapabilityConfig(enabled=True, roles=["execution"]), project_id="p",
+        managed_worktree_path=tmp_path,
     )
     monkeypatch.setattr("minime.services.opencode_adapter.shutil.which", lambda _: None)
     (tmp_path / ".agents/skills/openspec-apply-change/SKILL.md").exists()
@@ -133,6 +135,7 @@ async def test_ambiguous_output_and_external_actions_are_non_authoritative(tmp_p
 
     adapter = OpenCodeAdapter(
         OpenCodeCapabilityConfig(enabled=True, roles=["execution"]), project_id="p",
+        managed_worktree_path=tmp_path,
         confinement_factory=Ambiguous,
     )
     ambiguous = await adapter.dispatch(
@@ -176,6 +179,7 @@ async def test_provider_failures_are_recorded_without_retry_or_fallback(
             enabled=True, roles=["execution"], provider="openrouter", model="pinned-model"
         ),
         project_id="p",
+        managed_worktree_path=tmp_path,
         confinement_factory=FailedProvider,
     )
     outcome = await adapter.dispatch(OpenCodeRequest("p", "execution", "apply", tmp_path, sha))
@@ -193,7 +197,7 @@ async def test_provider_configuration_and_credentials_fail_closed_before_dispatc
             enabled=True, roles=["execution"], provider="openrouter", model="model-x",
             api_key_env="MISSING_OPENCODE_KEY",
         ),
-        project_id="p", confinement_factory=FakeConfinement,
+        project_id="p", managed_worktree_path=tmp_path, confinement_factory=FakeConfinement,
     )
     outcome = await adapter.dispatch(OpenCodeRequest("p", "execution", "apply", tmp_path, sha))
     assert not outcome.accepted
@@ -216,6 +220,7 @@ async def test_real_confinement_e2e_implementer_and_read_only_review(tmp_path):
             roles=["execution", "independent_review"],
         ),
         project_id="test-proj",
+        managed_worktree_path=tmp_path,
         confinement_factory=AgentProcessConfinement,
     )
 
@@ -274,6 +279,7 @@ async def test_real_confinement_e2e_negative_cases(tmp_path):
             roles=["execution", "independent_review"],
         ),
         project_id="test-proj",
+        managed_worktree_path=tmp_path,
         confinement_factory=AgentProcessConfinement,
     )
 
@@ -383,3 +389,44 @@ async def test_unbound_arbitrary_worktree_refused_without_mutation(tmp_path):
     )
     assert not outcome.accepted
     assert outcome.evidence.failure_reason == "WORKTREE_BINDING_MISMATCH"
+
+def test_missing_managed_worktree_binding_raises():
+    with pytest.raises(ValueError, match="managed_worktree_path is required"):
+        OpenCodeAdapter(OpenCodeCapabilityConfig(enabled=True), project_id="p", managed_worktree_path="")
+
+
+@pytest.mark.asyncio
+async def test_workflow_command_enforced_across_all_operations(tmp_path, monkeypatch):
+    sha = _git_worktree(tmp_path)
+    dispatched_commands = []
+
+    class CapturingConfinement(FakeConfinement):
+        async def run_confined_async_subprocess(self, command, **kwargs):
+            dispatched_commands.append(command)
+            return AgentProcessResult(returncode=0, stdout=b"COMPLETE", stderr=b"")
+
+    monkeypatch.setattr("minime.services.opencode_adapter.shutil.which", lambda _: "/bin/true")
+
+    for op in ("explore", "propose", "apply", "verify"):
+        skill_folder = f"openspec-{op}" if op not in ("apply", "verify") else f"openspec-{op}-change"
+        skill_dir = tmp_path / ".agents" / "skills" / skill_folder
+        skill_dir.mkdir(parents=True, exist_ok=True)
+        (skill_dir / "SKILL.md").write_text("# Skill\n")
+
+        adapter = OpenCodeAdapter(
+            OpenCodeCapabilityConfig(
+                enabled=True,
+                roles=["execution"],
+                args=["custom-run", "--custom-arg"],
+            ),
+            project_id="p",
+            managed_worktree_path=tmp_path,
+            confinement_factory=CapturingConfinement,
+        )
+        res = await adapter.dispatch(OpenCodeRequest("p", "execution", op, tmp_path, sha, prompt="run"))
+        assert res.accepted
+        last_cmd = dispatched_commands[-1]
+        assert "--command" in last_cmd
+        expected_skill = f"$openspec-{op}" if op != "apply" and op != "verify" else f"$openspec-{op}-change"
+        cmd_idx = last_cmd.index("--command")
+        assert last_cmd[cmd_idx + 1] == expected_skill
