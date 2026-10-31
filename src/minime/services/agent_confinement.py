@@ -682,6 +682,8 @@ class AgentProcessConfinement:
         base_env: dict[str, str] | None = None,
         codex_auth_source: str | None = None,
         antigravity_auth_source: str | None = None,
+        *,
+        extra_env: dict[str, str] | None = None,
     ) -> Iterator[AgentRuntimeState]:
         """Create one private runtime with only explicitly authorized provider credentials."""
         temp_parent = self._validate_temp_parent(
@@ -722,12 +724,20 @@ class AgentProcessConfinement:
                 }
             )
 
+            if extra_env:
+                for k, v in extra_env.items():
+                    safe_env[k] = v
+
             auth_copy: Path | None = None
             initial_auth_digest: str | None = None
             antigravity_auth_copy: Path | None = None
             initial_antigravity_auth_digest: str | None = None
             initial_antigravity_auth_bytes: bytes | None = None
             sensitive_values: tuple[str, ...] = ()
+            if extra_env:
+                for v in extra_env.values():
+                    if len(v) >= 8:
+                        sensitive_values = tuple(sorted(set(sensitive_values) | {v}, key=len, reverse=True))
             if codex_auth_source is not None:
                 auth_copy = subdirs["codex"] / "auth.json"
                 self._copy_codex_auth(codex_auth_source, auth_copy)
@@ -1109,6 +1119,7 @@ class AgentProcessConfinement:
         cmd: Sequence[str] | str,
         runtime_state: AgentRuntimeState | None = None,
         *,
+        read_only_worktree: bool = False,
         unshare_network: bool = False,
         secure_cache_path: str | Path | None = None,
         job_id: str | None = None,
@@ -1133,6 +1144,7 @@ class AgentProcessConfinement:
                 ) from err
 
         if self.confinement_mechanism == "bubblewrap":
+            worktree_mount = "--ro-bind" if read_only_worktree else "--bind"
             wrapped = [
                 "bwrap",
                 "--ro-bind",
@@ -1140,7 +1152,7 @@ class AgentProcessConfinement:
                 "/",
                 "--dev",
                 "/dev",
-                "--bind",
+                worktree_mount,
                 self.allowed_worktree_path,
                 self.allowed_worktree_path,
                 "--ro-bind",
@@ -1208,6 +1220,8 @@ class AgentProcessConfinement:
         codex_auth_source: str | None = None,
         antigravity_auth_source: str | None = None,
         unshare_network: bool = False,
+        read_only_worktree: bool = False,
+        extra_env: dict[str, str] | None = None,
     ) -> AgentProcessResult:
         """Run an async subprocess, guaranteeing process and private-state cleanup."""
         preflight = self.validate_command_preflight(cwd=cwd)
@@ -1216,9 +1230,14 @@ class AgentProcessConfinement:
         runtime_state = None
         try:
             with self.runtime_session(
-                env, codex_auth_source, antigravity_auth_source
+                env, codex_auth_source, antigravity_auth_source, extra_env=extra_env
             ) as runtime_state:
-                command = self.wrap_command(cmd, runtime_state, unshare_network=unshare_network)
+                command = self.wrap_command(
+                    cmd,
+                    runtime_state,
+                    unshare_network=unshare_network,
+                    read_only_worktree=read_only_worktree,
+                )
                 process = await asyncio.create_subprocess_exec(
                     *command,
                     cwd=self.allowed_worktree_path,
