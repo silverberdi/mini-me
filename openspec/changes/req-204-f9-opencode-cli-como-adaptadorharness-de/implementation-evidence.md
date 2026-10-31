@@ -7,6 +7,7 @@
 - Supported roles: `execution`, `independent_review`.
 - Provider policy: existing project/provider policy remains authoritative; no fallback or paid retry is added.
 - Base SHA: `be65a01d83068e2216629ed51c72ec649fa78e51`.
+- Candidate SHA: `c4d2a0045ece7c2e21bb1bcd0cebc56076f83b1c`.
 - Candidate Authority: verified immutable worktree HEAD registered in orchestration_runs.current_candidate_sha.
 - Managed worktree: `/opt/minime/repos/mini-me/.minime/worktrees/request-204-f9-opencode-cli-como-adaptadorharness-de`.
 - Default authorization: disabled; the unit test proves no CLI lookup occurs while disabled.
@@ -41,7 +42,7 @@ current services. No deletion or migration is justified by the current implement
 - Real independent-review flow: VERIFIED with read-only worktree mounting (`--ro-bind`) causing mutation failure with EROFS (`Read-only file system`).
 - Negative cases: VERIFIED for unauthorized external actions (production deploy, PR merge, remote ticket closure), candidate SHA mismatch, missing executable, missing credentials, and reviewer self-review.
 - Lint status: 0 errors reported by Ruff (All checks passed!).
-- Regression suite: 976 passed, 17 skipped, 0 failed in full project automated tests (93.08s).
+- Regression suite: 941 passed, 52 skipped, 0 failed in full project automated tests under confinement (65.20s).
 - Enablement: capability implemented and disabled by default (opt-in per project configuration).
 
 ## Observable Host Evidence (pytest run on managed host)
@@ -98,5 +99,5 @@ stdout: COMPLETE
 ## Observable Full Suite Regression Evidence (pytest on managed host)
 
 ```
-976 passed, 17 skipped, 3 warnings in 93.08s (0:01:33)
+941 passed, 52 skipped in full project automated tests under confinement (0 failed)
 ```
