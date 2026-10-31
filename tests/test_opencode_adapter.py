@@ -206,7 +206,7 @@ async def test_real_confinement_e2e_implementer_and_read_only_review(tmp_path):
     """Task 4.2: Real confinement with Bubblewrap verifying file mutation in execution and EROFS in review."""
     sha = _git_worktree(tmp_path)
     script = tmp_path / "run_agent.sh"
-    script.write_text("#!/bin/sh\nset -e\necho 'mutation' >> mutated.txt\necho COMPLETE\n")
+    script.write_text("#!/bin/sh\nset -e\nif [ \"$1\" = \"--version\" ]; then echo '1.0.0'; exit 0; fi\necho 'mutation' >> mutated.txt\necho COMPLETE\n")
     script.chmod(0o755)
 
     adapter = OpenCodeAdapter(

@@ -12,6 +12,7 @@ import hashlib
 import json
 import os
 import shutil
+import tempfile
 import subprocess
 from dataclasses import dataclass
 from pathlib import Path
@@ -196,7 +197,7 @@ async def _default_preflight(executable: str, args: tuple[str, ...]) -> Prefligh
     try:
         process = await asyncio.create_subprocess_exec(
             executable, "--version", stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE, cwd=tempfile.gettempdir(),
         )
         stdout, stderr = await asyncio.wait_for(process.communicate(), timeout=10.0)
     except (OSError, asyncio.TimeoutError):
