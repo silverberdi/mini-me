@@ -7,7 +7,7 @@
 - Supported roles: `execution`, `independent_review`.
 - Provider policy: existing project/provider policy remains authoritative; no fallback or paid retry is added.
 - Base SHA: `be65a01d83068e2216629ed51c72ec649fa78e51`.
-- Candidate SHA: d0e31945fa812cb0710183141e975871f31f9001
+- Candidate SHA: a56215c13f9f94c0ee10787e914565781a74d284
 - Managed worktree: `/opt/minime/repos/mini-me/.minime/worktrees/request-204-f9-opencode-cli-como-adaptadorharness-de`.
 - Default authorization: disabled; the unit test proves no CLI lookup occurs while disabled.
 
@@ -37,7 +37,7 @@ current services. No deletion or migration is justified by the current implement
 - Real independent-review flow: VERIFIED with read-only worktree mounting (`--ro-bind`) causing mutation failure with EROFS (`Read-only file system`).
 - Negative cases: VERIFIED for unauthorized external actions (production deploy, PR merge, remote ticket closure), candidate SHA mismatch, missing executable, missing credentials, and reviewer self-review.
 - Lint status: 0 errors reported by Ruff.
-- Regression suite: 970 passed in full project automated tests.
+- Regression suite: 973 passed, 17 skipped in full project automated tests.
 - Enablement: capability implemented and disabled by default (opt-in per project configuration).
 
 ## Observable Host Evidence (pytest run on managed host)

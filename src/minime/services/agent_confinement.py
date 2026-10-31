@@ -609,6 +609,18 @@ class AgentProcessConfinement:
     @classmethod
     def is_host_confinement_available(cls) -> bool:
         """Report platform capability without constructing a worktree sandbox."""
+        system = platform.system().lower()
+        if system == "linux":
+            bwrap = shutil.which("bwrap")
+            if not bwrap:
+                return False
+            try:
+                probe = subprocess.run(
+                    [bwrap, "--ro-bind", "/", "/", "true"], capture_output=True, timeout=2
+                )
+                return probe.returncode == 0
+            except (OSError, subprocess.TimeoutExpired):
+                return False
         return cls._detect_confinement_mechanism() != "none"
 
     def validate_command_preflight(
