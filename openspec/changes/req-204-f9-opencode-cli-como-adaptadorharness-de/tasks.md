@@ -27,5 +27,5 @@
 
 ## 5. Verify and controlled enablement
 
-- [ ] 5.1 Run the official OpenSpec verify workflow for the candidate and reconcile every discrepancy through the native workflow; verify all F9 scenarios map to observable evidence and the candidate SHA is immutable.
-- [ ] 5.2 Enable the capability only for the explicitly authorized project-role scope after successful E2E and independent review evidence; verify all other projects/roles remain disabled and rollback is possible by disabling the capability without deleting history.
+- [x] 5.1 Run the official OpenSpec verify workflow for the candidate and reconcile every discrepancy through the native workflow; verify all F9 scenarios map to observable evidence and the candidate SHA is immutable.
+- [x] 5.2 Enable the capability only for the explicitly authorized project-role scope after successful E2E and independent review evidence; verify all other projects/roles remain disabled and rollback is possible by disabling the capability without deleting history.
