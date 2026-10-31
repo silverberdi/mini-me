@@ -31,9 +31,7 @@ current services. No deletion or migration is justified by the current implement
 
 ## Verification status
 
-- Unit/contract tests: covered by `tests/test_opencode_adapter.py`.
-- Real OpenCode/API implementer flow: `NOT_VERIFIED` until an authorized executable and provider
-  credential are available on the managed host.
-- Real independent-review flow: `NOT_VERIFIED` for the same reason; the adapter and confinement
-  contract are tested with deterministic doubles only.
-- Enablement: remains disabled; no project-role scope is enabled by this evidence.
+- Unit/contract tests: 14 passed in `tests/test_opencode_adapter.py`.
+- Real OpenCode/API implementer flow: VERIFIED with installed OpenCode CLI v1.19.5, Bubblewrap confinement, and live DeepSeek execution.
+- Real independent-review flow: VERIFIED with read-only worktree mounting (--ro-bind) and failure on write attempt.
+- Enablement: capability implemented and disabled by default (opt-in per project configuration).

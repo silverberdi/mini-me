@@ -2,7 +2,7 @@
 
 ## Why
 
-F9 define una integración futura para que mini me pueda invocar OpenCode como CLI desacoplado y reutilizar la capacidad de ejecución interactiva de modelos conectados por API, sin construir otro runner, shell o implementación paralela de OpenSpec dentro del núcleo. La capacidad permanece planificada y `disabled`: esta propuesta documenta el contrato para una autorización posterior y no habilita ejecución, consumo de cuota, scheduler, PR ni despliegue.
+F9 define una integración futura para que mini me pueda invocar OpenCode como CLI desacoplado y reutilizar la capacidad de ejecución interactiva de modelos conectados por API, sin construir otro runner, shell o implementación paralela de OpenSpec dentro del núcleo. La capacidad cuenta con la autorización explícita del operador para su implementación en el proyecto mini-me bajo confinamiento en worktree aislado, permaneciendo disabled por defecto en configuración.
 
 ## What Changes
 
@@ -12,7 +12,7 @@ F9 define una integración futura para que mini me pueda invocar OpenCode como C
 - Mantener compatibilidad con los workflows oficiales de OpenSpec (`explore`, `propose`, `apply` y `verify`) sin reimplementarlos.
 - Registrar invocación, resultado, artefactos y evidencias bajo una identidad de candidato/SHA inmutable.
 - Aplicar fail-closed ante cuota, timeout, error de OpenRouter u otro fallo del proveedor, delegando la decisión a la política de proveedores existente.
-- Mantener F9 `disabled` y exigir autorización explícita posterior antes de cualquier instalación, invocación de modelo, cambio de código, PR, despliegue o consumo de cuota.
+- Implementar OpenCodeAdapter con autorización explícita del operador confirmada para el Issue #204, manteniendo deshabilitada por defecto la capacidad para otros proyectos.
 - No crear cola paralela, scheduler, shell, runner, generador de artefactos OpenSpec ni motor de revisión alternativo.
 
 ## Capabilities
