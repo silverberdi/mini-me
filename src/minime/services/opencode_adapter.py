@@ -218,12 +218,14 @@ class OpenCodeAdapter:
         config: OpenCodeCapabilityConfig,
         *,
         project_id: str,
+        managed_worktree_path: str | Path | None = None,
         confinement_factory=AgentProcessConfinement,
         preflight: OpenCodePreflight | None = None,
         recorder: CandidateEvidenceRecorder | None = None,
     ) -> None:
         self.config = config
         self.project_id = project_id
+        self.managed_worktree_path = Path(managed_worktree_path).resolve() if managed_worktree_path else None
         self._confinement_factory = confinement_factory
         self._preflight = preflight
         self._recorder = recorder
@@ -287,6 +289,8 @@ class OpenCodeAdapter:
             return self._refuse(request, "WORKTREE_UNAVAILABLE")
         if not worktree.is_dir():
             return self._refuse(request, "WORKTREE_UNAVAILABLE")
+        if self.managed_worktree_path and worktree != self.managed_worktree_path:
+            return self._refuse(request, "WORKTREE_BINDING_MISMATCH")
         actual_sha = _git_head(worktree)
         if not actual_sha or actual_sha != request.candidate_sha:
             return self._refuse(request, "CANDIDATE_SHA_MISMATCH")
