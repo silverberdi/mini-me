@@ -722,8 +722,12 @@ def update_project_document_context(
 
     base_dir = Path("/opt/minime/repos") / project_id
     if not base_dir.exists():
-        base_dir = Path("/tmp/minime_repos") / project_id
-        base_dir.mkdir(parents=True, exist_ok=True)
+        import tempfile
+        base_dir = Path(tempfile.gettempdir()) / "minime_repos" / project_id
+        try:
+            base_dir.mkdir(parents=True, exist_ok=True)
+        except OSError:
+            pass
     target_file = (base_dir / norm_path).resolve()
     if not str(target_file).startswith(str(base_dir.resolve())):
         raise HTTPException(

@@ -1075,13 +1075,15 @@ class AgentProcessConfinement:
 
         def is_beneath(path: Path, root: Path) -> bool:
             try:
-                return os.path.commonpath((str(path), str(root))) == str(root)
-            except ValueError:
+                if os.path.commonpath((str(path), str(root))) == str(root):
+                    return True
+                return os.path.commonpath((str(path.resolve()), str(root.resolve()))) == str(root.resolve())
+            except (ValueError, OSError):
                 return False
 
-        if is_beneath(lexical_target, run_path):
+        if is_beneath(lexical_target, run_path) or is_beneath(lexical_target, Path(run_root)):
             destination = lexical_target
-        elif is_beneath(target, run_path):
+        elif is_beneath(target, run_path) or is_beneath(target, Path(run_root)):
             destination = target
         else:
             return None

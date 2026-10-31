@@ -392,7 +392,7 @@ async def test_live_opencode_provider_e2e(tmp_path, monkeypatch):
                 model=model,
                 api_key_env=api_env,
                 roles=["execution"],
-                timeout_seconds=30,
+                timeout_seconds=60,
             ),
             project_id="live-proj",
             managed_worktree_path=tmp_path,

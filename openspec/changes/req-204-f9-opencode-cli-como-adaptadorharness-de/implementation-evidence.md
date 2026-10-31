@@ -7,7 +7,7 @@
 - Supported roles: `execution`, `independent_review`.
 - Provider policy: existing project/provider policy remains authoritative; no fallback or paid retry is added.
 - Base SHA: `be65a01d83068e2216629ed51c72ec649fa78e51`.
-- Candidate SHA: e5aa873663ab3a1f4e2322ae58fc8563ebbe51f9
+- Candidate Authority: verified immutable worktree HEAD registered in orchestration_runs.current_candidate_sha.
 - Managed worktree: `/opt/minime/repos/mini-me/.minime/worktrees/request-204-f9-opencode-cli-como-adaptadorharness-de`.
 - Default authorization: disabled; the unit test proves no CLI lookup occurs while disabled.
 

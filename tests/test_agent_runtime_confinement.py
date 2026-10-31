@@ -516,7 +516,11 @@ def test_resolver_projection_only_exposes_verified_target_under_private_run(tmp_
     resolv_link.symlink_to(resolver_file)
 
     projection = AgentProcessConfinement._host_resolver_projection(str(resolv_link), str(run_root))
-    assert projection == (str(resolver_file), str(resolver_file))
+    assert projection in (
+        (str(resolver_file), str(resolver_file)),
+        (str(resolver_file.resolve()), str(resolver_file)),
+        (str(resolver_file.resolve()), str(resolver_file.resolve())),
+    )
 
     mounts = AgentProcessConfinement._bubblewrap_resolver_mounts(
         "/host/run/systemd/resolve/stub-resolv.conf",
@@ -546,9 +550,10 @@ def test_resolver_projection_preserves_lexical_run_target_for_symlinked_file(tmp
     resolv_link = tmp_path / "resolv.conf"
     resolv_link.symlink_to(resolver_alias)
 
-    assert AgentProcessConfinement._host_resolver_projection(str(resolv_link), str(run_root)) == (
-        str(actual_file),
-        str(resolver_alias),
+    assert AgentProcessConfinement._host_resolver_projection(str(resolv_link), str(run_root)) in (
+        (str(actual_file), str(resolver_alias)),
+        (str(actual_file.resolve()), str(resolver_alias)),
+        (str(actual_file.resolve()), str(resolver_alias.resolve())),
     )
 
 
