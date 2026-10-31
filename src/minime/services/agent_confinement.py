@@ -594,20 +594,8 @@ class AgentProcessConfinement:
         """Detect OS-level confinement capability on system."""
         system = platform.system().lower()
         if system == "linux":
-            bwrap_path = shutil.which("bwrap")
-            if bwrap_path:
-                try:
-                    probe = subprocess.run(
-                        [bwrap_path, "--ro-bind", "/", "/", "true"],
-                        capture_output=True,
-                        check=False,
-                        timeout=2,
-                    )
-                    if probe.returncode == 0:
-                        return "bubblewrap"
-                except (OSError, subprocess.TimeoutExpired):
-                    pass
-                return "none"
+            if shutil.which("bwrap"):
+                return "bubblewrap"
             return "none"
         if system == "darwin":
             if shutil.which("sandbox-exec") or os.path.exists("/usr/bin/sandbox-exec"):

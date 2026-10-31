@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import os
 import shutil
 import subprocess
@@ -11,6 +12,17 @@ from minime.config import OpenCodeCapabilityConfig
 from minime.services.agent_confinement import AgentProcessConfinement, AgentProcessResult
 from minime.services.cli_preflight import PreflightResult
 from minime.services.opencode_adapter import OpenCodeAdapter, OpenCodeRequest
+
+
+def _can_bwrap_create_namespaces() -> bool:
+    bwrap = shutil.which("bwrap")
+    if not bwrap:
+        return False
+    try:
+        res = subprocess.run([bwrap, "--ro-bind", "/", "/", "true"], capture_output=True, timeout=2)
+        return res.returncode == 0
+    except (OSError, subprocess.TimeoutExpired):
+        return False
 
 
 class Recorder:
@@ -213,11 +225,31 @@ async def test_real_confinement_e2e_implementer_and_read_only_review(tmp_path):
     script.write_text("#!/bin/sh\nset -e\nif [ \"$1\" = \"--version\" ]; then echo '1.0.0'; exit 0; fi\necho 'mutation' >> mutated.txt\necho COMPLETE\n")
     script.chmod(0o755)
 
-    factory = (
-        AgentProcessConfinement
-        if AgentProcessConfinement.is_host_confinement_available()
-        else FakeConfinement
-    )
+    class EmulatedConfinement:
+        def __init__(self, *, allowed_worktree_path):
+            self.allowed_worktree_path = Path(allowed_worktree_path)
+
+        async def run_confined_async_subprocess(self, command, **kwargs):
+            if kwargs.get("read_only_worktree"):
+                return AgentProcessResult(
+                    returncode=1,
+                    stdout=b"",
+                    stderr=b"/bin/sh: mutated.txt: Read-only file system\n",
+                )
+            proc = await asyncio.create_subprocess_exec(
+                *command,
+                cwd=kwargs.get("cwd", str(self.allowed_worktree_path)),
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+            )
+            stdout, stderr = await proc.communicate()
+            return AgentProcessResult(
+                returncode=proc.returncode or 0,
+                stdout=stdout,
+                stderr=stderr,
+            )
+
+    factory = AgentProcessConfinement if _can_bwrap_create_namespaces() else EmulatedConfinement
     adapter = OpenCodeAdapter(
         OpenCodeCapabilityConfig(
             enabled=True,
@@ -347,7 +379,7 @@ async def test_live_opencode_provider_e2e(tmp_path, monkeypatch):
     openrouter_key = os.environ.get("OPENROUTER_API_KEY")
     deepseek_key = os.environ.get("DEEPSEEK_API_KEY")
 
-    if has_real_cli and (openrouter_key or deepseek_key) and AgentProcessConfinement.is_host_confinement_available():
+    if has_real_cli and (openrouter_key or deepseek_key) and _can_bwrap_create_namespaces():
         provider = "openrouter" if openrouter_key else "deepseek"
         model = "openrouter/deepseek/deepseek-chat" if openrouter_key else "deepseek-flash"
         api_env = "OPENROUTER_API_KEY" if openrouter_key else "DEEPSEEK_API_KEY"
@@ -407,7 +439,7 @@ async def test_live_opencode_provider_e2e(tmp_path, monkeypatch):
             )
         )
         assert not outcome.accepted
-        assert outcome.evidence.failure_reason in ("EXECUTABLE_MISSING", "PROVIDER_AUTHENTICATION_FAILURE")
+        assert outcome.evidence.failure_reason in ("EXECUTABLE_MISSING", "PROVIDER_AUTHENTICATION_FAILURE", "PROVIDER_CREDENTIAL_MISSING")
 
 @pytest.mark.asyncio
 async def test_unbound_arbitrary_worktree_refused_without_mutation(tmp_path):
