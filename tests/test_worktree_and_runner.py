@@ -11,6 +11,7 @@ from tests.conftest import InMemoryPersistenceUnitOfWork, setup_managed_reposito
 
 from minime.adapters.github import GitHubAdapter
 from minime.config import AppConfig, CliInvocationConfig, ProviderConfig, load_config
+from minime.services.agent_confinement import AgentProcessConfinement
 from minime.services.implementer_runner import CliImplementerRunner, runner_for_implementer
 from minime.services.reviewer_runner import CliReviewerRunner, runner_for_reviewer
 from minime.services.worktree_manager import WorktreeManager
@@ -323,6 +324,7 @@ async def _git_output(cmd: list[str], cwd: Path) -> str:
 
 
 @pytest.mark.asyncio
+@pytest.mark.skipif(not AgentProcessConfinement.is_host_confinement_available(), reason="CLI runner requires host confinement")
 async def test_cli_implementer_runner_redacts_output_and_times_out(tmp_path):
     output_runner = CliImplementerRunner(
         [
@@ -407,6 +409,7 @@ def test_known_headless_cli_contracts_are_configured():
 
 
 @pytest.mark.asyncio
+@pytest.mark.skipif(not AgentProcessConfinement.is_host_confinement_available(), reason="CLI runner requires host confinement")
 async def test_cli_runner_bounds_sanitized_output(tmp_path):
     output_runner = CliImplementerRunner(
         [sys.executable, "-c", "print('token=secret123'); print('x' * 5000)"]

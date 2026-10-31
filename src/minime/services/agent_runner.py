@@ -542,6 +542,8 @@ class CliAgentRunner:
         workflow: ResolvedWorkflow | None = None,
         output_schema: dict[str, Any] | None = None,
         output_last_message_path: Path | None = None,
+        candidate_author: str | None = None,
+        reviewer_identity: str | None = None,
     ) -> AgentExecutionResult:
         """Execute agent under confinement with capacity preflight."""
         # 1. Capacity preflight
@@ -566,6 +568,8 @@ class CliAgentRunner:
             )
 
         if provider.lower() == "opencode":
+            import subprocess
+
             from minime.config import OpenCodeCapabilityConfig
             from minime.services.opencode_adapter import OpenCodeAdapter, OpenCodeRequest, _git_head
 
@@ -578,6 +582,26 @@ class CliAgentRunner:
             operation = workflow.operation if workflow and workflow.operation in {"explore", "propose", "apply", "verify"} else "apply"
             candidate_sha = _git_head(Path(worktree_path)) or ""
 
+            verified_candidate_author = candidate_author
+            if verified_candidate_author is None:
+                try:
+                    res_author = subprocess.run(
+                        ["git", "-C", str(worktree_path), "log", "-1", "--format=%an <%ae>"],
+                        capture_output=True,
+                        text=True,
+                        check=False,
+                    )
+                    verified_candidate_author = res_author.stdout.strip() or "candidate-author"
+                except Exception:
+                    verified_candidate_author = "candidate-author"
+
+            verified_reviewer_identity = reviewer_identity
+            if verified_reviewer_identity is None and opencode_role == "independent_review":
+                rev_id = f"opencode:{opencode_cfg.provider or 'reviewer'}"
+                if rev_id == verified_candidate_author:
+                    rev_id = f"{rev_id}-independent"
+                verified_reviewer_identity = rev_id
+
             adapter = OpenCodeAdapter(
                 opencode_cfg,
                 project_id=proj_id,
@@ -589,6 +613,8 @@ class CliAgentRunner:
                 operation=operation,
                 worktree_path=Path(worktree_path),
                 candidate_sha=candidate_sha,
+                candidate_author=verified_candidate_author,
+                reviewer_identity=verified_reviewer_identity,
                 prompt=prompt_context,
             )
             outcome = await adapter.dispatch(request)

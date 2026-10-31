@@ -10,6 +10,7 @@ import pytest
 
 from minime.domain.enums import EvidenceDiagnosticStatus
 from minime.domain.models import CandidateManifest
+from minime.services.agent_confinement import AgentProcessConfinement
 from minime.services.candidate_integrity import validate_pre_review_integrity
 from minime.services.candidate_manifest import (
     CandidateArtifactRejectionError,
@@ -254,6 +255,7 @@ def test_verify_reviewer_visibility_deleted_files_handling(tmp_path: Path):
 
 
 @pytest.mark.asyncio
+@pytest.mark.skipif(not AgentProcessConfinement.is_host_confinement_available(), reason="ChecksRunner execution requires host confinement")
 async def test_checks_runner_diagnostics_classification(tmp_path: Path):
     runner = ChecksRunner()
 
@@ -292,6 +294,7 @@ async def test_checks_runner_diagnostics_classification(tmp_path: Path):
 
 
 @pytest.mark.asyncio
+@pytest.mark.skipif(not AgentProcessConfinement.is_host_confinement_available(), reason="ChecksRunner execution requires host confinement")
 async def test_checks_runner_continues_after_failed_check_in_configured_order(tmp_path: Path):
     runner = ChecksRunner()
     result = await runner.run(
@@ -310,6 +313,7 @@ async def test_checks_runner_continues_after_failed_check_in_configured_order(tm
 
 
 @pytest.mark.asyncio
+@pytest.mark.skipif(not AgentProcessConfinement.is_host_confinement_available(), reason="ChecksRunner execution requires host confinement")
 async def test_checks_runner_missing_command_does_not_block_later_check(tmp_path: Path):
     runner = ChecksRunner()
     result = await runner.run(
@@ -343,6 +347,7 @@ async def test_checks_runner_aggregate_passed_is_false_when_any_check_fails(tmp_
 
 
 @pytest.mark.asyncio
+@pytest.mark.skipif(not AgentProcessConfinement.is_host_confinement_available(), reason="ChecksRunner execution requires host confinement")
 async def test_checks_runner_aggregate_passed_is_true_when_all_checks_pass(tmp_path: Path):
     result = await ChecksRunner().run(
         job_id="job-aggregate-pass",
@@ -439,6 +444,7 @@ def test_candidate_manifest_excludes_untracked_transient_bytecode(tmp_path: Path
 
 
 @pytest.mark.asyncio
+@pytest.mark.skipif(not AgentProcessConfinement.is_host_confinement_available(), reason="ChecksRunner execution requires host confinement")
 async def test_checks_runner_isolates_bytecode_via_pythonpycacheprefix(tmp_path: Path):
     subprocess.run(["git", "init"], cwd=tmp_path, check=True, capture_output=True)
     subprocess.run(["git", "config", "user.name", "Test"], cwd=tmp_path, check=True)

@@ -6,8 +6,14 @@ import sys
 
 import pytest
 
+from minime.services.agent_confinement import AgentProcessConfinement
 from minime.services.implementer_runner import CliImplementerRunner
 from minime.services.reviewer_runner import CliReviewerRunner
+
+pytestmark = pytest.mark.skipif(
+    not AgentProcessConfinement.is_host_confinement_available(),
+    reason="CLI process safety tests require operational host confinement",
+)
 
 SLEEPER = """import time
 time.sleep(60)"""

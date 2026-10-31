@@ -584,3 +584,62 @@ async def test_reproducible_non_paid_opencode_e2e(tmp_path, monkeypatch):
     assert outcome.evidence.candidate_sha == sha
     assert outcome.evidence.workflow_path == ".agents/skills/openspec-apply-change/SKILL.md"
     assert outcome.evidence.workflow_sha256 is not None
+
+@pytest.mark.asyncio
+async def test_agent_runner_dispatches_opencode_independent_review_authorized(tmp_path, monkeypatch):
+    from minime.config import AppConfig, ProjectConfig
+    from minime.services.agent_runner import CliAgentRunner
+
+    _ = _git_worktree(tmp_path)
+    skill_dir = tmp_path / ".agents" / "skills" / "openspec-apply-change"
+    skill_dir.mkdir(parents=True, exist_ok=True)
+    (skill_dir / "SKILL.md").write_text("# Skill\n")
+
+    monkeypatch.setattr("minime.services.opencode_adapter.shutil.which", lambda _: "/bin/true")
+    monkeypatch.setattr(
+        "minime.services.agent_runner.load_config",
+        lambda: AppConfig(
+            projects={
+                "test-proj": ProjectConfig(
+                    repository="test/repo",
+                    opencode=OpenCodeCapabilityConfig(
+                        enabled=True,
+                        roles=["independent_review"],
+                        args=["run", "--review"],
+                    ),
+                )
+            }
+        ),
+    )
+    monkeypatch.setattr(
+        "minime.services.opencode_adapter.AgentProcessConfinement",
+        FakeConfinement,
+    )
+
+    runner = CliAgentRunner(invocation=["/bin/true"])
+    # Authorized distinct reviewer succeeds
+    res_auth = await runner.run(
+        worktree_path=tmp_path,
+        prompt_context="echo REVIEW_PASSED",
+        project_id="test-proj",
+        provider="opencode",
+        role="reviewer",
+        candidate_author="author@minime.test",
+        reviewer_identity="reviewer-model@provider.test",
+    )
+    assert res_auth.exit_code == 0
+    assert res_auth.preflight_error is None
+
+    # Self-review refused fail-closed
+    res_self = await runner.run(
+        worktree_path=tmp_path,
+        prompt_context="echo REVIEW_PASSED",
+        project_id="test-proj",
+        provider="opencode",
+        role="reviewer",
+        candidate_author="same-identity",
+        reviewer_identity="same-identity",
+    )
+    assert res_self.exit_code == -1
+    assert res_self.preflight_error == "REVIEWER_NOT_INDEPENDENT"
+
