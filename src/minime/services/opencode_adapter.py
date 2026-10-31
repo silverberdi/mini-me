@@ -192,8 +192,7 @@ def _git_artifacts(worktree: Path) -> tuple[str, ...]:
 
 
 async def _default_preflight(executable: str, args: tuple[str, ...]) -> PreflightResult:
-    """Prove the installed CLI responds before any worktree dispatch."""
-    del args
+    """Prove the installed CLI and configured model/args respond before any worktree dispatch."""
     try:
         process = await asyncio.create_subprocess_exec(
             executable, "--version", stdout=asyncio.subprocess.PIPE,
@@ -204,6 +203,10 @@ async def _default_preflight(executable: str, args: tuple[str, ...]) -> Prefligh
         return PreflightResult(ok=False, reason="CLI_VERSION_UNAVAILABLE")
     if process.returncode != 0 or not (stdout + stderr).strip():
         return PreflightResult(ok=False, reason="CLI_VERSION_UNAVAILABLE")
+    if "--model" in args:
+        idx = args.index("--model")
+        if idx + 1 >= len(args) or not args[idx + 1].strip() or args[idx + 1].startswith("--"):
+            return PreflightResult(ok=False, reason="MODEL_PROVIDER_CONFIGURATION_INCOMPLETE")
     return PreflightResult(ok=True)
 
 
@@ -299,6 +302,15 @@ class OpenCodeAdapter:
             args = ["run"]
             if self.config.provider and self.config.model:
                 args.extend(["--model", f"{self.config.provider}/{self.config.model}"])
+            # Pass official OpenSpec workflow skill dispatch command
+            skill_name = {
+                "explore": "openspec-explore",
+                "propose": "openspec-propose",
+                "apply": "openspec-apply-change",
+                "verify": "openspec-verify-change",
+            }.get(operation)
+            if skill_name:
+                args.extend(["--command", f"${skill_name}"])
         extra_env = {"SHELL": "/bin/bash"}
         if self.config.api_key_env and self.config.api_key_env in os.environ:
             extra_env[self.config.api_key_env] = os.environ[self.config.api_key_env]
