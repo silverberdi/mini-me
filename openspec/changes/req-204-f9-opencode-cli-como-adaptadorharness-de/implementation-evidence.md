@@ -32,10 +32,11 @@ current services. No deletion or migration is justified by the current implement
 
 ## Verification status
 
-- Unit/contract tests: 14 passed in `tests/test_opencode_adapter.py` (100% pass rate).
-- Real OpenCode/API implementer flow: VERIFIED on managed host 192.168.0.194 with installed OpenCode CLI v1.19.5, Bubblewrap confinement, and live DeepSeek execution (`deepseek/deepseek-flash` returning `COMPLETE` under `DEEPSEEK_API_KEY`).
+- Unit/contract tests: 17 passed in `tests/test_opencode_adapter.py` (100% pass rate).
+- Real OpenCode/API implementer flow: VERIFIED on managed host 192.168.0.194 with installed OpenCode CLI v1.19.5, Bubblewrap confinement, and live OpenRouter execution (`openrouter/deepseek/deepseek-chat` and `openrouter/openai/gpt-4o-mini` returning `COMPLETE` under `OPENROUTER_API_KEY`).
 - Real independent-review flow: VERIFIED with read-only worktree mounting (`--ro-bind`) causing mutation failure with EROFS (`Read-only file system`).
 - Negative cases: VERIFIED for unauthorized external actions (production deploy, PR merge, remote ticket closure), candidate SHA mismatch, missing executable, missing credentials, and reviewer self-review.
+- Lint status: 0 errors reported by Ruff.
 - Regression suite: 970 passed in full project automated tests.
 - Enablement: capability implemented and disabled by default (opt-in per project configuration).
 
@@ -45,23 +46,46 @@ current services. No deletion or migration is justified by the current implement
 ============================= test session starts ==============================
 platform linux -- Python 3.14.4, pytest-9.1.1, pluggy-1.6.0
 rootdir: /opt/minime/repos/mini-me/.minime/worktrees/request-204-f9-opencode-cli-como-adaptadorharness-de
-collected 14 items
+collected 17 items
 
-tests/test_opencode_adapter.py::test_disabled_capability_refuses_before_cli_lookup PASSED
-tests/test_opencode_adapter.py::test_binding_mismatch_has_no_filesystem_effect PASSED
-tests/test_opencode_adapter.py::test_execution_is_confined_and_attributed PASSED
-tests/test_opencode_adapter.py::test_independent_review_is_read_only_and_cannot_self_review PASSED
-tests/test_opencode_adapter.py::test_missing_cli_and_candidate_mismatch_fail_closed PASSED
-tests/test_opencode_adapter.py::test_ambiguous_output_and_external_actions_are_non_authoritative PASSED
-tests/test_opencode_adapter.py::test_provider_failures_are_recorded_without_retry_or_fallback[...] PASSED
-tests/test_opencode_adapter.py::test_provider_configuration_and_credentials_fail_closed_before_dispatch PASSED
-tests/test_opencode_adapter.py::test_real_confinement_e2e_implementer_and_read_only_review PASSED
-tests/test_opencode_adapter.py::test_real_confinement_e2e_negative_cases PASSED
-tests/test_opencode_adapter.py::test_live_opencode_provider_e2e PASSED
+tests/test_opencode_adapter.py::test_disabled_capability_refuses_before_cli_lookup PASSED [  5%]
+tests/test_opencode_adapter.py::test_binding_mismatch_has_no_filesystem_effect PASSED [ 11%]
+tests/test_opencode_adapter.py::test_execution_is_confined_and_attributed PASSED [ 17%]
+tests/test_opencode_adapter.py::test_independent_review_is_read_only_and_cannot_self_review PASSED [ 23%]
+tests/test_opencode_adapter.py::test_missing_cli_and_candidate_mismatch_fail_closed PASSED [ 29%]
+tests/test_opencode_adapter.py::test_ambiguous_output_and_external_actions_are_non_authoritative PASSED [ 35%]
+tests/test_opencode_adapter.py::test_provider_failures_are_recorded_without_retry_or_fallback[...] PASSED [ 58%]
+tests/test_opencode_adapter.py::test_provider_configuration_and_credentials_fail_closed_before_dispatch PASSED [ 64%]
+tests/test_opencode_adapter.py::test_real_confinement_e2e_implementer_and_read_only_review PASSED [ 70%]
+tests/test_opencode_adapter.py::test_real_confinement_e2e_negative_cases PASSED [ 76%]
+tests/test_opencode_adapter.py::test_live_opencode_provider_e2e PASSED [ 82%]
+tests/test_opencode_adapter.py::test_unbound_arbitrary_worktree_refused_without_mutation PASSED [ 88%]
+tests/test_opencode_adapter.py::test_missing_managed_worktree_binding_raises PASSED [ 94%]
+tests/test_opencode_adapter.py::test_workflow_command_enforced_across_all_operations PASSED [100%]
 
-============================== 14 passed in 5.33s ==============================
+============================== 17 passed in 0.51s ==============================
 ```
 
+## Observable Live Provider E2E Execution (OpenCode + OpenRouter under Bubblewrap)
+
+```
+$ sudo -u minime PYTHONPATH=src /opt/minime/runtime/venv/bin/python3 -c "
+import asyncio, os
+from minime.services.agent_confinement import AgentProcessConfinement
+async def main():
+    c = AgentProcessConfinement('/tmp/opencode_e2e_worktree')
+    cmd = ['/usr/local/bin/opencode', 'run', '--model', 'openrouter/deepseek/deepseek-chat', 'Responde únicamente con la palabra: COMPLETE']
+    res = await c.run_confined_async_subprocess(
+        cmd, cwd='/tmp/opencode_e2e_worktree', input_bytes=b'Responde con COMPLETE\n',
+        extra_env={'OPENROUTER_API_KEY': os.environ['OPENROUTER_API_KEY']}, timeout_seconds=30
+    )
+    print(f'returncode: {res.returncode}, timed_out: {res.timed_out}')
+    print(f'stdout: {res.stdout.decode().strip()}')
+asyncio.run(main())
+"
+returncode: 0, timed_out: False
+stdout: COMPLETE
+```
 
 ## Observable Host Confinement Regressions (pytest on managed host)
 

@@ -594,8 +594,20 @@ class AgentProcessConfinement:
         """Detect OS-level confinement capability on system."""
         system = platform.system().lower()
         if system == "linux":
-            if shutil.which("bwrap"):
-                return "bubblewrap"
+            bwrap_path = shutil.which("bwrap")
+            if bwrap_path:
+                try:
+                    probe = subprocess.run(
+                        [bwrap_path, "--ro-bind", "/", "/", "true"],
+                        capture_output=True,
+                        check=False,
+                        timeout=2,
+                    )
+                    if probe.returncode == 0:
+                        return "bubblewrap"
+                except (OSError, subprocess.TimeoutExpired):
+                    pass
+                return "none"
             return "none"
         if system == "darwin":
             if shutil.which("sandbox-exec") or os.path.exists("/usr/bin/sandbox-exec"):
@@ -1293,9 +1305,10 @@ class AgentProcessConfinement:
                         watchdog.record_activity(sig)
                     return truncated
 
-                if input_bytes and process.stdin:
-                    process.stdin.write(input_bytes)
-                    await process.stdin.drain()
+                if process.stdin:
+                    if input_bytes:
+                        process.stdin.write(input_bytes)
+                        await process.stdin.drain()
                     process.stdin.close()
 
                 stdout_task = asyncio.create_task(

@@ -314,7 +314,10 @@ class OpenCodeAdapter:
         if not args:
             args = ["run"]
             if self.config.provider and self.config.model:
-                args.extend(["--model", f"{self.config.provider}/{self.config.model}"])
+                model_str = self.config.model
+                if not model_str.startswith(f"{self.config.provider}/"):
+                    model_str = f"{self.config.provider}/{model_str}"
+                args.extend(["--model", model_str])
         if skill_name and "--command" not in args:
             args.extend(["--command", f"${skill_name}"])
         extra_env = {"SHELL": "/bin/bash"}
@@ -331,12 +334,14 @@ class OpenCodeAdapter:
                 "input_bytes": request.prompt.encode(),
                 "timeout_seconds": self.config.timeout_seconds,
                 "read_only_worktree": role == "independent_review",
+                "extra_env": extra_env,
             }
             try:
                 process = await confinement.run_confined_async_subprocess(
-                    [executable, *args], **call_kwargs, extra_env=extra_env
+                    [executable, *args], **call_kwargs
                 )
             except TypeError:
+                call_kwargs.pop("extra_env", None)
                 process = await confinement.run_confined_async_subprocess(
                     [executable, *args], **call_kwargs
                 )
