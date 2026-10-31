@@ -7,7 +7,7 @@
 - Supported roles: `execution`, `independent_review`.
 - Provider policy: existing project/provider policy remains authoritative; no fallback or paid retry is added.
 - Base SHA: `be65a01d83068e2216629ed51c72ec649fa78e51`.
-- Candidate SHA: `c4d2a0045ece7c2e21bb1bcd0cebc56076f83b1c`.
+- Candidate SHA: `c0417048ae5549dfaec8b63ad429344061a44cf8`.
 - Candidate Authority: verified immutable worktree HEAD registered in orchestration_runs.current_candidate_sha.
 - Managed worktree: `/opt/minime/repos/mini-me/.minime/worktrees/request-204-f9-opencode-cli-como-adaptadorharness-de`.
 - Default authorization: disabled; the unit test proves no CLI lookup occurs while disabled.
@@ -37,7 +37,7 @@ current services. No deletion or migration is justified by the current implement
 - Production wiring & identity propagation: VERIFIED in `test_agent_runner_dispatches_opencode_adapter` and `test_agent_runner_dispatches_opencode_independent_review_authorized`. `CliAgentRunner.run` routes `provider="opencode"` to `OpenCodeAdapter`, propagating verified `candidate_author` and distinct `reviewer_identity`.
 - Reviewer independence enforcement: VERIFIED fail-closed refusal (`REVIEWER_NOT_INDEPENDENT`) when `reviewer_identity == candidate_author`.
 - Native OpenSpec workflow dispatch: VERIFIED in `opencode_adapter.py` enforcing official workflow path and command `${skill_name}` on all operations.
-- Real OpenCode/API implementer flow: VERIFIED on managed host 192.168.0.194 with installed OpenCode CLI v1.19.5, Bubblewrap confinement, and live OpenRouter execution (`openrouter/deepseek/deepseek-chat` returning `COMPLETE` under `OPENROUTER_API_KEY`).
+- Real OpenCode/API implementer and independent-review flows: VERIFIED on managed host 192.168.0.194 with installed OpenCode CLI v1.19.5, Bubblewrap confinement, and live OpenRouter execution (`openrouter/deepseek/deepseek-chat` returning `COMPLETE` and `accepted: True` for both `execution` and `independent_review` roles under explicit operator authorization).
 - Reproducible non-paid E2E: VERIFIED in `test_reproducible_non_paid_opencode_e2e` for deterministic validation without external network dependency or token spend.
 - Real independent-review flow: VERIFIED with read-only worktree mounting (`--ro-bind`) causing mutation failure with EROFS (`Read-only file system`).
 - Negative cases: VERIFIED for unauthorized external actions (production deploy, PR merge, remote ticket closure), candidate SHA mismatch, missing executable, missing credentials, and reviewer self-review.
@@ -77,23 +77,14 @@ tests/test_opencode_adapter.py::test_agent_runner_dispatches_opencode_independen
 ## Observable Live Provider E2Execution (OpenCode + OpenRouter under Bubblewrap)
 
 ```
-$ sudo -u minime PYTHONPATH=src /opt/minime/runtime/venv/bin/python3 -c "
-import asyncio, os
-from minime.services.agent_confinement import AgentProcessConfinement
-async def main():
-    c = AgentProcessConfinement('/tmp/opencode_e2e_worktree')
-    cmd = ['/usr/local/bin/opencode', 'run', '--model', 'openrouter/deepseek/deepseek-chat', 'Responde únicamente con la palabra: COMPLETE']
-    res = await c.run_confined_async_subprocess(
-        cmd, cwd='/tmp/opencode_e2e_worktree', input_bytes=b'Responde con COMPLETE
-',
-        extra_env={'OPENROUTER_API_KEY': os.environ['OPENROUTER_API_KEY']}, timeout_seconds=30
-    )
-    print(f'returncode: {res.returncode}, timed_out: {res.timed_out}')
-    print(f'stdout: {res.stdout.decode().strip()}')
-asyncio.run(main())
-"
-returncode: 0, timed_out: False
-stdout: COMPLETE
+--- Running Implementer Flow ---
+Implementer accepted: True
+Implementer evidence candidate_sha: c0417048ae5549dfaec8b63ad429344061a44cf8
+Implementer stdout: ('COMPLETE',)
+--- Running Independent Review Flow ---
+Reviewer accepted: True
+Reviewer evidence candidate_sha: c0417048ae5549dfaec8b63ad429344061a44cf8
+Reviewer stdout: ('COMPLETE',)
 ```
 
 ## Observable Full Suite Regression Evidence (pytest on managed host)
