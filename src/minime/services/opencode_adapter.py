@@ -147,14 +147,14 @@ def _forbidden_external_action(prompt: str) -> bool:
 def _has_explicit_result(stdout: tuple[str, ...]) -> bool:
     """Require an explicit terminal result before accepting CLI output."""
     for line in reversed(stdout):
-        stripped = line.strip().strip('`')
+        stripped = line.strip().strip('`*._').upper()
         if stripped in {"COMPLETE", "INCOMPLETE", "HUMAN_REQUIRED"}:
             return True
         try:
-            payload = json.loads(stripped)
+            payload = json.loads(line.strip())
         except (TypeError, json.JSONDecodeError):
             continue
-        if isinstance(payload, dict) and payload.get("status") in {
+        if isinstance(payload, dict) and str(payload.get("status", "")).upper() in {
             "COMPLETE", "INCOMPLETE", "HUMAN_REQUIRED"
         }:
             return True
@@ -303,13 +303,6 @@ class OpenCodeAdapter:
         if not executable:
             return self._refuse(request, "EXECUTABLE_MISSING")
         executable_sha = _sha256_file(Path(executable))
-        skill_name = {
-            "explore": "openspec-explore",
-            "propose": "openspec-propose",
-            "apply": "openspec-apply-change",
-            "verify": "openspec-verify-change",
-        }.get(operation)
-
         args = list(self.config.args)
         if not args:
             args = ["run"]
@@ -318,8 +311,8 @@ class OpenCodeAdapter:
                 if not model_str.startswith(f"{self.config.provider}/"):
                     model_str = f"{self.config.provider}/{model_str}"
                 args.extend(["--model", model_str])
-        if skill_name and "--command" not in args:
-            args.extend(["--command", f"${skill_name}"])
+        if request.prompt and request.prompt not in args:
+            args.append(request.prompt)
         extra_env = {"SHELL": "/bin/bash"}
         if self.config.api_key_env and self.config.api_key_env in os.environ:
             extra_env[self.config.api_key_env] = os.environ[self.config.api_key_env]
@@ -331,7 +324,7 @@ class OpenCodeAdapter:
         try:
             call_kwargs = {
                 "cwd": str(worktree),
-                "input_bytes": request.prompt.encode(),
+                "input_bytes": b"",
                 "timeout_seconds": self.config.timeout_seconds,
                 "read_only_worktree": role == "independent_review",
                 "extra_env": extra_env,
