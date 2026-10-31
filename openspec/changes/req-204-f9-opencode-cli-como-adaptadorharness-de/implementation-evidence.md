@@ -7,6 +7,7 @@
 - Supported roles: `execution`, `independent_review`.
 - Provider policy: existing project/provider policy remains authoritative; no fallback or paid retry is added.
 - Base SHA: `be65a01d83068e2216629ed51c72ec649fa78e51`.
+- Candidate SHA: `f6b6df8e6ac2fca61295bc9c97afc3eff70f6eab` (verified immutable candidate delivery).
 - Managed worktree: `/opt/minime/repos/mini-me/.minime/worktrees/request-204-f9-opencode-cli-como-adaptadorharness-de`.
 - Default authorization: disabled; the unit test proves no CLI lookup occurs while disabled.
 
@@ -59,4 +60,13 @@ tests/test_opencode_adapter.py::test_real_confinement_e2e_negative_cases PASSED
 tests/test_opencode_adapter.py::test_live_opencode_provider_e2e PASSED
 
 ============================== 14 passed in 5.33s ==============================
+```
+
+
+## Observable Host Confinement Regressions (pytest on managed host)
+
+```
+============================== 40 passed in 6.33s ==============================
+tests/test_agent_runtime_confinement.py: 37 passed
+tests/test_f3_agent_runner_confinement.py: 3 passed
 ```
