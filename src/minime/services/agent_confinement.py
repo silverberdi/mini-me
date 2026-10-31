@@ -1087,14 +1087,15 @@ class AgentProcessConfinement:
             destination = target
         else:
             return None
-        if destination == run_path:
-            raise AgentConfinementError(
-                "Host DNS resolver target conflicts with the private agent runtime."
-            )
-        if is_beneath(destination, Path(AgentProcessConfinement.SANDBOX_RUNTIME_ROOT)):
-            raise AgentConfinementError(
-                "Host DNS resolver target conflicts with the private agent runtime."
-            )
+        if run_root == "/run":
+            if destination == run_path:
+                raise AgentConfinementError(
+                    "Host DNS resolver target conflicts with the private agent runtime."
+                )
+            if is_beneath(destination, Path(AgentProcessConfinement.SANDBOX_RUNTIME_ROOT)):
+                raise AgentConfinementError(
+                    "Host DNS resolver target conflicts with the private agent runtime."
+                )
         return str(target), str(destination)
 
     @staticmethod
