@@ -77,6 +77,47 @@ class RemoteRequestIntakeService:
         # Filter out pull requests if returned in issues endpoint
         return [item for item in items if not item.get("pull_request")]
 
+    def get_all_requests(self, repository: str) -> list[dict[str, Any]]:
+        """Return all open requests with their status classification (eligible vs disabled vs blocked)."""
+        all_open_issues = self.fetch_all_open_issues(repository)
+        open_issue_numbers = {
+            item.get("number")
+            for item in all_open_issues
+            if item.get("number") is not None
+        }
+
+        classified: list[dict[str, Any]] = []
+        for issue in all_open_issues:
+            labels = issue.get("labels") or []
+            label_names = {
+                (lbl.get("name", "").lower() if isinstance(lbl, dict) else str(lbl).lower())
+                for lbl in labels
+            }
+            body = issue.get("body") or ""
+            deps = parse_explicit_dependencies(body)
+            blocking_open_deps = deps.intersection(open_issue_numbers)
+
+            item = dict(issue)
+            if "deleted" in label_names:
+                continue
+            elif "disabled" in label_names:
+                item["status"] = "DISABLED"
+            elif blocking_open_deps:
+                item["status"] = "BLOCKED"
+            else:
+                item["status"] = "ELIGIBLE"
+
+            classified.append(item)
+
+        classified.sort(
+            key=lambda item: (
+                0 if item.get("status") == "ELIGIBLE" else (1 if item.get("status") == "DISABLED" else 2),
+                parse_iso_datetime(item.get("created_at") or item.get("createdAt")),
+                int(item.get("number") or 0),
+            )
+        )
+        return classified
+
     def get_eligible_requests(self, repository: str) -> list[dict[str, Any]]:
         """Filter and sort remote issues according to F3 intake rules.
 
