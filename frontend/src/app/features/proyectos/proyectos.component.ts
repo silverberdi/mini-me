@@ -218,7 +218,9 @@ import { ProjectAgentProfile, ProjectExecutionPolicy } from '../../core/models';
                 <label class="block text-slate-400 mb-1">Thinking (Exploración)</label>
                 <select [(ngModel)]="newProjectProfiles.thinking" name="model_thinking"
                         class="w-full bg-slate-800 border border-slate-700 rounded-xl px-2.5 py-2 text-white focus:outline-none focus:border-sky-500 font-mono text-[11px]">
-                  <option *ngFor="let m of availableModels" [value]="m.id">{{ m.label }}</option>
+                  <optgroup *ngFor="let g of modelGroups" [label]="g.name">
+                    <option *ngFor="let m of g.models" [value]="m.id">{{ m.label }}</option>
+                  </optgroup>
                 </select>
               </div>
 
@@ -226,7 +228,9 @@ import { ProjectAgentProfile, ProjectExecutionPolicy } from '../../core/models';
                 <label class="block text-slate-400 mb-1">Execution (Código)</label>
                 <select [(ngModel)]="newProjectProfiles.execution" name="model_execution"
                         class="w-full bg-slate-800 border border-slate-700 rounded-xl px-2.5 py-2 text-white focus:outline-none focus:border-sky-500 font-mono text-[11px]">
-                  <option *ngFor="let m of availableModels" [value]="m.id">{{ m.label }}</option>
+                  <optgroup *ngFor="let g of modelGroups" [label]="g.name">
+                    <option *ngFor="let m of g.models" [value]="m.id">{{ m.label }}</option>
+                  </optgroup>
                 </select>
               </div>
 
@@ -234,7 +238,9 @@ import { ProjectAgentProfile, ProjectExecutionPolicy } from '../../core/models';
                 <label class="block text-slate-400 mb-1">Review (Revisión)</label>
                 <select [(ngModel)]="newProjectProfiles.independent_review" name="model_review"
                         class="w-full bg-slate-800 border border-slate-700 rounded-xl px-2.5 py-2 text-white focus:outline-none focus:border-sky-500 font-mono text-[11px]">
-                  <option *ngFor="let m of availableModels" [value]="m.id">{{ m.label }}</option>
+                  <optgroup *ngFor="let g of modelGroups" [label]="g.name">
+                    <option *ngFor="let m of g.models" [value]="m.id">{{ m.label }}</option>
+                  </optgroup>
                 </select>
               </div>
 
@@ -242,9 +248,27 @@ import { ProjectAgentProfile, ProjectExecutionPolicy } from '../../core/models';
                 <label class="block text-slate-400 mb-1">Fallback (Respaldo)</label>
                 <select [(ngModel)]="newProjectProfiles.fallback" name="model_fallback"
                         class="w-full bg-slate-800 border border-slate-700 rounded-xl px-2.5 py-2 text-white focus:outline-none focus:border-sky-500 font-mono text-[11px]">
-                  <option *ngFor="let m of availableModels" [value]="m.id">{{ m.label }}</option>
+                  <optgroup *ngFor="let g of modelGroups" [label]="g.name">
+                    <option *ngFor="let m of g.models" [value]="m.id">{{ m.label }}</option>
+                  </optgroup>
                 </select>
               </div>
+            </div>
+
+            <!-- Independence warning -->
+            <div *ngIf="isReviewerConflict(newProjectProfiles)"
+                 class="p-2.5 rounded-xl bg-amber-500/10 border border-amber-500/20 text-amber-300 text-[11px]">
+              ⚠️ <strong>Principio de Independencia:</strong> La revisión independiente debe ser de un proveedor distinto a la ejecución (Codex ↔ Antigravity).
+            </div>
+
+            <!-- Architecture Info Banner -->
+            <div class="p-2.5 rounded-xl bg-slate-800/60 border border-slate-700/50 text-slate-400 text-[11px] space-y-1">
+              <div class="font-semibold text-slate-300 flex items-center gap-1.5">
+                <span>ℹ️</span> <span>Modelos y Proveedores (Contrato Rector 1.3):</span>
+              </div>
+              <p>• <strong>Anthropic Claude & Google Gemini</strong>: Operan vía el harness <strong>Antigravity</strong> con capacidades de edición OpenSpec.</p>
+              <p>• <strong>OpenAI GPT</strong>: Opera vía el harness <strong>Codex</strong>.</p>
+              <p>• <strong>DeepSeek</strong>: Auditor directo de solo lectura (<code class="text-sky-300">CONTRACT_REVIEW</code> y <code class="text-sky-300">REVIEW</code>), reservado por política rectora para verificación estricta independiente sin mutación de archivos.</p>
             </div>
           </div>
 
@@ -253,7 +277,7 @@ import { ProjectAgentProfile, ProjectExecutionPolicy } from '../../core/models';
                     class="px-4 py-2 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-300 font-semibold cursor-pointer">
               Cancelar
             </button>
-            <button type="submit" [disabled]="isActionRunning()"
+            <button type="submit" [disabled]="isActionRunning() || isReviewerConflict(newProjectProfiles)"
                     class="px-4 py-2 rounded-xl bg-sky-500 hover:bg-sky-400 disabled:opacity-50 text-slate-950 font-bold cursor-pointer">
               {{ isActionRunning() ? 'Guardando…' : 'Crear Proyecto' }}
             </button>
@@ -293,7 +317,9 @@ import { ProjectAgentProfile, ProjectExecutionPolicy } from '../../core/models';
                 <label class="block text-slate-400 mb-1">Thinking (Exploración)</label>
                 <select [(ngModel)]="editProjectProfiles.thinking" name="edit_thinking"
                         class="w-full bg-slate-800 border border-slate-700 rounded-xl px-2.5 py-2 text-white focus:outline-none focus:border-sky-500 font-mono text-[11px]">
-                  <option *ngFor="let m of availableModels" [value]="m.id">{{ m.label }}</option>
+                  <optgroup *ngFor="let g of modelGroups" [label]="g.name">
+                    <option *ngFor="let m of g.models" [value]="m.id">{{ m.label }}</option>
+                  </optgroup>
                 </select>
               </div>
 
@@ -301,7 +327,9 @@ import { ProjectAgentProfile, ProjectExecutionPolicy } from '../../core/models';
                 <label class="block text-slate-400 mb-1">Execution (Implementación)</label>
                 <select [(ngModel)]="editProjectProfiles.execution" name="edit_execution"
                         class="w-full bg-slate-800 border border-slate-700 rounded-xl px-2.5 py-2 text-white focus:outline-none focus:border-sky-500 font-mono text-[11px]">
-                  <option *ngFor="let m of availableModels" [value]="m.id">{{ m.label }}</option>
+                  <optgroup *ngFor="let g of modelGroups" [label]="g.name">
+                    <option *ngFor="let m of g.models" [value]="m.id">{{ m.label }}</option>
+                  </optgroup>
                 </select>
               </div>
 
@@ -309,7 +337,9 @@ import { ProjectAgentProfile, ProjectExecutionPolicy } from '../../core/models';
                 <label class="block text-slate-400 mb-1">Review (Revisión Independiente)</label>
                 <select [(ngModel)]="editProjectProfiles.independent_review" name="edit_review"
                         class="w-full bg-slate-800 border border-slate-700 rounded-xl px-2.5 py-2 text-white focus:outline-none focus:border-sky-500 font-mono text-[11px]">
-                  <option *ngFor="let m of availableModels" [value]="m.id">{{ m.label }}</option>
+                  <optgroup *ngFor="let g of modelGroups" [label]="g.name">
+                    <option *ngFor="let m of g.models" [value]="m.id">{{ m.label }}</option>
+                  </optgroup>
                 </select>
               </div>
 
@@ -317,9 +347,27 @@ import { ProjectAgentProfile, ProjectExecutionPolicy } from '../../core/models';
                 <label class="block text-slate-400 mb-1">Fallback (Agotamiento)</label>
                 <select [(ngModel)]="editProjectProfiles.fallback" name="edit_fallback"
                         class="w-full bg-slate-800 border border-slate-700 rounded-xl px-2.5 py-2 text-white focus:outline-none focus:border-sky-500 font-mono text-[11px]">
-                  <option *ngFor="let m of availableModels" [value]="m.id">{{ m.label }}</option>
+                  <optgroup *ngFor="let g of modelGroups" [label]="g.name">
+                    <option *ngFor="let m of g.models" [value]="m.id">{{ m.label }}</option>
+                  </optgroup>
                 </select>
               </div>
+            </div>
+
+            <!-- Independence warning -->
+            <div *ngIf="isReviewerConflict(editProjectProfiles)"
+                 class="p-2.5 rounded-xl bg-amber-500/10 border border-amber-500/20 text-amber-300 text-[11px]">
+              ⚠️ <strong>Principio de Independencia:</strong> La revisión independiente debe ser de un proveedor distinto a la ejecución (Codex ↔ Antigravity).
+            </div>
+
+            <!-- Architecture Info Banner -->
+            <div class="p-2.5 rounded-xl bg-slate-800/60 border border-slate-700/50 text-slate-400 text-[11px] space-y-1">
+              <div class="font-semibold text-slate-300 flex items-center gap-1.5">
+                <span>ℹ️</span> <span>Modelos y Proveedores (Contrato Rector 1.3):</span>
+              </div>
+              <p>• <strong>Anthropic Claude & Google Gemini</strong>: Operan vía el harness <strong>Antigravity</strong> con capacidades de edición OpenSpec.</p>
+              <p>• <strong>OpenAI GPT</strong>: Opera vía el harness <strong>Codex</strong>.</p>
+              <p>• <strong>DeepSeek</strong>: Auditor directo de solo lectura (<code class="text-sky-300">CONTRACT_REVIEW</code> y <code class="text-sky-300">REVIEW</code>), reservado por política rectora para verificación estricta independiente sin mutación de archivos.</p>
             </div>
           </div>
 
@@ -328,7 +376,7 @@ import { ProjectAgentProfile, ProjectExecutionPolicy } from '../../core/models';
                     class="px-4 py-2 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-300 font-semibold cursor-pointer">
               Cancelar
             </button>
-            <button type="submit" [disabled]="isActionRunning()"
+            <button type="submit" [disabled]="isActionRunning() || isReviewerConflict(editProjectProfiles)"
                     class="px-4 py-2 rounded-xl bg-sky-500 hover:bg-sky-400 disabled:opacity-50 text-slate-950 font-bold cursor-pointer">
               {{ isActionRunning() ? 'Guardando…' : 'Guardar Cambios' }}
             </button>
@@ -351,13 +399,32 @@ export class ProyectosComponent implements OnInit {
   showEditModal = false;
 
   // Available models catalog for selection
-  availableModels = [
-    { id: 'gemini-3.8-flash', label: 'Antigravity / gemini-3.8-flash', agent: 'antigravity' },
-    { id: 'gemini-3.8-pro', label: 'Antigravity / gemini-3.8-pro', agent: 'antigravity' },
-    { id: 'gpt-5-codex', label: 'Codex / gpt-5-codex', agent: 'codex' },
-    { id: 'deepseek-chat', label: 'DeepSeek / deepseek-chat', agent: 'deepseek' },
-    { id: 'deepseek-reasoner', label: 'DeepSeek / deepseek-reasoner', agent: 'deepseek' },
-    { id: 'auto', label: 'OpenRouter / auto fallback', agent: 'openrouter' },
+  availableModels: {
+    id: string;
+    label: string;
+    agent: string;
+    effort: string;
+    group: string;
+  }[] = [
+    // Anthropic Claude via Antigravity
+    { id: 'claude-sonnet-5-5-medium', label: 'Claude Sonnet 5.5 — Medio', agent: 'antigravity', effort: 'medium', group: 'Anthropic Claude (vía Antigravity)' },
+    { id: 'claude-sonnet-5-5-high', label: 'Claude Sonnet 5.5 — Alto', agent: 'antigravity', effort: 'high', group: 'Anthropic Claude (vía Antigravity)' },
+    { id: 'claude-opus-5-5-medium', label: 'Claude Opus 5.5 — Medio', agent: 'antigravity', effort: 'medium', group: 'Anthropic Claude (vía Antigravity)' },
+    { id: 'claude-opus-5-5-high', label: 'Claude Opus 5.5 — Alto', agent: 'antigravity', effort: 'high', group: 'Anthropic Claude (vía Antigravity)' },
+
+    // Google Gemini via Antigravity
+    { id: 'gemini-3.8-flash-medium', label: 'Gemini 3.8 Flash — Medio', agent: 'antigravity', effort: 'medium', group: 'Google Gemini (vía Antigravity)' },
+    { id: 'gemini-3.8-flash-high', label: 'Gemini 3.8 Flash — Alto', agent: 'antigravity', effort: 'high', group: 'Google Gemini (vía Antigravity)' },
+    { id: 'gemini-4-argon-medium', label: 'Gemini 4 Argon — Medio', agent: 'antigravity', effort: 'medium', group: 'Google Gemini (vía Antigravity)' },
+    { id: 'gemini-4-argon-high', label: 'Gemini 4 Argon — Alto', agent: 'antigravity', effort: 'high', group: 'Google Gemini (vía Antigravity)' },
+    { id: 'gpt-oss-120b-medium', label: 'GPT-OSS 120B — Medio', agent: 'antigravity', effort: 'medium', group: 'Open Source (vía Antigravity)' },
+
+    // OpenAI via Codex
+    { id: 'gpt-5.6-luna', label: 'GPT-5.6 Luna — Medio', agent: 'codex', effort: 'medium', group: 'OpenAI GPT (vía Codex)' },
+    { id: 'gpt-5.6-sol', label: 'GPT-5.6 Sol — Alto', agent: 'codex', effort: 'high', group: 'OpenAI GPT (vía Codex)' },
+    { id: 'gpt-6.1-sol', label: 'GPT-6.1 Sol — Alto', agent: 'codex', effort: 'high', group: 'OpenAI GPT (vía Codex)' },
+    { id: 'gpt-6-astra', label: 'GPT-6 Astra — Alto', agent: 'codex', effort: 'high', group: 'OpenAI GPT (vía Codex)' },
+    { id: 'gpt-6.1-terra', label: 'GPT-6.1 Terra — Alto', agent: 'codex', effort: 'high', group: 'OpenAI GPT (vía Codex)' },
   ];
 
   newProject: any = {
@@ -368,10 +435,10 @@ export class ProyectosComponent implements OnInit {
   };
 
   newProjectProfiles = {
-    thinking: 'gemini-3.8-flash',
-    execution: 'gpt-5-codex',
-    independent_review: 'gemini-3.8-flash',
-    fallback: 'auto',
+    thinking: 'gpt-5.6-luna',
+    execution: 'gpt-5.6-luna',
+    independent_review: 'claude-sonnet-5-5-medium',
+    fallback: 'gpt-5.6-luna',
   };
 
   editProject: any = {
@@ -381,11 +448,22 @@ export class ProyectosComponent implements OnInit {
   };
 
   editProjectProfiles = {
-    thinking: 'gemini-3.8-flash',
-    execution: 'gpt-5-codex',
-    independent_review: 'gemini-3.8-flash',
-    fallback: 'auto',
+    thinking: 'gpt-5.6-luna',
+    execution: 'gpt-5.6-luna',
+    independent_review: 'claude-sonnet-5-5-medium',
+    fallback: 'gpt-5.6-luna',
   };
+
+  get modelGroups() {
+    const groupsMap = new Map<string, typeof this.availableModels>();
+    for (const m of this.availableModels) {
+      if (!groupsMap.has(m.group)) {
+        groupsMap.set(m.group, []);
+      }
+      groupsMap.get(m.group)!.push(m);
+    }
+    return Array.from(groupsMap.entries()).map(([name, models]) => ({ name, models }));
+  }
 
   async ngOnInit(): Promise<void> {
     await this.loadAgentsCatalog();
@@ -395,25 +473,67 @@ export class ProyectosComponent implements OnInit {
     try {
       const res = await this.api.get<any>('/api/v1/catalogs/agents');
       if (res.ok && res.data?.agents) {
-        const parsed: any[] = [];
+        const parsed: typeof this.availableModels = [];
         for (const agent of res.data.agents) {
-          const providerId = agent.id;
+          const providerId = (agent.id || '').toLowerCase();
           const modelsObj = agent.models || {};
           for (const modelKey of Object.keys(modelsObj)) {
+            const efforts: string[] = modelsObj[modelKey] || [];
+            let group = 'Otros Modelos';
+            let label = `${providerId} / ${modelKey}`;
+            let effort = 'medium';
+
+            if (modelKey.endsWith('-high') || (efforts.includes('high') && !efforts.includes('medium'))) {
+              effort = 'high';
+            } else if (modelKey.endsWith('-low')) {
+              effort = 'low';
+            } else if (efforts.includes('medium')) {
+              effort = 'medium';
+            } else if (efforts.length > 0) {
+              effort = efforts[0];
+            }
+
+            if (modelKey.startsWith('claude')) {
+              group = 'Anthropic Claude (vía Antigravity)';
+              const sub = modelKey.replace('claude-', '').replace(/-[a-z]+$/, '');
+              label = `Claude ${sub.replace('-', '.').toUpperCase()} — ${effort.toUpperCase()}`;
+            } else if (modelKey.startsWith('gemini')) {
+              group = 'Google Gemini (vía Antigravity)';
+              const sub = modelKey.replace('gemini-', '').replace(/-[a-z]+$/, '');
+              label = `Gemini ${sub.toUpperCase()} — ${effort.toUpperCase()}`;
+            } else if (providerId === 'codex') {
+              group = 'OpenAI GPT (vía Codex)';
+              const sub = modelKey.replace('gpt-', '').toUpperCase();
+              label = `GPT-${sub} — ${effort.toUpperCase()}`;
+            } else if (modelKey.includes('oss')) {
+              group = 'Open Source (vía Antigravity)';
+              label = `GPT-OSS 120B — ${effort.toUpperCase()}`;
+            }
+
             parsed.push({
               id: modelKey,
-              label: `${providerId} / ${modelKey}`,
+              label,
               agent: providerId,
+              effort,
+              group,
             });
           }
         }
         if (parsed.length > 0) {
-          this.availableModels = parsed;
+          // Sort with Claude and Gemini first, then Codex
+          this.availableModels = parsed.sort((a, b) => a.group.localeCompare(b.group) || a.label.localeCompare(b.label));
         }
       }
     } catch {
       // Keep sensible defaults
     }
+  }
+
+  isReviewerConflict(profiles: { thinking: string; execution: string; independent_review: string }): boolean {
+    const execAgent = this.resolveAgentForModel(profiles.execution);
+    const thinkAgent = this.resolveAgentForModel(profiles.thinking);
+    const reviewAgent = this.resolveAgentForModel(profiles.independent_review);
+    return reviewAgent === execAgent || reviewAgent === thinkAgent;
   }
 
   getRoleModel(role: string): string {
@@ -439,6 +559,12 @@ export class ProyectosComponent implements OnInit {
       repository: '',
       base_branch: 'main',
     };
+    this.newProjectProfiles = {
+      thinking: 'gpt-5.6-luna',
+      execution: 'gpt-5.6-luna',
+      independent_review: 'claude-sonnet-5-5-medium',
+      fallback: 'gpt-5.6-luna',
+    };
     this.showCreateModal = true;
   }
 
@@ -453,24 +579,57 @@ export class ProyectosComponent implements OnInit {
 
     const profiles = proj.agent_profiles || {};
     this.editProjectProfiles = {
-      thinking: profiles['thinking']?.model_id || 'gemini-3.8-flash',
-      execution: profiles['execution']?.model_id || 'gpt-5-codex',
-      independent_review: profiles['independent_review']?.model_id || 'gemini-3.8-flash',
-      fallback: profiles['fallback']?.model_id || 'auto',
+      thinking: profiles['thinking']?.model_id || 'gpt-5.6-luna',
+      execution: profiles['execution']?.model_id || 'gpt-5.6-luna',
+      independent_review: profiles['independent_review']?.model_id || 'claude-sonnet-5-5-medium',
+      fallback: profiles['fallback']?.model_id || 'gpt-5.6-luna',
     };
     this.showEditModal = true;
   }
 
-  private resolveAgentForModel(modelId: string): string {
+  resolveAgentForModel(modelId: string): string {
     const found = this.availableModels.find(m => m.id === modelId);
     if (found) return found.agent;
-    if (modelId.includes('gemini')) return 'antigravity';
-    if (modelId.includes('codex') || modelId.includes('gpt')) return 'codex';
-    if (modelId.includes('deepseek')) return 'deepseek';
-    return 'openrouter';
+    if (modelId.includes('gemini') || modelId.includes('claude') || modelId.includes('oss')) return 'antigravity';
+    return 'codex';
+  }
+
+  private buildProfile(role: string, modelId: string) {
+    const found = this.availableModels.find(m => m.id === modelId);
+    let agent_id = found?.agent;
+    if (!agent_id) {
+      if (modelId.includes('gemini') || modelId.includes('claude') || modelId.includes('oss')) {
+        agent_id = 'antigravity';
+      } else {
+        agent_id = 'codex';
+      }
+    }
+
+    let effort = 'medium';
+    if (modelId.endsWith('-high')) effort = 'high';
+    else if (modelId.endsWith('-low')) effort = 'low';
+    else if (modelId.endsWith('-medium')) effort = 'medium';
+    else if (found?.effort) effort = found.effort;
+
+    const proj = this.refresh.activeProject();
+    const existing = proj?.agent_profiles?.[role];
+
+    return {
+      agent_id,
+      model_id: modelId,
+      effort,
+      workflows: existing?.workflows || [],
+      skills: existing?.skills || [],
+    };
   }
 
   async submitCreateProject() {
+    if (this.isReviewerConflict(this.newProjectProfiles)) {
+      this.actionOk.set(false);
+      this.actionMsg.set('Conflicto de Independencia: La revisión independiente debe ser de un proveedor distinto a la ejecución.');
+      return;
+    }
+
     this.isActionRunning.set(true);
     this.actionMsg.set(null);
 
@@ -485,26 +644,10 @@ export class ProyectosComponent implements OnInit {
         git_pr: { provider_id: 'github', secret_reference: null },
       },
       agent_profiles: {
-        thinking: {
-          agent_id: this.resolveAgentForModel(this.newProjectProfiles.thinking),
-          model_id: this.newProjectProfiles.thinking,
-          effort: 'high',
-        },
-        execution: {
-          agent_id: this.resolveAgentForModel(this.newProjectProfiles.execution),
-          model_id: this.newProjectProfiles.execution,
-          effort: 'high',
-        },
-        independent_review: {
-          agent_id: this.resolveAgentForModel(this.newProjectProfiles.independent_review),
-          model_id: this.newProjectProfiles.independent_review,
-          effort: 'high',
-        },
-        fallback: {
-          agent_id: this.resolveAgentForModel(this.newProjectProfiles.fallback),
-          model_id: this.newProjectProfiles.fallback,
-          effort: 'medium',
-        },
+        thinking: this.buildProfile('thinking', this.newProjectProfiles.thinking),
+        execution: this.buildProfile('execution', this.newProjectProfiles.execution),
+        independent_review: this.buildProfile('independent_review', this.newProjectProfiles.independent_review),
+        fallback: this.buildProfile('fallback', this.newProjectProfiles.fallback),
       },
       execution_policy: {
         max_review_rounds: 2,
@@ -535,6 +678,12 @@ export class ProyectosComponent implements OnInit {
   }
 
   async submitEditProject() {
+    if (this.isReviewerConflict(this.editProjectProfiles)) {
+      this.actionOk.set(false);
+      this.actionMsg.set('Conflicto de Independencia: La revisión independiente debe ser de un proveedor distinto a la ejecución.');
+      return;
+    }
+
     this.isActionRunning.set(true);
     this.actionMsg.set(null);
 
@@ -545,26 +694,10 @@ export class ProyectosComponent implements OnInit {
       display_name: this.editProject.display_name.trim(),
       base_branch: this.editProject.base_branch.trim() || 'main',
       agent_profiles: {
-        thinking: {
-          agent_id: this.resolveAgentForModel(this.editProjectProfiles.thinking),
-          model_id: this.editProjectProfiles.thinking,
-          effort: 'high',
-        },
-        execution: {
-          agent_id: this.resolveAgentForModel(this.editProjectProfiles.execution),
-          model_id: this.editProjectProfiles.execution,
-          effort: 'high',
-        },
-        independent_review: {
-          agent_id: this.resolveAgentForModel(this.editProjectProfiles.independent_review),
-          model_id: this.editProjectProfiles.independent_review,
-          effort: 'high',
-        },
-        fallback: {
-          agent_id: this.resolveAgentForModel(this.editProjectProfiles.fallback),
-          model_id: this.editProjectProfiles.fallback,
-          effort: 'medium',
-        },
+        thinking: this.buildProfile('thinking', this.editProjectProfiles.thinking),
+        execution: this.buildProfile('execution', this.editProjectProfiles.execution),
+        independent_review: this.buildProfile('independent_review', this.editProjectProfiles.independent_review),
+        fallback: this.buildProfile('fallback', this.editProjectProfiles.fallback),
       },
     };
 
