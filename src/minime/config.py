@@ -104,6 +104,7 @@ SUPPORTED_PROVIDER_EFFORTS: dict[str, set[str]] = {
     # must still prove the selected level against the authenticated account's
     # live /models catalog before any review is authorized or dispatched.
     "deepseek": {"low", "medium", "high", "max"},
+    "opencode": {"low", "medium", "high", "max"},
 }
 
 DEFAULT_R01_STAGE_PROFILES: dict[str, StageProfileConfig] = {

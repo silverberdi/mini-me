@@ -258,7 +258,7 @@ import { ProjectAgentProfile, ProjectExecutionPolicy } from '../../core/models';
             <!-- Independence warning -->
             <div *ngIf="isReviewerConflict(newProjectProfiles)"
                  class="p-2.5 rounded-xl bg-amber-500/10 border border-amber-500/20 text-amber-300 text-[11px]">
-              ⚠️ <strong>Principio de Independencia:</strong> La revisión independiente debe ser de un proveedor distinto a la ejecución (Codex ↔ Antigravity).
+              ⚠️ <strong>Principio de Independencia:</strong> La revisión independiente debe ser de un proveedor distinto a la ejecución (ej. OpenCode o Codex ↔ Antigravity).
             </div>
 
             <!-- Architecture Info Banner -->
@@ -266,9 +266,10 @@ import { ProjectAgentProfile, ProjectExecutionPolicy } from '../../core/models';
               <div class="font-semibold text-slate-300 flex items-center gap-1.5">
                 <span>ℹ️</span> <span>Modelos y Proveedores (Contrato Rector 1.3):</span>
               </div>
-              <p>• <strong>Anthropic Claude & Google Gemini</strong>: Operan vía el harness <strong>Antigravity</strong> con capacidades de edición OpenSpec.</p>
+              <p>• <strong>OpenCode CLI</strong>: Ejecuta modelos API externos (<strong class="text-sky-300">opencode-deepseek (API)</strong> y <strong class="text-sky-300">opencode-deepseek (openrouter)</strong>).</p>
+              <p>• <strong>Anthropic Claude & Google Gemini</strong>: Operan vía el harness <strong>Antigravity</strong> con capacidades OpenSpec.</p>
               <p>• <strong>OpenAI GPT</strong>: Opera vía el harness <strong>Codex</strong>.</p>
-              <p>• <strong>DeepSeek</strong>: Auditor directo de solo lectura (<code class="text-sky-300">CONTRACT_REVIEW</code> y <code class="text-sky-300">REVIEW</code>), reservado por política rectora para verificación estricta independiente sin mutación de archivos.</p>
+              <p>• <strong>DeepSeek Directo</strong>: Auditor de solo lectura (<code class="text-sky-300">CONTRACT_REVIEW</code> y <code class="text-sky-300">REVIEW</code>).</p>
             </div>
           </div>
 
@@ -357,7 +358,7 @@ import { ProjectAgentProfile, ProjectExecutionPolicy } from '../../core/models';
             <!-- Independence warning -->
             <div *ngIf="isReviewerConflict(editProjectProfiles)"
                  class="p-2.5 rounded-xl bg-amber-500/10 border border-amber-500/20 text-amber-300 text-[11px]">
-              ⚠️ <strong>Principio de Independencia:</strong> La revisión independiente debe ser de un proveedor distinto a la ejecución (Codex ↔ Antigravity).
+              ⚠️ <strong>Principio de Independencia:</strong> La revisión independiente debe ser de un proveedor distinto a la ejecución (ej. OpenCode o Codex ↔ Antigravity).
             </div>
 
             <!-- Architecture Info Banner -->
@@ -365,9 +366,10 @@ import { ProjectAgentProfile, ProjectExecutionPolicy } from '../../core/models';
               <div class="font-semibold text-slate-300 flex items-center gap-1.5">
                 <span>ℹ️</span> <span>Modelos y Proveedores (Contrato Rector 1.3):</span>
               </div>
-              <p>• <strong>Anthropic Claude & Google Gemini</strong>: Operan vía el harness <strong>Antigravity</strong> con capacidades de edición OpenSpec.</p>
+              <p>• <strong>OpenCode CLI</strong>: Ejecuta modelos API externos (<strong class="text-sky-300">opencode-deepseek (API)</strong> y <strong class="text-sky-300">opencode-deepseek (openrouter)</strong>).</p>
+              <p>• <strong>Anthropic Claude & Google Gemini</strong>: Operan vía el harness <strong>Antigravity</strong> con capacidades OpenSpec.</p>
               <p>• <strong>OpenAI GPT</strong>: Opera vía el harness <strong>Codex</strong>.</p>
-              <p>• <strong>DeepSeek</strong>: Auditor directo de solo lectura (<code class="text-sky-300">CONTRACT_REVIEW</code> y <code class="text-sky-300">REVIEW</code>), reservado por política rectora para verificación estricta independiente sin mutación de archivos.</p>
+              <p>• <strong>DeepSeek Directo</strong>: Auditor de solo lectura (<code class="text-sky-300">CONTRACT_REVIEW</code> y <code class="text-sky-300">REVIEW</code>).</p>
             </div>
           </div>
 
@@ -406,6 +408,10 @@ export class ProyectosComponent implements OnInit {
     effort: string;
     group: string;
   }[] = [
+    // OpenCode CLI (Modelos API)
+    { id: 'deepseek-chat', label: 'opencode-deepseek (API)', agent: 'opencode', effort: 'medium', group: 'OpenCode CLI (Modelos API)' },
+    { id: 'deepseek/deepseek-chat', label: 'opencode-deepseek (openrouter)', agent: 'opencode', effort: 'medium', group: 'OpenCode CLI (Modelos API)' },
+
     // Anthropic Claude via Antigravity
     { id: 'claude-sonnet-5-5-medium', label: 'Claude Sonnet 5.5 — Medio', agent: 'antigravity', effort: 'medium', group: 'Anthropic Claude (vía Antigravity)' },
     { id: 'claude-sonnet-5-5-high', label: 'Claude Sonnet 5.5 — Alto', agent: 'antigravity', effort: 'high', group: 'Anthropic Claude (vía Antigravity)' },
@@ -493,7 +499,14 @@ export class ProyectosComponent implements OnInit {
               effort = efforts[0];
             }
 
-            if (modelKey.startsWith('claude')) {
+            if (providerId === 'opencode' || modelKey.includes('deepseek')) {
+              group = 'OpenCode CLI (Modelos API)';
+              if (modelKey.includes('openrouter')) {
+                label = 'opencode-deepseek (openrouter)';
+              } else {
+                label = 'opencode-deepseek (API)';
+              }
+            } else if (modelKey.startsWith('claude')) {
               group = 'Anthropic Claude (vía Antigravity)';
               const sub = modelKey.replace('claude-', '').replace(/-[a-z]+$/, '');
               label = `Claude ${sub.replace('-', '.').toUpperCase()} — ${effort.toUpperCase()}`;
@@ -590,6 +603,7 @@ export class ProyectosComponent implements OnInit {
   resolveAgentForModel(modelId: string): string {
     const found = this.availableModels.find(m => m.id === modelId);
     if (found) return found.agent;
+    if (modelId.includes('deepseek')) return 'opencode';
     if (modelId.includes('gemini') || modelId.includes('claude') || modelId.includes('oss')) return 'antigravity';
     return 'codex';
   }
@@ -598,7 +612,9 @@ export class ProyectosComponent implements OnInit {
     const found = this.availableModels.find(m => m.id === modelId);
     let agent_id = found?.agent;
     if (!agent_id) {
-      if (modelId.includes('gemini') || modelId.includes('claude') || modelId.includes('oss')) {
+      if (modelId.includes('deepseek')) {
+        agent_id = 'opencode';
+      } else if (modelId.includes('gemini') || modelId.includes('claude') || modelId.includes('oss')) {
         agent_id = 'antigravity';
       } else {
         agent_id = 'codex';

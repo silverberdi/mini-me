@@ -61,6 +61,25 @@ providers:
     api_key_env: DEEPSEEK_API_KEY
     roles: [reviewer]
     code_review_max_output_tokens: 16384
+  opencode:
+    type: cli
+    command: opencode
+    enabled: true
+    roles: [implementer, reviewer]
+    file_edit_roles: [implementer]
+    read_only_roles: [reviewer]
+    invocation:
+      implementer:
+        args: [run, "--stdio"]
+        prompt_transport: stdin
+      reviewer:
+        args: [run, "--stdio"]
+        prompt_transport: stdin
+    probe:
+      cooldown_seconds: 300
+      backoff_base_seconds: 300
+      backoff_max_seconds: 3600
+      max_per_hour: 4
   qwen-local:
     type: openai-compatible
     enabled: false

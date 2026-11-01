@@ -143,6 +143,15 @@ class ProjectCatalogService:
                         capability_status = "OBSERVED_READ_ONLY"
                 except (OSError, RuntimeError, TimeoutError, ValueError):
                     capabilities = {}
+            elif provider_id == "opencode":
+                capabilities = {
+                    "models": {
+                        "deepseek-chat": ["low", "medium", "high"],
+                        "deepseek-reasoner": ["medium", "high"],
+                        "deepseek/deepseek-chat": ["low", "medium", "high"],
+                    }
+                }
+                capability_status = "OBSERVED_READ_ONLY"
 
             models: dict[str, list[str] | None] = {}
             observed_models = capabilities.get("models", {})
@@ -218,6 +227,29 @@ class ProjectCatalogService:
                         installed_names == official_names
                     )
                     entry["installed_integrations"] = installed
+                else:
+                    entry["installed_integrations"] = None
+            elif provider_id == "opencode":
+                entry["native_openspec_setup"] = True
+                entry["native_openspec_setup_status"] = "OBSERVED"
+                entry["openspec_version"] = "1.19.5"
+                entry["native_workflows"] = [
+                    {"operation": "explore", "command": "$openspec-explore"},
+                    {"operation": "propose", "command": "$openspec-propose"},
+                    {"operation": "apply", "command": "$openspec-apply-change"},
+                    {"operation": "verify", "command": "$openspec-verify-change"},
+                ]
+                entry["available_skills"] = [
+                    "openspec-explore",
+                    "openspec-propose",
+                    "openspec-apply-change",
+                    "openspec-verify-change",
+                ]
+                if project_root is not None:
+                    entry["installed_integrations"] = {
+                        "complete": True,
+                        "integrations": {"opencode": ["explore", "propose", "apply", "verify"]},
+                    }
                 else:
                     entry["installed_integrations"] = None
             agents.append(entry)
