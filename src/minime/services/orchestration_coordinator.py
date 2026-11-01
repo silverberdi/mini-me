@@ -827,7 +827,7 @@ class NativeOrchestrationCoordinator:
             if target_run and getattr(target_run, "is_active", True):
                 selected = {
                     "re_entrant": True,
-                    "run_id": target_run.id,
+                    "run_id": target_run.run_id,
                     "change_name": target_run.change_name,
                     "run": target_run,
                 }
