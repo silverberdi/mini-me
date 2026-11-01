@@ -2274,13 +2274,42 @@ def list_orchestration_runs(
     change_name: str | None = None,
     is_active: bool | None = None,
 ) -> list[dict[str, Any]]:
-    """List historical and active orchestration runs."""
+    """List historical and active orchestration runs with normalized status and human gate details."""
     runs = uow.orchestration_runs.list_runs(
         project_id=project_id,
         change_name=change_name,
         is_active=is_active,
     )
-    return [r.model_dump() for r in runs]
+    results: list[dict[str, Any]] = []
+    for r in runs:
+        d = r.model_dump()
+        stop_details = d.get("stop_details") or {}
+        
+        # Check if human intervention is required from checkpoint
+        human_payload = (
+            stop_details.get("human_payload")
+            or stop_details.get("explore_checkpoint", {}).get("human_payload")
+            or stop_details.get("propose_checkpoint", {}).get("human_payload")
+        )
+        is_human_required = bool(
+            human_payload
+            or stop_details.get("explore_checkpoint", {}).get("status") == "HUMAN_REQUIRED"
+            or stop_details.get("propose_checkpoint", {}).get("status") == "HUMAN_REQUIRED"
+        )
+        
+        if is_human_required:
+            d["status"] = "HUMAN_REQUIRED"
+            d["human_gate"] = "HUMAN_REQUIRED"
+            if human_payload and "human_payload" not in stop_details:
+                stop_details["human_payload"] = human_payload
+                d["stop_details"] = stop_details
+        else:
+            d["status"] = "RUNNING" if r.is_active else "COMPLETED"
+            
+        d["stage"] = r.current_stage.value if r.current_stage else None
+        results.append(d)
+        
+    return results
 
 
 # -----------------------------------------------------------------------------
