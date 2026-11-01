@@ -410,7 +410,8 @@ export class ProyectosComponent implements OnInit {
   }[] = [
     // OpenCode CLI (Modelos API)
     { id: 'deepseek-chat', label: 'opencode-deepseek (API)', agent: 'opencode', effort: 'medium', group: 'OpenCode CLI (Modelos API)' },
-    { id: 'deepseek/deepseek-chat', label: 'opencode-deepseek (openrouter)', agent: 'opencode', effort: 'medium', group: 'OpenCode CLI (Modelos API)' },
+    { id: 'deepseek/deepseek-chat', label: 'opencode-deepseek (OpenRouter)', agent: 'opencode', effort: 'medium', group: 'OpenCode CLI (Modelos API)' },
+    { id: 'deepseek-reasoner', label: 'opencode-deepseek-r1 (API)', agent: 'opencode', effort: 'medium', group: 'OpenCode CLI (Modelos API)' },
 
     // Anthropic Claude via Antigravity
     { id: 'claude-sonnet-5-5-medium', label: 'Claude Sonnet 5.5 — Medio', agent: 'antigravity', effort: 'medium', group: 'Anthropic Claude (vía Antigravity)' },
@@ -501,8 +502,10 @@ export class ProyectosComponent implements OnInit {
 
             if (providerId === 'opencode' || modelKey.includes('deepseek')) {
               group = 'OpenCode CLI (Modelos API)';
-              if (modelKey.includes('openrouter')) {
-                label = 'opencode-deepseek (openrouter)';
+              if (modelKey.includes('/') || modelKey.includes('openrouter')) {
+                label = 'opencode-deepseek (OpenRouter)';
+              } else if (modelKey.includes('reasoner') || modelKey.includes('r1')) {
+                label = 'opencode-deepseek-r1 (API)';
               } else {
                 label = 'opencode-deepseek (API)';
               }
@@ -554,7 +557,21 @@ export class ProyectosComponent implements OnInit {
     if (!proj || !proj.agent_profiles) return 'Configuración por defecto';
     const profile = proj.agent_profiles[role];
     if (!profile) return 'No asignado';
-    return `${profile.agent_id} (${profile.model_id})`;
+    const found = this.availableModels.find(m => m.id === profile.model_id);
+    const effort = profile.effort ? ` [${profile.effort.slice(0, 3)}]` : '';
+    if (found) {
+      return `${found.label}${effort}`;
+    }
+    if (profile.model_id === 'deepseek/deepseek-chat') {
+      return `opencode-deepseek (OpenRouter)${effort}`;
+    }
+    if (profile.model_id === 'deepseek-chat') {
+      return `opencode-deepseek (API)${effort}`;
+    }
+    if (profile.model_id === 'deepseek-reasoner') {
+      return `opencode-deepseek-r1 (API)${effort}`;
+    }
+    return `${profile.agent_id} (${profile.model_id})${effort}`;
   }
 
   selectProject(projectId: string) {
