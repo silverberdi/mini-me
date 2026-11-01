@@ -22,7 +22,7 @@ import { ThemeService } from './core/theme.service';
         <div class="hidden sm:flex items-center gap-2">
           <label for="projectSelector" class="text-xs text-slate-400 font-medium">Proyecto:</label>
           <select id="projectSelector"
-                  [value]="refresh.activeProject()?.project_id || ''"
+                  [value]="refresh.activeProject().project_id"
                   (change)="onProjectChange($event)"
                   class="bg-slate-800 border border-slate-700 text-xs rounded-lg px-2.5 py-1.5 text-slate-200 focus:outline-none focus:border-sky-500">
             <option *ngFor="let p of refresh.projects()" [value]="p.project_id">
