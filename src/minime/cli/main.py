@@ -644,11 +644,20 @@ def scheduler_run_cmd(
 
                 uow = uow_factory()
                 projects = uow.projects.list_all()
-                active_projects = [
-                    p for p in projects
-                    if getattr(p, "is_active", True)
-                    and not (getattr(p, "execution_policy", None) and getattr(p.execution_policy, "global_pause", False))
-                ]
+                def _is_project_paused(p: Any) -> bool:
+                    if not getattr(p, "is_active", True) or getattr(p, "status", "ACTIVE") == "PAUSED":
+                        return True
+                    policy = getattr(p, "execution_policy", None)
+                    if not policy:
+                        return False
+                    if isinstance(policy, dict):
+                        return bool(policy.get("global_pause") or policy.get("effective_pause"))
+                    return bool(
+                        getattr(policy, "global_pause", False)
+                        or getattr(policy, "effective_pause", False)
+                    )
+
+                active_projects = [p for p in projects if not _is_project_paused(p)]
 
                 if not active_projects:
                     time.sleep(poll_interval)

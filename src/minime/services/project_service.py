@@ -820,6 +820,8 @@ class ProjectService:
         policy = dict(target.execution_policy or {})
         policy["effective_pause"] = False
         target.execution_policy = policy
+        target.status = "ACTIVE"
+        target.is_active = True
         target.updated_at = utc_now()
         self.uow.projects.save(target)
 
