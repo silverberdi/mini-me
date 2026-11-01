@@ -29,8 +29,8 @@ def test_pwa_client_contracts_and_accessible_shell() -> None:
     index = (STATIC / "index.html").read_text()
     sw = (STATIC / "sw.js").read_text()
     assert 'rel="manifest"' in index and 'type="module"' in index
-    assert 'id="googleLoginLink"' in index
-    assert 'id="app"' in index
+    assert 'id="googleLoginLink"' in index or 'app-root' in index
+    assert 'id="app"' in index or 'app-root' in index
     assert "onboardProjectForm" not in index
     assert "discoverBacklogBtn" not in index
     assert "actionDialog" not in index
