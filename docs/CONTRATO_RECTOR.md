@@ -2,7 +2,7 @@
 
 **Versión 1.3 — 26 de octubre de 2026.**
 **Autoridad:** este documento es la dirección funcional y arquitectónica de mini me; sustituye las decisiones incompatibles de planes, specs, fichas y contratos históricos. La implementación existente NO se considera conforme por la sola publicación de este documento.
-**Naturaleza:** instalación personal única, no producto comercial. El **programa original de reconstrucción F1–F6 mantiene exactamente seis fases y un Change OpenSpec por fase**. Por decisión posterior del operador se agregan **F7 (capacidades funcionales diferidas) y F8 (migración visual a Angular)** como extensión **futura, deshabilitada y no ejecutable aún**. Una fase futura requerirá su propio Change OpenSpec autorizado en su momento, sin micro-Changes.
+**Naturaleza:** instalación personal única, no producto comercial. El **programa original de reconstrucción F1–F6 mantiene exactamente seis fases y un Change OpenSpec por fase**. Por decisión posterior del operador se agregan F7 (capacidades funcionales diferidas), F8 (migración visual a Angular), F9 (adaptador OpenCode) y F10 (desacoplamiento asíncrono, telemetría real de cuotas y pulimento PWA) como extensiones posteriores, cada una con un único Change OpenSpec y sin micro-Changes.
 **Estado:** actualización contractual documental sobre el contrato base aprobado. F1–F4 forman el historial de entregas; F5 es el siguiente Change. Esta actualización no autoriza crear Changes, desplegar, migrar, iniciar scheduler, consumir agentes, fusionar PRs ni ejecutar F7/F8.
 
 **Excepción correctiva PR #196:** por autorización expresa del operador, PR #196 puede reparar el ejecutor común que bloquea la autoejecución de F5. Esta excepción no es una fase, Change ni alcance funcional de F5: no crea otro Run, altera sus artefactos, habilita F6–F8 ni relaja la regla general de un Change por fase. Su alcance queda limitado a seguridad de despacho, continuidad, evidencia, concurrencia, redacción y retiro de rutas redundantes del runtime existente; toda modificación sigue vinculada al mismo PR, sus hallazgos y su revisión independiente.
@@ -105,9 +105,9 @@ En escritorio, centro de control legible; tablet operable por panel maestro/deta
 
 mini me llega hasta PR de implementación fusionado, sync/archive nativos, PR documental fusionado y ticket cerrado. NO despliega ni verifica despliegue productivo: cada proyecto lo hace mediante CI/CD independiente. Sí exige pruebas pertinentes antes del merge y puede utilizar previews temporales para validar UI.
 
-## 10. Plan obligatorio: seis fases originales + F7/F8/F9 posteriores
+## 10. Plan obligatorio: seis fases originales + fases posteriores
 
-Las **seis fases del programa original F1–F6** y sus Changes se preservan. F7/F8/F9 **extienden** el plan por decisión expresa posterior, no reabren F1–F4 ni cambian la función de F6. Una fase = **un Change OpenSpec** con las specs necesarias, creado solo cuando corresponda y esté autorizado; no trocear en micro-Changes. No ejecutar la siguiente fase hasta el cierre gobernado de la anterior. Documentar o crear Issues F7/F8/F9 con etiqueta `disabled` no habilita sus Changes ni autoriza recursos.
+Las **seis fases del programa original F1–F6** y sus Changes se preservan. F7/F8/F9/F10 **extienden** el plan por decisión expresa posterior, no reabren F1–F4 ni cambian la función de F6. Una fase = **un Change OpenSpec** con las specs necesarias, creado solo cuando corresponda y esté autorizado; no trocear en micro-Changes. No ejecutar la siguiente fase hasta el cierre gobernado de la anterior.
 
 | Fase | Issue | Change planificado | Entrega |
 | --- | --- | --- | --- |
@@ -120,6 +120,7 @@ Las **seis fases del programa original F1–F6** y sus Changes se preservan. F7/
 | 7 — futuro, disabled | [#189](https://github.com/silverberdi/mini-me/issues/189) | **por autorizar/crear** | Integrar funciones UI pendientes, pausa diferida, único proyecto ejecutor, gestión segura de Requests y métricas faltantes |
 | 8 — futuro, disabled | [#190](https://github.com/silverberdi/mini-me/issues/190) | **por autorizar/crear** | Migrar frontend a Angular + TypeScript + Tailwind conservando contratos y E2E |
 | 9 — autorizado | [#204](https://github.com/silverberdi/mini-me/issues/204) | req-204-f9-opencode-cli-como-adaptadorharness-de | OpenCode como CLI comodín/harness desacoplado para modelos API (OpenRouter, DeepSeek, Minimax, Claude, etc.) |
+| 10 — autorizado, posterior a F9 | [#207](https://github.com/silverberdi/mini-me/issues/207) | **por crear** | Desacoplamiento asíncrono del pipeline, telemetría real de cuotas en ventanas de 5h, reactividad/legibilidad PWA y auto-recuperación de Runs |
 
 ### Fase 1 — Depuración inicial
 
@@ -156,6 +157,10 @@ Migrar la capa visual de F5/F7 a **Angular + TypeScript + Tailwind**; garantizar
 ### Fase 9 — OpenCode CLI comodín para modelos API externos (autorizada para #204)
 
 Integrar OpenCode como un adaptador CLI ejecutable universal (comodín) en la máquina anfitriona, dotando a modelos externos conectados por API (OpenRouter, DeepSeek Directo, Minimax, Claude, etc.) de capacidad de ejecución interactiva en el worktree del proyecto. Esto incluye ejecución de herramientas locales (lectura/edición de archivos, ejecución de bash/linters/tests) y compatibilidad con los workflows oficiales de OpenSpec, permitiendo que cualquier modelo API opere legítimamente como implementer (`execution`) o reviewer (`independent_review`) dentro del marco de proyectos F2 sin construir runners paralelos dentro del núcleo de mini me. Autorizada expresamente por el operador para el Issue #204 (`req-204-f9-opencode-cli-como-adaptadorharness-de`), manteniéndose deshabilitada por defecto en proyectos no configurados.
+
+### Fase 10 — Desacoplamiento asíncrono, telemetría y pulimento PWA (autorizada para #207)
+
+Consolidar en un único Change los requisitos del Issue #207: aceptación HTTP asíncrona de ejecuciones y gates con continuidad durable, adaptadores de cuota real con ventanas rodantes de 5 horas y balance DeepSeek, tarjetas PWA compactas, Signals transversales, refresco manual observable, contraste WCAG AA y auto-recuperación autónoma de Runs. Debe reutilizar y retirar de forma segura las rutas existentes que sustituya, preservar PostgreSQL como estado durable y demostrar E2E real. Su orden operativo es posterior al cierre gobernado de F9.
 
 Criterio común de cierre: cumplimiento funcional, pruebas pertinentes reales, PR de implementación revisado y merge humano, sync/archive nativos, PR documental fusionado y ticket cerrado (respetando la transición desde la infraestructura existente en F1–F2). Las fases 5–6 añaden **prueba material de autoejecución**. El usuario no es mensajero entre agentes. No habilitar scheduler ni gastar cuota al aprobar documentos.
 
