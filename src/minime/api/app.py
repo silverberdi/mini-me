@@ -2428,6 +2428,24 @@ def list_orchestration_runs(
             or stop_details.get("propose_checkpoint", {}).get("status") == "HUMAN_REQUIRED"
         )
 
+        # Calculate tokens from budget ledger or stop_details
+        tokens = stop_details.get("tokens") or 0
+        if not tokens and hasattr(uow, "budget_ledger"):
+            change_name = r.change_name
+            entries = uow.budget_ledger.list_by_change_id(change_name) if hasattr(uow.budget_ledger, "list_by_change_id") else []
+            if entries:
+                tokens = sum(e.total_tokens or 0 for e in entries)
+        d["tokens"] = tokens
+
+        # Autonomy: if human gate was required or recovery blocked, autonomy is degraded
+        has_human_gate = bool(r.human_gate or is_human_required)
+        reassignments = getattr(r, "reassignment_count", 0)
+        retries = getattr(r, "retry_count", 0)
+        if has_human_gate or reassignments > 0 or retries > 1:
+            d["autonomy_percent"] = 50.0 if not has_human_gate else 0.0
+        else:
+            d["autonomy_percent"] = 100.0 if not r.is_active else None
+
         if is_human_required:
             d["status"] = "HUMAN_REQUIRED"
             d["human_gate"] = "HUMAN_REQUIRED"

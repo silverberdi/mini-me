@@ -606,13 +606,106 @@ def _legacy_group_command(operation: str, phase: str = "F3"):
 
 
 for _group, _operation, _commands in (
-    (scheduler_app, "legacy_scheduler", ("status", "tick", "run")),
+    (scheduler_app, "legacy_scheduler", ("status", "tick")),
     (queue_app, "legacy_queue", ("list", "explain")),
     (orchestrate_app, "legacy_orchestration", ("start", "resume", "status", "list", "cancel", "retry", "reassign")),
     (action_app, "legacy_control_plane", ("list", "execute", "history")),
 ):
     for _command_name in _commands:
         _group.command(_command_name)(_legacy_group_command(_operation))
+
+
+@scheduler_app.command("run")
+def scheduler_run_cmd(
+    poll_interval: int = typer.Option(30, "--interval", "-i", help="Poll interval in seconds"),
+    max_iterations: int | None = typer.Option(None, "--max-iterations", help="Exit after N iterations"),
+) -> None:
+    """Run autonomous background runner for active project."""
+    import time
+    from minime.adapters.github import GitHubAdapter
+    from minime.services.agent_runner import CliAgentRunner
+    from minime.services.budget_service import BudgetService
+    from minime.services.capacity_lifecycle_service import CapacityLifecycleService
+    from minime.services.orchestration_coordinator import NativeOrchestrationCoordinator
+    from minime.services.worktree_manager import WorktreeManager
+
+    iterations = 0
+    typer.echo(f"Autonomous SDLC scheduler started (poll_interval={poll_interval}s).")
+
+    while True:
+        if max_iterations is not None and iterations >= max_iterations:
+            break
+        iterations += 1
+
+        try:
+            with db_manager.session() as session:
+                def uow_factory() -> PostgresPersistenceUnitOfWork:
+                    return PostgresPersistenceUnitOfWork(session)
+
+                uow = uow_factory()
+                projects = uow.projects.list_all()
+                active_projects = [
+                    p for p in projects
+                    if getattr(p, "is_active", True)
+                    and not (getattr(p, "execution_policy", None) and getattr(p.execution_policy, "global_pause", False))
+                ]
+
+                if not active_projects:
+                    time.sleep(poll_interval)
+                    continue
+
+                for proj in active_projects:
+                    project_id = proj.project_id
+                    binding = None
+                    if hasattr(uow, "project_managed_repository_bindings"):
+                        binding = uow.project_managed_repository_bindings.get_by_project_id(project_id)
+                    if not binding or not getattr(binding, "managed_repository_root", None):
+                        continue
+
+                    # Check if there is an active run
+                    active_runs = uow.orchestration_runs.list_runs(project_id=project_id, is_active=True)
+                    if active_runs:
+                        active_run = active_runs[0]
+                        if getattr(active_run, "human_gate", None) == "HUMAN_REQUIRED":
+                            # Awaiting human attention
+                            continue
+
+                    repo_root = Path(binding.managed_repository_root)
+                    wt_manager = WorktreeManager(project_root=repo_root, uow=uow)
+                    github = GitHubAdapter()
+                    try:
+                        agent_runner = CliAgentRunner.for_project_profiles(
+                            proj.agent_profiles,
+                            capacity_service=CapacityLifecycleService(uow),
+                            budget_service=BudgetService(uow),
+                        )
+                    except Exception as err:
+                        typer.echo(f"[{project_id}] Agent profiles error: {err}")
+                        continue
+
+                    coordinator = NativeOrchestrationCoordinator(
+                        uow_factory=uow_factory,
+                        github_adapter=github,
+                        worktree_manager=wt_manager,
+                        agent_runner=agent_runner,
+                        semantic_pr_agent=True,
+                    )
+
+                    typer.echo(f"[{project_id}] Checking / executing eligible request...")
+                    result = asyncio.run(
+                        coordinator.execute_project_request(
+                            project_id=project_id,
+                            thinker_provider=agent_runner.provider_for_role("thinker"),
+                            implementer_provider=agent_runner.provider_for_role("implementer"),
+                            reviewer_provider=agent_runner.provider_for_role("reviewer"),
+                        )
+                    )
+                    typer.echo(f"[{project_id}] Result: status={result.status}, run_id={result.run_id}, message={result.message}")
+
+        except Exception as exc:
+            typer.echo(f"Scheduler loop error: {exc}", err=True)
+
+        time.sleep(poll_interval)
 
 
 if __name__ == "__main__":
