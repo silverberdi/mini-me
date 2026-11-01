@@ -2,7 +2,7 @@
 
 ## Execution Metadata
 - **Change Identifier**: `req-207-f10-desacoplamiento-asincrono-telemetria`
-- **Candidate Commit SHA**: `HEAD` (Clean immutable candidate commit on `request-207-f10-desacoplamiento-asincrono-telemetria`)
+- **Candidate Commit SHA**: `583627e9839855a298ab41d1489e689be3c209fb`
 - **Execution Timestamp**: `2026-11-01T03:37:13.754235+00:00`
 - **Verification Environment**: Ubuntu Linux 24.04 LTS (x86_64) on host `192.168.0.194`
 - **Governing Canonical Contract**: Contrato Rector v1.3
