@@ -2544,8 +2544,8 @@ class GitHubAdapter(GitHubAdapterInterface):
             payload["body"] = body
 
         req_headers = {}
-        if remote_etag:
-            req_headers["If-Match"] = remote_etag
+        # GitHub Issues PATCH does not support If-Match
+        pass
 
         try:
             resp = self._request("PATCH", f"/repos/{repo}/issues/{issue_number}", json=payload, headers=req_headers)
