@@ -38,7 +38,7 @@ export class RefreshService implements OnDestroy {
   });
 
   readonly humanRequiredRun = computed(() => {
-    return this.runs().find(r => r.status === "HUMAN_REQUIRED" || (r as any).human_gate === "HUMAN_REQUIRED" || !!r.metadata?.['human_payload']) || null;
+    return this.runs().find(r => r.is_active && (r.status === "HUMAN_REQUIRED" || (r as any).human_gate === "HUMAN_REQUIRED" || !!r.metadata?.['human_payload'])) || null;
   });
 
   constructor(private api: ApiService) {

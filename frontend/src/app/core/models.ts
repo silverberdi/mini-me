@@ -18,6 +18,7 @@ export interface OrchestrationRun {
   status: string;
   created_at?: string;
   updated_at?: string;
+  is_active?: boolean;
   active_agent_id?: string | null;
   error_detail?: string | null;
   metadata?: Record<string, any>;

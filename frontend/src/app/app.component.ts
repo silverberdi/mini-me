@@ -14,7 +14,7 @@ import { ThemeService } from './core/theme.service';
     <header class="h-16 border-b border-slate-800 bg-slate-900/80 backdrop-blur-md sticky top-0 z-50 flex items-center justify-between px-4 sm:px-6">
       <div class="flex items-center gap-6">
         <a routerLink="/dashboard" class="flex items-center gap-2.5 text-white font-bold text-lg hover:text-sky-400 transition-colors">
-          <span class="w-8 h-8 rounded-lg bg-sky-500/20 border border-sky-500/30 flex items-center justify-center text-sky-400">⚡</span>
+          <span class="w-8 h-8 rounded-lg bg-sky-500/20 border border-sky-500/30 flex items-center justify-center text-lg">🤖</span>
           <span>mini me <span class="text-xs font-normal text-slate-400 block -mt-1 uppercase tracking-wider">centro de control</span></span>
         </a>
 
