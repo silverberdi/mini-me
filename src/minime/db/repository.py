@@ -54,6 +54,7 @@ from minime.db.models import (
     ProjectModel,
     ProviderEfficiencyMetricsModel,
     ProviderHealthModel,
+    PushSubscriptionModel,
     RecoveryClaimModel,
     RecoveryDecisionModel,
     ReviewFindingModel,
@@ -152,6 +153,7 @@ from minime.domain.interfaces import (
     ProjectRepositoryInterface,
     ProviderEfficiencyMetricsRepositoryInterface,
     ProviderHealthRepositoryInterface,
+    PushSubscriptionRepositoryInterface,
     RecoveryClaimRepositoryInterface,
     RecoveryDecisionRepositoryInterface,
     ReviewFindingRepositoryInterface,
@@ -5546,6 +5548,78 @@ class PostgresExternalActionAttemptRepository(ExternalActionAttemptRepositoryInt
         raise ValueError(f"ExternalActionAttempt {attempt_id} not found")
 
 
+class PostgresPushSubscriptionRepository(PushSubscriptionRepositoryInterface):
+    def __init__(self, session: Session):
+        self.session = session
+
+    def get_by_endpoint(self, endpoint: str) -> PushSubscriptionModel | None:
+        stmt = select(PushSubscriptionModel).where(PushSubscriptionModel.endpoint == endpoint)
+        return self.session.scalars(stmt).first()
+
+    def list_by_operator(self, operator_id: str, active_only: bool = True) -> list[PushSubscriptionModel]:
+        stmt = select(PushSubscriptionModel).where(PushSubscriptionModel.operator_id == operator_id)
+        if active_only:
+            stmt = stmt.where(PushSubscriptionModel.is_active.is_(True))
+        return list(self.session.scalars(stmt).all())
+
+    def save(
+        self,
+        operator_id: str,
+        endpoint: str,
+        p256dh: str,
+        auth: str,
+        device_label: str | None = None,
+        categories: dict[str, bool] | None = None,
+    ) -> PushSubscriptionModel:
+        cats = categories or {}
+        existing = self.get_by_endpoint(endpoint)
+        if existing:
+            existing.operator_id = operator_id
+            existing.p256dh = p256dh
+            existing.auth = auth
+            if device_label is not None:
+                existing.device_label = device_label
+            if "stage_transitions" in cats:
+                existing.category_stage_transitions = cats["stage_transitions"]
+            if "human_required" in cats:
+                existing.category_human_required = cats["human_required"]
+            if "terminal_outcomes" in cats:
+                existing.category_terminal_outcomes = cats["terminal_outcomes"]
+            existing.is_active = True
+            existing.updated_at = utc_now()
+            self.session.flush()
+            return existing
+        import uuid
+
+        model = PushSubscriptionModel(
+            id=str(uuid.uuid4()),
+            operator_id=operator_id,
+            endpoint=endpoint,
+            p256dh=p256dh,
+            auth=auth,
+            device_label=device_label,
+            is_active=True,
+            category_stage_transitions=cats.get("stage_transitions", True),
+            category_human_required=cats.get("human_required", True),
+            category_terminal_outcomes=cats.get("terminal_outcomes", True),
+            created_at=utc_now(),
+            updated_at=utc_now(),
+        )
+        self.session.add(model)
+        self.session.flush()
+        return model
+
+    def deactivate(self, endpoint: str, error: str | None = None) -> bool:
+        model = self.get_by_endpoint(endpoint)
+        if model:
+            model.is_active = False
+            model.last_error = error
+            model.updated_at = utc_now()
+            self.session.flush()
+            return True
+        return False
+
+
 class PostgresPersistenceUnitOfWork(PersistenceUnitOfWork):
     """Encapsulates a database session for atomic operations across repositories."""
 
@@ -5599,6 +5673,7 @@ class PostgresPersistenceUnitOfWork(PersistenceUnitOfWork):
         self.intake_workspace_ownerships = PostgresIntakeWorkspaceOwnershipRepository(session)
         self.durable_sagas = PostgresDurableSagaRepository(session)
         self.deferred_transitions = PostgresDeferredTransitionRepository(session)
+        self.push_subscriptions = PostgresPushSubscriptionRepository(session)
         self.claims = PostgresRecoveryClaimRepository(session)
         self.recovery_decisions = PostgresRecoveryDecisionRepository(session)
         self.external_action_attempts = PostgresExternalActionAttemptRepository(session)

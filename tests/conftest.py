@@ -76,6 +76,7 @@ from minime.domain.interfaces import (
     ProjectRepositoryInterface,
     ProviderEfficiencyMetricsRepositoryInterface,
     ProviderHealthRepositoryInterface,
+    PushSubscriptionRepositoryInterface,
     RecoveryClaimRepositoryInterface,
     RecoveryDecisionRepositoryInterface,
     ReviewFindingRepositoryInterface,
@@ -2476,10 +2477,87 @@ class InMemoryExternalActionAttemptRepository(ExternalActionAttemptRepositoryInt
         return attempt
 
 
+class InMemoryPushSubscriptionRepository(PushSubscriptionRepositoryInterface):
+    def __init__(self):
+        self._store: dict[str, Any] = {}
+
+    def get_by_endpoint(self, endpoint: str) -> Any | None:
+        return self._store.get(endpoint)
+
+    def list_by_operator(self, operator_id: str, active_only: bool = True) -> list[Any]:
+        res = [s for s in self._store.values() if getattr(s, "operator_id", None) == operator_id]
+        if active_only:
+            res = [s for s in res if getattr(s, "is_active", True)]
+        return res
+
+    def save(
+        self,
+        operator_id: str,
+        endpoint: str,
+        p256dh: str,
+        auth: str,
+        device_label: str | None = None,
+        categories: dict[str, bool] | None = None,
+    ) -> Any:
+        cats = categories or {}
+        existing = self._store.get(endpoint)
+        if existing:
+            existing.operator_id = operator_id
+            existing.p256dh = p256dh
+            existing.auth = auth
+            if device_label is not None:
+                existing.device_label = device_label
+            if "stage_transitions" in cats:
+                existing.category_stage_transitions = cats["stage_transitions"]
+            if "human_required" in cats:
+                existing.category_human_required = cats["human_required"]
+            if "terminal_outcomes" in cats:
+                existing.category_terminal_outcomes = cats["terminal_outcomes"]
+            existing.is_active = True
+            existing.updated_at = utc_now()
+            return existing
+
+        class DummySubscription:
+            def __init__(self, **kwargs):
+                for k, v in kwargs.items():
+                    setattr(self, k, v)
+
+        import uuid
+
+        sub = DummySubscription(
+            id=str(uuid.uuid4()),
+            operator_id=operator_id,
+            endpoint=endpoint,
+            p256dh=p256dh,
+            auth=auth,
+            device_label=device_label,
+            is_active=True,
+            category_stage_transitions=cats.get("stage_transitions", True),
+            category_human_required=cats.get("human_required", True),
+            category_terminal_outcomes=cats.get("terminal_outcomes", True),
+            created_at=utc_now(),
+            updated_at=utc_now(),
+            last_success_at=None,
+            last_error=None,
+        )
+        self._store[endpoint] = sub
+        return sub
+
+    def deactivate(self, endpoint: str, error: str | None = None) -> bool:
+        sub = self._store.get(endpoint)
+        if sub:
+            sub.is_active = False
+            sub.last_error = error
+            sub.updated_at = utc_now()
+            return True
+        return False
+
+
 class InMemoryPersistenceUnitOfWork(PersistenceUnitOfWork):
     def __init__(self):
         self.durable_sagas = InMemoryDurableSagaRepository()
         self.deferred_transitions = InMemoryDeferredTransitionRepository()
+        self.push_subscriptions = InMemoryPushSubscriptionRepository()
         self.projects = InMemoryProjectRepository()
         self.changes = InMemoryChangeRepository()
         self.bindings = InMemoryProjectBindingRepository(self)

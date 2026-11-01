@@ -2,6 +2,7 @@ import { Component, OnInit } from '@angular/core';
 import { CommonModule } from '@angular/common';
 import { RouterModule, Router } from '@angular/router';
 import { AuthService } from './core/auth.service';
+import { PushNotificationService } from './core/push-notification.service';
 import { RefreshService } from './core/refresh.service';
 import { ThemeService } from './core/theme.service';
 
@@ -53,6 +54,15 @@ import { ThemeService } from './core/theme.service';
           </select>
         </label>
 
+        <!-- Push Notification Toggle / Modal Button -->
+        <button (click)="togglePushModal()"
+                [class.text-amber-400]="pushService.isSubscribed()"
+                class="p-2 rounded-lg bg-slate-800 hover:bg-slate-700 border border-slate-700 text-slate-300 transition-colors relative"
+                title="Supervisión móvil (Web Push)" aria-label="Notificaciones Push">
+          <span class="text-sm">🔔</span>
+          <span *ngIf="pushService.isSubscribed()" class="absolute top-1 right-1 w-2 h-2 rounded-full bg-emerald-400"></span>
+        </button>
+
         <!-- Refresh Manual Button -->
         <button (click)="refresh.read()"
                 [disabled]="refresh.isRefreshing()"
@@ -79,6 +89,100 @@ import { ThemeService } from './core/theme.service';
         </button>
       </div>
     </header>
+
+    <!-- Push Notification Configuration Modal -->
+    <div *ngIf="showPushModal" class="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-950/80 backdrop-blur-sm animate-fade-in">
+      <div class="bg-slate-900 border border-slate-800 rounded-2xl max-w-md w-full p-6 shadow-2xl relative">
+        <button (click)="showPushModal = false" class="absolute top-4 right-4 text-slate-400 hover:text-white text-lg">✕</button>
+        
+        <div class="flex items-center gap-3 mb-4">
+          <div class="w-10 h-10 rounded-xl bg-sky-500/10 border border-sky-500/20 flex items-center justify-center text-xl">
+            🔔
+          </div>
+          <div>
+            <h3 class="font-bold text-white text-base">Supervisión Móvil (Web Push)</h3>
+            <p class="text-xs text-slate-400">Recibe alertas en tu dispositivo cuando el flujo requiera atención.</p>
+          </div>
+        </div>
+
+        <!-- Support warning -->
+        <div *ngIf="!pushService.isSupported()" class="p-3 bg-amber-500/10 border border-amber-500/20 rounded-xl text-amber-300 text-xs mb-4">
+          Tu navegador o entorno no soporta Service Workers o la API Web Push.
+        </div>
+
+        <div *ngIf="pushService.errorMessage()" class="p-3 bg-rose-500/10 border border-rose-500/20 rounded-xl text-rose-300 text-xs mb-4">
+          {{ pushService.errorMessage() }}
+        </div>
+
+        <div *ngIf="pushService.successMessage()" class="p-3 bg-emerald-500/10 border border-emerald-500/20 rounded-xl text-emerald-300 text-xs mb-4">
+          {{ pushService.successMessage() }}
+        </div>
+
+        <!-- Subscription Status -->
+        <div class="p-4 bg-slate-800/50 border border-slate-700/50 rounded-xl space-y-3 mb-5">
+          <div class="flex items-center justify-between">
+            <span class="text-xs text-slate-300 font-medium">Estado del dispositivo</span>
+            <span class="px-2 py-0.5 rounded-full text-xs font-semibold"
+                  [ngClass]="pushService.isSubscribed() ? 'bg-emerald-500/20 text-emerald-400 border border-emerald-500/30' : 'bg-slate-700 text-slate-400'">
+              {{ pushService.isSubscribed() ? 'Suscrito y activo' : 'No suscrito' }}
+            </span>
+          </div>
+
+          <!-- Category Preferences -->
+          <div class="pt-2 border-t border-slate-700/50 space-y-2">
+            <span class="text-[11px] font-semibold text-slate-400 uppercase tracking-wider block">Categorías notificables</span>
+            
+            <label class="flex items-center justify-between text-xs text-slate-300 cursor-pointer">
+              <span>Atención humana requerida (HUMAN_REQUIRED)</span>
+              <input type="checkbox"
+                     [checked]="pushService.categories().human_required"
+                     (change)="onCategoryChange('human_required', $event)"
+                     class="rounded bg-slate-700 border-slate-600 text-sky-500 focus:ring-0">
+            </label>
+
+            <label class="flex items-center justify-between text-xs text-slate-300 cursor-pointer">
+              <span>Resultados terminales (COMPLETED / FAILED)</span>
+              <input type="checkbox"
+                     [checked]="pushService.categories().terminal_outcomes"
+                     (change)="onCategoryChange('terminal_outcomes', $event)"
+                     class="rounded bg-slate-700 border-slate-600 text-sky-500 focus:ring-0">
+            </label>
+
+            <label class="flex items-center justify-between text-xs text-slate-300 cursor-pointer">
+              <span>Transiciones de etapa (10 fases de pipeline)</span>
+              <input type="checkbox"
+                     [checked]="pushService.categories().stage_transitions"
+                     (change)="onCategoryChange('stage_transitions', $event)"
+                     class="rounded bg-slate-700 border-slate-600 text-sky-500 focus:ring-0">
+            </label>
+          </div>
+        </div>
+
+        <!-- Action Buttons -->
+        <div class="flex items-center gap-3">
+          <button *ngIf="!pushService.isSubscribed()"
+                  (click)="pushService.subscribe()"
+                  [disabled]="pushService.isLoading() || !pushService.isSupported()"
+                  class="flex-1 py-2 px-4 rounded-xl bg-sky-500 hover:bg-sky-400 disabled:opacity-50 text-slate-950 font-bold text-xs transition-colors">
+            {{ pushService.isLoading() ? 'Procesando…' : 'Activar Notificaciones' }}
+          </button>
+
+          <button *ngIf="pushService.isSubscribed()"
+                  (click)="pushService.sendTest()"
+                  [disabled]="pushService.isLoading()"
+                  class="flex-1 py-2 px-3 rounded-xl bg-slate-800 hover:bg-slate-700 border border-slate-700 text-slate-200 font-semibold text-xs transition-colors">
+            Probar Notificación
+          </button>
+
+          <button *ngIf="pushService.isSubscribed()"
+                  (click)="pushService.unsubscribe()"
+                  [disabled]="pushService.isLoading()"
+                  class="py-2 px-3 rounded-xl bg-rose-500/10 hover:bg-rose-500/20 border border-rose-500/30 text-rose-300 font-semibold text-xs transition-colors">
+            Desactivar
+          </button>
+        </div>
+      </div>
+    </div>
 
     <!-- Offline Banner -->
     <div *ngIf="!refresh.isConnected()" class="bg-rose-500/20 border-b border-rose-500/30 text-rose-200 text-xs py-2 px-4 text-center" role="status" aria-live="polite">
@@ -135,10 +239,13 @@ import { ThemeService } from './core/theme.service';
   `
 })
 export class AppComponent implements OnInit {
+  showPushModal = false;
+
   constructor(
     public auth: AuthService,
     public refresh: RefreshService,
     public theme: ThemeService,
+    public pushService: PushNotificationService,
     private router: Router
   ) {}
 
@@ -147,6 +254,17 @@ export class AppComponent implements OnInit {
     if (isAuthed) {
       await this.refresh.read();
     }
+  }
+
+  togglePushModal(): void {
+    this.showPushModal = !this.showPushModal;
+    if (this.showPushModal) {
+      this.pushService.checkCurrentSubscription();
+    }
+  }
+
+  onCategoryChange(category: any, event: any): void {
+    this.pushService.updateCategory(category, event.target.checked);
   }
 
   onProjectChange(event: any) {

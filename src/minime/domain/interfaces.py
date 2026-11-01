@@ -864,6 +864,7 @@ class PersistenceUnitOfWork(ABC):
     external_action_attempts: ExternalActionAttemptRepositoryInterface
     durable_sagas: DurableSagaRepositoryInterface
     deferred_transitions: DeferredTransitionRepositoryInterface
+    push_subscriptions: PushSubscriptionRepositoryInterface
 
     @abstractmethod
     def commit(self) -> None: ...
@@ -1370,3 +1371,25 @@ class ExternalActionAttemptRepositoryInterface(ABC):
         result_payload: dict[str, Any] | None = None,
         error_message: str | None = None,
     ) -> ExternalActionAttempt: ...
+
+
+class PushSubscriptionRepositoryInterface(ABC):
+    @abstractmethod
+    def get_by_endpoint(self, endpoint: str) -> Any | None: ...
+
+    @abstractmethod
+    def list_by_operator(self, operator_id: str, active_only: bool = True) -> list[Any]: ...
+
+    @abstractmethod
+    def save(
+        self,
+        operator_id: str,
+        endpoint: str,
+        p256dh: str,
+        auth: str,
+        device_label: str | None = None,
+        categories: dict[str, bool] | None = None,
+    ) -> Any: ...
+
+    @abstractmethod
+    def deactivate(self, endpoint: str, error: str | None = None) -> bool: ...
