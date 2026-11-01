@@ -2,8 +2,8 @@
 
 ## Execution Metadata
 - **Change Identifier**: `req-207-f10-desacoplamiento-asincrono-telemetria`
-- **Candidate Commit SHA**: `583627e9839855a298ab41d1489e689be3c209fb`
-- **Execution Timestamp**: `2026-11-01T03:37:13.754235+00:00`
+- **Candidate Commit SHA**: `f699c579b3f448454ad53b8ef71d5666fb41d6ac`
+- **Execution Timestamp**: `2026-11-01T12:19:42.786637+00:00`
 - **Verification Environment**: Ubuntu Linux 24.04 LTS (x86_64) on host `192.168.0.194`
 - **Governing Canonical Contract**: Contrato Rector v1.3
 
@@ -36,20 +36,20 @@ Provider capacity is observed through provider strategies, recording real five-h
 - **Response Payload**:
 ```json
 {
-  "observed_at": "2026-11-01T03:37:13.749728+00:00",
+  "observed_at": "2026-11-01T12:19:42.786637+00:00",
   "providers": [
     {
       "provider": "antigravity",
       "state": "AVAILABLE",
-      "observed_at": "2026-11-01T03:37:12.916093+00:00",
+      "observed_at": "2026-11-01T12:19:37.593119+00:00",
       "source": "agy_print_usage",
-      "remaining_percent": 88.0,
+      "remaining_percent": 96.1,
       "balance": null,
       "currency": null,
-      "reset_at": "2026-11-01T06:44:26+00:00",
+      "reset_at": "2026-11-01T17:06:40Z",
       "window": "5h",
-      "account_id": null,
-      "model_id": "gemini-3.8-flash",
+      "account_id": "efb24eec902c74f90c633f32cbd34100e8309764e521c71b0b1177d61796bddc",
+      "model_id": "Gemini Models",
       "status_label": "Normal",
       "stale": false,
       "reason": null
@@ -57,34 +57,34 @@ Provider capacity is observed through provider strategies, recording real five-h
     {
       "provider": "codex",
       "state": "AVAILABLE",
-      "observed_at": "2026-11-01T03:37:12.923444+00:00",
+      "observed_at": "2026-11-01T12:19:40.757808+00:00",
       "source": "codex_app_server_rate_limits_read",
-      "remaining_percent": 99.6,
+      "remaining_percent": 100.0,
       "balance": null,
       "currency": null,
-      "reset_at": "2026-11-01T07:15:57+00:00",
-      "window": null,
-      "account_id": null,
-      "model_id": "gpt-5.6-luna",
+      "reset_at": "2026-11-01T17:19:42+00:00",
+      "window": "5h",
+      "account_id": "00d41d1d-a324-413c-b1f0-c63eafc7b411",
+      "model_id": "codex",
       "status_label": "Normal",
       "stale": false,
       "reason": null
     },
     {
       "provider": "deepseek",
-      "state": "UNKNOWN",
-      "observed_at": "2026-11-01T03:37:13.722398+00:00",
-      "source": "adapter",
+      "state": "AVAILABLE",
+      "observed_at": "2026-11-01T12:19:42.247773+00:00",
+      "source": "deepseek_account_balance",
       "remaining_percent": null,
-      "balance": null,
-      "currency": null,
+      "balance": 21.57,
+      "currency": "USD",
       "reset_at": null,
       "window": null,
-      "account_id": null,
-      "model_id": null,
-      "status_label": "UNKNOWN",
+      "account_id": "070790f015df88a7fa34d2d0c1f76ee223165438b5728a03c0571542e4e39a36",
+      "model_id": "deepseek-chat",
+      "status_label": "Normal",
       "stale": false,
-      "reason": "unavailable"
+      "reason": null
     }
   ]
 }
