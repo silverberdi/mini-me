@@ -245,6 +245,7 @@ PUBLIC_EXEMPT_PATHS = {
     "/sw.js",
     "/manifest.webmanifest",
     "/favicon.ico",
+    "/favicon.svg",
     "/api/v1/auth/google/login",
     "/api/v1/auth/google/callback",
     "/api/v1/auth/logout",
@@ -3003,4 +3004,20 @@ def get_service_worker() -> Response:
     sw_file = STATIC_DIR / "sw.js"
     if sw_file.exists():
         return FileResponse(sw_file, media_type="application/javascript")
+    return Response(status_code=404)
+
+
+@app.api_route("/favicon.ico", methods=["GET", "HEAD"], include_in_schema=False)
+def get_favicon_ico() -> Response:
+    fav_file = STATIC_DIR / "favicon.ico"
+    if fav_file.exists():
+        return FileResponse(fav_file, media_type="image/x-icon")
+    return Response(status_code=404)
+
+
+@app.api_route("/favicon.svg", methods=["GET", "HEAD"], include_in_schema=False)
+def get_favicon_svg() -> Response:
+    fav_file = STATIC_DIR / "favicon.svg"
+    if fav_file.exists():
+        return FileResponse(fav_file, media_type="image/svg+xml")
     return Response(status_code=404)
