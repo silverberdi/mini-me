@@ -16,10 +16,7 @@ from typing import Any
 import httpx
 
 from minime.adapters.provider_adapter import (
-    AntigravityProviderAdapter,
     CapacityObservation,
-    CodexProviderAdapter,
-    DeepSeekProviderAdapter,
     get_provider_adapter,
 )
 
@@ -124,7 +121,7 @@ class ProviderQuotaStrategy:
                     status_label="UNKNOWN",
                     reason="unavailable",
                 )
-            
+
             # Extract real 5h window percentage directly from agy CLI /usage
             proc = await asyncio.create_subprocess_exec(
                 "agy", "-p", "/usage", "--output-format", "json",
@@ -135,7 +132,7 @@ class ProviderQuotaStrategy:
             data = json.loads(stdout.decode("utf-8", errors="replace"))
             groups = data.get("command", {}).get("data", {}).get("groups", [])
             gemini_group = next((g for g in groups if "gemini" in g.get("name", "").lower()), None)
-            
+
             rem_pct = None
             reset_at = raw_obs.capacity_reset_at.isoformat() if raw_obs.capacity_reset_at else None
             if gemini_group:
@@ -148,7 +145,7 @@ class ProviderQuotaStrategy:
 
             parsed = parse_five_hour_usage({"remaining_percent": rem_pct, "window": "5h", "reset_at": reset_at}) if rem_pct is not None else None
             state = "AVAILABLE" if raw_obs.ordinary_usage_allowed else "EXHAUSTED"
-            
+
             status_lbl = "Normal"
             if state == "EXHAUSTED" or (rem_pct is not None and rem_pct < 10.0):
                 status_lbl = "Crítico"
@@ -192,7 +189,7 @@ class ProviderQuotaStrategy:
                     status_label="UNKNOWN",
                     reason="unavailable",
                 )
-            
+
             # Extract real 5h rate limit from Codex app-server
             rem_pct = None
             reset_at = raw_obs.capacity_reset_at.isoformat() if raw_obs.capacity_reset_at else None
@@ -259,7 +256,7 @@ class ProviderQuotaStrategy:
 
             async with httpx.AsyncClient(base_url=base_url, timeout=5.0) as client:
                 resp = await client.get("/user/balance", headers={"Authorization": f"Bearer {key}"})
-            
+
             if resp.status_code != 200:
                 return QuotaObservation(
                     provider=self.provider,
@@ -269,11 +266,11 @@ class ProviderQuotaStrategy:
                     status_label="UNKNOWN",
                     reason=f"http_{resp.status_code}",
                 )
-            
+
             payload = resp.json()
             is_available = bool(payload.get("is_available"))
             balance_infos = payload.get("balance_infos", [])
-            
+
             bal = None
             curr = None
             if balance_infos and isinstance(balance_infos, list):

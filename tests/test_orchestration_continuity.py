@@ -172,12 +172,13 @@ def test_request_rest_api_endpoints(in_memory_uow, tmp_path: Path):
                 assert data["pr1_url"] == "https://github.com/org/repo-test/pull/1"
 
         # 3. POST request ack
-        with patch("minime.services.agent_runner.CliAgentRunner.for_project_profiles", return_value=MagicMock()), \
-             patch("minime.services.orchestration_coordinator.NativeOrchestrationCoordinator.execute_project_request") as mock_exec:
-            mock_exec.return_value = mock_res
+        with patch("minime.services.agent_runner.CliAgentRunner.for_project_profiles", return_value=MagicMock()),              patch("minime.api.app._schedule_request_worker", return_value="test-op-ack") as mock_schedule:
             res = client.post("/api/v1/projects/proj-test/requests/ack")
-            assert res.status_code in (200, 202)
-            mock_exec.assert_called_once_with("proj-test", operator_ack=True)
+            assert res.status_code == 202
+            data = res.json()
+            assert data["status"] == "ACCEPTED"
+            assert data["operation_id"] == "test-op-ack"
+            mock_schedule.assert_called_once()
 
         # 4. Recovery authority is recorded through the authenticated API and
         # produces the same durable OperatorActionRecord consumed by CLI runs.
