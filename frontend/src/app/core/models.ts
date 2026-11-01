@@ -40,8 +40,11 @@ export interface QuotaObservation {
   source: string;
   remaining_percent?: number | null;
   balance?: number | null;
+  currency?: string | null;
   reset_at?: string | null;
   window?: string | null;
+  model_id?: string | null;
+  sublabel?: string | null;
   stale?: boolean;
   reason?: string | null;
 }

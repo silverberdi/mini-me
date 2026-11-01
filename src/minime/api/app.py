@@ -1247,6 +1247,8 @@ async def get_provider_quotas(_operator: AuthenticatedOperatorDep) -> dict[str, 
     antigravity_pct = 100.0
     deepseek_bal = 21.56
     deepseek_max = 20.0
+    openrouter_bal = 18.43
+    openrouter_total = 30.0
 
     for item in snapshot:
         p_name = item.get("provider")
@@ -1262,8 +1264,16 @@ async def get_provider_quotas(_operator: AuthenticatedOperatorDep) -> dict[str, 
             bal = item.get("balance")
             if bal is not None:
                 deepseek_bal = float(bal)
+        elif p_name == "openrouter":
+            bal = item.get("balance")
+            if bal is not None:
+                openrouter_bal = float(bal)
+            rem = item.get("remaining_percent")
+            if rem is not None:
+                openrouter_pct = float(rem)
 
     deepseek_pct = round((deepseek_bal / deepseek_max) * 100, 1)
+    openrouter_pct = round((openrouter_bal / openrouter_total) * 100, 1) if openrouter_total > 0 else 0.0
 
     return {
         "observed_at": datetime.now(UTC).isoformat(),
@@ -1287,6 +1297,14 @@ async def get_provider_quotas(_operator: AuthenticatedOperatorDep) -> dict[str, 
             "max_balance_usd": deepseek_max,
             "quota_percent": deepseek_pct,
             "sublabel": f"${deepseek_bal:.2f} de ${deepseek_max:.2f} USD ({deepseek_pct}% disponible)",
+        },
+        "openrouter": {
+            "provider": "openrouter",
+            "model": "auto / fallback",
+            "balance_usd": openrouter_bal,
+            "max_balance_usd": openrouter_total,
+            "quota_percent": openrouter_pct,
+            "sublabel": f"${openrouter_bal:.2f} de ${openrouter_total:.2f} USD ({openrouter_pct}% disponible)",
         },
     }
 

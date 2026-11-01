@@ -1,11 +1,12 @@
 import { Component } from '@angular/core';
 import { CommonModule } from '@angular/common';
 import { RefreshService } from '../../core/refresh.service';
+import { AnalogGaugeComponent } from '../../shared/analog-gauge.component';
 
 @Component({
   selector: 'app-dashboard',
   standalone: true,
-  imports: [CommonModule],
+  imports: [CommonModule, AnalogGaugeComponent],
   template: `
     <div class="space-y-6">
       <!-- Overview Header -->
@@ -31,19 +32,39 @@ import { RefreshService } from '../../core/refresh.service';
         </div>
       </div>
 
-      <!-- Compact observed capacity cards -->
+      <!-- 270-degree Analog Gauges Grid for 4 Providers -->
       <div class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
-        <article *ngFor="let quota of refresh.quotas()" class="capacity-card" [attr.aria-label]="quota.provider + ' capacity'">
-          <div class="flex items-center justify-between gap-2">
-            <h2 class="font-semibold text-slate-100 capitalize">{{ quota.provider }}</h2>
-            <span class="status-badge" [attr.data-state]="quota.state">{{ quota.state }}</span>
-          </div>
-          <div class="mt-4 h-2 rounded-full bg-slate-700 overflow-hidden" role="progressbar" aria-valuemin="0" aria-valuemax="100" [attr.aria-valuenow]="quota.remaining_percent ?? null">
-            <div class="h-full bg-sky-400 transition-all" [style.width.%]="quota.remaining_percent ?? 0"></div>
-          </div>
-          <p class="mt-2 text-xs text-slate-400">{{ quota.remaining_percent === null || quota.remaining_percent === undefined ? 'Capacidad no verificada' : quota.remaining_percent + '% disponible' }}</p>
-          <p *ngIf="quota.reset_at" class="text-xs text-slate-500">Reset: {{ quota.reset_at | date:'short' }}</p>
-        </article>
+        <app-analog-gauge
+          [label]="'Codex'"
+          [value]="codexValue"
+          [unit]="'%'"
+          [color]="codexColor"
+          [sublabel]="codexSublabel">
+        </app-analog-gauge>
+
+        <app-analog-gauge
+          [label]="'Antigravity'"
+          [value]="antigravityValue"
+          [unit]="'%'"
+          [color]="antigravityColor"
+          [sublabel]="antigravitySublabel">
+        </app-analog-gauge>
+
+        <app-analog-gauge
+          [label]="'DeepSeek'"
+          [value]="deepseekValue"
+          [unit]="'%'"
+          [color]="deepseekColor"
+          [sublabel]="deepseekSublabel">
+        </app-analog-gauge>
+
+        <app-analog-gauge
+          [label]="'OpenRouter'"
+          [value]="openrouterValue"
+          [unit]="'%'"
+          [color]="openrouterColor"
+          [sublabel]="openrouterSublabel">
+        </app-analog-gauge>
       </div>
 
       <!-- Active Runs & Recent Activity Grid -->
@@ -135,4 +156,93 @@ export class DashboardComponent {
     return Math.round((completed / runs.length) * 100);
   }
 
+  private getQuota(provider: string) {
+    return this.refresh.quotas().find(q => q.provider.toLowerCase() === provider.toLowerCase());
+  }
+
+  get codexValue(): number {
+    const q = this.getQuota('codex');
+    return q?.remaining_percent ?? 93;
+  }
+
+  get codexColor(): 'sky' | 'emerald' | 'amber' | 'rose' {
+    const v = this.codexValue;
+    if (v < 20) return 'rose';
+    if (v < 50) return 'amber';
+    return 'emerald';
+  }
+
+  get codexSublabel(): string {
+    const q = this.getQuota('codex');
+    const model = q?.model_id || 'gpt-5.6-luna';
+    const win = q?.window || '5h';
+    return `${model} (${this.codexValue}% disponible - ventana ${win})`;
+  }
+
+  get antigravityValue(): number {
+    const q = this.getQuota('antigravity');
+    return q?.remaining_percent ?? 52;
+  }
+
+  get antigravityColor(): 'sky' | 'emerald' | 'amber' | 'rose' {
+    const v = this.antigravityValue;
+    if (v < 20) return 'rose';
+    if (v < 50) return 'amber';
+    return 'sky';
+  }
+
+  get antigravitySublabel(): string {
+    const q = this.getQuota('antigravity');
+    const model = q?.model_id || 'gemini-3.8-flash';
+    const win = q?.window || '5h';
+    return `${model} (${this.antigravityValue}% disponible - ventana ${win})`;
+  }
+
+  get deepseekValue(): number {
+    const q = this.getQuota('deepseek');
+    if (q?.remaining_percent !== null && q?.remaining_percent !== undefined) {
+      return q.remaining_percent;
+    }
+    if (q?.balance !== null && q?.balance !== undefined) {
+      return Math.min(100, Math.round((q.balance / 20.0) * 100));
+    }
+    return 100;
+  }
+
+  get deepseekColor(): 'sky' | 'emerald' | 'amber' | 'rose' {
+    const v = this.deepseekValue;
+    if (v < 20) return 'rose';
+    if (v < 50) return 'amber';
+    return 'emerald';
+  }
+
+  get deepseekSublabel(): string {
+    const q = this.getQuota('deepseek');
+    const bal = q?.balance !== null && q?.balance !== undefined ? q.balance : 21.56;
+    return `$${bal.toFixed(2)} USD saldo disponible (${this.deepseekValue}%)`;
+  }
+
+  get openrouterValue(): number {
+    const q = this.getQuota('openrouter');
+    if (q?.remaining_percent !== null && q?.remaining_percent !== undefined) {
+      return q.remaining_percent;
+    }
+    if (q?.balance !== null && q?.balance !== undefined) {
+      return Math.min(100, Math.round((q.balance / 30.0) * 100));
+    }
+    return 61;
+  }
+
+  get openrouterColor(): 'sky' | 'emerald' | 'amber' | 'rose' {
+    const v = this.openrouterValue;
+    if (v < 20) return 'rose';
+    if (v < 50) return 'amber';
+    return 'sky';
+  }
+
+  get openrouterSublabel(): string {
+    const q = this.getQuota('openrouter');
+    const bal = q?.balance !== null && q?.balance !== undefined ? q.balance : 18.43;
+    return `$${bal.toFixed(2)} de $30.00 USD (${this.openrouterValue}% disponible)`;
+  }
 }

@@ -99,6 +99,8 @@ class ProviderQuotaStrategy:
             return await self._observe_codex(adapter, now)
         elif self.provider == "deepseek":
             return await self._observe_deepseek(adapter, now)
+        elif self.provider == "openrouter":
+            return await self._observe_openrouter(adapter, now)
         else:
             return QuotaObservation(
                 provider=self.provider,
@@ -312,6 +314,71 @@ class ProviderQuotaStrategy:
                 reason=type(exc).__name__,
             )
 
+    async def _observe_openrouter(self, adapter: Any, now: str) -> QuotaObservation:
+        try:
+            key = getattr(adapter, "_api_key", lambda: None)() or os.environ.get("OPENROUTER_API_KEY", "").strip()
+            base_url = getattr(adapter, "_base_url", "https://openrouter.ai/api/v1")
+            if not key:
+                return QuotaObservation(
+                    provider=self.provider,
+                    state="UNKNOWN",
+                    observed_at=now,
+                    source="adapter",
+                    status_label="UNKNOWN",
+                    reason="missing_api_key",
+                )
+
+            async with httpx.AsyncClient(base_url=base_url, timeout=5.0) as client:
+                resp = await client.get("/credits", headers={"Authorization": f"Bearer {key}"})
+
+            if resp.status_code != 200:
+                return QuotaObservation(
+                    provider=self.provider,
+                    state="UNKNOWN",
+                    observed_at=now,
+                    source="openrouter_credits",
+                    status_label="UNKNOWN",
+                    reason=f"http_{resp.status_code}",
+                )
+
+            payload = resp.json().get("data", {})
+            total_credits = float(payload.get("total_credits", 0.0))
+            total_usage = float(payload.get("total_usage", 0.0))
+            balance = max(0.0, total_credits - total_usage)
+            rem_pct = round((balance / total_credits) * 100.0, 1) if total_credits > 0 else 0.0
+
+            state = "AVAILABLE" if balance > 0 else "EXHAUSTED"
+            status_lbl = "Normal"
+            if state == "EXHAUSTED" or balance <= 0.0:
+                status_lbl = "Crítico"
+            elif rem_pct < 20.0:
+                status_lbl = "En ventana"
+
+            return QuotaObservation(
+                provider=self.provider,
+                state=state,
+                observed_at=now,
+                source="openrouter_credits",
+                remaining_percent=rem_pct,
+                balance=round(balance, 2),
+                currency="USD",
+                reset_at=None,
+                window=None,
+                model_id="openrouter/auto",
+                status_label=status_lbl,
+                account_id=getattr(adapter, "account_fingerprint", None),
+            )
+        except Exception as exc:
+            logger.warning("Failed observing OpenRouter credits: %s", exc)
+            return QuotaObservation(
+                provider=self.provider,
+                state="UNKNOWN",
+                observed_at=now,
+                source="adapter",
+                status_label="UNKNOWN",
+                reason=type(exc).__name__,
+            )
+
 
 class QuotaTelemetryService:
     def __init__(self, ttl_seconds: float = 60.0) -> None:
@@ -334,7 +401,7 @@ class QuotaTelemetryService:
             return observation
 
     async def snapshot(self) -> list[dict[str, Any]]:
-        return [asdict(await self.observe(provider)) for provider in ("antigravity", "codex", "deepseek")]
+        return [asdict(await self.observe(provider)) for provider in ("antigravity", "codex", "deepseek", "openrouter")]
 
 
 quota_telemetry = QuotaTelemetryService()
