@@ -57,11 +57,12 @@ import { ThemeService } from './core/theme.service';
         <button (click)="refresh.read()"
                 [disabled]="refresh.isRefreshing()"
                 class="p-2 rounded-lg bg-slate-800 hover:bg-slate-700 border border-slate-700 text-slate-300 transition-colors"
-                title="Actualizar ahora">
+                title="Actualizar ahora" aria-label="Actualizar datos operativos">
           <svg class="w-4 h-4" [ngClass]="{'animate-spin': refresh.isRefreshing()}" fill="none" stroke="currentColor" viewBox="0 0 24 24">
             <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" />
           </svg>
         </button>
+        <span *ngIf="refresh.syncState() === 'syncing'" class="text-xs text-sky-300" role="status" aria-live="polite">Sincronizando…</span>
 
         <!-- Theme Toggle -->
         <button (click)="theme.toggleTheme()"

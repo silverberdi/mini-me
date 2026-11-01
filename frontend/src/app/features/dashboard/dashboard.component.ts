@@ -1,12 +1,11 @@
 import { Component } from '@angular/core';
 import { CommonModule } from '@angular/common';
 import { RefreshService } from '../../core/refresh.service';
-import { AnalogGaugeComponent } from '../../shared/analog-gauge.component';
 
 @Component({
   selector: 'app-dashboard',
   standalone: true,
-  imports: [CommonModule, AnalogGaugeComponent],
+  imports: [CommonModule],
   template: `
     <div class="space-y-6">
       <!-- Overview Header -->
@@ -32,43 +31,19 @@ import { AnalogGaugeComponent } from '../../shared/analog-gauge.component';
         </div>
       </div>
 
-      <!-- Gauges & Telemetry Row -->
+      <!-- Compact observed capacity cards -->
       <div class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
-        <app-analog-gauge
-          label="Tasa de Éxito"
-          sublabel="Últimas 24h"
-          [value]="successRate"
-          [max]="100"
-          unit="%"
-          color="emerald">
-        </app-analog-gauge>
-
-        <app-analog-gauge
-          label="Carga Orquestación"
-          sublabel="Runs concurrentes"
-          [value]="runningCount"
-          [max]="5"
-          unit=""
-          color="sky">
-        </app-analog-gauge>
-
-        <app-analog-gauge
-          label="Cuota de Modelos"
-          sublabel="Consumo presupuestado"
-          [value]="quotaUsage"
-          [max]="100"
-          unit="%"
-          color="amber">
-        </app-analog-gauge>
-
-        <app-analog-gauge
-          label="Latencia Promedio"
-          sublabel="Tiempo de inferencia"
-          [value]="avgLatency"
-          [max]="10"
-          unit="s"
-          color="sky">
-        </app-analog-gauge>
+        <article *ngFor="let quota of refresh.quotas()" class="capacity-card" [attr.aria-label]="quota.provider + ' capacity'">
+          <div class="flex items-center justify-between gap-2">
+            <h2 class="font-semibold text-slate-100 capitalize">{{ quota.provider }}</h2>
+            <span class="status-badge" [attr.data-state]="quota.state">{{ quota.state }}</span>
+          </div>
+          <div class="mt-4 h-2 rounded-full bg-slate-700 overflow-hidden" role="progressbar" aria-valuemin="0" aria-valuemax="100" [attr.aria-valuenow]="quota.remaining_percent ?? null">
+            <div class="h-full bg-sky-400 transition-all" [style.width.%]="quota.remaining_percent ?? 0"></div>
+          </div>
+          <p class="mt-2 text-xs text-slate-400">{{ quota.remaining_percent === null || quota.remaining_percent === undefined ? 'Capacidad no verificada' : quota.remaining_percent + '% disponible' }}</p>
+          <p *ngIf="quota.reset_at" class="text-xs text-slate-500">Reset: {{ quota.reset_at | date:'short' }}</p>
+        </article>
       </div>
 
       <!-- Active Runs & Recent Activity Grid -->
@@ -160,11 +135,4 @@ export class DashboardComponent {
     return Math.round((completed / runs.length) * 100);
   }
 
-  get quotaUsage(): number {
-    return 42; // Telemetry representation
-  }
-
-  get avgLatency(): number {
-    return 3.2; // Seconds
-  }
 }
