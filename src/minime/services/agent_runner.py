@@ -782,18 +782,15 @@ class CliAgentRunner:
             normalized_provider = "antigravity"
 
         try:
-            if response_path and schema_path:
-                if normalized_provider == "codex":
-                    cmd.extend(
-                        [
-                            "--output-schema",
-                            str(schema_path),
-                            "--output-last-message",
-                            str(response_path),
-                        ]
-                    )
-                elif normalized_provider == "antigravity":
-                    cmd.extend(["--json-schema", str(schema_path)])
+            if response_path and schema_path and normalized_provider == "codex":
+                cmd.extend(
+                    [
+                        "--output-schema",
+                        str(schema_path),
+                        "--output-last-message",
+                        str(response_path),
+                    ]
+                )
             auth_kwargs: dict[str, str] = {}
             if normalized_provider == "codex":
                 auth_kwargs["codex_auth_source"] = confinement.codex_auth_source(env)

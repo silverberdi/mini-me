@@ -106,11 +106,10 @@ async def test_antigravity_does_not_inject_codex_output_flags(tmp_path: Path):
     assert len(captured_cmds) == 1
     cmd = captured_cmds[0]
 
-    # Must NOT have Codex-specific flags
+    # Must NOT have Codex-specific flags or incompatible schema flags
     assert "--output-schema" not in cmd
     assert "--output-last-message" not in cmd
-    # Must use Antigravity's --json-schema
-    assert "--json-schema" in cmd
+    assert "--json-schema" not in cmd
 
     # Structured output should have been parsed and populated before cleanup
     assert not res.structured_output_missing
