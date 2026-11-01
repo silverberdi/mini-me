@@ -858,12 +858,28 @@ def list_project_requests(
     if project is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Project not found")
 
-    intake = RemoteRequestIntakeService(github_adapter=GitHubAdapter(), uow=uow)
-    eligible = intake.get_eligible_requests(project.repository)
+    github_adapter = GitHubAdapter()
+    intake = RemoteRequestIntakeService(github_adapter=github_adapter, uow=uow)
+    raw_eligible = intake.get_eligible_requests(project.repository)
+    
+    # Mark status as ELIGIBLE for frontend badge compatibility
+    eligible = []
+    for item in raw_eligible:
+        item_copy = dict(item)
+        if not item_copy.get("status"):
+            item_copy["status"] = "ELIGIBLE"
+        eligible.append(item_copy)
+
+    # Fetch closed issues to calculate project progress in PWA dashboard
+    closed_res = github_adapter.list_issues(project.repository, state="closed", limit=100)
+    closed = closed_res.data if closed_res.data else []
+
     return {
         "project_id": project_id,
         "repository": project.repository,
         "eligible_requests": eligible,
+        "all_requests": eligible,
+        "closed_requests": closed,
     }
 
 
