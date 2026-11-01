@@ -858,6 +858,7 @@ def verify_project_connections(
 
 class ProjectRequestRunPayload(BaseModel):
     idempotency_key: str | None = None
+    target_run_id: str | None = None
     operator_ack: bool = False
     operator_response: str | None = None
     operator_clarification: str | None = None
@@ -1185,6 +1186,21 @@ async def run_project_request(
             status_code=status.HTTP_409_CONFLICT,
             detail="Verified managed repository binding is required",
         )
+
+    # Check durable orchestration runs in PostgreSQL during request admission
+    active_runs = uow.orchestration_runs.list_runs(project_id=project_id, is_active=True)
+    if active_runs:
+        active_run = active_runs[0]
+        # Permit re-entry only if target matches or human clarification/ack is provided
+        is_reentry = (
+            body.target_run_id == active_run.id
+            or bool(body.operator_response or body.operator_clarification or body.operator_ack)
+        )
+        if not is_reentry:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail=f"Active run already in progress for project '{project_id}' (run_id={active_run.id})",
+            )
 
     intent_key = body.idempotency_key or f"{project_id}:active"
     operation_id = _accepted_operations.get((project_id, intent_key))
@@ -1522,20 +1538,13 @@ def authorize_code_review_recovery(
     return {"action_request_id": action_request_id, "run_id": run_id, "status": "ACCEPTED"}
 
 
-@app.post("/api/v1/projects/{project_id}/requests/ack", tags=["requests"])
+@app.post("/api/v1/projects/{project_id}/requests/ack", status_code=status.HTTP_202_ACCEPTED, tags=["requests"])
 async def ack_project_request(
     project_id: str,
     _operator: AuthenticatedOperatorDep,
     uow: UowDep,
 ) -> dict[str, Any]:
-    """Acknowledge («Estoy enterado») high-complexity PR merge and continue."""
-    from minime.adapters.github import GitHubAdapter
-    from minime.services.agent_runner import CliAgentRunner
-    from minime.services.budget_service import BudgetService
-    from minime.services.capacity_lifecycle_service import CapacityLifecycleService
-    from minime.services.orchestration_coordinator import NativeOrchestrationCoordinator
-    from minime.services.worktree_manager import WorktreeManager
-
+    """Acknowledge high-complexity PR merge and continue asynchronously."""
     project = uow.projects.get_by_id(project_id)
     if project is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Project not found")
@@ -1546,39 +1555,18 @@ async def ack_project_request(
             status_code=status.HTTP_409_CONFLICT,
             detail="Verified managed repository binding is required",
         )
-    wt_manager = WorktreeManager(project_root=Path(binding.managed_repository_root), uow=uow)
-    github = GitHubAdapter()
-    try:
-        agent_runner = CliAgentRunner.for_project_profiles(
-            project.agent_profiles,
-            capacity_service=CapacityLifecycleService(uow),
-            budget_service=BudgetService(uow),
-        )
-    except (ValueError, OSError) as exc:
-        raise HTTPException(
-            status_code=status.HTTP_409_CONFLICT,
-            detail=f"Verified F2 agent profiles unavailable: {exc}",
-        ) from exc
 
-    coordinator = NativeOrchestrationCoordinator(
-        uow_factory=lambda: uow,
-        github_adapter=github,
-        worktree_manager=wt_manager,
-        agent_runner=agent_runner,
-        semantic_pr_agent=True,
-    )
-    res = await coordinator.execute_project_request(
-        project_id,
-        operator_ack=True,
-    )
+    active_runs = uow.orchestration_runs.list_runs(project_id=project_id, is_active=True)
+    target_run_id = active_runs[0].id if active_runs else None
+
+    body = ProjectRequestRunPayload(operator_ack=True, target_run_id=target_run_id)
+    intent_key = f"{project_id}:ack:{target_run_id or 'active'}"
+    operation_id = _schedule_request_worker(project_id, body, intent_key)
     return {
-        "status": res.status,
-        "run_id": res.run_id,
-        "current_stage": res.current_stage.value if res.current_stage else None,
-        "message": res.message,
-        "pr1_url": res.pr1_url,
-        "pr2_url": res.pr2_url,
-        "human_payload": res.human_payload,
+        "status": "ACCEPTED",
+        "operation_id": operation_id,
+        "run_id": target_run_id,
+        "message": "Operator acknowledgment accepted for asynchronous execution.",
     }
 
 
@@ -2359,13 +2347,42 @@ def list_orchestration_runs(
     change_name: str | None = None,
     is_active: bool | None = None,
 ) -> list[dict[str, Any]]:
-    """List historical and active orchestration runs."""
+    """List historical and active orchestration runs with normalized status and human gate details."""
     runs = uow.orchestration_runs.list_runs(
         project_id=project_id,
         change_name=change_name,
         is_active=is_active,
     )
-    return [r.model_dump() for r in runs]
+    results: list[dict[str, Any]] = []
+    for r in runs:
+        d = r.model_dump()
+        stop_details = d.get("stop_details") or {}
+
+        # Check if human intervention is required from checkpoint
+        human_payload = (
+            stop_details.get("human_payload")
+            or stop_details.get("explore_checkpoint", {}).get("human_payload")
+            or stop_details.get("propose_checkpoint", {}).get("human_payload")
+        )
+        is_human_required = bool(
+            human_payload
+            or stop_details.get("explore_checkpoint", {}).get("status") == "HUMAN_REQUIRED"
+            or stop_details.get("propose_checkpoint", {}).get("status") == "HUMAN_REQUIRED"
+        )
+
+        if is_human_required:
+            d["status"] = "HUMAN_REQUIRED"
+            d["human_gate"] = "HUMAN_REQUIRED"
+            if human_payload and "human_payload" not in stop_details:
+                stop_details["human_payload"] = human_payload
+                d["stop_details"] = stop_details
+        else:
+            d["status"] = "RUNNING" if r.is_active else "COMPLETED"
+
+        d["stage"] = r.current_stage.value if r.current_stage else None
+        results.append(d)
+
+    return results
 
 
 # -----------------------------------------------------------------------------
