@@ -1199,16 +1199,16 @@ async def run_project_request(
     # Check durable orchestration runs in PostgreSQL during request admission
     active_runs = uow.orchestration_runs.list_runs(project_id=project_id, is_active=True)
     if active_runs:
-        active_run = active_runs[0]
+        active_run_id = getattr(active_run, "run_id", getattr(active_run, "id", None))
         # Permit re-entry only if target matches or human clarification/ack is provided
         is_reentry = (
-            body.target_run_id == active_run.id
+            body.target_run_id == active_run_id
             or bool(body.operator_response or body.operator_clarification or body.operator_ack)
         )
         if not is_reentry:
             raise HTTPException(
                 status_code=status.HTTP_409_CONFLICT,
-                detail=f"Active run already in progress for project '{project_id}' (run_id={active_run.id})",
+                detail=f"Active run already in progress for project '{project_id}' (run_id={active_run_id})",
             )
 
     intent_key = body.idempotency_key or f"{project_id}:active"
