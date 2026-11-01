@@ -2,7 +2,7 @@
 
 ## Execution Metadata
 - **Change Identifier**: `req-207-f10-desacoplamiento-asincrono-telemetria`
-- **Candidate Commit SHA**: `80670d1014b234adc52e6b4ccaae292a6b911e4d`
+- **Candidate Commit SHA**: `772bdd873cf4041a8e789fcedbe6fc2ae8b419e0`
 - **Execution Timestamp**: `2026-11-01T03:37:13.754235+00:00`
 - **Verification Environment**: Ubuntu Linux 24.04 LTS (x86_64) on host `192.168.0.194`
 - **Governing Canonical Contract**: Contrato Rector v1.3
@@ -114,5 +114,5 @@ The system exposes an SSE stream providing immediate fan-out notifications for r
 
 - **Production Angular Build**: `ng build --configuration production` completed in 6.1s producing `dist/minime-frontend`.
 - **Frontend Test Suite**: `node --test tests/*.test.mjs` completed with 4 passed, 0 failed.
-- **Python Automated Suite**: 979 passed, 0 failed across entire worktree.
+- **Python Automated Suite**: 944 passed, 52 skipped across entire worktree.
 - **Static Code Analysis**: `ruff check .` reported `All checks passed!`.
