@@ -21,6 +21,7 @@ export class RefreshService implements OnDestroy {
   readonly projects = signal<Project[]>([]);
   readonly runs = signal<OrchestrationRun[]>([]);
   readonly requests = signal<RequestItem[]>([]);
+  readonly closedRequests = signal<RequestItem[]>([]);
   readonly quotas = signal<QuotaObservation[]>([]);
   readonly syncState = signal<'idle' | 'syncing' | 'error'>('idle');
   private events: EventSource | null = null;
@@ -34,6 +35,10 @@ export class RefreshService implements OnDestroy {
       if (found) return found;
     }
     return list.find(p => p.status === "ACTIVE") || list[0] || ({ project_id: '', name: '', status: 'ACTIVE', local_path: '', github_repo: '' } as Project);
+  });
+
+  readonly humanRequiredRun = computed(() => {
+    return this.runs().find(r => r.status === "HUMAN_REQUIRED" || (r as any).human_gate === "HUMAN_REQUIRED" || !!r.metadata?.['human_payload']) || null;
   });
 
   constructor(private api: ApiService) {
@@ -110,6 +115,9 @@ export class RefreshService implements OnDestroy {
       if (reqsRes && reqsRes.ok && Array.isArray(reqsRes.data)) {
         const payload: any = reqsRes.data;
         this.requests.set(Array.isArray(payload) ? payload : (payload.eligible_requests || payload.all_requests || []));
+        if (payload && payload.closed_requests && Array.isArray(payload.closed_requests)) {
+          this.closedRequests.set(payload.closed_requests);
+        }
       }
 
       const quotaRes = await this.api.get<{providers: QuotaObservation[]}>("/api/v1/providers/quotas", { signal });

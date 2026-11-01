@@ -15,32 +15,26 @@ import { CommonModule } from '@angular/common';
       </div>
 
       <!-- 270-degree Arc SVG Gauge -->
-      <div class="relative w-36 h-36 flex items-center justify-center">
-        <svg class="w-36 h-36 transform rotate-90" viewBox="0 0 100 100">
-          <!-- Background 270deg Track (r=38, C=238.76, arc=179.07, gap=59.69) -->
-          <circle
-            cx="50"
-            cy="50"
-            r="38"
+      <div class="relative w-28 h-28 flex items-center justify-center">
+        <svg class="w-28 h-28" viewBox="0 0 100 100">
+          <!-- Background 270deg Arc Track (open at bottom: M 23.13 76.87 A 38 38 0 1 1 76.87 76.87) -->
+          <path
+            d="M 23.13 76.87 A 38 38 0 1 1 76.87 76.87"
             fill="none"
             stroke="currentColor"
             class="text-slate-700/60"
             stroke-width="8"
             stroke-linecap="round"
-            stroke-dasharray="179.07 238.76"
-            stroke-dashoffset="0"
           />
           <!-- Foreground 270deg Progress -->
-          <circle
-            cx="50"
-            cy="50"
-            r="38"
+          <path
+            d="M 23.13 76.87 A 38 38 0 1 1 76.87 76.87"
             fill="none"
             stroke="currentColor"
             [class]="gaugeColorClass"
             stroke-width="8"
             stroke-linecap="round"
-            stroke-dasharray="179.07 238.76"
+            stroke-dasharray="179.07 179.07"
             [style.stroke-dashoffset]="dashOffset"
             class="transition-all duration-500 ease-out"
           />
@@ -53,7 +47,7 @@ import { CommonModule } from '@angular/common';
       </div>
 
       <!-- Minimal Provider Title (Codex, Antigravity, DeepSeek, OpenRouter) -->
-      <div class="mt-1 text-sm font-semibold tracking-wide text-slate-200 text-center">
+      <div class="mt-2 text-xs font-semibold uppercase tracking-wider text-slate-300 text-center">
         {{ label }}
       </div>
     </div>
