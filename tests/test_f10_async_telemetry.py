@@ -3,7 +3,11 @@ import asyncio
 import pytest
 
 from minime.services.event_broker import EventBroker
-from minime.services.quota_telemetry import QuotaObservation, QuotaTelemetryService, parse_five_hour_usage
+from minime.services.quota_telemetry import (
+    QuotaObservation,
+    QuotaTelemetryService,
+    parse_five_hour_usage,
+)
 
 
 def test_five_hour_parser_is_explicit_and_fail_closed():

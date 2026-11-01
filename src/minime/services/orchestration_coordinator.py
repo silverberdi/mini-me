@@ -779,6 +779,7 @@ class NativeOrchestrationCoordinator:
         thinker_provider: str = "antigravity",
         implementer_provider: str = "codex",
         reviewer_provider: str = "antigravity",
+        target_run_id: str | None = None,
     ) -> OrchestrationCoordinationResult:
         """Execute or resume the active/next request for a project."""
         uow: PersistenceUnitOfWork = self.uow_factory()
@@ -821,7 +822,19 @@ class NativeOrchestrationCoordinator:
             )
 
         # Step 1: Remote Request Intake and Selection
-        selected = intake_service.select_next_request(project_id, repository)
+        if target_run_id and hasattr(uow, "orchestration_runs"):
+            target_run = uow.orchestration_runs.get_by_id(target_run_id)
+            if target_run and getattr(target_run, "is_active", True):
+                selected = {
+                    "re_entrant": True,
+                    "run_id": target_run.id,
+                    "change_name": target_run.change_name,
+                    "run": target_run,
+                }
+            else:
+                selected = intake_service.select_next_request(project_id, repository)
+        else:
+            selected = intake_service.select_next_request(project_id, repository)
         if not selected:
             return OrchestrationCoordinationResult(
                 status="IDLE",

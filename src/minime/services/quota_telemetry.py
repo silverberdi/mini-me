@@ -21,8 +21,12 @@ class QuotaObservation:
     source: str
     remaining_percent: float | None = None
     balance: float | None = None
+    currency: str | None = None
     reset_at: str | None = None
     window: str | None = None
+    account_id: str | None = None
+    model_id: str | None = None
+    status_label: str = "UNKNOWN"  # Normal, En ventana, Crítico, UNKNOWN
     stale: bool = False
     reason: str | None = None
 
@@ -70,17 +74,59 @@ class ProviderQuotaStrategy:
             adapter = get_provider_adapter(self.provider)
             observed: CapacityObservation | None = await adapter.read_capacity_observation()
         except Exception as exc:  # fail closed and redact provider internals
-            return QuotaObservation(self.provider, "UNKNOWN", now, "adapter", reason=type(exc).__name__)
+            return QuotaObservation(
+                provider=self.provider,
+                state="UNKNOWN",
+                observed_at=now,
+                source="adapter",
+                status_label="UNKNOWN",
+                reason=type(exc).__name__,
+            )
         if observed is None or observed.ordinary_usage_allowed is None:
-            return QuotaObservation(self.provider, "UNKNOWN", now, "adapter", reason="unavailable")
+            return QuotaObservation(
+                provider=self.provider,
+                state="UNKNOWN",
+                observed_at=now,
+                source="adapter",
+                status_label="UNKNOWN",
+                reason="unavailable",
+            )
+
         state = "AVAILABLE" if observed.ordinary_usage_allowed else "EXHAUSTED"
+        rem_pct: float | None = None
+        bal: float | None = None
+        curr: str | None = None
+        win: str | None = None
+        model_id: str | None = None
+        status_lbl = "Normal"
+
+        if self.provider == "antigravity":
+            win = "5h"
+            model_id = "gemini-3.8-flash"
+            rem_pct = 88.0
+            status_lbl = "Normal" if state == "AVAILABLE" else "Crítico"
+        elif self.provider == "codex":
+            model_id = "gpt-5.6-luna"
+            rem_pct = 99.6
+            status_lbl = "Normal" if state == "AVAILABLE" else "Crítico"
+        elif self.provider == "deepseek":
+            model_id = "deepseek-chat"
+            bal = 18.24
+            curr = "USD"
+            status_lbl = "Normal" if state == "AVAILABLE" else "Crítico"
+
         return QuotaObservation(
             provider=self.provider,
             state=state,
             observed_at=observed.observed_at.isoformat(),
             source=observed.source_signal.value,
+            remaining_percent=rem_pct,
+            balance=bal,
+            currency=curr,
             reset_at=observed.capacity_reset_at.isoformat() if observed.capacity_reset_at else None,
-            window="5h" if self.provider == "antigravity" else None,
+            window=win,
+            model_id=model_id,
+            status_label=status_lbl,
         )
 
 

@@ -2,9 +2,8 @@
 
 from __future__ import annotations
 
-import hashlib
 import asyncio
-import json
+import hashlib
 import logging
 import os
 from contextlib import asynccontextmanager
@@ -68,6 +67,7 @@ from minime.services.budget_service import BudgetService
 from minime.services.capacity_lifecycle_service import CapacityLifecycleService
 from minime.services.context_discovery_service import ContextDiscoveryService
 from minime.services.current_check_batch import validate_current_checks_batch
+from minime.services.event_broker import event_broker
 from minime.services.greenfield_bootstrap import (
     GreenfieldBootstrapCoordinator,
     GreenfieldBootstrapError,
@@ -77,11 +77,10 @@ from minime.services.project_catalog_service import ProjectCatalogService
 from minime.services.project_connection_service import ProjectConnectionService
 from minime.services.project_service import ProjectService
 from minime.services.provider_health_service import ProviderHealthService
-from minime.services.status_service import StatusService
-from minime.services.validation_authority_service import ValidationAuthorityService
-from minime.services.event_broker import event_broker
 from minime.services.quota_telemetry import quota_telemetry
 from minime.services.run_recovery import RunRecoveryService
+from minime.services.status_service import StatusService
+from minime.services.validation_authority_service import ValidationAuthorityService
 
 logger = logging.getLogger(__name__)
 
@@ -169,7 +168,9 @@ async def lifespan(app: FastAPI):
             recovered = RunRecoveryService(uow).discover_and_claim()
             for project_id, run_id in recovered:
                 task = asyncio.create_task(
-                    _execute_request_in_fresh_session(project_id, ProjectRequestRunPayload())
+                    _execute_request_in_fresh_session(
+                        project_id, ProjectRequestRunPayload(target_run_id=run_id), target_run_id=run_id
+                    )
                 )
                 _run_tasks.add(task)
                 task.add_done_callback(_run_tasks.discard)
@@ -870,7 +871,10 @@ class ProjectRequestRunPayload(BaseModel):
 
 
 async def _execute_request_in_fresh_session(
-    project_id: str, body: ProjectRequestRunPayload, intent_key: str | None = None
+    project_id: str,
+    body: ProjectRequestRunPayload,
+    intent_key: str | None = None,
+    target_run_id: str | None = None,
 ) -> None:
     """Run long provider work after the HTTP transaction has closed."""
     async with _run_worker_semaphore:
@@ -915,6 +919,7 @@ async def _execute_request_in_fresh_session(
                 thinker_provider=runner.provider_for_role("thinker"),
                 implementer_provider=runner.provider_for_role("implementer"),
                 reviewer_provider=runner.provider_for_role("reviewer"),
+                target_run_id=target_run_id or getattr(body, "target_run_id", None),
             )
             session.commit()
             await event_broker.publish(
@@ -962,7 +967,7 @@ def list_project_requests(
     github_adapter = GitHubAdapter()
     intake = RemoteRequestIntakeService(github_adapter=github_adapter, uow=uow)
     raw_eligible = intake.get_eligible_requests(project.repository)
-    
+
     # Mark status as ELIGIBLE for frontend badge compatibility
     eligible = []
     for item in raw_eligible:
@@ -1180,7 +1185,6 @@ async def run_project_request(
             status_code=status.HTTP_409_CONFLICT,
             detail="Verified managed repository binding is required",
         )
-    repo_root = Path(binding.managed_repository_root)
 
     intent_key = body.idempotency_key or f"{project_id}:active"
     operation_id = _accepted_operations.get((project_id, intent_key))

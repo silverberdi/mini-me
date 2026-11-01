@@ -1,3 +1,6 @@
+// RETAIN-WITH-REASON: Legacy F5 vanilla JS views retained solely for historical auditability and contract regression tests.
+// Superseded by Angular PWA production bundle since F8/F10.
+// This file is not imported or executed by index.html in production.
 function text(tag, content, className = "") {
   const el = document.createElement(tag);
   el.textContent = content;
