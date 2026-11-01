@@ -2,7 +2,10 @@ export interface Project {
   project_id: string;
   name?: string;
   repo_path?: string;
+  local_path?: string;
   github_repo?: string;
+  repository?: string;
+  base_branch?: string;
   status?: string;
   active_run_id?: string | null;
   created_at?: string;
@@ -16,12 +19,17 @@ export interface OrchestrationRun {
   change_name?: string | null;
   stage: string;
   status: string;
+  base_sha?: string | null;
+  candidate_sha?: string | null;
+  current_candidate_sha?: string | null;
   created_at?: string;
   updated_at?: string;
   is_active?: boolean;
   active_agent_id?: string | null;
   error_detail?: string | null;
   metadata?: Record<string, any>;
+  human_gate?: string | null;
+  stop_details?: Record<string, any> | null;
 }
 
 export interface RequestItem {
@@ -29,6 +37,7 @@ export interface RequestItem {
   project_id: string;
   issue_number?: number | null;
   title: string;
+  body?: string | null;
   status: string;
   created_at?: string;
   updated_at?: string;

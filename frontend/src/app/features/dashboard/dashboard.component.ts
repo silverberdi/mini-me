@@ -147,7 +147,12 @@ import { AnalogGaugeComponent } from '../../shared/analog-gauge.component';
           </div>
 
           <div class="relative w-full h-52">
-            <svg viewBox="0 0 600 170" preserveAspectRatio="none" class="w-full h-full overflow-visible">
+            <div *ngIf="dataPoints.length === 0" class="h-full flex flex-col items-center justify-center text-center p-6 text-slate-500 space-y-1">
+              <span class="text-sm font-medium text-slate-400">Sin ejecuciones históricas registradas</span>
+              <span class="text-xs font-mono">Las métricas de efectividad se trazarán automáticamente al completarse ciclos reales.</span>
+            </div>
+
+            <svg *ngIf="dataPoints.length > 0" viewBox="0 0 600 170" preserveAspectRatio="none" class="w-full h-full overflow-visible">
               <!-- Grid lines -->
               <line x1="45" y1="20" x2="580" y2="20" stroke="#334155" stroke-dasharray="3 3" stroke-width="0.75" />
               <line x1="45" y1="65" x2="580" y2="65" stroke="#334155" stroke-dasharray="3 3" stroke-width="0.75" />
@@ -289,25 +294,27 @@ export class DashboardComponent {
 
   get codexValue(): number {
     const q = this.getQuota('codex');
-    return q?.remaining_percent ?? 93;
+    return q?.remaining_percent ?? 0;
   }
 
   get codexSublabel(): string {
     const q = this.getQuota('codex');
-    const model = q?.model_id || 'gpt-5.6-luna';
-    const win = q?.window || '5h';
+    if (!q) return 'No disponible (sin telemetría)';
+    const model = q.model_id || 'gpt-5.6-luna';
+    const win = q.window || '5h';
     return `${model} (${this.codexValue}% disponible - ventana ${win})`;
   }
 
   get antigravityValue(): number {
     const q = this.getQuota('antigravity');
-    return q?.remaining_percent ?? 52;
+    return q?.remaining_percent ?? 0;
   }
 
   get antigravitySublabel(): string {
     const q = this.getQuota('antigravity');
-    const model = q?.model_id || 'gemini-3.8-flash';
-    const win = q?.window || '5h';
+    if (!q) return 'No disponible (sin telemetría)';
+    const model = q.model_id || 'gemini-3.8-flash';
+    const win = q.window || '5h';
     return `${model} (${this.antigravityValue}% disponible - ventana ${win})`;
   }
 
@@ -319,13 +326,15 @@ export class DashboardComponent {
     if (q?.balance !== null && q?.balance !== undefined) {
       return Math.min(100, Math.round((q.balance / 20.0) * 100));
     }
-    return 100;
+    return 0;
   }
 
   get deepseekSublabel(): string {
     const q = this.getQuota('deepseek');
-    const bal = q?.balance !== null && q?.balance !== undefined ? q.balance : 21.56;
-    return `$${bal.toFixed(2)} USD saldo disponible (${this.deepseekValue}%)`;
+    if (q?.balance !== null && q?.balance !== undefined) {
+      return `$${q.balance.toFixed(2)} USD saldo disponible (${this.deepseekValue}%)`;
+    }
+    return 'No disponible (sin telemetría)';
   }
 
   get openrouterValue(): number {
@@ -336,13 +345,15 @@ export class DashboardComponent {
     if (q?.balance !== null && q?.balance !== undefined) {
       return Math.min(100, Math.round((q.balance / 30.0) * 100));
     }
-    return 61;
+    return 0;
   }
 
   get openrouterSublabel(): string {
     const q = this.getQuota('openrouter');
-    const bal = q?.balance !== null && q?.balance !== undefined ? q.balance : 18.43;
-    return `$${bal.toFixed(2)} de $30.00 USD (${this.openrouterValue}% disponible)`;
+    if (q?.balance !== null && q?.balance !== undefined) {
+      return `$${q.balance.toFixed(2)} de $30.00 USD (${this.openrouterValue}% disponible)`;
+    }
+    return 'No disponible (sin telemetría)';
   }
 
   get currentDimensionTitle(): string {
@@ -396,10 +407,7 @@ export class DashboardComponent {
   get dataPoints(): Array<{ x: number; y: number; label: string; displayVal: string }> {
     const runs = this.refresh.runs().slice(0, 5).reverse();
     if (runs.length === 0) {
-      return [
-        { x: 120, y: 145, label: 'F6', displayVal: this.selectedDimension() === 'autonomy' ? '100%' : this.selectedDimension() === 'time' ? '10.6h' : 'CLI' },
-        { x: 340, y: 20, label: 'F9', displayVal: this.selectedDimension() === 'autonomy' ? '100%' : this.selectedDimension() === 'time' ? '22.1h' : 'CLI' }
-      ];
+      return [];
     }
 
     const step = 500 / Math.max(1, (runs.length - 1) || 1);

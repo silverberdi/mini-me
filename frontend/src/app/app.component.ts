@@ -26,7 +26,7 @@ import { ThemeService } from './core/theme.service';
                   (change)="onProjectChange($event)"
                   class="bg-slate-800 border border-slate-700 text-xs rounded-lg px-2.5 py-1.5 text-slate-200 focus:outline-none focus:border-sky-500">
             <option *ngFor="let p of refresh.projects()" [value]="p.project_id">
-              {{ p.project_id }} ({{ p.status || 'ACTIVE' }})
+              {{ p.project_id }}{{ p.status && p.status !== 'ACTIVE' ? ' (' + p.status + ')' : '' }}
             </option>
           </select>
         </div>

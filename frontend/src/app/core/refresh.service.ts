@@ -112,11 +112,16 @@ export class RefreshService implements OnDestroy {
         this.runs.set(runsRes.data);
       }
 
-      if (reqsRes && reqsRes.ok && Array.isArray(reqsRes.data)) {
+      if (reqsRes && reqsRes.ok && reqsRes.data) {
         const payload: any = reqsRes.data;
-        this.requests.set(Array.isArray(payload) ? payload : (payload.eligible_requests || payload.all_requests || []));
-        if (payload && payload.closed_requests && Array.isArray(payload.closed_requests)) {
-          this.closedRequests.set(payload.closed_requests);
+        if (Array.isArray(payload)) {
+          this.requests.set(payload);
+        } else if (typeof payload === 'object') {
+          const reqList = payload.eligible_requests || payload.all_requests || [];
+          this.requests.set(Array.isArray(reqList) ? reqList : []);
+          if (payload.closed_requests && Array.isArray(payload.closed_requests)) {
+            this.closedRequests.set(payload.closed_requests);
+          }
         }
       }
 
