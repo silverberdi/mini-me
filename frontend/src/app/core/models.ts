@@ -33,6 +33,19 @@ export interface RequestItem {
   updated_at?: string;
 }
 
+export interface QuotaObservation {
+  provider: string;
+  state: 'AVAILABLE' | 'EXHAUSTED' | 'UNKNOWN';
+  observed_at: string;
+  source: string;
+  remaining_percent?: number | null;
+  balance?: number | null;
+  reset_at?: string | null;
+  window?: string | null;
+  stale?: boolean;
+  reason?: string | null;
+}
+
 export interface UserSession {
   authenticated: boolean;
   user?: {

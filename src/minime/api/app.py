@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import logging
 import os
@@ -20,6 +21,7 @@ from fastapi.responses import (
     JSONResponse,
     RedirectResponse,
     Response,
+    StreamingResponse,
 )
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
@@ -65,6 +67,7 @@ from minime.services.budget_service import BudgetService
 from minime.services.capacity_lifecycle_service import CapacityLifecycleService
 from minime.services.context_discovery_service import ContextDiscoveryService
 from minime.services.current_check_batch import validate_current_checks_batch
+from minime.services.event_broker import event_broker
 from minime.services.greenfield_bootstrap import (
     GreenfieldBootstrapCoordinator,
     GreenfieldBootstrapError,
@@ -74,10 +77,17 @@ from minime.services.project_catalog_service import ProjectCatalogService
 from minime.services.project_connection_service import ProjectConnectionService
 from minime.services.project_service import ProjectService
 from minime.services.provider_health_service import ProviderHealthService
+from minime.services.quota_telemetry import quota_telemetry
+from minime.services.run_recovery import RunRecoveryService
 from minime.services.status_service import StatusService
 from minime.services.validation_authority_service import ValidationAuthorityService
 
 logger = logging.getLogger(__name__)
+
+_RUN_WORKER_LIMIT = 2
+_run_worker_semaphore = asyncio.Semaphore(_RUN_WORKER_LIMIT)
+_run_tasks: set[asyncio.Task[None]] = set()
+_accepted_operations: dict[tuple[str, str], str] = {}
 
 
 @asynccontextmanager
@@ -152,6 +162,21 @@ async def lifespan(app: FastAPI):
                             )
         except Exception as exc:
             logger.warning(f"Error initializing authorized operators: {exc}")
+        # Recovery is discovery + fenced claim only; provider work is scheduled after
+        # the startup transaction and therefore never shares this session.
+        try:
+            recovered = RunRecoveryService(uow).discover_and_claim()
+            for project_id, run_id in recovered:
+                task = asyncio.create_task(
+                    _execute_request_in_fresh_session(
+                        project_id, ProjectRequestRunPayload(target_run_id=run_id), target_run_id=run_id
+                    )
+                )
+                _run_tasks.add(task)
+                task.add_done_callback(_run_tasks.discard)
+                await event_broker.publish("run.recovered", {"project_id": project_id, "run_id": run_id})
+        except Exception as exc:
+            logger.warning("Run startup recovery unavailable: %s", type(exc).__name__)
     except Exception as exc:
         logger.warning(f"Error during startup reconciliation: {exc}")
     finally:
@@ -832,6 +857,8 @@ def verify_project_connections(
 
 
 class ProjectRequestRunPayload(BaseModel):
+    idempotency_key: str | None = None
+    target_run_id: str | None = None
     operator_ack: bool = False
     operator_response: str | None = None
     operator_clarification: str | None = None
@@ -842,6 +869,86 @@ class ProjectRequestRunPayload(BaseModel):
     thinker_provider: str | None = None
     implementer_provider: str | None = None
     reviewer_provider: str | None = None
+
+
+async def _execute_request_in_fresh_session(
+    project_id: str,
+    body: ProjectRequestRunPayload,
+    intent_key: str | None = None,
+    target_run_id: str | None = None,
+) -> None:
+    """Run long provider work after the HTTP transaction has closed."""
+    async with _run_worker_semaphore:
+        await event_broker.publish("run.accepted", {"project_id": project_id})
+        session = db_manager.sessionmaker()
+        try:
+            worker_uow = PostgresPersistenceUnitOfWork(session)
+            project = worker_uow.projects.get_by_id(project_id)
+            if project is None:
+                return
+            binding = worker_uow.project_managed_repository_bindings.get_by_project_id(project_id)
+            if binding is None or not binding.managed_repository_root:
+                return
+            from minime.adapters.github import GitHubAdapter
+            from minime.services.agent_runner import CliAgentRunner
+            from minime.services.budget_service import BudgetService
+            from minime.services.capacity_lifecycle_service import CapacityLifecycleService
+            from minime.services.orchestration_coordinator import NativeOrchestrationCoordinator
+            from minime.services.worktree_manager import WorktreeManager
+
+            runner = CliAgentRunner.for_project_profiles(
+                project.agent_profiles,
+                capacity_service=CapacityLifecycleService(worker_uow),
+                budget_service=BudgetService(worker_uow),
+            )
+            result = await NativeOrchestrationCoordinator(
+                uow_factory=lambda: worker_uow,
+                github_adapter=GitHubAdapter(),
+                worktree_manager=WorktreeManager(
+                    project_root=Path(binding.managed_repository_root), uow=worker_uow
+                ),
+                agent_runner=runner,
+                semantic_pr_agent=True,
+            ).execute_project_request(
+                project_id,
+                operator_ack=body.operator_ack,
+                operator_clarification=body.operator_clarification or body.operator_response,
+                explore_recovery_authorization_id=body.explore_recovery_authorization_id,
+                propose_recovery_authorization_id=body.propose_recovery_authorization_id,
+                proposal_review_recovery_authorization_id=body.proposal_review_recovery_authorization_id,
+                code_review_recovery_authorization_id=body.code_review_recovery_authorization_id,
+                thinker_provider=runner.provider_for_role("thinker"),
+                implementer_provider=runner.provider_for_role("implementer"),
+                reviewer_provider=runner.provider_for_role("reviewer"),
+                target_run_id=target_run_id or getattr(body, "target_run_id", None),
+            )
+            session.commit()
+            await event_broker.publish(
+                "run.transition",
+                {"project_id": project_id, "run_id": result.run_id, "status": result.status},
+            )
+            if result.human_payload:
+                await event_broker.publish(
+                    "human.gate",
+                    {"project_id": project_id, "run_id": result.run_id, "payload": result.human_payload},
+                )
+        except Exception as exc:
+            session.rollback()
+            logger.exception("Asynchronous run worker failed: %s", type(exc).__name__)
+            await event_broker.publish(
+                "run.failed", {"project_id": project_id, "reason": type(exc).__name__}
+            )
+        finally:
+            session.close()
+            if intent_key is not None:
+                _accepted_operations.pop((project_id, intent_key), None)
+
+
+def _schedule_request_worker(project_id: str, body: ProjectRequestRunPayload, intent_key: str) -> str:
+    task = asyncio.create_task(_execute_request_in_fresh_session(project_id, body, intent_key))
+    _run_tasks.add(task)
+    task.add_done_callback(_run_tasks.discard)
+    return str(uuid4())
 
 
 @app.get("/api/v1/projects/{project_id}/requests", tags=["requests"])
@@ -1056,7 +1163,7 @@ def get_project_request_metrics(
     return svc.project_request_metrics(project_id, issue_number)
 
 
-@app.post("/api/v1/projects/{project_id}/requests/run", tags=["requests"])
+@app.post("/api/v1/projects/{project_id}/requests/run", status_code=status.HTTP_202_ACCEPTED, tags=["requests"])
 async def run_project_request(
     project_id: str,
     _operator: AuthenticatedOperatorDep,
@@ -1064,13 +1171,6 @@ async def run_project_request(
     payload: ProjectRequestRunPayload | None = None,
 ) -> dict[str, Any]:
     """Execute or continue the active remote request for a project."""
-    from minime.adapters.github import GitHubAdapter
-    from minime.services.agent_runner import CliAgentRunner
-    from minime.services.budget_service import BudgetService
-    from minime.services.capacity_lifecycle_service import CapacityLifecycleService
-    from minime.services.orchestration_coordinator import NativeOrchestrationCoordinator
-    from minime.services.worktree_manager import WorktreeManager
-
     project = uow.projects.get_by_id(project_id)
     if project is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Project not found")
@@ -1084,51 +1184,52 @@ async def run_project_request(
             status_code=status.HTTP_409_CONFLICT,
             detail="Verified managed repository binding is required",
         )
-    repo_root = Path(binding.managed_repository_root)
 
-    wt_manager = WorktreeManager(project_root=repo_root, uow=uow)
-    github = GitHubAdapter()
-    try:
-        agent_runner = CliAgentRunner.for_project_profiles(
-            project.agent_profiles,
-            capacity_service=CapacityLifecycleService(uow),
-            budget_service=BudgetService(uow),
+    # Check durable orchestration runs in PostgreSQL during request admission
+    active_runs = uow.orchestration_runs.list_runs(project_id=project_id, is_active=True)
+    if active_runs:
+        active_run = active_runs[0]
+        # Permit re-entry only if target matches or human clarification/ack is provided
+        is_reentry = (
+            body.target_run_id == active_run.id
+            or bool(body.operator_response or body.operator_clarification or body.operator_ack)
         )
-    except (ValueError, OSError) as exc:
-        raise HTTPException(
-            status_code=status.HTTP_409_CONFLICT,
-            detail=f"Verified F2 agent profiles unavailable: {exc}",
-        ) from exc
+        if not is_reentry:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail=f"Active run already in progress for project '{project_id}' (run_id={active_run.id})",
+            )
 
-    coordinator = NativeOrchestrationCoordinator(
-        uow_factory=lambda: uow,
-        github_adapter=github,
-        worktree_manager=wt_manager,
-        agent_runner=agent_runner,
-        semantic_pr_agent=True,
-    )
-    clarification = body.operator_clarification or body.operator_response
-    res = await coordinator.execute_project_request(
-        project_id,
-        operator_ack=body.operator_ack,
-        operator_clarification=clarification,
-        explore_recovery_authorization_id=body.explore_recovery_authorization_id,
-        propose_recovery_authorization_id=body.propose_recovery_authorization_id,
-        proposal_review_recovery_authorization_id=body.proposal_review_recovery_authorization_id,
-        code_review_recovery_authorization_id=body.code_review_recovery_authorization_id,
-        thinker_provider=agent_runner.provider_for_role("thinker"),
-        implementer_provider=agent_runner.provider_for_role("implementer"),
-        reviewer_provider=agent_runner.provider_for_role("reviewer"),
-    )
+    intent_key = body.idempotency_key or f"{project_id}:active"
+    operation_id = _accepted_operations.get((project_id, intent_key))
+    if operation_id is None:
+        operation_id = _schedule_request_worker(project_id, body, intent_key)
+        # The map is deliberately bounded to active intent identities; terminal
+        # state remains authoritative in PostgreSQL and recovery can reconcile it.
+        _accepted_operations[(project_id, intent_key)] = operation_id
     return {
-        "status": res.status,
-        "run_id": res.run_id,
-        "current_stage": res.current_stage.value if res.current_stage else None,
-        "message": res.message,
-        "pr1_url": res.pr1_url,
-        "pr2_url": res.pr2_url,
-        "human_payload": res.human_payload,
+        "status": "ACCEPTED",
+        "operation_id": operation_id,
+        "run_id": None,
+        "message": "Run accepted for bounded background execution.",
     }
+
+
+@app.get("/api/v1/events", tags=["events"])
+async def stream_events(_operator: AuthenticatedOperatorDep) -> StreamingResponse:
+    async def stream():
+        yield ": connected\n\n"
+        async for event in event_broker.subscribe():
+            yield event
+
+    return StreamingResponse(stream(), media_type="text/event-stream", headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
+
+
+@app.get("/api/v1/providers/quotas", tags=["providers"])
+async def get_provider_quotas(_operator: AuthenticatedOperatorDep) -> dict[str, Any]:
+    snapshot = await quota_telemetry.snapshot()
+    await event_broker.publish("quota.update", {"providers": snapshot})
+    return {"observed_at": datetime.now(UTC).isoformat(), "providers": snapshot}
 
 
 class ExploreRecoveryAuthorizationPayload(BaseModel):
@@ -1435,20 +1536,13 @@ def authorize_code_review_recovery(
     return {"action_request_id": action_request_id, "run_id": run_id, "status": "ACCEPTED"}
 
 
-@app.post("/api/v1/projects/{project_id}/requests/ack", tags=["requests"])
+@app.post("/api/v1/projects/{project_id}/requests/ack", status_code=status.HTTP_202_ACCEPTED, tags=["requests"])
 async def ack_project_request(
     project_id: str,
     _operator: AuthenticatedOperatorDep,
     uow: UowDep,
 ) -> dict[str, Any]:
-    """Acknowledge («Estoy enterado») high-complexity PR merge and continue."""
-    from minime.adapters.github import GitHubAdapter
-    from minime.services.agent_runner import CliAgentRunner
-    from minime.services.budget_service import BudgetService
-    from minime.services.capacity_lifecycle_service import CapacityLifecycleService
-    from minime.services.orchestration_coordinator import NativeOrchestrationCoordinator
-    from minime.services.worktree_manager import WorktreeManager
-
+    """Acknowledge high-complexity PR merge and continue asynchronously."""
     project = uow.projects.get_by_id(project_id)
     if project is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Project not found")
@@ -1459,39 +1553,18 @@ async def ack_project_request(
             status_code=status.HTTP_409_CONFLICT,
             detail="Verified managed repository binding is required",
         )
-    wt_manager = WorktreeManager(project_root=Path(binding.managed_repository_root), uow=uow)
-    github = GitHubAdapter()
-    try:
-        agent_runner = CliAgentRunner.for_project_profiles(
-            project.agent_profiles,
-            capacity_service=CapacityLifecycleService(uow),
-            budget_service=BudgetService(uow),
-        )
-    except (ValueError, OSError) as exc:
-        raise HTTPException(
-            status_code=status.HTTP_409_CONFLICT,
-            detail=f"Verified F2 agent profiles unavailable: {exc}",
-        ) from exc
 
-    coordinator = NativeOrchestrationCoordinator(
-        uow_factory=lambda: uow,
-        github_adapter=github,
-        worktree_manager=wt_manager,
-        agent_runner=agent_runner,
-        semantic_pr_agent=True,
-    )
-    res = await coordinator.execute_project_request(
-        project_id,
-        operator_ack=True,
-    )
+    active_runs = uow.orchestration_runs.list_runs(project_id=project_id, is_active=True)
+    target_run_id = active_runs[0].id if active_runs else None
+
+    body = ProjectRequestRunPayload(operator_ack=True, target_run_id=target_run_id)
+    intent_key = f"{project_id}:ack:{target_run_id or 'active'}"
+    operation_id = _schedule_request_worker(project_id, body, intent_key)
     return {
-        "status": res.status,
-        "run_id": res.run_id,
-        "current_stage": res.current_stage.value if res.current_stage else None,
-        "message": res.message,
-        "pr1_url": res.pr1_url,
-        "pr2_url": res.pr2_url,
-        "human_payload": res.human_payload,
+        "status": "ACCEPTED",
+        "operation_id": operation_id,
+        "run_id": target_run_id,
+        "message": "Operator acknowledgment accepted for asynchronous execution.",
     }
 
 
@@ -2329,7 +2402,7 @@ def list_orchestration_runs(
     for r in runs:
         d = r.model_dump()
         stop_details = d.get("stop_details") or {}
-        
+
         # Check if human intervention is required from checkpoint
         human_payload = (
             stop_details.get("human_payload")
@@ -2341,7 +2414,7 @@ def list_orchestration_runs(
             or stop_details.get("explore_checkpoint", {}).get("status") == "HUMAN_REQUIRED"
             or stop_details.get("propose_checkpoint", {}).get("status") == "HUMAN_REQUIRED"
         )
-        
+
         if is_human_required:
             d["status"] = "HUMAN_REQUIRED"
             d["human_gate"] = "HUMAN_REQUIRED"
@@ -2350,10 +2423,8 @@ def list_orchestration_runs(
                 d["stop_details"] = stop_details
         else:
             d["status"] = "RUNNING" if r.is_active else "COMPLETED"
-            
         d["stage"] = r.current_stage.value if r.current_stage else None
         results.append(d)
-        
     return results
 
 

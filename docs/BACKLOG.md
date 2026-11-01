@@ -1,6 +1,6 @@
 # Backlog vigente — mini me Gacela
 
-**Autoridad:** [Contrato rector v1.3](CONTRATO_RECTOR.md) y [refinamiento UX F5](F5_UX_CONTRATO.md). **La reconstrucción original consta de seis Changes F1–F6; F7, F8 y F9 son fases futuras añadidas por el operador, expresamente deshabilitadas.** Este archivo e Issues no autorizan trabajo, deploy ni consumo de agentes.
+**Autoridad:** [Contrato rector v1.3](CONTRATO_RECTOR.md) y [refinamiento UX F5](F5_UX_CONTRATO.md). **La reconstrucción original consta de seis Changes F1–F6; F7–F10 son fases posteriores. F10 queda autorizada para un único Change, posterior al cierre gobernado de F9.** Este archivo e Issues no autorizan Apply, deploy ni consumo de agentes.
 
 | Orden | Issue | Change | Resultado | Ejecutor/autoridad |
 | --- | --- | --- | --- | --- |
@@ -13,6 +13,7 @@
 | 7 | [#189](https://github.com/silverberdi/mini-me/issues/189) | `request-189-f7-capacidades-funcionales-posteriores-a` | Gestión de Requests, pausa diferida, proyecto ejecutor único, métricas y edición segura faltantes | Histórico cerrado |
 | 8 | [#190](https://github.com/silverberdi/mini-me/issues/190) | **NO creado/NO autorizado** | Angular + TypeScript + Tailwind, migración de frontend sin modificar backend | **disabled**, F8 futuro |
 | 9 | [#204](https://github.com/silverberdi/mini-me/issues/204) | `req-204-f9-opencode-cli-como-adaptadorharness-de` | OpenCode como adaptador CLI universal para modelos API externos (OpenRouter, DeepSeek, Minimax, Claude, etc.) | **autorizado**, F9 en verificación |
+| 10 | [#207](https://github.com/silverberdi/mini-me/issues/207) | **por crear** | Desacoplamiento asíncrono, telemetría real de cuotas 5h, reactividad y pulimento PWA, auto-recuperación de Runs | **autorizado**, F10 posterior a F9 |
 
 ## Alcance acordado de F5
 
@@ -46,7 +47,7 @@ Migrar exclusivamente la UI a Angular + TypeScript + Tailwind, conservando rutas
 
 ## Reglas de admisión y cierre
 
-1. Un Change OpenSpec por fase **autorizada**, no micro-Changes. F7 completada y cerrada; F8 y F9 permanecen disabled hasta autorización expresa.
+1. Un Change OpenSpec por fase **autorizada**, no micro-Changes. F7 consta cerrada; F8 permanece disabled; F9 precede a F10 y F10 requiere un único Change.
 2. Fuente de tickets remota, FIFO por proyecto y sin base local de backlog; Gherkin normalizado por capacidad F4. No confundir bandera de proyecto F2 `ACTIVE` con proyecto seleccionado para ejecutar F7.
 3. Revisión/merge/PR1+PR2, recuperación y autorizaciones según contrato vigente; la pausa posterior F7 debe incluir cierre documental y remoto antes de detener nuevas admisiones.
 4. F5 y F6 deben ejecutarse por mini me. Bootstrap PR #188 **no** equivale a F5 iniciado/ejecutado, no autoriza merge/deploy/consumo.

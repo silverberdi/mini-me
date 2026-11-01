@@ -30,18 +30,18 @@ import { RefreshService } from '../../core/refresh.service';
             <div>
               <div class="flex items-center gap-3">
                 <span class="text-xs font-mono font-bold px-2.5 py-1 rounded-md bg-sky-500/10 text-sky-400 border border-sky-500/20">
-                  {{ activeRun()?.run_id }}
+                  {{ activeRun().run_id }}
                 </span>
                 <span class="px-2.5 py-1 text-xs font-semibold rounded-lg bg-sky-500/20 text-sky-300 border border-sky-500/30">
-                  {{ activeRun()?.status }}
+                  {{ activeRun().status }}
                 </span>
               </div>
-              <h2 class="text-xl font-bold text-white mt-2">{{ activeRun()?.change_name || 'Sin cambio OpenSpec asignado' }}</h2>
-              <p class="text-xs text-slate-400 font-mono mt-1">Proyecto: {{ activeRun()?.project_id }} | Request ID: {{ activeRun()?.request_id || 'N/A' }}</p>
+              <h2 class="text-xl font-bold text-white mt-2">{{ activeRun().change_name || 'Sin cambio OpenSpec asignado' }}</h2>
+              <p class="text-xs text-slate-400 font-mono mt-1">Proyecto: {{ activeRun().project_id }} | Request ID: {{ activeRun().request_id || 'N/A' }}</p>
             </div>
             <div>
               <span class="px-3 py-1.5 rounded-xl bg-slate-900 border border-slate-700 text-sm font-semibold text-slate-200">
-                Stage: {{ activeRun()?.stage }}
+                Stage: {{ activeRun().stage }}
               </span>
             </div>
           </div>
@@ -54,25 +54,25 @@ import { RefreshService } from '../../core/refresh.service';
             <div class="space-y-3 text-sm">
               <div class="flex justify-between py-2 border-b border-slate-700/40">
                 <span class="text-slate-400">Agente Activo:</span>
-                <span class="font-mono text-slate-200">{{ activeRun()?.active_agent_id || 'Autónomo / Ninguno' }}</span>
+                <span class="font-mono text-slate-200">{{ activeRun().active_agent_id || 'Autónomo / Ninguno' }}</span>
               </div>
               <div class="flex justify-between py-2 border-b border-slate-700/40">
                 <span class="text-slate-400">Inicio de Ejecución:</span>
-                <span class="font-mono text-slate-200">{{ activeRun()?.created_at || 'N/A' }}</span>
+                <span class="font-mono text-slate-200">{{ activeRun().created_at || 'N/A' }}</span>
               </div>
               <div class="flex justify-between py-2 border-b border-slate-700/40">
                 <span class="text-slate-400">Última Transición:</span>
-                <span class="font-mono text-slate-200">{{ activeRun()?.updated_at || 'N/A' }}</span>
+                <span class="font-mono text-slate-200">{{ activeRun().updated_at || 'N/A' }}</span>
               </div>
             </div>
           </div>
 
           <div class="bg-slate-800/40 rounded-2xl border border-slate-700/50 p-6 backdrop-blur-sm space-y-4">
             <h3 class="text-base font-semibold text-white">Diagnóstico & Errores</h3>
-            <div *ngIf="activeRun()?.error_detail" class="p-4 rounded-xl bg-rose-500/10 border border-rose-500/20 text-rose-300 text-xs font-mono">
-              {{ activeRun()?.error_detail }}
+            <div *ngIf="activeRun().error_detail" class="p-4 rounded-xl bg-rose-500/10 border border-rose-500/20 text-rose-300 text-xs font-mono">
+              {{ activeRun().error_detail }}
             </div>
-            <div *ngIf="!activeRun()?.error_detail" class="p-4 rounded-xl bg-slate-900/60 border border-slate-700/40 text-slate-400 text-sm">
+            <div *ngIf="!activeRun().error_detail" class="p-4 rounded-xl bg-slate-900/60 border border-slate-700/40 text-slate-400 text-sm">
               La ejecución procede con normalidad sin errores reportados por el supervisor.
             </div>
           </div>

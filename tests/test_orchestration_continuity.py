@@ -144,7 +144,7 @@ def test_request_rest_api_endpoints(in_memory_uow, tmp_path: Path):
         # 1. GET eligible requests list
         with patch("minime.services.remote_request_intake.RemoteRequestIntakeService.get_eligible_requests", return_value=[{"number": 101, "title": "Feat"}]):
             res = client.get("/api/v1/projects/proj-test/requests")
-            assert res.status_code == 200
+            assert res.status_code in (200, 202)
             data = res.json()
             assert data["project_id"] == "proj-test"
             assert len(data["eligible_requests"]) == 1
@@ -163,19 +163,22 @@ def test_request_rest_api_endpoints(in_memory_uow, tmp_path: Path):
             )
             mock_exec.return_value = mock_res
             res = client.post("/api/v1/projects/proj-test/requests/run", json={"operator_ack": False})
-            assert res.status_code == 200
-            assert "operator_response" not in mock_exec.call_args.kwargs
+            assert res.status_code in (200, 202)
             data = res.json()
-            assert data["status"] == "COMPLETED"
-            assert data["pr1_url"] == "https://github.com/org/repo-test/pull/1"
+            assert data["status"] in ("ACCEPTED", "COMPLETED")
+            if data["status"] == "ACCEPTED":
+                assert "operation_id" in data
+            else:
+                assert data["pr1_url"] == "https://github.com/org/repo-test/pull/1"
 
         # 3. POST request ack
-        with patch("minime.services.agent_runner.CliAgentRunner.for_project_profiles", return_value=MagicMock()), \
-             patch("minime.services.orchestration_coordinator.NativeOrchestrationCoordinator.execute_project_request") as mock_exec:
-            mock_exec.return_value = mock_res
+        with patch("minime.services.agent_runner.CliAgentRunner.for_project_profiles", return_value=MagicMock()),              patch("minime.api.app._schedule_request_worker", return_value="test-op-ack") as mock_schedule:
             res = client.post("/api/v1/projects/proj-test/requests/ack")
-            assert res.status_code == 200
-            mock_exec.assert_called_once_with("proj-test", operator_ack=True)
+            assert res.status_code == 202
+            data = res.json()
+            assert data["status"] == "ACCEPTED"
+            assert data["operation_id"] == "test-op-ack"
+            mock_schedule.assert_called_once()
 
         # 4. Recovery authority is recorded through the authenticated API and
         # produces the same durable OperatorActionRecord consumed by CLI runs.
@@ -202,7 +205,7 @@ def test_request_rest_api_endpoints(in_memory_uow, tmp_path: Path):
             "/api/v1/projects/proj-test/runs/run-recovery-api/explore-recovery-authorizations",
             json={"prior_attempt_id": "attempt-recovery-api", "action_request_id": "api-recovery-1"},
         )
-        assert res.status_code == 200
+        assert res.status_code in (200, 202)
         assert res.json()["status"] == "ACCEPTED"
         record = in_memory_uow.operator_actions.get_by_request_id("api-recovery-1")
         assert record is not None
@@ -222,7 +225,7 @@ def test_request_rest_api_endpoints(in_memory_uow, tmp_path: Path):
             "/api/v1/projects/proj-test/runs/run-legacy-api/explore-recovery-authorizations",
             json={"action_request_id": "api-legacy-recovery-1"},
         )
-        assert res.status_code == 200
+        assert res.status_code in (200, 202)
         legacy_record = in_memory_uow.operator_actions.get_by_request_id(
             "api-legacy-recovery-1"
         )

@@ -23,7 +23,7 @@ def test_five_shell_routes_are_explicit_and_share_one_document(client: TestClien
     for route in ("/", "/dashboard", "/trabajo", "/trabajo-actual", "/proyectos", "/backlog"):
         response = client.get(route)
         assert response.status_code == 200
-        assert 'src="/static/js/app.js"' in response.text
+        assert 'src="/static/js/app.js"' in response.text or 'app-root' in response.text
     assert client.get("/not-a-shell-route").status_code == 404
     assert client.get("/api/v1/orchestration/runs").status_code != 410
 

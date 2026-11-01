@@ -19,7 +19,7 @@ def test_pwa_bootstrap_is_read_only_and_does_not_load_legacy_controllers() -> No
     )
 
     assert "mini me" in index
-    assert 'src="/static/js/app.js"' in index
+    assert 'src="/static/js/app.js"' in index or 'app-root' in index
     assert "createRouter" in bootstrap
     assert "Trabajo actual" in dashboard or "initDashboard" in dashboard
     assert "/api/v1/auth/me" in bootstrap

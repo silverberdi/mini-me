@@ -1,6 +1,6 @@
 import { Injectable, signal, computed, effect, OnDestroy } from "@angular/core";
 import { ApiService } from "./api.service";
-import { Project, OrchestrationRun, RequestItem } from "./models";
+import { Project, OrchestrationRun, RequestItem, QuotaObservation } from "./models";
 
 @Injectable({
   providedIn: "root"
@@ -21,6 +21,9 @@ export class RefreshService implements OnDestroy {
   readonly projects = signal<Project[]>([]);
   readonly runs = signal<OrchestrationRun[]>([]);
   readonly requests = signal<RequestItem[]>([]);
+  readonly quotas = signal<QuotaObservation[]>([]);
+  readonly syncState = signal<'idle' | 'syncing' | 'error'>('idle');
+  private events: EventSource | null = null;
 
   // Computed
   readonly activeProject = computed(() => {
@@ -40,6 +43,7 @@ export class RefreshService implements OnDestroy {
       const sec = this.interval();
       this.setupTimer(sec);
     });
+    this.connectEvents();
   }
 
   setInterval(val: string) {
@@ -72,6 +76,7 @@ export class RefreshService implements OnDestroy {
     const currentGen = ++this.generation;
 
     this.isRefreshing.set(true);
+    this.syncState.set('syncing');
     const activeId = this.activeProject()?.project_id || this.selectedProjectId();
     const query = activeId ? `?project_id=${encodeURIComponent(activeId)}` : "";
 
@@ -103,12 +108,20 @@ export class RefreshService implements OnDestroy {
       }
 
       if (reqsRes && reqsRes.ok && Array.isArray(reqsRes.data)) {
-        this.requests.set(reqsRes.data);
+        const payload: any = reqsRes.data;
+        this.requests.set(Array.isArray(payload) ? payload : (payload.eligible_requests || payload.all_requests || []));
       }
+
+      const quotaRes = await this.api.get<{providers: QuotaObservation[]}>("/api/v1/providers/quotas", { signal });
+      if (quotaRes.ok && quotaRes.data?.providers) this.quotas.set(quotaRes.data.providers);
 
       if (!projRes.offline && !runsRes.offline) {
         this.lastUpdated.set(new Date());
+        this.syncState.set('idle');
       }
+    } catch {
+      this.syncState.set('error');
+      this.isConnected.set(false);
     } finally {
       if (currentGen === this.generation) {
         this.isRefreshing.set(false);
@@ -122,6 +135,24 @@ export class RefreshService implements OnDestroy {
       this.timer = null;
     }
     this.abortController?.abort();
+    this.events?.close();
+  }
+
+  private connectEvents(): void {
+    if (typeof EventSource === 'undefined') return;
+    this.events?.close();
+    this.events = new EventSource('/api/v1/events');
+    const refresh = () => void this.read();
+    this.events.addEventListener('run.transition', refresh);
+    this.events.addEventListener('run.accepted', refresh);
+    this.events.addEventListener('run.failed', refresh);
+    this.events.addEventListener('quota.update', (event: MessageEvent) => {
+      try { this.quotas.set(JSON.parse(event.data).providers || []); } catch { /* polling repairs malformed events */ }
+    });
+    this.events.onerror = () => {
+      // EventSource reconnects itself; polling remains the bounded fallback.
+      this.isConnected.set(false);
+    };
   }
 
   private onOnline = () => {
