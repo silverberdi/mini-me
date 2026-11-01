@@ -41,6 +41,20 @@ export class RefreshService implements OnDestroy {
     return this.runs().find(r => r.is_active && (r.status === "HUMAN_REQUIRED" || (r as any).human_gate === "HUMAN_REQUIRED" || !!r.metadata?.['human_payload'])) || null;
   });
 
+  readonly projectProgressPercent = computed(() => {
+    const closed = this.closedRequests().length;
+    const open = this.requests().length;
+    const total = closed + open;
+    return total === 0 ? 0 : Math.round((closed / total) * 100);
+  });
+
+  readonly projectProgressSublabel = computed(() => {
+    const closed = this.closedRequests().length;
+    const open = this.requests().length;
+    const total = closed + open;
+    return total === 0 ? '0 solicitudes' : `${closed} de ${total} cerradas`;
+  });
+
   constructor(private api: ApiService) {
     window.addEventListener('online', this.onOnline);
     window.addEventListener('offline', this.onOffline);

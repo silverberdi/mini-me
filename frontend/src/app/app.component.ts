@@ -4,7 +4,6 @@ import { RouterModule, Router } from '@angular/router';
 import { AuthService } from './core/auth.service';
 import { PushNotificationService } from './core/push-notification.service';
 import { RefreshService } from './core/refresh.service';
-import { ThemeService } from './core/theme.service';
 
 @Component({
   selector: 'app-root',
@@ -16,7 +15,7 @@ import { ThemeService } from './core/theme.service';
       <div class="flex items-center gap-6">
         <a routerLink="/dashboard" class="flex items-center gap-2.5 text-white font-bold text-lg hover:text-sky-400 transition-colors">
           <span class="w-8 h-8 rounded-lg bg-sky-500/20 border border-sky-500/30 flex items-center justify-center text-lg">🤖</span>
-          <span>mini me <span class="text-xs font-normal text-slate-400 block -mt-1 uppercase tracking-wider">centro de control</span></span>
+          <span>mini me</span>
         </a>
 
         <!-- Project Selector Dropdown -->
@@ -35,24 +34,22 @@ import { ThemeService } from './core/theme.service';
 
       <!-- Controls & Session -->
       <div class="flex items-center gap-2 sm:gap-3">
+        <!-- Project Progress Bar in Top Bar -->
+        <div class="hidden md:flex items-center gap-3 px-3 py-1.5 rounded-xl bg-slate-800/60 border border-slate-700/50">
+          <span class="text-xs text-slate-400 font-medium">Avance:</span>
+          <div class="w-28 bg-slate-700 rounded-full h-2 overflow-hidden border border-slate-600">
+            <div class="bg-emerald-500 h-2 rounded-full transition-all duration-500" [style.width.%]="refresh.projectProgressPercent()"></div>
+          </div>
+          <span class="text-xs font-mono font-bold text-emerald-400">{{ refresh.projectProgressPercent() }}%</span>
+          <span class="text-[11px] text-slate-400 font-mono hidden xl:inline">({{ refresh.projectProgressSublabel() }})</span>
+        </div>
+
         <!-- Connection Status -->
-        <span class="hidden md:inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-medium"
+        <span class="hidden sm:inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-medium"
               [ngClass]="refresh.isConnected() ? 'bg-emerald-500/10 text-emerald-400 border border-emerald-500/20' : 'bg-rose-500/10 text-rose-400 border border-rose-500/20'">
           <span class="w-1.5 h-1.5 rounded-full" [ngClass]="refresh.isConnected() ? 'bg-emerald-400 animate-pulse' : 'bg-rose-400'"></span>
           {{ refresh.isConnected() ? 'Conectado' : 'Sin conexión' }}
         </span>
-
-        <!-- Refresh Interval Selector -->
-        <label class="hidden lg:flex items-center gap-1.5 text-xs text-slate-400">
-          <span>Actualizar</span>
-          <select [value]="refresh.interval()" (change)="onIntervalChange($event)"
-                  class="bg-slate-800 border border-slate-700 text-xs rounded-lg px-2 py-1 text-slate-200 focus:outline-none focus:border-sky-500">
-            <option value="manual">Manual</option>
-            <option value="5">5 s</option>
-            <option value="10">10 s</option>
-            <option value="30">30 s</option>
-          </select>
-        </label>
 
         <!-- Push Notification Toggle / Modal Button -->
         <button (click)="togglePushModal()"
@@ -63,24 +60,7 @@ import { ThemeService } from './core/theme.service';
           <span *ngIf="pushService.isSubscribed()" class="absolute top-1 right-1 w-2 h-2 rounded-full bg-emerald-400"></span>
         </button>
 
-        <!-- Refresh Manual Button -->
-        <button (click)="refresh.read()"
-                [disabled]="refresh.isRefreshing()"
-                class="p-2 rounded-lg bg-slate-800 hover:bg-slate-700 border border-slate-700 text-slate-300 transition-colors"
-                title="Actualizar ahora" aria-label="Actualizar datos operativos">
-          <svg class="w-4 h-4" [ngClass]="{'animate-spin': refresh.isRefreshing()}" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" />
-          </svg>
-        </button>
         <span *ngIf="refresh.syncState() === 'syncing'" class="text-xs text-sky-300" role="status" aria-live="polite">Sincronizando…</span>
-
-        <!-- Theme Toggle -->
-        <button (click)="theme.toggleTheme()"
-                class="p-2 rounded-lg bg-slate-800 hover:bg-slate-700 border border-slate-700 text-slate-300 transition-colors"
-                title="Cambiar tema">
-          <span *ngIf="theme.isDark()">☀️</span>
-          <span *ngIf="!theme.isDark()">🌙</span>
-        </button>
 
         <!-- Logout Button -->
         <button (click)="auth.logout()"
@@ -244,7 +224,6 @@ export class AppComponent implements OnInit {
   constructor(
     public auth: AuthService,
     public refresh: RefreshService,
-    public theme: ThemeService,
     public pushService: PushNotificationService,
     private router: Router
   ) {}
@@ -272,9 +251,5 @@ export class AppComponent implements OnInit {
     if (pid) {
       this.refresh.setSelectedProject(pid);
     }
-  }
-
-  onIntervalChange(event: any) {
-    this.refresh.setInterval(event.target.value);
   }
 }

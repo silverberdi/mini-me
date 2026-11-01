@@ -10,35 +10,6 @@ import { AnalogGaugeComponent } from '../../shared/analog-gauge.component';
   imports: [CommonModule, RouterModule, AnalogGaugeComponent],
   template: `
     <div class="space-y-6">
-      <!-- Overview Header -->
-      <div class="flex flex-col md:flex-row md:items-center md:justify-between gap-4 bg-slate-800/40 p-6 rounded-2xl border border-slate-700/50 backdrop-blur-sm shadow-xl">
-        <div class="flex items-center gap-3">
-          <h1 class="text-2xl font-bold tracking-tight text-white flex items-center gap-2.5">
-            <span>Centro de Control</span>
-            <span *ngIf="refresh.activeProject()" class="text-sm font-semibold px-2.5 py-0.5 rounded-full bg-sky-500/10 text-sky-400 border border-sky-500/20">
-              {{ refresh.activeProject().project_id }}
-            </span>
-          </h1>
-          <div class="flex items-center gap-3 mt-1.5 flex-wrap">
-            <span class="text-xs text-slate-400">Progreso del Proyecto:</span>
-            <div class="w-32 bg-slate-800 rounded-full h-2 overflow-hidden border border-slate-700">
-              <div class="bg-emerald-500 h-2 rounded-full transition-all duration-500" [style.width.%]="projectProgressPercent"></div>
-            </div>
-            <span class="text-xs font-mono font-semibold text-emerald-400">{{ projectProgressPercent }}%</span>
-            <span class="text-xs text-slate-500">({{ projectProgressSublabel }})</span>
-          </div>
-        </div>
-        <div class="flex items-center gap-3 self-start md:self-auto">
-          <span class="inline-flex items-center gap-1.5 px-3 py-1 rounded-full text-xs font-medium"
-                [ngClass]="refresh.isConnected() ? 'bg-emerald-500/10 text-emerald-400 border border-emerald-500/20' : 'bg-rose-500/10 text-rose-400 border border-rose-500/20'">
-            <span class="w-1.5 h-1.5 rounded-full" [ngClass]="refresh.isConnected() ? 'bg-emerald-400 animate-pulse' : 'bg-rose-400'"></span>
-            {{ refresh.isConnected() ? 'En línea' : 'Sin conexión' }}
-          </span>
-          <span *ngIf="refresh.lastUpdated()" class="text-xs text-slate-500 font-mono">
-            {{ refresh.lastUpdated() | date:'HH:mm:ss' }}
-          </span>
-        </div>
-      </div>
 
       <!-- Human Attention Required Alert Banner -->
       <div *ngIf="refresh.humanRequiredRun()" class="p-5 rounded-2xl bg-rose-500/10 border border-rose-500/30 flex flex-col md:flex-row md:items-center justify-between gap-4 shadow-lg shadow-rose-500/5 animate-pulse">
