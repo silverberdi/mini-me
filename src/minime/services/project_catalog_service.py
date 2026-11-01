@@ -105,6 +105,11 @@ class ProjectCatalogService:
                     file_edit_roles.add(role)
                 if role == "reviewer" and operation in {"review", "verify"}:
                     read_only_roles.add(role)
+            elif provider_id == "opencode":
+                if role == "implementer":
+                    file_edit_roles.add(role)
+                if role == "reviewer":
+                    read_only_roles.add(role)
         return file_edit_roles, read_only_roles
 
     async def agent_catalog(self, project_root: str | Path | None = None) -> dict[str, Any]:
@@ -306,23 +311,31 @@ class ProjectCatalogService:
                 )
             workflow_commands = {
                 item["command"] for item in agent.get("native_workflows", [])
+            } | {
+                item["operation"] for item in agent.get("native_workflows", [])
             }
+            for cmd in list(workflow_commands):
+                if "-change" in cmd:
+                    workflow_commands.add(cmd.replace("-change", ""))
+                elif cmd.startswith("/opsx-") or cmd.startswith("$openspec-"):
+                    workflow_commands.add(cmd + "-change")
             if project_root is not None:
                 installed_names = set(installed.get("integrations", {}).get(provider_id, []))
-                prefix = "$openspec-" if provider_id == "codex" else "/opsx-"
-                workflow_commands = {prefix + name for name in installed_names}
+                prefix = "$openspec-" if provider_id in {"codex", "opencode"} else "/opsx-"
+                workflow_commands |= {prefix + name for name in installed_names} | installed_names
             unsupported_workflows = set(profile.workflows) - workflow_commands
             if unsupported_workflows:
                 raise ValueError(
                     f"Profile '{profile_name}' requests unverified native workflows: "
                     + ", ".join(sorted(unsupported_workflows))
                 )
-            unsupported_skills = set(profile.skills) - set(agent.get("available_skills", []))
-            if project_root is not None and provider_id == "codex":
-                unsupported_skills = set(profile.skills) - {
+            available_skills = set(agent.get("available_skills", []))
+            if project_root is not None and provider_id in {"codex", "opencode"}:
+                available_skills = {
                     f"openspec-{name}"
                     for name in installed.get("integrations", {}).get(provider_id, [])
-                }
+                } | set(installed.get("integrations", {}).get(provider_id, []))
+            unsupported_skills = set(profile.skills) - available_skills
             if unsupported_skills:
                 raise ValueError(
                     f"Profile '{profile_name}' requests unverified skills: "

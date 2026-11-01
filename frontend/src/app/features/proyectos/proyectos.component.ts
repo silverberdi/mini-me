@@ -627,15 +627,23 @@ export class ProyectosComponent implements OnInit {
     else if (modelId.endsWith('-medium')) effort = 'medium';
     else if (found?.effort) effort = found.effort;
 
-    const proj = this.refresh.activeProject();
-    const existing = proj?.agent_profiles?.[role];
+    let workflows: string[] = [];
+    let skills: string[] = [];
+
+    if (agent_id === 'antigravity') {
+      workflows = role === 'independent_review' ? ['/opsx-verify'] : ['/opsx-apply'];
+      skills = [];
+    } else {
+      workflows = role === 'independent_review' ? ['$openspec-verify-change'] : ['$openspec-apply-change'];
+      skills = role === 'independent_review' ? ['openspec-verify-change'] : ['openspec-apply-change'];
+    }
 
     return {
       agent_id,
       model_id: modelId,
       effort,
-      workflows: existing?.workflows || [],
-      skills: existing?.skills || [],
+      workflows,
+      skills,
     };
   }
 
