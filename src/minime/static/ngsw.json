@@ -1,0 +1,58 @@
+{
+  "configVersion": 1,
+  "timestamp": 1793413914813,
+  "index": "/index.html",
+  "assetGroups": [
+    {
+      "name": "public-shell",
+      "installMode": "prefetch",
+      "updateMode": "prefetch",
+      "cacheQueryOptions": {
+        "ignoreVary": true
+      },
+      "urls": [
+        "/icons/icon-192.png",
+        "/icons/icon-192.svg",
+        "/icons/icon-512.png",
+        "/icons/icon-512.svg",
+        "/index.html",
+        "/main-36GRMCJM.js",
+        "/manifest.webmanifest",
+        "/polyfills-SNKC6BFL.js",
+        "/styles-YGNWHAHW.css"
+      ],
+      "patterns": []
+    }
+  ],
+  "dataGroups": [],
+  "hashTable": {
+    "/icons/icon-192.png": "30d429d27787f5cc207befbccc468921879bbd6b",
+    "/icons/icon-192.svg": "6d5913fc98f70f86af8501978a7720685ed1c25c",
+    "/icons/icon-512.png": "8d58c9261532b00098ef0c97737ffc82030236ba",
+    "/icons/icon-512.svg": "d97dfcd2d50300ab5b2eaf6dc8cd5c6715c033cc",
+    "/index.html": "455fd9cd0e5a398a0aa64fa61fe4ec361eafbe39",
+    "/main-36GRMCJM.js": "03a00f66a3272fb7d03144326e6ef854dfd40ec8",
+    "/manifest.webmanifest": "4f03c25a0514edbeef21fde509cef57539515fe8",
+    "/polyfills-SNKC6BFL.js": "f49b49a155bc7d192db62a4c15d0a612b460a667",
+    "/styles-YGNWHAHW.css": "7bc7e2d13bcb6e7089edb1de05f1f15f2dbd2bcb"
+  },
+  "navigationUrls": [
+    {
+      "positive": true,
+      "regex": "^\\/.*$"
+    },
+    {
+      "positive": false,
+      "regex": "^\\/(?:.+\\/)?[^/]*\\.[^/]*$"
+    },
+    {
+      "positive": false,
+      "regex": "^\\/(?:.+\\/)?[^/]*__[^/]*$"
+    },
+    {
+      "positive": false,
+      "regex": "^\\/(?:.+\\/)?[^/]*__[^/]*\\/.*$"
+    }
+  ],
+  "navigationRequestStrategy": "performance"
+}

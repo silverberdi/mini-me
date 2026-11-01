@@ -1,25 +1,15 @@
 <!DOCTYPE html>
-<html lang="es" data-f5="true">
+<html lang="es" data-f5="true" data-critters-container>
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>mini me — Centro de Control</title>
-  <meta name="description" content="Acceso seguro al daemon mini me.">
-  <meta name="theme-color" content="#10243b">
   <meta name="description" content="Centro de control local de mini me">
-  <link rel="manifest" href="/static/manifest.webmanifest">
-  <link rel="stylesheet" href="/static/css/pwa.css">
-  <link rel="stylesheet" href="/static/css/dashboard.css">
-</head>
-<body class="theme-dark">
-  <header class="top-nav" role="banner">
-    <a class="nav-brand" href="/dashboard" data-route="/dashboard" aria-label="mini me, ir al Dashboard"><span class="brand-icon" aria-hidden="true">⚡</span><span class="brand-title">mini me <span class="brand-sub">centro de control</span></span></a>
-    <div class="nav-actions" aria-label="Controles globales"><span id="connectionStatus" class="status-badge status-info">Conectando</span><label class="refresh-control">Actualizar <select id="refreshInterval" aria-label="Intervalo de actualización"><option value="manual">Manual</option><option value="5">5 s</option><option value="10" selected>10 s</option><option value="30">30 s</option></select></label><button class="btn btn-secondary" id="themeToggle" type="button" aria-pressed="false">Tema claro</button><button class="btn btn-secondary" id="refreshNow" type="button">Actualizar ahora</button><button class="btn btn-secondary" id="logoutButton" type="button">Salir</button></div>
-  </header>
-  <div id="offlineBanner" class="offline-banner" role="status" aria-live="polite">Sin conexión. Los datos en memoria están desactualizados; no hay mutaciones en cola.</div>
-  <div class="app-layout"><nav class="primary-nav" aria-label="Navegación primaria"><a href="/dashboard" data-route="/dashboard">Dashboard</a><a href="/backlog" data-route="/backlog">Backlog</a><a href="/trabajo" data-route="/trabajo">Trabajo</a><a href="/proyectos" data-route="/proyectos">Proyectos</a></nav><main id="app" class="dashboard-main" tabindex="-1" aria-live="polite"></main></div>
-  <section id="loginSection" class="login-container" aria-label="Autenticación del operador" hidden><div class="login-card"><h1>Acceso a mini me</h1><p>Inicia sesión con una cuenta de Google autorizada.</p><a href="/api/v1/auth/google/login" class="btn btn-primary" id="googleLoginLink">Iniciar sesión con Google</a></div></section>
-
-  <script type="module" src="/static/js/app.js"></script>
-</body>
+  <meta name="theme-color" content="#10243b">
+  <link rel="manifest" href="/manifest.webmanifest">
+  <base href="/">
+<style>*,:before,:after{--tw-border-spacing-x:0;--tw-border-spacing-y:0;--tw-translate-x:0;--tw-translate-y:0;--tw-rotate:0;--tw-skew-x:0;--tw-skew-y:0;--tw-scale-x:1;--tw-scale-y:1;--tw-pan-x: ;--tw-pan-y: ;--tw-pinch-zoom: ;--tw-scroll-snap-strictness:proximity;--tw-gradient-from-position: ;--tw-gradient-via-position: ;--tw-gradient-to-position: ;--tw-ordinal: ;--tw-slashed-zero: ;--tw-numeric-figure: ;--tw-numeric-spacing: ;--tw-numeric-fraction: ;--tw-ring-inset: ;--tw-ring-offset-width:0px;--tw-ring-offset-color:#fff;--tw-ring-color:rgb(59 130 246 / .5);--tw-ring-offset-shadow:0 0 #0000;--tw-ring-shadow:0 0 #0000;--tw-shadow:0 0 #0000;--tw-shadow-colored:0 0 #0000;--tw-blur: ;--tw-brightness: ;--tw-contrast: ;--tw-grayscale: ;--tw-hue-rotate: ;--tw-invert: ;--tw-saturate: ;--tw-sepia: ;--tw-drop-shadow: ;--tw-backdrop-blur: ;--tw-backdrop-brightness: ;--tw-backdrop-contrast: ;--tw-backdrop-grayscale: ;--tw-backdrop-hue-rotate: ;--tw-backdrop-invert: ;--tw-backdrop-opacity: ;--tw-backdrop-saturate: ;--tw-backdrop-sepia: ;--tw-contain-size: ;--tw-contain-layout: ;--tw-contain-paint: ;--tw-contain-style: }*,:before,:after{box-sizing:border-box;border-width:0;border-style:solid;border-color:#e5e7eb}:before,:after{--tw-content:""}html{line-height:1.5;-webkit-text-size-adjust:100%;-moz-tab-size:4;tab-size:4;font-family:ui-sans-serif,system-ui,sans-serif,"Apple Color Emoji","Segoe UI Emoji",Segoe UI Symbol,"Noto Color Emoji";font-feature-settings:normal;font-variation-settings:normal;-webkit-tap-highlight-color:transparent}body{margin:0;line-height:inherit}.min-h-screen{min-height:100vh}.bg-slate-900{--tw-bg-opacity:1;background-color:rgb(15 23 42 / var(--tw-bg-opacity, 1))}.text-slate-100{--tw-text-opacity:1;color:rgb(241 245 249 / var(--tw-text-opacity, 1))}:root{color-scheme:light dark}body{margin:0;font-family:-apple-system,BlinkMacSystemFont,Segoe UI,Roboto,Helvetica,Arial,sans-serif;-webkit-font-smoothing:antialiased;transition:background-color .2s ease,color .2s ease}.selection\:bg-sky-500 *::selection{--tw-bg-opacity:1;background-color:rgb(14 165 233 / var(--tw-bg-opacity, 1))}.selection\:text-white *::selection{--tw-text-opacity:1;color:rgb(255 255 255 / var(--tw-text-opacity, 1))}.selection\:bg-sky-500::selection{--tw-bg-opacity:1;background-color:rgb(14 165 233 / var(--tw-bg-opacity, 1))}.selection\:text-white::selection{--tw-text-opacity:1;color:rgb(255 255 255 / var(--tw-text-opacity, 1))}</style><link rel="stylesheet" href="/static/styles-YGNWHAHW.css" media="print" onload="this.media='all'"><noscript><link rel="stylesheet" href="/static/styles-YGNWHAHW.css"></noscript></head>
+<body class="bg-slate-900 text-slate-100 min-h-screen selection:bg-sky-500 selection:text-white">
+  <app-root></app-root>
+<script src="/static/polyfills-SNKC6BFL.js" type="module"></script><script src="/static/main-36GRMCJM.js" type="module"></script></body>
 </html>
