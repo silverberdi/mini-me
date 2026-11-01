@@ -17,7 +17,7 @@ import { RefreshService } from '../../core/refresh.service';
         <div *ngFor="let proj of refresh.projects()"
              (click)="selectProject(proj.project_id)"
              class="group cursor-pointer p-6 rounded-2xl bg-slate-800/40 border transition-all duration-200"
-             [ngClass]="refresh.activeProject().project_id === proj.project_id ? 'border-sky-500 bg-slate-800/80 shadow-lg shadow-sky-500/10' : 'border-slate-700/50 hover:border-slate-600 hover:bg-slate-800/60'">
+              [ngClass]="refresh.activeProject()?.project_id === proj.project_id ? 'border-sky-500 bg-slate-800/80 shadow-lg shadow-sky-500/10' : 'border-slate-700/50 hover:border-slate-600 hover:bg-slate-800/60'">
           <div class="flex items-center justify-between">
             <h2 class="text-lg font-bold text-white group-hover:text-sky-400 transition-colors">{{ proj.project_id }}</h2>
             <span class="px-2.5 py-0.5 text-xs font-semibold rounded-full"
@@ -34,10 +34,10 @@ import { RefreshService } from '../../core/refresh.service';
           </div>
 
           <div class="mt-3 flex items-center justify-between">
-            <span *ngIf="refresh.activeProject().project_id === proj.project_id" class="text-xs font-semibold text-sky-400 flex items-center gap-1">
+            <span *ngIf="refresh.activeProject()?.project_id === proj.project_id" class="text-xs font-semibold text-sky-400 flex items-center gap-1">
               <span class="w-1.5 h-1.5 rounded-full bg-sky-400"></span> Proyecto Activo
             </span>
-            <span *ngIf="refresh.activeProject().project_id !== proj.project_id" class="text-xs text-slate-500 group-hover:text-slate-400">
+            <span *ngIf="refresh.activeProject()?.project_id !== proj.project_id" class="text-xs text-slate-500 group-hover:text-slate-400">
               Clic para seleccionar
             </span>
           </div>

@@ -259,6 +259,8 @@ def get_context_service(uow: UowDep) -> ContextDiscoveryService:
 ContextServiceDep = Annotated[ContextDiscoveryService, Depends(get_context_service)]
 
 
+STATIC_DIR = Path(__file__).parent.parent / "static"
+
 PUBLIC_EXEMPT_PATHS = {
     "/health",
     "/",
@@ -308,9 +310,18 @@ async def auth_middleware(request: Request, call_next):
         return await call_next(request)
 
     path = request.url.path
+    clean_path = path.lstrip("/")
+    target_static = (STATIC_DIR / clean_path).resolve() if STATIC_DIR.exists() and clean_path else None
+    is_static_file = (
+        target_static is not None
+        and STATIC_DIR.resolve() in target_static.parents
+        and target_static.is_file()
+    )
+
     if (
         path in PUBLIC_EXEMPT_PATHS
         or any(path.startswith(prefix) for prefix in PUBLIC_EXEMPT_PREFIXES)
+        or is_static_file
         or request.method == "OPTIONS"
     ):
         return await call_next(request)
@@ -1603,7 +1614,9 @@ def get_scheduler_status(uow: UowDep) -> SchedulerStatus:
 @app.get("/api/v1/providers/quotas", tags=["providers"])
 async def get_providers_quotas(_operator: AuthenticatedOperatorDep) -> dict[str, Any]:
     """Return observed real-time quota and balance for active model providers."""
-    import os, httpx
+    import os
+
+    import httpx
     deepseek_balance = 18.24
     deepseek_max = 20.00
     deepseek_key = os.environ.get("DEEPSEEK_API_KEY")
@@ -3182,3 +3195,24 @@ def get_favicon_svg() -> Response:
     if fav_file.exists():
         return FileResponse(fav_file, media_type="image/svg+xml")
     return Response(status_code=404)
+
+
+@app.api_route("/{file_name:path}", methods=["GET", "HEAD"], include_in_schema=False)
+def get_static_root_file(file_name: str) -> Response:
+    if STATIC_DIR.exists():
+        target = (STATIC_DIR / file_name).resolve()
+        if STATIC_DIR.resolve() in target.parents and target.is_file():
+            media_type = None
+            if file_name.endswith(".js"):
+                media_type = "application/javascript"
+            elif file_name.endswith(".css"):
+                media_type = "text/css"
+            elif file_name.endswith(".json") or file_name.endswith(".webmanifest"):
+                media_type = "application/json"
+            elif file_name.endswith(".svg"):
+                media_type = "image/svg+xml"
+            elif file_name.endswith(".ico"):
+                media_type = "image/x-icon"
+            return FileResponse(target, media_type=media_type)
+    raise HTTPException(status_code=404)
+

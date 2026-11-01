@@ -33,7 +33,7 @@ export class RefreshService implements OnDestroy {
       const found = list.find(p => p.project_id === selected);
       if (found) return found;
     }
-    return list.find(p => p.status === "ACTIVE") || list[0] || null;
+    return list.find(p => p.status === "ACTIVE") || list[0] || ({ project_id: '', name: '', status: 'ACTIVE', local_path: '', github_repo: '' } as Project);
   });
 
   constructor(private api: ApiService) {

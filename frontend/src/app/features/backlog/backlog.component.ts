@@ -13,7 +13,7 @@ import { RefreshService } from '../../core/refresh.service';
           <h1 class="text-2xl font-bold tracking-tight text-white flex items-center gap-2">
             <span>Backlog de Solicitudes</span>
             <span *ngIf="refresh.activeProject()" class="text-sm font-semibold px-2.5 py-0.5 rounded-full bg-sky-500/10 text-sky-400 border border-sky-500/20">
-              {{ refresh.activeProject().project_id }}
+              {{ refresh.activeProject()?.project_id }}
             </span>
           </h1>
           <p class="text-sm text-slate-400 mt-1">Solicitudes sincronizadas desde GitHub Issues elegibles para ejecución autónoma.</p>

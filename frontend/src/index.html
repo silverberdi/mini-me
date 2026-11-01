@@ -10,6 +10,28 @@
   <link rel="alternate icon" type="image/png" href="/favicon.ico">
   <link rel="manifest" href="/manifest.webmanifest">
   <base href="/">
+  <script>
+    if ('serviceWorker' in navigator) {
+      navigator.serviceWorker.getRegistrations().then(function(regs) {
+        for (var r of regs) {
+          if (r.active && r.active.scriptURL.indexOf('sw.js') !== -1) {
+            r.unregister().then(function() {
+              if ('caches' in window) {
+                caches.keys().then(function(keys) {
+                  for (var k of keys) {
+                    if (k.indexOf('pwa-shell') !== -1 || k.indexOf('f7') !== -1) {
+                      caches.delete(k);
+                    }
+                  }
+                });
+              }
+              window.location.reload();
+            });
+          }
+        }
+      });
+    }
+  </script>
 </head>
 <body class="bg-slate-900 text-slate-100 min-h-screen selection:bg-sky-500 selection:text-white">
   <app-root></app-root>
