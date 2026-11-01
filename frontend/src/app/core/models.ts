@@ -1,12 +1,33 @@
+export interface ProjectAgentProfile {
+  agent_id: string;
+  model_id: string;
+  effort: string;
+  workflows?: string[];
+  skills?: string[];
+}
+
+export interface ProjectExecutionPolicy {
+  max_review_rounds?: number;
+  max_correction_attempts?: number;
+  code_review_policy?: 'required' | 'risk_based' | 'disabled';
+  fallback_authorized?: boolean;
+}
+
 export interface Project {
   project_id: string;
+  display_name?: string;
   name?: string;
+  project_type?: 'BROWNFIELD' | 'GREENFIELD';
   repo_path?: string;
   local_path?: string;
   github_repo?: string;
   repository?: string;
   base_branch?: string;
   status?: string;
+  agent_profiles?: Record<string, ProjectAgentProfile>;
+  execution_policy?: ProjectExecutionPolicy;
+  provider_connections?: Record<string, any>;
+  onboarding_status?: string;
   active_run_id?: string | null;
   created_at?: string;
   updated_at?: string;

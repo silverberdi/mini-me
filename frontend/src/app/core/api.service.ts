@@ -21,6 +21,18 @@ export class ApiService {
     });
   }
 
+  async patch<T>(path: string, body: any, options: RequestInit = {}): Promise<ApiResponse<T>> {
+    return this.request<T>(path, {
+      ...options,
+      method: "PATCH",
+      body: JSON.stringify(body),
+      headers: {
+        "Content-Type": "application/json",
+        ...(options.headers || {})
+      }
+    });
+  }
+
   async delete<T>(path: string, body?: any, options: RequestInit = {}): Promise<ApiResponse<T>> {
     return this.request<T>(path, {
       ...options,

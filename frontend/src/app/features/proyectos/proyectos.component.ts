@@ -1,13 +1,15 @@
-import { Component, signal, inject } from '@angular/core';
+import { Component, signal, inject, OnInit } from '@angular/core';
 import { CommonModule } from '@angular/common';
+import { FormsModule } from '@angular/forms';
 import { RouterModule, Router } from '@angular/router';
 import { RefreshService } from '../../core/refresh.service';
 import { ApiService } from '../../core/api.service';
+import { ProjectAgentProfile, ProjectExecutionPolicy } from '../../core/models';
 
 @Component({
   selector: 'app-proyectos',
   standalone: true,
-  imports: [CommonModule, RouterModule],
+  imports: [CommonModule, FormsModule, RouterModule],
   template: `
     <div class="space-y-6">
       <!-- Header -->
@@ -15,6 +17,13 @@ import { ApiService } from '../../core/api.service';
         <div>
           <h1 class="text-2xl font-bold tracking-tight text-white">Proyectos Administrados</h1>
           <p class="text-sm text-slate-400 mt-1">Configuración, vinculaciones y estado administrativo de repositorios bajo la autoridad mini me.</p>
+        </div>
+        <div class="flex items-center gap-3">
+          <button (click)="openCreateModal()"
+                  class="px-4 py-2.5 rounded-xl bg-sky-500 hover:bg-sky-400 text-slate-950 font-bold text-xs tracking-wide shadow-lg shadow-sky-500/20 transition-all flex items-center gap-2 cursor-pointer">
+            <span>+</span>
+            <span>Nuevo Proyecto</span>
+          </button>
         </div>
       </div>
 
@@ -34,14 +43,15 @@ import { ApiService } from '../../core/api.service';
              [ngClass]="refresh.activeProject()?.project_id === proj.project_id ? 'border-sky-500 bg-slate-800/80 shadow-lg shadow-sky-500/10' : 'border-slate-700/50 hover:border-slate-600 hover:bg-slate-800/60'">
           <div>
             <div class="flex items-center justify-between">
-              <h2 class="text-lg font-bold text-white group-hover:text-sky-400 transition-colors">{{ proj.project_id }}</h2>
+              <h2 class="text-lg font-bold text-white group-hover:text-sky-400 transition-colors">{{ proj.display_name || proj.project_id }}</h2>
               <span class="px-2.5 py-0.5 text-xs font-semibold rounded-full uppercase font-mono"
                     [ngClass]="proj.status === 'ACTIVE' ? 'bg-emerald-500/10 text-emerald-400 border border-emerald-500/20' : 'bg-amber-500/10 text-amber-400 border border-amber-500/20'">
                 {{ proj.status || 'ACTIVE' }}
               </span>
             </div>
 
-            <p class="text-xs text-slate-400 font-mono mt-3 truncate">{{ proj.repo_path || proj.repository || 'Ruta local no especificada' }}</p>
+            <p class="text-xs text-slate-400 font-mono mt-1 text-[11px]">ID: {{ proj.project_id }}</p>
+            <p class="text-xs text-slate-400 font-mono mt-2 truncate">{{ proj.repo_path || proj.repository || 'Ruta local no especificada' }}</p>
 
             <div class="mt-4 pt-4 border-t border-slate-700/50 space-y-2 text-xs text-slate-400">
               <div class="flex items-center justify-between">
@@ -75,23 +85,30 @@ import { ApiService } from '../../core/api.service';
         <div class="flex flex-col md:flex-row md:items-center justify-between gap-4 border-b border-slate-700/60 pb-4">
           <div>
             <h3 class="text-lg font-bold text-white flex items-center gap-3">
-              <span>Gestión de Proyecto: {{ refresh.activeProject().project_id }}</span>
+              <span>Gestión: {{ refresh.activeProject().display_name || refresh.activeProject().project_id }}</span>
               <span class="px-2.5 py-0.5 text-xs font-semibold rounded-full uppercase font-mono"
                     [ngClass]="refresh.activeProject().status === 'ACTIVE' ? 'bg-emerald-500/10 text-emerald-400 border border-emerald-500/20' : 'bg-amber-500/10 text-amber-400 border border-amber-500/20'">
                 {{ refresh.activeProject().status || 'ACTIVE' }}
               </span>
             </h3>
-            <p class="text-xs text-slate-400 mt-1">Acciones de ciclo de vida y navegación contextual para el proyecto activo.</p>
+            <p class="text-xs text-slate-400 mt-1">Configuración técnica, perfiles de agentes y modelos asignados por etapa.</p>
           </div>
 
           <!-- Project Actions Toolbar -->
           <div class="flex items-center gap-2 flex-wrap">
             <button
+              (click)="openEditModal()"
+              class="px-3.5 py-2 rounded-xl bg-slate-800 hover:bg-slate-700 border border-slate-700 text-sky-400 text-xs font-semibold transition-all cursor-pointer flex items-center gap-1.5">
+              <span>✏️</span>
+              <span>Editar Modelos & Ajustes</span>
+            </button>
+
+            <button
               (click)="toggleProjectPause()"
               [disabled]="isActionRunning()"
               class="px-3.5 py-2 rounded-xl text-xs font-semibold border transition-all cursor-pointer"
               [ngClass]="refresh.activeProject().status === 'PAUSED' ? 'bg-emerald-600 hover:bg-emerald-500 text-white border-emerald-500/30' : 'bg-amber-600/20 hover:bg-amber-600/30 text-amber-300 border-amber-500/30'">
-              {{ refresh.activeProject().status === 'PAUSED' ? '▶ Reanudar Proyecto' : '⏸ Pausar Proyecto' }}
+              {{ refresh.activeProject().status === 'PAUSED' ? '▶ Reanudar' : '⏸ Pausar' }}
             </button>
 
             <button
@@ -109,6 +126,7 @@ import { ApiService } from '../../core/api.service';
           </div>
         </div>
 
+        <!-- Details Grid -->
         <div class="grid grid-cols-1 md:grid-cols-2 gap-6 text-xs font-mono">
           <div class="space-y-3 bg-slate-900/60 p-4 rounded-xl border border-slate-800">
             <div class="text-slate-300 font-bold uppercase font-sans mb-2">Identidad & Repositorio</div>
@@ -121,32 +139,206 @@ import { ApiService } from '../../core/api.service';
               <span class="text-slate-200">{{ refresh.activeProject().repository || refresh.activeProject().github_repo || 'No vinculado' }}</span>
             </div>
             <div class="flex justify-between py-1.5 border-b border-slate-800">
+              <span class="text-slate-400 font-sans">Rama Base:</span>
+              <span class="text-slate-200">{{ refresh.activeProject().base_branch || 'main' }}</span>
+            </div>
+            <div class="flex justify-between py-1.5 border-b border-slate-800">
               <span class="text-slate-400 font-sans">Ruta en Host:</span>
               <span class="text-slate-200 truncate max-w-[220px]">{{ refresh.activeProject().repo_path || refresh.activeProject().local_path || 'No definida' }}</span>
             </div>
           </div>
 
           <div class="space-y-3 bg-slate-900/60 p-4 rounded-xl border border-slate-800">
-            <div class="text-slate-300 font-bold uppercase font-sans mb-2">Políticas de Ejecución & Auditoría</div>
+            <div class="text-slate-300 font-bold uppercase font-sans mb-2">Asignación de Modelos por Rol / Etapa</div>
             <div class="flex justify-between py-1.5 border-b border-slate-800">
-              <span class="text-slate-400 font-sans">Auditoría Independiente:</span>
-              <span class="text-emerald-400 font-bold">REQUERIDA</span>
+              <span class="text-slate-400 font-sans">Thinking (Exploración / Propuesta):</span>
+              <span class="text-sky-300 font-bold">{{ getRoleModel('thinking') }}</span>
             </div>
             <div class="flex justify-between py-1.5 border-b border-slate-800">
-              <span class="text-slate-400 font-sans">Verificación Estricta:</span>
-              <span class="text-emerald-400 font-bold">FAIL-CLOSED</span>
+              <span class="text-slate-400 font-sans">Execution (Implementación):</span>
+              <span class="text-emerald-300 font-bold">{{ getRoleModel('execution') }}</span>
             </div>
             <div class="flex justify-between py-1.5 border-b border-slate-800">
-              <span class="text-slate-400 font-sans">Drain OpenRouter:</span>
-              <span class="text-slate-300">SOLO EN AGOTAMIENTO</span>
+              <span class="text-slate-400 font-sans">Independent Review (Revisión):</span>
+              <span class="text-amber-300 font-bold">{{ getRoleModel('independent_review') }}</span>
+            </div>
+            <div class="flex justify-between py-1.5 border-b border-slate-800">
+              <span class="text-slate-400 font-sans">Fallback (Agotamiento):</span>
+              <span class="text-purple-300 font-bold">{{ getRoleModel('fallback') }}</span>
             </div>
           </div>
         </div>
       </div>
     </div>
+
+    <!-- Modal: Crear Proyecto -->
+    <div *ngIf="showCreateModal" class="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-950/80 backdrop-blur-sm animate-fade-in">
+      <div class="bg-slate-900 border border-slate-800 rounded-2xl max-w-lg w-full p-6 shadow-2xl relative space-y-4 max-h-[90vh] overflow-y-auto">
+        <button (click)="showCreateModal = false" class="absolute top-4 right-4 text-slate-400 hover:text-white text-lg">✕</button>
+
+        <div>
+          <h2 class="text-lg font-bold text-white">Registrar Nuevo Proyecto</h2>
+          <p class="text-xs text-slate-400 mt-0.5">Ingresa los datos para registrar un repositorio bajo la autoridad de mini me.</p>
+        </div>
+
+        <form (ngSubmit)="submitCreateProject()" class="space-y-4 text-xs">
+          <div>
+            <label class="block text-slate-300 font-medium mb-1">ID del Proyecto (slug único)</label>
+            <input type="text" [(ngModel)]="newProject.project_id" name="project_id" required
+                   placeholder="ej. mini-me, my-service"
+                   class="w-full bg-slate-800 border border-slate-700 rounded-xl px-3 py-2 text-white focus:outline-none focus:border-sky-500 font-mono">
+          </div>
+
+          <div>
+            <label class="block text-slate-300 font-medium mb-1">Nombre Descriptivo</label>
+            <input type="text" [(ngModel)]="newProject.display_name" name="display_name" required
+                   placeholder="ej. Mini Me Core"
+                   class="w-full bg-slate-800 border border-slate-700 rounded-xl px-3 py-2 text-white focus:outline-none focus:border-sky-500">
+          </div>
+
+          <div>
+            <label class="block text-slate-300 font-medium mb-1">Repositorio GitHub (owner/repo)</label>
+            <input type="text" [(ngModel)]="newProject.repository" name="repository" required
+                   placeholder="ej. silverberdi/mini-me"
+                   class="w-full bg-slate-800 border border-slate-700 rounded-xl px-3 py-2 text-white focus:outline-none focus:border-sky-500 font-mono">
+          </div>
+
+          <div>
+            <label class="block text-slate-300 font-medium mb-1">Rama Base</label>
+            <input type="text" [(ngModel)]="newProject.base_branch" name="base_branch" required
+                   placeholder="main"
+                   class="w-full bg-slate-800 border border-slate-700 rounded-xl px-3 py-2 text-white focus:outline-none focus:border-sky-500 font-mono">
+          </div>
+
+          <div class="pt-3 border-t border-slate-800 space-y-3">
+            <h3 class="font-bold text-slate-200">Modelos Asignados por Etapa</h3>
+
+            <div class="grid grid-cols-2 gap-3">
+              <div>
+                <label class="block text-slate-400 mb-1">Thinking (Exploración)</label>
+                <select [(ngModel)]="newProjectProfiles.thinking" name="model_thinking"
+                        class="w-full bg-slate-800 border border-slate-700 rounded-xl px-2.5 py-2 text-white focus:outline-none focus:border-sky-500 font-mono text-[11px]">
+                  <option *ngFor="let m of availableModels" [value]="m.id">{{ m.label }}</option>
+                </select>
+              </div>
+
+              <div>
+                <label class="block text-slate-400 mb-1">Execution (Código)</label>
+                <select [(ngModel)]="newProjectProfiles.execution" name="model_execution"
+                        class="w-full bg-slate-800 border border-slate-700 rounded-xl px-2.5 py-2 text-white focus:outline-none focus:border-sky-500 font-mono text-[11px]">
+                  <option *ngFor="let m of availableModels" [value]="m.id">{{ m.label }}</option>
+                </select>
+              </div>
+
+              <div>
+                <label class="block text-slate-400 mb-1">Review (Revisión)</label>
+                <select [(ngModel)]="newProjectProfiles.independent_review" name="model_review"
+                        class="w-full bg-slate-800 border border-slate-700 rounded-xl px-2.5 py-2 text-white focus:outline-none focus:border-sky-500 font-mono text-[11px]">
+                  <option *ngFor="let m of availableModels" [value]="m.id">{{ m.label }}</option>
+                </select>
+              </div>
+
+              <div>
+                <label class="block text-slate-400 mb-1">Fallback (Respaldo)</label>
+                <select [(ngModel)]="newProjectProfiles.fallback" name="model_fallback"
+                        class="w-full bg-slate-800 border border-slate-700 rounded-xl px-2.5 py-2 text-white focus:outline-none focus:border-sky-500 font-mono text-[11px]">
+                  <option *ngFor="let m of availableModels" [value]="m.id">{{ m.label }}</option>
+                </select>
+              </div>
+            </div>
+          </div>
+
+          <div class="pt-4 flex items-center justify-end gap-3">
+            <button type="button" (click)="showCreateModal = false"
+                    class="px-4 py-2 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-300 font-semibold cursor-pointer">
+              Cancelar
+            </button>
+            <button type="submit" [disabled]="isActionRunning()"
+                    class="px-4 py-2 rounded-xl bg-sky-500 hover:bg-sky-400 disabled:opacity-50 text-slate-950 font-bold cursor-pointer">
+              {{ isActionRunning() ? 'Guardando…' : 'Crear Proyecto' }}
+            </button>
+          </div>
+        </form>
+      </div>
+    </div>
+
+    <!-- Modal: Editar Proyecto & Asignación de Modelos -->
+    <div *ngIf="showEditModal" class="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-950/80 backdrop-blur-sm animate-fade-in">
+      <div class="bg-slate-900 border border-slate-800 rounded-2xl max-w-lg w-full p-6 shadow-2xl relative space-y-4 max-h-[90vh] overflow-y-auto">
+        <button (click)="showEditModal = false" class="absolute top-4 right-4 text-slate-400 hover:text-white text-lg">✕</button>
+
+        <div>
+          <h2 class="text-lg font-bold text-white">Editar Proyecto: {{ editProject.project_id }}</h2>
+          <p class="text-xs text-slate-400 mt-0.5">Modifica nombre, rama base y los modelos autónomos asignados por etapa.</p>
+        </div>
+
+        <form (ngSubmit)="submitEditProject()" class="space-y-4 text-xs">
+          <div>
+            <label class="block text-slate-300 font-medium mb-1">Nombre Descriptivo</label>
+            <input type="text" [(ngModel)]="editProject.display_name" name="display_name" required
+                   class="w-full bg-slate-800 border border-slate-700 rounded-xl px-3 py-2 text-white focus:outline-none focus:border-sky-500">
+          </div>
+
+          <div>
+            <label class="block text-slate-300 font-medium mb-1">Rama Base</label>
+            <input type="text" [(ngModel)]="editProject.base_branch" name="base_branch" required
+                   class="w-full bg-slate-800 border border-slate-700 rounded-xl px-3 py-2 text-white focus:outline-none focus:border-sky-500 font-mono">
+          </div>
+
+          <div class="pt-3 border-t border-slate-800 space-y-3">
+            <h3 class="font-bold text-slate-200">Asignación de Modelos por Etapa</h3>
+
+            <div class="grid grid-cols-2 gap-3">
+              <div>
+                <label class="block text-slate-400 mb-1">Thinking (Exploración)</label>
+                <select [(ngModel)]="editProjectProfiles.thinking" name="edit_thinking"
+                        class="w-full bg-slate-800 border border-slate-700 rounded-xl px-2.5 py-2 text-white focus:outline-none focus:border-sky-500 font-mono text-[11px]">
+                  <option *ngFor="let m of availableModels" [value]="m.id">{{ m.label }}</option>
+                </select>
+              </div>
+
+              <div>
+                <label class="block text-slate-400 mb-1">Execution (Implementación)</label>
+                <select [(ngModel)]="editProjectProfiles.execution" name="edit_execution"
+                        class="w-full bg-slate-800 border border-slate-700 rounded-xl px-2.5 py-2 text-white focus:outline-none focus:border-sky-500 font-mono text-[11px]">
+                  <option *ngFor="let m of availableModels" [value]="m.id">{{ m.label }}</option>
+                </select>
+              </div>
+
+              <div>
+                <label class="block text-slate-400 mb-1">Review (Revisión Independiente)</label>
+                <select [(ngModel)]="editProjectProfiles.independent_review" name="edit_review"
+                        class="w-full bg-slate-800 border border-slate-700 rounded-xl px-2.5 py-2 text-white focus:outline-none focus:border-sky-500 font-mono text-[11px]">
+                  <option *ngFor="let m of availableModels" [value]="m.id">{{ m.label }}</option>
+                </select>
+              </div>
+
+              <div>
+                <label class="block text-slate-400 mb-1">Fallback (Agotamiento)</label>
+                <select [(ngModel)]="editProjectProfiles.fallback" name="edit_fallback"
+                        class="w-full bg-slate-800 border border-slate-700 rounded-xl px-2.5 py-2 text-white focus:outline-none focus:border-sky-500 font-mono text-[11px]">
+                  <option *ngFor="let m of availableModels" [value]="m.id">{{ m.label }}</option>
+                </select>
+              </div>
+            </div>
+          </div>
+
+          <div class="pt-4 flex items-center justify-end gap-3">
+            <button type="button" (click)="showEditModal = false"
+                    class="px-4 py-2 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-300 font-semibold cursor-pointer">
+              Cancelar
+            </button>
+            <button type="submit" [disabled]="isActionRunning()"
+                    class="px-4 py-2 rounded-xl bg-sky-500 hover:bg-sky-400 disabled:opacity-50 text-slate-950 font-bold cursor-pointer">
+              {{ isActionRunning() ? 'Guardando…' : 'Guardar Cambios' }}
+            </button>
+          </div>
+        </form>
+      </div>
+    </div>
   `
 })
-export class ProyectosComponent {
+export class ProyectosComponent implements OnInit {
   private router = inject(Router);
   private api = inject(ApiService);
   public refresh = inject(RefreshService);
@@ -155,12 +347,244 @@ export class ProyectosComponent {
   readonly actionMsg = signal<string | null>(null);
   readonly actionOk = signal<boolean>(false);
 
+  showCreateModal = false;
+  showEditModal = false;
+
+  // Available models catalog for selection
+  availableModels = [
+    { id: 'gemini-3.8-flash', label: 'Antigravity / gemini-3.8-flash', agent: 'antigravity' },
+    { id: 'gemini-3.8-pro', label: 'Antigravity / gemini-3.8-pro', agent: 'antigravity' },
+    { id: 'gpt-5-codex', label: 'Codex / gpt-5-codex', agent: 'codex' },
+    { id: 'deepseek-chat', label: 'DeepSeek / deepseek-chat', agent: 'deepseek' },
+    { id: 'deepseek-reasoner', label: 'DeepSeek / deepseek-reasoner', agent: 'deepseek' },
+    { id: 'auto', label: 'OpenRouter / auto fallback', agent: 'openrouter' },
+  ];
+
+  newProject: any = {
+    project_id: '',
+    display_name: '',
+    repository: '',
+    base_branch: 'main',
+  };
+
+  newProjectProfiles = {
+    thinking: 'gemini-3.8-flash',
+    execution: 'gpt-5-codex',
+    independent_review: 'gemini-3.8-flash',
+    fallback: 'auto',
+  };
+
+  editProject: any = {
+    project_id: '',
+    display_name: '',
+    base_branch: 'main',
+  };
+
+  editProjectProfiles = {
+    thinking: 'gemini-3.8-flash',
+    execution: 'gpt-5-codex',
+    independent_review: 'gemini-3.8-flash',
+    fallback: 'auto',
+  };
+
+  async ngOnInit(): Promise<void> {
+    await this.loadAgentsCatalog();
+  }
+
+  async loadAgentsCatalog(): Promise<void> {
+    try {
+      const res = await this.api.get<any>('/api/v1/catalogs/agents');
+      if (res.ok && res.data?.agents) {
+        const parsed: any[] = [];
+        for (const agent of res.data.agents) {
+          const providerId = agent.id;
+          const modelsObj = agent.models || {};
+          for (const modelKey of Object.keys(modelsObj)) {
+            parsed.push({
+              id: modelKey,
+              label: `${providerId} / ${modelKey}`,
+              agent: providerId,
+            });
+          }
+        }
+        if (parsed.length > 0) {
+          this.availableModels = parsed;
+        }
+      }
+    } catch {
+      // Keep sensible defaults
+    }
+  }
+
+  getRoleModel(role: string): string {
+    const proj = this.refresh.activeProject();
+    if (!proj || !proj.agent_profiles) return 'Configuración por defecto';
+    const profile = proj.agent_profiles[role];
+    if (!profile) return 'No asignado';
+    return `${profile.agent_id} (${profile.model_id})`;
+  }
+
   selectProject(projectId: string) {
     this.refresh.setSelectedProject(projectId);
   }
 
   openBacklog() {
     void this.router.navigate(['/backlog']);
+  }
+
+  openCreateModal() {
+    this.newProject = {
+      project_id: '',
+      display_name: '',
+      repository: '',
+      base_branch: 'main',
+    };
+    this.showCreateModal = true;
+  }
+
+  openEditModal() {
+    const proj = this.refresh.activeProject();
+    if (!proj) return;
+    this.editProject = {
+      project_id: proj.project_id,
+      display_name: proj.display_name || proj.name || proj.project_id,
+      base_branch: proj.base_branch || 'main',
+    };
+
+    const profiles = proj.agent_profiles || {};
+    this.editProjectProfiles = {
+      thinking: profiles['thinking']?.model_id || 'gemini-3.8-flash',
+      execution: profiles['execution']?.model_id || 'gpt-5-codex',
+      independent_review: profiles['independent_review']?.model_id || 'gemini-3.8-flash',
+      fallback: profiles['fallback']?.model_id || 'auto',
+    };
+    this.showEditModal = true;
+  }
+
+  private resolveAgentForModel(modelId: string): string {
+    const found = this.availableModels.find(m => m.id === modelId);
+    if (found) return found.agent;
+    if (modelId.includes('gemini')) return 'antigravity';
+    if (modelId.includes('codex') || modelId.includes('gpt')) return 'codex';
+    if (modelId.includes('deepseek')) return 'deepseek';
+    return 'openrouter';
+  }
+
+  async submitCreateProject() {
+    this.isActionRunning.set(true);
+    this.actionMsg.set(null);
+
+    const payload = {
+      project_id: this.newProject.project_id.trim(),
+      display_name: this.newProject.display_name.trim(),
+      project_type: 'BROWNFIELD',
+      repository: this.newProject.repository.trim(),
+      base_branch: this.newProject.base_branch.trim() || 'main',
+      provider_connections: {
+        tickets: { provider_id: 'github', secret_reference: null },
+        git_pr: { provider_id: 'github', secret_reference: null },
+      },
+      agent_profiles: {
+        thinking: {
+          agent_id: this.resolveAgentForModel(this.newProjectProfiles.thinking),
+          model_id: this.newProjectProfiles.thinking,
+          effort: 'high',
+        },
+        execution: {
+          agent_id: this.resolveAgentForModel(this.newProjectProfiles.execution),
+          model_id: this.newProjectProfiles.execution,
+          effort: 'high',
+        },
+        independent_review: {
+          agent_id: this.resolveAgentForModel(this.newProjectProfiles.independent_review),
+          model_id: this.newProjectProfiles.independent_review,
+          effort: 'high',
+        },
+        fallback: {
+          agent_id: this.resolveAgentForModel(this.newProjectProfiles.fallback),
+          model_id: this.newProjectProfiles.fallback,
+          effort: 'medium',
+        },
+      },
+      execution_policy: {
+        max_review_rounds: 2,
+        max_correction_attempts: 1,
+        code_review_policy: 'risk_based',
+        fallback_authorized: false,
+      },
+    };
+
+    try {
+      const res = await this.api.post('/api/v1/projects', payload);
+      if (res.ok) {
+        this.actionOk.set(true);
+        this.actionMsg.set(`Proyecto '${payload.project_id}' registrado exitosamente.`);
+        this.showCreateModal = false;
+        await this.refresh.read();
+        this.refresh.setSelectedProject(payload.project_id);
+      } else {
+        this.actionOk.set(false);
+        this.actionMsg.set(`Error al registrar proyecto: ${res.error || 'Verifica los datos'}`);
+      }
+    } catch (e: any) {
+      this.actionOk.set(false);
+      this.actionMsg.set(`Error de conexión: ${e.message || e}`);
+    } finally {
+      this.isActionRunning.set(false);
+    }
+  }
+
+  async submitEditProject() {
+    this.isActionRunning.set(true);
+    this.actionMsg.set(null);
+
+    const proj = this.refresh.activeProject();
+    if (!proj) return;
+
+    const payload = {
+      display_name: this.editProject.display_name.trim(),
+      base_branch: this.editProject.base_branch.trim() || 'main',
+      agent_profiles: {
+        thinking: {
+          agent_id: this.resolveAgentForModel(this.editProjectProfiles.thinking),
+          model_id: this.editProjectProfiles.thinking,
+          effort: 'high',
+        },
+        execution: {
+          agent_id: this.resolveAgentForModel(this.editProjectProfiles.execution),
+          model_id: this.editProjectProfiles.execution,
+          effort: 'high',
+        },
+        independent_review: {
+          agent_id: this.resolveAgentForModel(this.editProjectProfiles.independent_review),
+          model_id: this.editProjectProfiles.independent_review,
+          effort: 'high',
+        },
+        fallback: {
+          agent_id: this.resolveAgentForModel(this.editProjectProfiles.fallback),
+          model_id: this.editProjectProfiles.fallback,
+          effort: 'medium',
+        },
+      },
+    };
+
+    try {
+      const res = await this.api.patch(`/api/v1/projects/${encodeURIComponent(proj.project_id)}`, payload);
+      if (res.ok) {
+        this.actionOk.set(true);
+        this.actionMsg.set(`Proyecto '${proj.project_id}' actualizado con nuevos modelos y ajustes.`);
+        this.showEditModal = false;
+        await this.refresh.read();
+      } else {
+        this.actionOk.set(false);
+        this.actionMsg.set(`Error al actualizar proyecto: ${res.error || 'Verifica los parámetros'}`);
+      }
+    } catch (e: any) {
+      this.actionOk.set(false);
+      this.actionMsg.set(`Error de conexión: ${e.message || e}`);
+    } finally {
+      this.isActionRunning.set(false);
+    }
   }
 
   async toggleProjectPause() {
