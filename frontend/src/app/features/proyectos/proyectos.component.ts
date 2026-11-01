@@ -631,11 +631,25 @@ export class ProyectosComponent implements OnInit {
     let skills: string[] = [];
 
     if (agent_id === 'antigravity') {
-      workflows = role === 'independent_review' ? ['/opsx-verify'] : ['/opsx-apply'];
+      if (role === 'independent_review') {
+        workflows = ['/opsx-verify'];
+      } else if (role === 'thinking') {
+        workflows = ['/opsx-explore', '/opsx-propose'];
+      } else {
+        workflows = ['/opsx-apply', '/opsx-update'];
+      }
       skills = [];
     } else {
-      workflows = role === 'independent_review' ? ['$openspec-verify-change'] : ['$openspec-apply-change'];
-      skills = role === 'independent_review' ? ['openspec-verify-change'] : ['openspec-apply-change'];
+      if (role === 'independent_review') {
+        workflows = ['$openspec-verify-change'];
+        skills = ['openspec-verify-change'];
+      } else if (role === 'thinking') {
+        workflows = ['$openspec-explore', '$openspec-propose'];
+        skills = ['openspec-explore', 'openspec-propose'];
+      } else {
+        workflows = ['$openspec-apply-change', '$openspec-update-change'];
+        skills = ['openspec-apply-change', 'openspec-update-change'];
+      }
     }
 
     return {

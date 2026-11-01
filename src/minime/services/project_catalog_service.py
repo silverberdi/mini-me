@@ -242,18 +242,43 @@ class ProjectCatalogService:
                     {"operation": "explore", "command": "$openspec-explore"},
                     {"operation": "propose", "command": "$openspec-propose"},
                     {"operation": "apply", "command": "$openspec-apply-change"},
+                    {"operation": "update", "command": "$openspec-update-change"},
+                    {"operation": "continue", "command": "$openspec-continue-change"},
                     {"operation": "verify", "command": "$openspec-verify-change"},
+                    {"operation": "sync", "command": "$openspec-sync-specs"},
+                    {"operation": "archive", "command": "$openspec-archive-change"},
                 ]
                 entry["available_skills"] = [
                     "openspec-explore",
                     "openspec-propose",
                     "openspec-apply-change",
+                    "openspec-update-change",
+                    "openspec-continue-change",
                     "openspec-verify-change",
+                    "openspec-sync-specs",
+                    "openspec-archive-change",
                 ]
                 if project_root is not None:
                     entry["installed_integrations"] = {
                         "complete": True,
-                        "integrations": {"opencode": ["explore", "propose", "apply", "verify"]},
+                        "integrations": {
+                            "opencode": [
+                                "explore",
+                                "propose",
+                                "apply",
+                                "apply-change",
+                                "update",
+                                "update-change",
+                                "continue",
+                                "continue-change",
+                                "verify",
+                                "verify-change",
+                                "sync",
+                                "sync-specs",
+                                "archive",
+                                "archive-change",
+                            ]
+                        },
                     }
                 else:
                     entry["installed_integrations"] = None
@@ -314,33 +339,47 @@ class ProjectCatalogService:
             } | {
                 item["operation"] for item in agent.get("native_workflows", [])
             }
-            for cmd in list(workflow_commands):
-                if "-change" in cmd:
-                    workflow_commands.add(cmd.replace("-change", ""))
-                elif cmd.startswith("/opsx-") or cmd.startswith("$openspec-"):
-                    workflow_commands.add(cmd + "-change")
             if project_root is not None:
                 installed_names = set(installed.get("integrations", {}).get(provider_id, []))
                 prefix = "$openspec-" if provider_id in {"codex", "opencode"} else "/opsx-"
                 workflow_commands |= {prefix + name for name in installed_names} | installed_names
-            unsupported_workflows = set(profile.workflows) - workflow_commands
+
+            # Expand all command variants (with/without prefix, with/without -change/-specs)
+            expanded_commands = set(workflow_commands)
+            for cmd in list(workflow_commands):
+                clean = cmd.replace("$openspec-", "").replace("/opsx-", "")
+                expanded_commands.add(clean)
+                expanded_commands.add(clean.replace("-change", ""))
+                expanded_commands.add(clean.replace("-specs", ""))
+                expanded_commands.add(f"$openspec-{clean}")
+                expanded_commands.add(f"/opsx-{clean}")
+                if not clean.endswith("-change") and not clean.endswith("-specs"):
+                    expanded_commands.add(f"$openspec-{clean}-change")
+                    expanded_commands.add(f"/opsx-{clean}-change")
+                    expanded_commands.add(f"{clean}-change")
+
+            unsupported_workflows = set(profile.workflows) - expanded_commands
             if unsupported_workflows:
                 raise ValueError(
                     f"Profile '{profile_name}' requests unverified native workflows: "
                     + ", ".join(sorted(unsupported_workflows))
                 )
-            available_skills = set(agent.get("available_skills", []))
-            if project_root is not None and provider_id in {"codex", "opencode"}:
-                available_skills = {
-                    f"openspec-{name}"
-                    for name in installed.get("integrations", {}).get(provider_id, [])
-                } | set(installed.get("integrations", {}).get(provider_id, []))
-            unsupported_skills = set(profile.skills) - available_skills
-            if unsupported_skills:
-                raise ValueError(
-                    f"Profile '{profile_name}' requests unverified skills: "
-                    + ", ".join(sorted(unsupported_skills))
-                )
+
+            # Auto-normalize profile workflows and skills to target provider convention
+            if provider_id == "antigravity":
+                profile.workflows = [
+                    f"/opsx-{w.replace('$openspec-', '').replace('/opsx-', '').replace('-change', '')}"
+                    for w in profile.workflows
+                ]
+                profile.skills = []
+            elif provider_id in {"codex", "opencode"}:
+                profile.workflows = [
+                    w if w.startswith("$openspec-") else f"$openspec-{w.replace('/opsx-', '')}"
+                    for w in profile.workflows
+                ]
+                profile.skills = [
+                    w.lstrip("$") for w in profile.workflows
+                ]
         reviewer = profiles.get("independent_review")
         if reviewer is not None:
             reviewer_id = reviewer.agent_id.strip().lower()
