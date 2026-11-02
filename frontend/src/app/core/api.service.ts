@@ -21,6 +21,30 @@ export class ApiService {
     });
   }
 
+  async patch<T>(path: string, body: any, options: RequestInit = {}): Promise<ApiResponse<T>> {
+    return this.request<T>(path, {
+      ...options,
+      method: "PATCH",
+      body: JSON.stringify(body),
+      headers: {
+        "Content-Type": "application/json",
+        ...(options.headers || {})
+      }
+    });
+  }
+
+  async delete<T>(path: string, body?: any, options: RequestInit = {}): Promise<ApiResponse<T>> {
+    return this.request<T>(path, {
+      ...options,
+      method: "DELETE",
+      body: body ? JSON.stringify(body) : undefined,
+      headers: {
+        "Content-Type": "application/json",
+        ...(options.headers || {})
+      }
+    });
+  }
+
   private async request<T>(path: string, options: RequestInit = {}): Promise<ApiResponse<T>> {
     const method = (options.method || "GET").toUpperCase();
     if (method !== "GET" && typeof navigator !== "undefined" && !navigator.onLine) {

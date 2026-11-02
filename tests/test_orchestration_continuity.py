@@ -231,6 +231,41 @@ def test_request_rest_api_endpoints(in_memory_uow, tmp_path: Path):
         )
         assert legacy_record is not None
         assert legacy_record.parameters_json["legacy_missing_attempt"] is True
+
+        code_review_run = OrchestrationRun(
+            run_id="run-code-review-recovery-api",
+            project_id="proj-test",
+            change_name="req-103-code-review",
+            base_sha="base-sha",
+            current_stage=OrchestrationStage.CODE_REVIEW,
+            resumable_stage=OrchestrationStage.CODE_REVIEW,
+            candidate_sha="candidate-sha",
+            stop_details={
+                "issue_number": 103,
+                "code_review": {
+                    "attempt_id": "attempt-code-review-api",
+                    "status": "invalid_response",
+                    "candidate_sha": "candidate-sha",
+                    "issue_number": 103,
+                },
+            },
+        )
+        in_memory_uow.orchestration_runs.save(code_review_run)
+        res = client.post(
+            "/api/v1/projects/proj-test/runs/run-code-review-recovery-api/code-review-recovery-authorizations",
+            json={"prior_attempt_id": "attempt-code-review-api", "action_request_id": "api-code-review-recovery-1"},
+        )
+        assert res.status_code == 200
+        assert res.json()["status"] == "ACCEPTED"
+        code_review_action = in_memory_uow.operator_actions.get_by_request_id("api-code-review-recovery-1")
+        assert code_review_action is not None
+        assert code_review_action.parameters_json["stage"] == "code_review"
+
+        duplicate = client.post(
+            "/api/v1/projects/proj-test/runs/run-code-review-recovery-api/code-review-recovery-authorizations",
+            json={"prior_attempt_id": "attempt-code-review-api", "action_request_id": "api-code-review-recovery-1"},
+        )
+        assert duplicate.status_code == 409
     finally:
         app.dependency_overrides.clear()
 

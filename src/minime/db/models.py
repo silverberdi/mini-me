@@ -1617,3 +1617,26 @@ class DeferredTransitionModel(Base):
         DateTime(timezone=True), default=utc_now, nullable=False
     )
     applied_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+
+class PushSubscriptionModel(Base):
+    __tablename__ = "push_subscriptions"
+
+    id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    operator_id: Mapped[str] = mapped_column(String(128), nullable=False, index=True)
+    endpoint: Mapped[str] = mapped_column(Text, nullable=False, unique=True)
+    p256dh: Mapped[str] = mapped_column(Text, nullable=False)
+    auth: Mapped[str] = mapped_column(Text, nullable=False)
+    device_label: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    is_active: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
+    category_stage_transitions: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
+    category_human_required: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
+    category_terminal_outcomes: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utc_now, nullable=False
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utc_now, onupdate=utc_now, nullable=False
+    )
+    last_success_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    last_error: Mapped[str | None] = mapped_column(Text, nullable=True)

@@ -81,6 +81,7 @@ from minime.services.quota_telemetry import quota_telemetry
 from minime.services.run_recovery import RunRecoveryService
 from minime.services.status_service import StatusService
 from minime.services.validation_authority_service import ValidationAuthorityService
+from minime.services.web_push_service import web_push_service
 
 logger = logging.getLogger(__name__)
 
@@ -938,17 +939,66 @@ async def _execute_request_in_fresh_session(
                 "run.transition",
                 {"project_id": project_id, "run_id": result.run_id, "status": result.status},
             )
+            # Web Push: Human Attention Required
             if result.human_payload:
                 await event_broker.publish(
                     "human.gate",
                     {"project_id": project_id, "run_id": result.run_id, "payload": result.human_payload},
                 )
+                try:
+                    prompt_preview = (
+                        result.human_payload.get("prompt")
+                        or result.human_payload.get("message")
+                        or "Se requiere atención para continuar."
+                    )[:100]
+                    web_push_service.broadcast_to_active_operators(
+                        uow=uow,
+                        title="Atención Requerida — mini me",
+                        body=f"[{project_id}] {prompt_preview}",
+                        data={"url": f"/trabajo-actual?run={result.run_id}&project={project_id}"},
+                        category="human_required",
+                    )
+                except Exception as push_err:
+                    logger.debug("Failed sending human_required push: %s", push_err)
+            elif result.status in ("COMPLETED", "FAILED", "BLOCKED"):
+                try:
+                    web_push_service.broadcast_to_active_operators(
+                        uow=uow,
+                        title=f"Ejecución {result.status} — mini me",
+                        body=f"Proyecto {project_id}: la ejecución finalizó en estado {result.status}.",
+                        data={"url": f"/trabajo-actual?run={result.run_id}&project={project_id}"},
+                        category="terminal_outcomes",
+                    )
+                except Exception as push_err:
+                    logger.debug("Failed sending terminal_outcomes push: %s", push_err)
+            else:
+                try:
+                    stage_name = getattr(result, "current_stage", result.status)
+                    web_push_service.broadcast_to_active_operators(
+                        uow=uow,
+                        title="Avance de Etapa — mini me",
+                        body=f"[{project_id}] Etapa actual: {stage_name}",
+                        data={"url": f"/trabajo-actual?run={result.run_id}&project={project_id}"},
+                        category="stage_transitions",
+                    )
+                except Exception as push_err:
+                    logger.debug("Failed sending stage_transitions push: %s", push_err)
         except Exception as exc:
             session.rollback()
             logger.exception("Asynchronous run worker failed: %s", type(exc).__name__)
             await event_broker.publish(
                 "run.failed", {"project_id": project_id, "reason": type(exc).__name__}
             )
+            try:
+                web_push_service.broadcast_to_active_operators(
+                    uow=uow,
+                    title="Ejecución FAILED — mini me",
+                    body=f"[{project_id}] Fallo en ejecución asíncrona: {type(exc).__name__}",
+                    data={"url": f"/trabajo-actual?project={project_id}"},
+                    category="terminal_outcomes",
+                )
+            except Exception as push_err:
+                logger.debug("Failed sending run.failed push: %s", push_err)
         finally:
             session.close()
             if intent_key is not None:
@@ -3173,6 +3223,102 @@ def logout_endpoint(request: Request, uow: UowDep) -> Response:
     response = JSONResponse({"status": "logged_out", "message": "Session successfully invalidated"})
     response.delete_cookie(key="minime_session", path="/")
     return response
+
+
+# -----------------------------------------------------------------------------
+# Web Push Endpoints (F11)
+# -----------------------------------------------------------------------------
+
+
+class PushSubscriptionPayload(BaseModel):
+    endpoint: str
+    keys: dict[str, str]  # {"p256dh": "...", "auth": "..."}
+    device_label: str | None = None
+    categories: dict[str, bool] | None = None
+
+
+class PushUnsubscribePayload(BaseModel):
+    endpoint: str
+
+
+class PushTestPayload(BaseModel):
+    title: str | None = "Notificación de Prueba — mini me"
+    body: str | None = "La conexión de notificaciones Web Push está funcionando correctamente."
+
+
+@app.get("/api/v1/push/vapid-public-key", tags=["push"])
+def get_vapid_public_key(_operator: AuthenticatedOperatorDep) -> dict[str, str]:
+    """Return URL-safe base64 uncompressed public key for browser PushManager subscription."""
+    return {"public_key": web_push_service.get_public_key_b64()}
+
+
+@app.post("/api/v1/push/subscriptions", tags=["push"])
+def register_push_subscription(
+    payload: PushSubscriptionPayload,
+    operator: AuthenticatedOperatorDep,
+    uow: UowDep,
+) -> dict[str, Any]:
+    """Register or update an operator device push subscription."""
+    p256dh = payload.keys.get("p256dh")
+    auth = payload.keys.get("auth")
+    if not p256dh or not auth or not payload.endpoint:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Push subscription requires endpoint, p256dh and auth keys",
+        )
+
+    sub = uow.push_subscriptions.save(
+        operator_id=operator.email,
+        endpoint=payload.endpoint,
+        p256dh=p256dh,
+        auth=auth,
+        device_label=payload.device_label,
+        categories=payload.categories,
+    )
+    uow.commit()
+    return {
+        "status": "subscribed",
+        "subscription_id": getattr(sub, "id", None),
+        "operator_id": operator.email,
+        "is_active": getattr(sub, "is_active", True),
+    }
+
+
+@app.delete("/api/v1/push/subscriptions", tags=["push"])
+def deactivate_push_subscription(
+    payload: PushUnsubscribePayload,
+    operator: AuthenticatedOperatorDep,
+    uow: UowDep,
+) -> dict[str, Any]:
+    """Deactivate a push subscription by endpoint."""
+    sub = uow.push_subscriptions.get_by_endpoint(payload.endpoint)
+    if sub and getattr(sub, "operator_id", None) == operator.email:
+        uow.push_subscriptions.deactivate(payload.endpoint, error="Operator unsubscribed")
+        uow.commit()
+        return {"status": "unsubscribed", "endpoint": payload.endpoint}
+    return {"status": "not_found", "endpoint": payload.endpoint}
+
+
+@app.post("/api/v1/push/test", tags=["push"])
+def send_test_push_notification(
+    payload: PushTestPayload,
+    operator: AuthenticatedOperatorDep,
+    uow: UowDep,
+) -> dict[str, Any]:
+    """Dispatch an immediate test push notification to all active devices of the caller."""
+    sent_count = web_push_service.send_to_operator(
+        uow=uow,
+        operator_id=operator.email,
+        title=payload.title or "Notificación de Prueba — mini me",
+        body=payload.body or "Conexión Web Push verificada.",
+        data={"url": "/trabajo-actual"},
+    )
+    uow.commit()
+    return {
+        "status": "sent",
+        "sent_count": sent_count,
+        "operator_id": operator.email,
+    }
 
 
 # -----------------------------------------------------------------------------

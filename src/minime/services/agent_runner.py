@@ -372,6 +372,27 @@ class CliAgentRunner:
                     None,
                 )
                 check_parts = (".agent", ".agent/workflows", ".agents", ".agents/workflows")
+        elif prov == "opencode":
+            op_to_skill = {
+                "explore": "openspec-explore",
+                "propose": "openspec-propose",
+                "apply": "openspec-apply-change",
+                "continue": "openspec-continue-change",
+                "verify": "openspec-verify-change",
+                "sync": "openspec-sync-specs",
+                "archive": "openspec-archive-change",
+            }
+            skill_folder = op_to_skill.get(op, f"openspec-{op}")
+            skill_candidates = (
+                Path(".agents/skills") / skill_folder / "SKILL.md",
+                Path(".agent/skills") / skill_folder / "SKILL.md",
+            )
+            rel_path = next(
+                (candidate for candidate in skill_candidates if (root / candidate).is_file()),
+                None,
+            )
+            dispatch_cmd = f"${skill_folder} {change_name}"
+            check_parts = (".agents", ".agents/skills", ".agent", ".agent/skills")
         else:
             raise NativeOpenSpecWorkflowUnavailable(
                 f"Dynamic OpenSpec resolution is not supported for provider '{provider}'."
@@ -579,7 +600,30 @@ class CliAgentRunner:
             opencode_cfg = proj_cfg.opencode if proj_cfg else OpenCodeCapabilityConfig()
 
             opencode_role = "independent_review" if role in ("reviewer", "independent_review") else "execution"
-            operation = workflow.operation if workflow and workflow.operation in {"explore", "propose", "apply", "verify"} else "apply"
+
+            if not opencode_cfg.enabled:
+                profile_key = "independent_review" if opencode_role == "independent_review" else "execution"
+                p = self.profiles.get((profile_key, "opencode")) if hasattr(self, "profiles") and self.profiles else None
+                if p:
+                    model_val = p.model or "deepseek-flash"
+                    if model_val == "deepseek-chat":
+                        model_val = "deepseek-flash"
+                    is_openrouter = "/" in model_val or "openrouter" in model_val.lower()
+                    opencode_cfg = OpenCodeCapabilityConfig(
+                        enabled=True,
+                        executable=p.executable or "opencode",
+                        provider="openrouter" if is_openrouter else "deepseek",
+                        model=model_val,
+                        api_key_env="OPENROUTER_API_KEY" if is_openrouter else "DEEPSEEK_API_KEY",
+                        roles=["execution", "independent_review"],
+                        args=[],
+                    )
+
+            operation = (
+                workflow.operation
+                if workflow and workflow.operation in {"explore", "propose", "apply", "verify"}
+                else ("verify" if opencode_role == "independent_review" else "apply")
+            )
             candidate_sha = _git_head(Path(worktree_path)) or ""
 
             verified_candidate_author = candidate_author
@@ -619,11 +663,32 @@ class CliAgentRunner:
             )
             outcome = await adapter.dispatch(request)
 
-            if output_last_message_path and outcome.evidence.stdout:
-                last_line = outcome.evidence.stdout[-1]
-                output_path = Path(output_last_message_path)
-                output_path.parent.mkdir(parents=True, exist_ok=True)
-                output_path.write_text(last_line, encoding="utf-8")
+            candidate_json = None
+            if outcome.evidence.stdout:
+                text_block = "\n".join(outcome.evidence.stdout).strip()
+                import re
+
+                candidate_json = text_block
+                if "```json" in candidate_json:
+                    m = re.search(r"```(?:json)?\s*(\{.*?\})\s*```", candidate_json, re.DOTALL)
+                    if m:
+                        candidate_json = m.group(1).strip()
+                elif "```" in candidate_json:
+                    m = re.search(r"```\s*(\{.*?\})\s*```", candidate_json, re.DOTALL)
+                    if m:
+                        candidate_json = m.group(1).strip()
+                elif "{" in candidate_json and "}" in candidate_json:
+                    s = candidate_json.find("{")
+                    e = candidate_json.rfind("}")
+                    if s != -1 and e != -1 and e > s:
+                        candidate_json = candidate_json[s : e + 1].strip()
+                else:
+                    candidate_json = outcome.evidence.stdout[-1]
+
+                if output_last_message_path:
+                    output_path = Path(output_last_message_path)
+                    output_path.parent.mkdir(parents=True, exist_ok=True)
+                    output_path.write_text(candidate_json, encoding="utf-8")
 
             return AgentExecutionResult(
                 exit_code=outcome.evidence.exit_code if outcome.evidence.exit_code is not None else (0 if outcome.accepted else -1),
@@ -633,7 +698,7 @@ class CliAgentRunner:
                 duration_ms=0,
                 preflight_error=outcome.evidence.failure_reason if not outcome.accepted else None,
                 workflow=workflow,
-                final_response=outcome.evidence.stdout[-1] if outcome.evidence.stdout else None,
+                final_response=candidate_json if candidate_json else (outcome.evidence.stdout[-1] if outcome.evidence.stdout else None),
                 final_response_status="COMPLETE" if outcome.accepted else "MISSING",
                 final_response_source="structured_file" if output_last_message_path else "stdout",
             )
@@ -721,8 +786,12 @@ class CliAgentRunner:
         env = os.environ.copy()
         env["TERM"] = "dumb"
 
+        normalized_provider = provider.lower()
+        if normalized_provider == "agy":
+            normalized_provider = "antigravity"
+
         try:
-            if response_path and schema_path:
+            if response_path and schema_path and normalized_provider == "codex":
                 cmd.extend(
                     [
                         "--output-schema",
@@ -732,9 +801,6 @@ class CliAgentRunner:
                     ]
                 )
             auth_kwargs: dict[str, str] = {}
-            normalized_provider = provider.lower()
-            if normalized_provider == "agy":
-                normalized_provider = "antigravity"
             if normalized_provider == "codex":
                 auth_kwargs["codex_auth_source"] = confinement.codex_auth_source(env)
             elif normalized_provider == "antigravity":
@@ -788,6 +854,40 @@ class CliAgentRunner:
         stderr_lines = [redact_secrets(line[: self.MAX_LINE_CHARS]) for line in raw_stderr_lines][
             : self.MAX_OUTPUT_LINES
         ]
+        if response_path and not response_path.is_file():
+            # For non-Codex agents (such as Antigravity), structured output is emitted to stdout.
+            # Extract final response from stdout and materialize response_path if valid JSON.
+            extracted, ext_status, _ = self._extract_final_response(
+                result.stdout,
+                provider,
+                captured_incompletely=getattr(result, "stdout_capture_truncated", False),
+            )
+            if extracted and ext_status == "COMPLETE":
+                candidate_text = extracted.strip()
+                import re
+
+                if "```json" in candidate_text:
+                    m = re.search(r"```(?:json)?\s*(\{.*?\})\s*```", candidate_text, re.DOTALL)
+                    if m:
+                        candidate_text = m.group(1).strip()
+                elif "```" in candidate_text:
+                    m = re.search(r"```\s*(\{.*?\})\s*```", candidate_text, re.DOTALL)
+                    if m:
+                        candidate_text = m.group(1).strip()
+                elif "{" in candidate_text and "}" in candidate_text:
+                    start_idx = candidate_text.find("{")
+                    end_idx = candidate_text.rfind("}")
+                    if start_idx != -1 and end_idx != -1 and end_idx > start_idx:
+                        candidate_text = candidate_text[start_idx : end_idx + 1].strip()
+
+                try:
+                    parsed = json.loads(candidate_text)
+                    if isinstance(parsed, dict):
+                        response_path.write_text(json.dumps(parsed), encoding="utf-8")
+                except Exception as exc:
+                    import logging
+                    logging.getLogger(__name__).warning(f"Failed to materialize response_path: {exc}")
+
         structured_output_missing = bool(response_path and not response_path.is_file())
         structured_output_too_large = False
         structured_output: list[str] | None = [] if response_path else None

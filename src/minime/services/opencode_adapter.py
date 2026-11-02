@@ -146,18 +146,47 @@ def _forbidden_external_action(prompt: str) -> bool:
 
 def _has_explicit_result(stdout: tuple[str, ...]) -> bool:
     """Require an explicit terminal result before accepting CLI output."""
+    valid_results = {"COMPLETE", "INCOMPLETE", "HUMAN_REQUIRED", "READY_TO_MERGE", "CHANGES_REQUIRED"}
     for line in reversed(stdout):
         stripped = line.strip().strip('`*._').upper()
-        if stripped in {"COMPLETE", "INCOMPLETE", "HUMAN_REQUIRED"}:
+        if stripped in valid_results:
             return True
         try:
             payload = json.loads(line.strip())
+            if isinstance(payload, dict):
+                status = str(payload.get("status", "")).upper()
+                verdict = str(payload.get("verdict", "")).upper()
+                if status in valid_results or verdict in valid_results:
+                    return True
         except (TypeError, json.JSONDecodeError):
-            continue
-        if isinstance(payload, dict) and str(payload.get("status", "")).upper() in {
-            "COMPLETE", "INCOMPLETE", "HUMAN_REQUIRED"
-        }:
-            return True
+            pass
+
+    import re
+    full_text = "\n".join(stdout).strip()
+    json_blocks = re.findall(r"```(?:json)?\s*(\{.*?\})\s*```", full_text, re.DOTALL)
+    for block in json_blocks:
+        try:
+            payload = json.loads(block)
+            if isinstance(payload, dict):
+                status = str(payload.get("status", "")).upper()
+                verdict = str(payload.get("verdict", "")).upper()
+                if status in valid_results or verdict in valid_results:
+                    return True
+        except Exception:
+            pass
+
+    m = re.search(r"\{.*\}", full_text, re.DOTALL)
+    if m:
+        try:
+            payload = json.loads(m.group(0))
+            if isinstance(payload, dict):
+                status = str(payload.get("status", "")).upper()
+                verdict = str(payload.get("verdict", "")).upper()
+                if status in valid_results or verdict in valid_results:
+                    return True
+        except Exception:
+            pass
+
     return False
 
 
@@ -323,10 +352,10 @@ class OpenCodeAdapter:
             f"using {workflow[0]} (workflow command: {workflow_dispatch_cmd})."
         )
         if request.prompt:
-            if workflow_dispatch_cmd not in request.prompt and workflow[0] not in request.prompt:
-                effective_prompt = f"{workflow_instruction}\n\n{request.prompt}"
-            else:
+            if role == "independent_review" or workflow_dispatch_cmd in request.prompt or workflow[0] in request.prompt:
                 effective_prompt = request.prompt
+            else:
+                effective_prompt = f"{workflow_instruction}\n\n{request.prompt}"
         else:
             effective_prompt = workflow_instruction
 
