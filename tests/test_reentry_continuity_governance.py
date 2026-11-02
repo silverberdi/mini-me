@@ -617,6 +617,93 @@ async def test_proposal_review_e2e_correction_then_second_failure_stops_without_
 
 
 @pytest.mark.asyncio
+async def test_proposal_review_escalation_operator_clarification_reproposes(base_setup):
+    uow, candidate_worktree, change_dir = base_setup
+    current_hashes = NativeOrchestrationCoordinator._compute_proposal_artifacts_hashes(
+        candidate_worktree, "gacela-05-ui-self-hosted"
+    )
+    run = OrchestrationRun(
+        project_id="mini-me",
+        run_id="run-test-proposal-escalation-repropose",
+        change_name="gacela-05-ui-self-hosted",
+        base_sha="base_sha_123",
+        current_stage=OrchestrationStage.PROPOSAL_REVIEW,
+        stop_details=make_stop_details(
+            {
+                "proposal_review": {
+                    "status": "changes_required",
+                    "verdict": "CHANGES_REQUIRED",
+                    "summary": "Still inconsistent",
+                    "findings": [
+                        {
+                            "severity": "MAJOR",
+                            "location": "design.md",
+                            "violated_requirement": "scope",
+                            "expected_correction": "remove stale behavior",
+                        }
+                    ],
+                    "artifact_hashes": current_hashes,
+                    "round": 1,
+                },
+                "proposal_review_escalated": True,
+            }
+        ),
+    )
+    uow.orchestration_runs.save(run)
+    coordinator = NativeOrchestrationCoordinator(
+        github_adapter=MagicMock(),
+        worktree_manager=MagicMock(),
+        agent_runner=MagicMock(),
+        uow_factory=lambda: uow,
+    )
+    coordinator.worktree_manager.create_request_worktree = AsyncMock(
+        return_value=WorktreeInfo(
+            path=candidate_worktree, branch_name="feature/f5", base_sha="base_sha_123"
+        )
+    )
+
+    res = await coordinator.execute_project_request(
+        "mini-me", operator_clarification="Reduce scope to truly-dead code"
+    )
+    assert res.status == "RUNNING"
+    stored = uow.orchestration_runs.get_by_id(run.run_id)
+    assert stored.current_stage == OrchestrationStage.PROPOSING
+    assert "proposal_review_escalated" not in (stored.stop_details or {})
+    revision = (stored.stop_details or {}).get("pending_proposal_revision") or {}
+    assert revision.get("clarification") == "Reduce scope to truly-dead code"
+    assert revision.get("findings")
+
+
+@pytest.mark.asyncio
+async def test_proposal_review_escalation_without_clarification_awaits_human(base_setup):
+    uow, candidate_worktree, change_dir = base_setup
+    run = OrchestrationRun(
+        project_id="mini-me",
+        run_id="run-test-proposal-escalation-await",
+        change_name="gacela-05-ui-self-hosted",
+        base_sha="base_sha_123",
+        current_stage=OrchestrationStage.PROPOSAL_REVIEW,
+        stop_details=make_stop_details({"proposal_review_escalated": True}),
+    )
+    uow.orchestration_runs.save(run)
+    coordinator = NativeOrchestrationCoordinator(
+        github_adapter=MagicMock(),
+        worktree_manager=MagicMock(),
+        agent_runner=MagicMock(),
+        uow_factory=lambda: uow,
+    )
+    coordinator.worktree_manager.create_request_worktree = AsyncMock(
+        return_value=WorktreeInfo(
+            path=candidate_worktree, branch_name="feature/f5", base_sha="base_sha_123"
+        )
+    )
+
+    res = await coordinator.execute_project_request("mini-me")
+    assert res.status == "HUMAN_REQUIRED"
+    coordinator.agent_runner.run.assert_not_called()
+
+
+@pytest.mark.asyncio
 async def test_corrupted_approved_verdict_pauses_fail_closed(base_setup):
     uow, candidate_worktree, change_dir = base_setup
     current_hashes = NativeOrchestrationCoordinator._compute_proposal_artifacts_hashes(
