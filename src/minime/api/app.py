@@ -4,12 +4,14 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import ipaddress
 import logging
 import os
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Annotated, Any, Generator
+from urllib.parse import urlparse
 from uuid import uuid4
 
 from fastapi import Depends, FastAPI, HTTPException, Query, Request, status
@@ -24,7 +26,7 @@ from fastapi.responses import (
     StreamingResponse,
 )
 from fastapi.staticfiles import StaticFiles
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 from minime.config import load_config
 from minime.db.repository import PostgresPersistenceUnitOfWork
@@ -893,8 +895,8 @@ async def _execute_request_in_fresh_session(
     async with _run_worker_semaphore:
         await event_broker.publish("run.accepted", {"project_id": project_id})
         session = db_manager.sessionmaker()
+        worker_uow = PostgresPersistenceUnitOfWork(session)
         try:
-            worker_uow = PostgresPersistenceUnitOfWork(session)
             project = worker_uow.projects.get_by_id(project_id)
             if project is None:
                 return
@@ -952,7 +954,7 @@ async def _execute_request_in_fresh_session(
                         or "Se requiere atención para continuar."
                     )[:100]
                     web_push_service.broadcast_to_active_operators(
-                        uow=uow,
+                        uow=worker_uow,
                         title="Atención Requerida — mini me",
                         body=f"[{project_id}] {prompt_preview}",
                         data={"url": f"/trabajo-actual?run={result.run_id}&project={project_id}"},
@@ -963,7 +965,7 @@ async def _execute_request_in_fresh_session(
             elif result.status in ("COMPLETED", "FAILED", "BLOCKED"):
                 try:
                     web_push_service.broadcast_to_active_operators(
-                        uow=uow,
+                        uow=worker_uow,
                         title=f"Ejecución {result.status} — mini me",
                         body=f"Proyecto {project_id}: la ejecución finalizó en estado {result.status}.",
                         data={"url": f"/trabajo-actual?run={result.run_id}&project={project_id}"},
@@ -975,7 +977,7 @@ async def _execute_request_in_fresh_session(
                 try:
                     stage_name = getattr(result, "current_stage", result.status)
                     web_push_service.broadcast_to_active_operators(
-                        uow=uow,
+                        uow=worker_uow,
                         title="Avance de Etapa — mini me",
                         body=f"[{project_id}] Etapa actual: {stage_name}",
                         data={"url": f"/trabajo-actual?run={result.run_id}&project={project_id}"},
@@ -983,6 +985,9 @@ async def _execute_request_in_fresh_session(
                     )
                 except Exception as push_err:
                     logger.debug("Failed sending stage_transitions push: %s", push_err)
+            # Persist subscription mutations (deactivation on 404/410, last_success_at)
+            # applied by the broadcast above; the worker's earlier commit predates them.
+            session.commit()
         except Exception as exc:
             session.rollback()
             logger.exception("Asynchronous run worker failed: %s", type(exc).__name__)
@@ -991,7 +996,7 @@ async def _execute_request_in_fresh_session(
             )
             try:
                 web_push_service.broadcast_to_active_operators(
-                    uow=uow,
+                    uow=worker_uow,
                     title="Ejecución FAILED — mini me",
                     body=f"[{project_id}] Fallo en ejecución asíncrona: {type(exc).__name__}",
                     data={"url": f"/trabajo-actual?project={project_id}"},
@@ -3235,6 +3240,29 @@ class PushSubscriptionPayload(BaseModel):
     keys: dict[str, str]  # {"p256dh": "...", "auth": "..."}
     device_label: str | None = None
     categories: dict[str, bool] | None = None
+
+    @field_validator("endpoint")
+    @classmethod
+    def _endpoint_is_safe_push_url(cls, value: str) -> str:
+        """Reject SSRF targets: push endpoints must be https to a non-private host."""
+        parsed = urlparse(value)
+        if parsed.scheme != "https" or not parsed.hostname:
+            raise ValueError("push endpoint must be an absolute https URL")
+        try:
+            addr = ipaddress.ip_address(parsed.hostname)
+        except ValueError:
+            # Not a literal IP; a hostname is acceptable (resolved by the push gateway).
+            return value
+        if (
+            addr.is_private
+            or addr.is_loopback
+            or addr.is_link_local
+            or addr.is_reserved
+            or addr.is_multicast
+            or addr.is_unspecified
+        ):
+            raise ValueError("push endpoint must not target a private, loopback, or reserved host")
+        return value
 
 
 class PushUnsubscribePayload(BaseModel):

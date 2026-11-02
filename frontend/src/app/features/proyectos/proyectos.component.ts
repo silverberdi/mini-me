@@ -695,8 +695,8 @@ export class ProyectosComponent implements OnInit {
       repository: this.newProject.repository.trim(),
       base_branch: this.newProject.base_branch.trim() || 'main',
       provider_connections: {
-        tickets: { provider_id: 'github', secret_reference: null },
-        git_pr: { provider_id: 'github', secret_reference: null },
+        tickets: { provider_id: 'github', repository_url: this.newProject.repository.trim(), auth_mode: 'environment_app', secret_reference: null },
+        git_pr: { provider_id: 'github', repository_url: this.newProject.repository.trim(), auth_mode: 'environment_app', secret_reference: null },
       },
       agent_profiles: {
         thinking: this.buildProfile('thinking', this.newProjectProfiles.thinking),

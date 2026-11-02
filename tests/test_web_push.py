@@ -165,3 +165,38 @@ def test_push_api_endpoints_flow(in_memory_uow: Any) -> None:
         assert sub_in_db_after.is_active is False
     finally:
         app.dependency_overrides.clear()
+
+
+def test_push_subscription_rejects_private_and_non_https_endpoints(in_memory_uow: Any) -> None:
+    """Registration must fail closed on SSRF targets (private IPs, metadata, non-https)."""
+    from minime.api.app import get_current_operator, get_uow
+
+    operator = AuthorizedOperator(
+        operator_id="op-1",
+        email="operator@minime.test",
+        display_name="Test Operator",
+        is_active=True,
+    )
+    in_memory_uow.authorized_operators.save(operator)
+    app.dependency_overrides[get_current_operator] = lambda: operator
+    app.dependency_overrides[get_uow] = lambda: in_memory_uow
+
+    bad_endpoints = [
+        "http://169.254.169.254/latest/meta-data/",
+        "http://192.168.1.10/internal",
+        "https://127.0.0.1/admin",
+        "http://push.services.mozilla.com/v1/not-https",
+    ]
+    try:
+        client = TestClient(app)
+        for endpoint in bad_endpoints:
+            res = client.post(
+                "/api/v1/push/subscriptions",
+                json={
+                    "endpoint": endpoint,
+                    "keys": {"p256dh": "dummy", "auth": "dummy"},
+                },
+            )
+            assert res.status_code == 422, f"{endpoint} should be rejected, got {res.status_code}"
+    finally:
+        app.dependency_overrides.clear()

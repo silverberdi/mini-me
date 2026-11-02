@@ -20,7 +20,7 @@ from minime.domain.models import utc_now
 
 logger = logging.getLogger(__name__)
 
-def _resolve_default_key_path() -> Path:
+def _resolve_default_key_path() -> Path | None:
     env_path = os.environ.get("MINIME_VAPID_KEY_PATH")
     if env_path:
         return Path(env_path)
@@ -32,7 +32,14 @@ def _resolve_default_key_path() -> Path:
     except Exception:
         pass
     home_dir = Path.home() / ".minime"
-    return home_dir / "vapid_private.pem"
+    try:
+        home_dir.mkdir(parents=True, exist_ok=True)
+        if os.access(home_dir, os.W_OK):
+            return home_dir / "vapid_private.pem"
+    except Exception:
+        pass
+    # No writable persistence location: report in-memory-only so callers can fail loud.
+    return None
 
 
 class WebPushService:
@@ -60,7 +67,7 @@ class WebPushService:
                 logger.warning("Failed to load VAPID key from MINIME_VAPID_PRIVATE_KEY: %s", e)
 
         # 2. File-based persistence
-        if self.key_path.exists():
+        if self.key_path is not None and self.key_path.exists():
             try:
                 pem_data = self.key_path.read_bytes()
                 self._vapid = Vapid.from_pem(pem_data)
@@ -72,13 +79,25 @@ class WebPushService:
         v = Vapid()
         v.generate_keys()
         self._vapid = v
+        if self.key_path is None:
+            logger.error(
+                "No writable VAPID key path available; push will use an in-memory key "
+                "that changes on every restart and will invalidate existing subscriptions. "
+                "Set MINIME_VAPID_PRIVATE_KEY or MINIME_VAPID_KEY_PATH to a persistent location."
+            )
+            return
         try:
             self.key_path.parent.mkdir(parents=True, exist_ok=True)
             self.key_path.write_bytes(v.private_pem())
             os.chmod(self.key_path, 0o600)
             logger.info("Generated and saved new VAPID keys to %s", self.key_path)
         except Exception as e:
-            logger.warning("Could not persist VAPID key to %s (in-memory only): %s", self.key_path, e)
+            logger.error(
+                "Could not persist VAPID key to %s; push subscriptions will break on restart. "
+                "Set MINIME_VAPID_PRIVATE_KEY or a writable MINIME_VAPID_KEY_PATH. (%s)",
+                self.key_path,
+                e,
+            )
 
     def get_public_key_b64(self) -> str:
         """Return URL-safe base64 uncompressed point of VAPID public key (for applicationServerKey)."""
@@ -117,8 +136,8 @@ class WebPushService:
             "notification": {
                 "title": title,
                 "body": body,
-                "icon": "/assets/icons/icon-192x192.png",
-                "badge": "/assets/icons/icon-72x72.png",
+                "icon": "/icons/icon-192.png",
+                "badge": "/icons/icon-192.png",
                 "vibrate": [100, 50, 100],
                 "data": {
                     "url": target_url,
@@ -149,6 +168,7 @@ class WebPushService:
                 data=payload_data,
                 vapid_private_key=self._vapid,
                 vapid_claims=self.claims,
+                timeout=10.0,
             )
             if hasattr(subscription, "last_success_at"):
                 subscription.last_success_at = utc_now()

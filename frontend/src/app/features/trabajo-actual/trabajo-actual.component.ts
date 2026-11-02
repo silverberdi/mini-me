@@ -319,7 +319,7 @@ export class TrabajoActualComponent {
       && run.stage === 'CODE_REVIEW'
       && !!details?.['attempt_id']
       && !!(details?.['candidate_sha'] || run.candidate_sha || run.current_candidate_sha)
-      && ['invalid_response', 'technical_failure', 'failed', 'error'].includes(reviewStatus);
+      && ['invalid_response', 'technical_failure', 'provider_error', 'failed', 'error'].includes(reviewStatus);
   }
 
   codeReviewAttemptId(): string {

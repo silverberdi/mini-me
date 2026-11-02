@@ -7,5 +7,6 @@ assert.match(source, /code-review-recovery-authorizations/);
 assert.match(source, /target_run_id:\s*run\.run_id/);
 assert.match(source, /code_review_recovery_authorization_id/);
 assert.match(source, /canRecoverCodeReview\(\)/);
+assert.match(source, /'provider_error'/);
 assert.match(source, /isRecoveringCodeReview\(\)/);
 console.log('code-review recovery UI contract: PASS');
