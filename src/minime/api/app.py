@@ -1705,9 +1705,25 @@ class JobRunRequest(BaseModel):
     project_root: str = "."
 
 
+def _load_version_metadata() -> dict[str, Any]:
+    """Load the shipped version.json so /health and the frontend report the same artifact."""
+    import json
+
+    version_file = STATIC_DIR / "version.json"
+    if version_file.is_file():
+        try:
+            data = json.loads(version_file.read_text(encoding="utf-8"))
+            if isinstance(data, dict):
+                return data
+        except (ValueError, OSError):
+            pass
+    return {}
+
+
 @app.api_route("/health", methods=["GET", "HEAD"])
 def get_health() -> dict[str, Any]:
     healthy, message = db_manager.check_health()
+    metadata = _load_version_metadata()
     return {
         "status": "healthy" if healthy else "unhealthy",
         "observed_at": datetime.now(UTC).isoformat(),
@@ -1716,7 +1732,9 @@ def get_health() -> dict[str, Any]:
             "healthy": healthy,
             "message": message,
         },
-        "version": "0.1.0",
+        "version": metadata.get("version", "0.1.0"),
+        "commit_sha": metadata.get("commit_sha"),
+        "build_date": metadata.get("build_date"),
     }
 
 
