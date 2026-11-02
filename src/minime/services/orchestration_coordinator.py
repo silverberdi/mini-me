@@ -3662,6 +3662,12 @@ class NativeOrchestrationCoordinator:
                 if updater is not None:
                     preserved = dict(run.stop_details or {})
                     preserved["proposal_review_escalated"] = True
+                    preserved["human_payload"] = {
+                        "question": reason,
+                        "options": [],
+                        "run_id": run.run_id,
+                        "stage": OrchestrationStage.PROPOSAL_REVIEW.value,
+                    }
                     updater(
                         run.run_id,
                         OrchestrationStopOutcome.NEEDS_HUMAN,
