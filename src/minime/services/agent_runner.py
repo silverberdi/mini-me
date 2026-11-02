@@ -801,10 +801,15 @@ class CliAgentRunner:
                 schema_path.unlink(missing_ok=True)
 
         # Ask the agent once, in the original dispatch, whether it finished.
-        # Explore and Verify already have their own authoritative verdict formats.
+        # Explore, Apply, and Verify each have their own authoritative evidence:
+        # Explore/Verify return structured verdicts, and Apply is judged by the
+        # worktree state (tasks.md fully checked) plus the native Verify gate that
+        # follows it — never by a free-text handoff token. Only the planning and
+        # bookkeeping workflows (propose/continue/sync/archive) have no equivalent
+        # artifact and still need the explicit handoff.
         handoff_required = bool(
             workflow is not None
-            and workflow.operation in {"propose", "continue", "apply", "sync", "archive"}
+            and workflow.operation in {"propose", "continue", "sync", "archive"}
             and output_schema is None
         )
         if handoff_required:

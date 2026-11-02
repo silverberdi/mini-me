@@ -128,6 +128,57 @@ def test_handoff_cannot_replace_agent_process_evidence():
 
 
 
+def test_apply_is_not_gated_on_handoff_token():
+    """Apply is judged by worktree state + native Verify, never by the free-text token.
+
+    Regression for the correction loop that kept dying: Apply dispatched by OpenCode
+    (DeepSeek) reported a clean exit and fully-checked tasks.md but omitted the
+    MINIME_WORKFLOW_RESULT token, so `_execution_is_successful` rejected it and the run
+    never advanced. Contrato Rector §4 makes Apply success = native workflow exit 0 +
+    tests exit 0 + tasks.md implemented; the handoff token is not one of those signals.
+    """
+    apply_result = AgentExecutionResult(
+        exit_code=0,
+        timed_out=False,
+        stdout=["diagnostic"],
+        stderr=[],
+        duration_ms=1,
+        # No MINIME_WORKFLOW_RESULT token: the agent simply reported what it did.
+        final_response="Implemented all tasks; test suite passes.",
+        final_response_status="COMPLETE",
+        workflow_handoff_required=False,
+        workflow_handoff=None,
+    )
+    assert NativeOrchestrationCoordinator._execution_is_successful(apply_result)
+
+    # The token absence must not silently weaken the other fail-closed signals.
+    assert not NativeOrchestrationCoordinator._execution_is_successful(
+        AgentExecutionResult(
+            exit_code=1,
+            timed_out=False,
+            stdout=["diagnostic"],
+            stderr=[],
+            duration_ms=1,
+            final_response="Implemented all tasks; test suite passes.",
+            final_response_status="COMPLETE",
+            workflow_handoff_required=False,
+            workflow_handoff=None,
+        )
+    )
+    assert not NativeOrchestrationCoordinator._execution_is_successful(
+        AgentExecutionResult(
+            exit_code=0,
+            timed_out=False,
+            stdout=["diagnostic"],
+            stderr=[],
+            duration_ms=1,
+            final_response_status="AMBIGUOUS",
+            workflow_handoff_required=False,
+            workflow_handoff=None,
+        )
+    )
+
+
 def test_codex_terminal_handoff_is_not_read_from_tool_diagnostics():
     """Only the completed assistant message, never a tool log, is authoritative."""
     import json
