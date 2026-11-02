@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import ipaddress
+import json
 import logging
 import os
 from contextlib import asynccontextmanager
@@ -91,6 +92,49 @@ _RUN_WORKER_LIMIT = 2
 _run_worker_semaphore = asyncio.Semaphore(_RUN_WORKER_LIMIT)
 _run_tasks: set[asyncio.Task[None]] = set()
 _accepted_operations: dict[tuple[str, str], str] = {}
+
+
+def _run_notification_fingerprint(result: Any, run: Any) -> str:
+    """Identify one observable Run outcome without using wall-clock polling."""
+    details = getattr(run, "stop_details", {}) or {}
+    stage = getattr(result, "current_stage", None)
+    stage_value = getattr(stage, "value", stage)
+    stage_attempt = details.get(str(stage_value).lower()) if isinstance(details, dict) else None
+    if not isinstance(stage_attempt, dict):
+        stage_attempt = details.get("proposal_review") if isinstance(details, dict) else None
+    payload = {
+        "run_id": getattr(result, "run_id", None),
+        "status": getattr(result, "status", None),
+        "stage": stage_value,
+        "message": getattr(result, "message", None),
+        "human_payload": getattr(result, "human_payload", None),
+        "attempt_id": stage_attempt.get("attempt_id") if isinstance(stage_attempt, dict) else None,
+    }
+    return hashlib.sha256(
+        json.dumps(payload, ensure_ascii=False, sort_keys=True, default=str).encode("utf-8")
+    ).hexdigest()
+
+
+def _should_publish_run_notification(uow: Any, result: Any) -> bool:
+    """Publish only a new durable Run outcome; preserve explicit re-entry paths."""
+    run_id = getattr(result, "run_id", None)
+    runs = getattr(uow, "orchestration_runs", None)
+    if not run_id or runs is None or not hasattr(runs, "get_by_id"):
+        return True
+    run = runs.get_by_id(run_id)
+    if run is None:
+        return True
+    fingerprint = _run_notification_fingerprint(result, run)
+    details = dict(getattr(run, "stop_details", {}) or {})
+    if details.get("last_notification_fingerprint") == fingerprint:
+        return False
+    details["last_notification_fingerprint"] = fingerprint
+    run.stop_details = details
+    if hasattr(runs, "save"):
+        runs.save(run)
+    if hasattr(uow, "commit"):
+        uow.commit()
+    return True
 
 
 @asynccontextmanager
@@ -937,54 +981,55 @@ async def _execute_request_in_fresh_session(
                 target_run_id=target_run_id or getattr(body, "target_run_id", None),
             )
             session.commit()
-            await event_broker.publish(
-                "run.transition",
-                {"project_id": project_id, "run_id": result.run_id, "status": result.status},
-            )
-            # Web Push: Human Attention Required
-            if result.human_payload:
+            if _should_publish_run_notification(worker_uow, result):
                 await event_broker.publish(
-                    "human.gate",
-                    {"project_id": project_id, "run_id": result.run_id, "payload": result.human_payload},
+                    "run.transition",
+                    {"project_id": project_id, "run_id": result.run_id, "status": result.status},
                 )
-                try:
-                    prompt_preview = (
-                        result.human_payload.get("prompt")
-                        or result.human_payload.get("message")
-                        or "Se requiere atención para continuar."
-                    )[:100]
-                    web_push_service.broadcast_to_active_operators(
-                        uow=worker_uow,
-                        title="Atención Requerida — mini me",
-                        body=f"[{project_id}] {prompt_preview}",
-                        data={"url": f"/trabajo-actual?run={result.run_id}&project={project_id}"},
-                        category="human_required",
+                # Web Push: Human Attention Required
+                if result.human_payload:
+                    await event_broker.publish(
+                        "human.gate",
+                        {"project_id": project_id, "run_id": result.run_id, "payload": result.human_payload},
                     )
-                except Exception as push_err:
-                    logger.debug("Failed sending human_required push: %s", push_err)
-            elif result.status in ("COMPLETED", "FAILED", "BLOCKED"):
-                try:
-                    web_push_service.broadcast_to_active_operators(
-                        uow=worker_uow,
-                        title=f"Ejecución {result.status} — mini me",
-                        body=f"Proyecto {project_id}: la ejecución finalizó en estado {result.status}.",
-                        data={"url": f"/trabajo-actual?run={result.run_id}&project={project_id}"},
-                        category="terminal_outcomes",
-                    )
-                except Exception as push_err:
-                    logger.debug("Failed sending terminal_outcomes push: %s", push_err)
-            else:
-                try:
-                    stage_name = getattr(result, "current_stage", result.status)
-                    web_push_service.broadcast_to_active_operators(
-                        uow=worker_uow,
-                        title="Avance de Etapa — mini me",
-                        body=f"[{project_id}] Etapa actual: {stage_name}",
-                        data={"url": f"/trabajo-actual?run={result.run_id}&project={project_id}"},
-                        category="stage_transitions",
-                    )
-                except Exception as push_err:
-                    logger.debug("Failed sending stage_transitions push: %s", push_err)
+                    try:
+                        prompt_preview = (
+                            result.human_payload.get("prompt")
+                            or result.human_payload.get("message")
+                            or "Se requiere atención para continuar."
+                        )[:100]
+                        web_push_service.broadcast_to_active_operators(
+                            uow=worker_uow,
+                            title="Atención Requerida — mini me",
+                            body=f"[{project_id}] {prompt_preview}",
+                            data={"url": f"/trabajo-actual?run={result.run_id}&project={project_id}"},
+                            category="human_required",
+                        )
+                    except Exception as push_err:
+                        logger.debug("Failed sending human_required push: %s", push_err)
+                elif result.status in ("COMPLETED", "FAILED", "BLOCKED"):
+                    try:
+                        web_push_service.broadcast_to_active_operators(
+                            uow=worker_uow,
+                            title=f"Ejecución {result.status} — mini me",
+                            body=f"Proyecto {project_id}: la ejecución finalizó en estado {result.status}.",
+                            data={"url": f"/trabajo-actual?run={result.run_id}&project={project_id}"},
+                            category="terminal_outcomes",
+                        )
+                    except Exception as push_err:
+                        logger.debug("Failed sending terminal_outcomes push: %s", push_err)
+                else:
+                    try:
+                        stage_name = getattr(result, "current_stage", result.status)
+                        web_push_service.broadcast_to_active_operators(
+                            uow=worker_uow,
+                            title="Avance de Etapa — mini me",
+                            body=f"[{project_id}] Etapa actual: {stage_name}",
+                            data={"url": f"/trabajo-actual?run={result.run_id}&project={project_id}"},
+                            category="stage_transitions",
+                        )
+                    except Exception as push_err:
+                        logger.debug("Failed sending stage_transitions push: %s", push_err)
             # Persist subscription mutations (deactivation on 404/410, last_success_at)
             # applied by the broadcast above; the worker's earlier commit predates them.
             session.commit()
