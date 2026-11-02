@@ -50,7 +50,7 @@ class WebPushService:
     ) -> None:
         self.key_path = key_path or _resolve_default_key_path()
         self.claims = vapid_claims or {
-            "sub": os.environ.get("MINIME_VAPID_SUB", "mailto:operator@minime.local")
+            "sub": os.environ.get("MINIME_VAPID_SUB", "mailto:admin@mini-me.silverman.pro")
         }
         self._vapid: Vapid | None = None
         self._init_vapid_keys()
