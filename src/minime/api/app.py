@@ -3407,6 +3407,9 @@ def get_static_root_file(file_name: str) -> Response:
                 media_type = "image/svg+xml"
             elif file_name.endswith(".ico"):
                 media_type = "image/x-icon"
-            return FileResponse(target, media_type=media_type)
+            headers = None
+            if file_name in {"ngsw-worker.js", "ngsw.json"}:
+                headers = {"Cache-Control": "no-cache, no-store, must-revalidate"}
+            return FileResponse(target, media_type=media_type, headers=headers)
     raise HTTPException(status_code=404)
 
