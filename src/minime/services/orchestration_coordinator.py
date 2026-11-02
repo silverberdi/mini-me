@@ -1308,7 +1308,7 @@ class NativeOrchestrationCoordinator:
                         f"{active_run.run_id}:{change_name}:{issue_number}:{thinker_provider}".encode()
                     ).hexdigest(),
                     attempt_fields={"change_name": change_name},
-                    is_recovery=propose_recovery_needed,
+                    is_recovery=propose_recovery_needed and not pending_revision,
                     recovery_authorization_id=propose_recovery_authorization_id,
                 )
                 if dispatch is None:
