@@ -21,6 +21,9 @@ El operador de mini me supervisa ciclos autónomos de desarrollo desde dispositi
   - Aislamiento estricto entre operadores: una notificación solo se envía a las suscripciones del operador autorizado.
   - Deduplicación y tolerancia a fallos: errores en el envío push nunca bloquean ni corrompen el avance del orquestador.
   - Cero secretos expuestos en payloads o respuestas públicas.
+- **Continuidad operativa de revisión:**
+  - Exponer en `Trabajo Actual` una acción autenticada para recuperar un intento de revisión de código que terminó sin veredicto estructurado.
+  - La recuperación debe autorizarse contra el `Run`, el intento previo y el candidato exacto; luego debe reanudar el mismo Run para repetir la revisión independiente configurada.
 
 ## Capabilities
 
@@ -35,4 +38,4 @@ Ninguna existente: se extiende la superficie de observabilidad y entrega de F10 
 
 - **Backend:** nuevos endpoints en `src/minime/api/app.py`, servicio `src/minime/services/web_push_service.py`, tabla y modelo SQLAlchemy/Alembic en `src/minime/db/`.
 - **Frontend:** servicio Angular `PushNotificationService`, controles de configuración en el shell y manejo de `push` en Service Worker.
-- **Operación:** supervisión desatendida en móviles sin mantener la pantalla encendida ni polling continuo.
+- **Operación:** supervisión desatendida en móviles sin mantener la pantalla encendida ni polling continuo; el operador puede desbloquear desde la UI una revisión inválida sin crear otro Change ni otro candidato.

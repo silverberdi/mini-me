@@ -66,3 +66,10 @@ flowchart TD
 - Cada transición observable emite como máximo una notificación push por instalación.
 - La identidad de operador garantiza que una cuenta no reciba alertas de proyectos a los que no tiene acceso.
 - Los payloads solo contienen título, mensaje descriptivo y URL contextual relativa; nunca contienen credenciales, tokens ni datos sensibles.
+
+### 6. Recuperación autenticada de revisión de código
+- `Trabajo Actual` mostrará la acción solo cuando el Run activo esté en `CODE_REVIEW`, conserve un intento de revisión cuyo resultado sea inválido/técnico y exponga el `candidate_sha` asociado.
+- La UI llamará primero a `POST /api/v1/projects/{project_id}/runs/{run_id}/code-review-recovery-authorizations` con el `prior_attempt_id`; después enviará `POST /api/v1/projects/{project_id}/requests/run` con `target_run_id` y `code_review_recovery_authorization_id` devueltos por la primera operación.
+- El backend conservará la autorización durable existente como única fuente de verdad: identidad autenticada, proyecto, Run, etapa, intento, Issue, revisor configurado y candidato deben coincidir. Una autorización repetida, obsoleta o de otro Run se rechaza con `409` y nunca crea un Run paralelo.
+- La reanudación invoca de nuevo el revisor independiente configurado en PostgreSQL. No se reutiliza el intento inválido, no se acepta una salida no estructurada como aprobación y se conserva evidencia del nuevo intento y su SHA.
+- La UI debe mostrar el resultado de ambas operaciones, deshabilitar la acción durante la transición y refrescar el Run desde la API; un fallo deja el Run detenido y visible.

@@ -6,7 +6,7 @@ Proveer un servicio backend de despacho y firma VAPID de notificaciones Web Push
 ## ADDED Requirements
 
 ### Requirement: VAPID Public Key Distribution
-El sistema expondrá la clave pública VAPID en un endpoint seguro accesible para operadores autenticados.
+El sistema SHALL exponer la clave pública VAPID en un endpoint seguro accesible para operadores autenticados.
 
 #### Scenario: Operador autenticado obtiene la clave VAPID
 - **Given** un operador autenticado mediante sesión o token válido
@@ -22,7 +22,7 @@ El sistema expondrá la clave pública VAPID en un endpoint seguro accesible par
 ---
 
 ### Requirement: Push Subscription Persistence and Lifecycle
-El sistema registrará y mantendrá las suscripciones Web Push por dispositivo e instalación asociadas al operador.
+El sistema SHALL registrar y mantener las suscripciones Web Push por dispositivo e instalación asociadas al operador.
 
 #### Scenario: Registro o actualización idempotente de suscripción
 - **Given** una suscripción Web Push válida con `endpoint`, `keys.p256dh` y `keys.auth`
@@ -39,7 +39,7 @@ El sistema registrará y mantendrá las suscripciones Web Push por dispositivo e
 ---
 
 ### Requirement: Durable Notification Dispatch on Stage Transition and Human Gate
-El sistema emitirá notificaciones Web Push únicamente ante transiciones verificables de la orquestación.
+El sistema SHALL emitir notificaciones Web Push únicamente ante transiciones verificables de la orquestación.
 
 #### Scenario: Emisión en bloqueo de atención humana (HUMAN_REQUIRED)
 - **Given** un Run que transiciona de forma duradera a `HUMAN_REQUIRED`

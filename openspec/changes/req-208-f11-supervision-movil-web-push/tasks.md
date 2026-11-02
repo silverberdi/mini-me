@@ -25,3 +25,11 @@
 - [x] 5.1 Escribir pruebas unitarias y de integración para `WebPushService`, serialización VAPID, modelo de suscripciones y endpoints REST de la API.
 - [x] 5.2 Escribir pruebas para el manejo de `notificationclick` y contratos PWA offline.
 - [x] 5.3 Registrar evidencia determinista de pruebas aprobadas y validación de endpoints.
+
+## 6. Recuperación de revisión independiente desde la UI
+- [x] 6.1 Exponer en el modelo de `Trabajo Actual` el estado durable del intento de `CODE_REVIEW` y mostrar la acción únicamente para un Run activo recuperable con candidato e intento identificables.
+- [x] 6.2 Integrar la acción autenticada con los endpoints existentes de autorización y reanudación, encadenando sus identificadores y conservando `target_run_id`.
+- [x] 6.3 Añadir pruebas backend/frontend para autorización obsoleta o repetida, doble clic, error de red y ausencia de veredicto; verificar que no se crea un Run paralelo.
+- [ ] 6.4 Ejecutar E2E real sobre el Run existente: autorización durable, reanudación del mismo Run y nueva invocación del revisor independiente configurado en PostgreSQL contra el candidato exacto.
+- [ ] 6.5 Repetir el code review independiente después del nuevo SHA; registrar el resultado estructurado, sus findings y evidencia de fail-closed si vuelve a ser inválido.
+- [ ] 6.6 Validar manualmente en la PWA móvil el estado del botón, mensajes de éxito/error y refresco del Run contra el SHA desplegado en preview; invalidar la validación si cambia el SHA.

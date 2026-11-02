@@ -190,6 +190,35 @@ interface PipelineStage {
           <span class="font-mono text-slate-500">WAITING_CAPACITY / UNKNOWN no generan preguntas.</span>
         </div>
 
+        <!-- Independent code review recovery -->
+        <div *ngIf="canRecoverCodeReview()" class="p-6 rounded-2xl bg-violet-500/10 border-2 border-violet-500/30 space-y-4 shadow-xl">
+          <div class="flex items-start gap-3">
+            <div class="w-10 h-10 rounded-xl bg-violet-500/20 text-violet-300 flex items-center justify-center text-2xl shrink-0">🔍</div>
+            <div>
+              <h3 class="text-base font-bold text-white">Revisión independiente pendiente</h3>
+              <p class="text-xs text-slate-300 mt-1">
+                El intento anterior no produjo un veredicto estructurado. Puedes autorizar una repetición sobre el mismo Run y candidato.
+              </p>
+            </div>
+          </div>
+          <div class="grid grid-cols-1 md:grid-cols-2 gap-2 text-xs font-mono text-slate-400">
+            <span>Intento: <strong class="text-slate-200">{{ codeReviewAttemptId() }}</strong></span>
+            <span>Candidate SHA: <strong class="text-slate-200">{{ codeReviewCandidateSha() }}</strong></span>
+          </div>
+          <div class="flex items-center justify-between gap-3">
+            <span class="text-xs text-slate-400">El backend rechazará autorizaciones obsoletas o repetidas.</span>
+            <button type="button" (click)="recoverCodeReview()" [disabled]="isRecoveringCodeReview()"
+                    class="px-5 py-2.5 rounded-xl bg-violet-600 hover:bg-violet-500 disabled:opacity-50 text-white font-semibold text-xs tracking-wide shadow-lg transition-all flex items-center gap-2 cursor-pointer">
+              <span *ngIf="isRecoveringCodeReview()" class="w-3.5 h-3.5 border-2 border-white/30 border-t-white rounded-full animate-spin"></span>
+              <span>{{ isRecoveringCodeReview() ? 'Reanudando…' : 'Repetir revisión independiente' }}</span>
+            </button>
+          </div>
+          <div *ngIf="codeReviewRecoveryMessage()" class="p-3 rounded-xl text-xs font-mono"
+               [ngClass]="codeReviewRecoverySuccess() ? 'bg-emerald-500/10 text-emerald-400 border border-emerald-500/20' : 'bg-rose-500/10 text-rose-400 border border-rose-500/20'">
+            {{ codeReviewRecoveryMessage() }}
+          </div>
+        </div>
+
         <!-- Technical Identity & Evidence Grid -->
         <div class="grid grid-cols-1 md:grid-cols-2 gap-6">
           <div class="bg-slate-800/40 rounded-2xl border border-slate-700/50 p-6 backdrop-blur-sm space-y-4">
@@ -241,6 +270,9 @@ export class TrabajoActualComponent {
   readonly isSubmitting = signal<boolean>(false);
   readonly submissionMessage = signal<string | null>(null);
   readonly submissionSuccess = signal<boolean>(false);
+  readonly isRecoveringCodeReview = signal<boolean>(false);
+  readonly codeReviewRecoveryMessage = signal<string | null>(null);
+  readonly codeReviewRecoverySuccess = signal<boolean>(false);
 
   readonly pipelineStages: PipelineStage[] = [
     { key: 'ADMITTED', label: 'Admisión' },
@@ -272,6 +304,68 @@ export class TrabajoActualComponent {
     const gate = (run as any).human_gate || run.status;
     const details = (run as any).stop_details?.human_payload || (run as any).stop_details?.human_request || run.metadata?.['human_payload'];
     return gate === 'HUMAN_REQUIRED' || !!details;
+  }
+
+  private codeReviewDetails(): Record<string, any> | null {
+    const value = this.targetRun()?.stop_details?.['code_review'];
+    return value && typeof value === 'object' ? value : null;
+  }
+
+  canRecoverCodeReview(): boolean {
+    const run = this.targetRun();
+    const details = this.codeReviewDetails();
+    const reviewStatus = String(details?.['status'] || '').toLowerCase();
+    return !!run?.is_active
+      && run.stage === 'CODE_REVIEW'
+      && !!details?.['attempt_id']
+      && !!(details?.['candidate_sha'] || run.candidate_sha || run.current_candidate_sha)
+      && ['invalid_response', 'technical_failure', 'failed', 'error'].includes(reviewStatus);
+  }
+
+  codeReviewAttemptId(): string {
+    return String(this.codeReviewDetails()?.['attempt_id'] || 'N/A');
+  }
+
+  codeReviewCandidateSha(): string {
+    const run = this.targetRun();
+    return String(this.codeReviewDetails()?.['candidate_sha'] || run?.candidate_sha || run?.current_candidate_sha || 'N/A');
+  }
+
+  async recoverCodeReview(): Promise<void> {
+    const run = this.targetRun();
+    const details = this.codeReviewDetails();
+    if (!run || !details?.['attempt_id'] || !this.canRecoverCodeReview() || this.isRecoveringCodeReview()) return;
+
+    this.isRecoveringCodeReview.set(true);
+    this.codeReviewRecoveryMessage.set(null);
+    try {
+      const authorization = await this.api.post<{ action_request_id: string }>(
+        `/api/v1/projects/${encodeURIComponent(run.project_id)}/runs/${encodeURIComponent(run.run_id)}/code-review-recovery-authorizations`,
+        { prior_attempt_id: details['attempt_id'] }
+      );
+      if (!authorization.ok || !authorization.data?.action_request_id) {
+        throw new Error(authorization.error || 'La autorización de recuperación fue rechazada');
+      }
+
+      const resumed = await this.api.post(
+        `/api/v1/projects/${encodeURIComponent(run.project_id)}/requests/run`,
+        {
+          target_run_id: run.run_id,
+          code_review_recovery_authorization_id: authorization.data.action_request_id
+        }
+      );
+      if (!resumed.ok) throw new Error(resumed.error || 'No se pudo reanudar el Run');
+
+      this.codeReviewRecoverySuccess.set(true);
+      this.codeReviewRecoveryMessage.set('Revisión autorizada. El mismo Run fue reanudado con el revisor independiente; actualizando…');
+      await this.refresh.read();
+    } catch (error: any) {
+      this.codeReviewRecoverySuccess.set(false);
+      this.codeReviewRecoveryMessage.set(error?.message || 'No se pudo recuperar la revisión');
+      await this.refresh.read();
+    } finally {
+      this.isRecoveringCodeReview.set(false);
+    }
   }
 
   humanGateQuestion(): string {

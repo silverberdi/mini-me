@@ -6,7 +6,7 @@ Permitir a los operadores suscribir sus dispositivos móviles (iPhone y Android)
 ## ADDED Requirements
 
 ### Requirement: Browser Permission and Push Subscription Management
-La PWA gestionará el ciclo de vida de los permisos y la suscripción local ante el Service Worker y el backend.
+La PWA SHALL gestionar el ciclo de vida de los permisos y la suscripción local ante el Service Worker y el backend.
 
 #### Scenario: Activación exitosa de notificaciones en móvil
 - **Given** un navegador compatible con soporte de Service Worker y Push API (e.g. Safari iOS 16.4+ o Chrome Android)
@@ -23,7 +23,7 @@ La PWA gestionará el ciclo de vida de los permisos y la suscripción local ante
 ---
 
 ### Requirement: Direct Contextual Navigation on Notification Click
-Al pulsar una notificación Web Push recibida en el sistema operativo, la PWA debe abrir la vista relevante.
+Al pulsar una notificación Web Push recibida en el sistema operativo, la PWA SHALL abrir la vista relevante.
 
 #### Scenario: Apertura de Run bloqueado en HUMAN_REQUIRED
 - **Given** una notificación push recibida con URL `/trabajo-actual?run=R-123&project=PROJ`
@@ -34,10 +34,32 @@ Al pulsar una notificación Web Push recibida en el sistema operativo, la PWA de
 ---
 
 ### Requirement: Test Notification Dispatch
-El operador dispondrá de una acción explícita para comprobar la recepción real en su dispositivo.
+El operador SHALL disponer de una acción explícita para comprobar la recepción real en su dispositivo.
 
 #### Scenario: Envío de notificación de prueba dirigida
 - **Given** un dispositivo con suscripción activa
 - **When** el operador pulsa "Enviar Notificación de Prueba"
 - **Then** el backend emite inmediatamente una notificación dirigida a dicha instalación
 - **And** la PWA o el sistema operativo del móvil muestra el banner de notificación confirmando la conectividad de extremo a extremo.
+
+### Requirement: Authenticated Code Review Recovery
+La vista `Trabajo Actual` SHALL permitir reanudar una revisión de código independiente que falló técnicamente sin veredicto estructurado, conservando la identidad durable del Run y del candidato.
+
+#### Scenario: Recuperar revisión inválida y repetirla
+- **Given** un Run activo en `CODE_REVIEW` con un intento `invalid_response`, `technical_failure` o equivalente, su `prior_attempt_id` y `candidate_sha` observables
+- **When** el operador autenticado pulsa "Repetir revisión independiente"
+- **Then** la PWA registra una autorización en el endpoint de recuperación con el `prior_attempt_id` del Run
+- **And** reanuda el mismo Run mediante `target_run_id` y la autorización aceptada
+- **And** el backend vuelve a invocar el revisor independiente configurado y registra un nuevo intento, sin crear un Change, Job, worktree o candidato paralelo.
+
+#### Scenario: Rechazar autorización obsoleta o repetida
+- **Given** que el Run ya avanzó, terminó o su intento de revisión cambió
+- **When** la PWA intenta reutilizar una autorización o un `prior_attempt_id` anterior
+- **Then** la API responde `409`
+- **And** no crea una nueva ejecución ni modifica el candidato; la UI conserva el error y refresca el estado durable.
+
+#### Scenario: Fallar cerrado ante resultado no estructurado
+- **Given** que el revisor vuelve a responder sin un veredicto estructurado
+- **When** el Run procesa el segundo intento
+- **Then** el Run permanece detenido en revisión de código
+- **And** la UI muestra que la revisión no fue aprobada y permite una nueva decisión solo si la política durable lo autoriza.
