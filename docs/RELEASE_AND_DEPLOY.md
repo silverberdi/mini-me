@@ -1,7 +1,7 @@
 # Releases y despliegue
 
-El workflow `.github/workflows/release-and-deploy.yml` se ejecuta al recibir un
-push a `main` (incluido un merge) y también puede iniciarse manualmente.
+El workflow `.github/workflows/release-and-deploy.yml` se ejecuta únicamente al
+recibir un push a `main` (incluido un merge).
 
 Cada ejecución:
 
