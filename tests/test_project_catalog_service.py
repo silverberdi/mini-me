@@ -187,7 +187,10 @@ def test_opencode_model_alias_translates_direct_api_ids():
     from minime.config import OPENCODE_DEEPSEEK_MODEL_ALIASES
 
     assert OPENCODE_DEEPSEEK_MODEL_ALIASES["deepseek-chat"] == "deepseek/deepseek-flash"
-    assert OPENCODE_DEEPSEEK_MODEL_ALIASES["deepseek-reasoner"] == "deepseek/deepseek-v4-pro"
+    assert OPENCODE_DEEPSEEK_MODEL_ALIASES["deepseek/deepseek-chat"] == "deepseek/deepseek-flash"
+    # deepseek-reasoner (R1) is not exposed by the direct DeepSeek API; it routes
+    # through OpenRouter to the actual R1 rather than a premium v4-pro substitute.
+    assert OPENCODE_DEEPSEEK_MODEL_ALIASES["deepseek-reasoner"] == "openrouter/deepseek/deepseek-r1-0528"
     # Bare ids from earlier profiles also normalize to canonical full ids.
     assert OPENCODE_DEEPSEEK_MODEL_ALIASES["deepseek-flash"] == "deepseek/deepseek-flash"
     assert OPENCODE_DEEPSEEK_MODEL_ALIASES["deepseek-v4-pro"] == "deepseek/deepseek-v4-pro"
