@@ -663,7 +663,8 @@ class CliAgentRunner:
             )
             outcome = await adapter.dispatch(request)
 
-            if output_last_message_path and outcome.evidence.stdout:
+            candidate_json = None
+            if outcome.evidence.stdout:
                 text_block = "\n".join(outcome.evidence.stdout).strip()
                 import re
 
@@ -683,9 +684,11 @@ class CliAgentRunner:
                         candidate_json = candidate_json[s : e + 1].strip()
                 else:
                     candidate_json = outcome.evidence.stdout[-1]
-                output_path = Path(output_last_message_path)
-                output_path.parent.mkdir(parents=True, exist_ok=True)
-                output_path.write_text(candidate_json, encoding="utf-8")
+
+                if output_last_message_path:
+                    output_path = Path(output_last_message_path)
+                    output_path.parent.mkdir(parents=True, exist_ok=True)
+                    output_path.write_text(candidate_json, encoding="utf-8")
 
             return AgentExecutionResult(
                 exit_code=outcome.evidence.exit_code if outcome.evidence.exit_code is not None else (0 if outcome.accepted else -1),
@@ -695,7 +698,7 @@ class CliAgentRunner:
                 duration_ms=0,
                 preflight_error=outcome.evidence.failure_reason if not outcome.accepted else None,
                 workflow=workflow,
-                final_response=outcome.evidence.stdout[-1] if outcome.evidence.stdout else None,
+                final_response=candidate_json if candidate_json else (outcome.evidence.stdout[-1] if outcome.evidence.stdout else None),
                 final_response_status="COMPLETE" if outcome.accepted else "MISSING",
                 final_response_source="structured_file" if output_last_message_path else "stdout",
             )

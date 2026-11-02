@@ -146,18 +146,34 @@ def _forbidden_external_action(prompt: str) -> bool:
 
 def _has_explicit_result(stdout: tuple[str, ...]) -> bool:
     """Require an explicit terminal result before accepting CLI output."""
+    valid_results = {"COMPLETE", "INCOMPLETE", "HUMAN_REQUIRED", "READY_TO_MERGE", "CHANGES_REQUIRED"}
     for line in reversed(stdout):
         stripped = line.strip().strip('`*._').upper()
-        if stripped in {"COMPLETE", "INCOMPLETE", "HUMAN_REQUIRED"}:
+        if stripped in valid_results:
             return True
         try:
             payload = json.loads(line.strip())
+            if isinstance(payload, dict):
+                status = str(payload.get("status", "")).upper()
+                verdict = str(payload.get("verdict", "")).upper()
+                if status in valid_results or verdict in valid_results:
+                    return True
         except (TypeError, json.JSONDecodeError):
-            continue
-        if isinstance(payload, dict) and str(payload.get("status", "")).upper() in {
-            "COMPLETE", "INCOMPLETE", "HUMAN_REQUIRED"
-        }:
-            return True
+            pass
+
+    import re
+    full_text = "\n".join(stdout)
+    json_blocks = re.findall(r"```(?:json)?\s*(\{.*?\})\s*```", full_text, re.DOTALL)
+    for block in json_blocks:
+        try:
+            payload = json.loads(block)
+            if isinstance(payload, dict):
+                status = str(payload.get("status", "")).upper()
+                verdict = str(payload.get("verdict", "")).upper()
+                if status in valid_results or verdict in valid_results:
+                    return True
+        except Exception:
+            pass
     return False
 
 
