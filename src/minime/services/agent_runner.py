@@ -373,6 +373,14 @@ class CliAgentRunner:
                 )
                 check_parts = (".agent", ".agent/workflows", ".agents", ".agents/workflows")
         elif prov == "opencode":
+            # F9 scopes OpenCode to execution and independent_review; the
+            # minime-request-normalizer and minime-pr-preparer skills are
+            # thinking-role responsibilities and are not authorized here.
+            if op in {"normalize", "pr_prepare"}:
+                raise NativeOpenSpecWorkflowUnavailable(
+                    f"OpenCode does not support the '{op}' thinking workflow "
+                    "(F9 authorizes execution and independent_review only)."
+                )
             op_to_skill = {
                 "explore": "openspec-explore",
                 "propose": "openspec-propose",
@@ -599,7 +607,24 @@ class CliAgentRunner:
             proj_cfg = app_cfg.projects.get(proj_id) if hasattr(app_cfg, "projects") else None
             opencode_cfg = proj_cfg.opencode if proj_cfg else OpenCodeCapabilityConfig()
 
-            opencode_role = "independent_review" if role in ("reviewer", "independent_review") else "execution"
+            if role in ("reviewer", "independent_review"):
+                opencode_role = "independent_review"
+            elif role in ("implementer", "execution"):
+                opencode_role = "execution"
+            else:
+                # F9 authorizes OpenCode for execution and independent_review only.
+                return AgentExecutionResult(
+                    exit_code=-2,
+                    timed_out=False,
+                    stdout=[],
+                    stderr=[
+                        f"OpenCode is not authorized for role '{role}' "
+                        "(F9 supports execution and independent_review only)."
+                    ],
+                    duration_ms=0,
+                    environment_error=True,
+                    workflow=workflow,
+                )
 
             if not opencode_cfg.enabled:
                 profile_key = "independent_review" if opencode_role == "independent_review" else "execution"
@@ -619,9 +644,12 @@ class CliAgentRunner:
                         args=[],
                     )
 
+            # Pass the resolved operation through unchanged so the adapter's
+            # SUPPORTED_OPERATIONS guard fails closed on sync/archive/continue
+            # instead of silently rewriting them to apply.
             operation = (
                 workflow.operation
-                if workflow and workflow.operation in {"explore", "propose", "apply", "verify"}
+                if workflow and workflow.operation
                 else ("verify" if opencode_role == "independent_review" else "apply")
             )
             candidate_sha = _git_head(Path(worktree_path)) or ""
