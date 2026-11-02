@@ -1617,6 +1617,23 @@ class NativeOrchestrationCoordinator:
             OrchestrationStage.IMPLEMENTING,
         ):
             self._update_stage(uow, active_run, OrchestrationStage.IMPLEMENTING)
+            # Physical-validation tasks (marked NOT_VERIFIED in tasks.md) require
+            # evidence only a human can produce (real devices, manual scenarios).
+            # If they are the only remaining unchecked work, escalate immediately
+            # instead of burning Apply retries on evidence mini me can never create.
+            tasks_path = worktree_path / "openspec" / "changes" / change_name / "tasks.md"
+            if tasks_path.is_file():
+                tasks_text = tasks_path.read_text(encoding="utf-8", errors="replace")
+                automated_pending, not_verified = self._classify_pending_tasks(tasks_text)
+                if not automated_pending and not_verified:
+                    reason = (
+                        "Physical validation required: task(s) "
+                        + ", ".join(not_verified)
+                        + " need evidence only a human can produce (real devices / physical "
+                        "scenarios) and are marked NOT_VERIFIED in tasks.md. Automated Apply "
+                        "cannot satisfy them; worktree preserved for operator validation."
+                    )
+                    return self._escalate_apply_to_human(uow, active_run, reason)
             # Durable correction context from a prior CHANGES_REQUIRED verdict.
             pending_corrections = list(
                 (active_run.stop_details or {}).get("pending_corrections") or []
@@ -2544,6 +2561,28 @@ class NativeOrchestrationCoordinator:
         details = dict(run.stop_details or {})
         attempts = details.get("apply_failure_count")
         return attempts if isinstance(attempts, int) and attempts >= 0 else 0
+
+    _UNCHECKED_TASK_RE = re.compile(r"(?m)^\s*-\s*\[\s\]\s+([^\n]*)$")
+
+    @staticmethod
+    def _classify_pending_tasks(tasks_text: str) -> tuple[list[str], list[str]]:
+        """Split unchecked tasks.md boxes into (automated_pending, not_verified) ids.
+
+        A task whose line carries the ``NOT_VERIFIED`` marker needs evidence only a
+        human can produce (physical devices, manual scenarios). Those must never gate
+        or retry Apply — they are escalated to the operator instead of re-dispatching
+        an agent that can never satisfy them.
+        """
+        automated_pending: list[str] = []
+        not_verified: list[str] = []
+        for match in NativeOrchestrationCoordinator._UNCHECKED_TASK_RE.finditer(tasks_text):
+            line = match.group(1).strip()
+            task_id = line.split()[0] if line else "?"
+            if "NOT_VERIFIED" in line.upper():
+                not_verified.append(task_id)
+            else:
+                automated_pending.append(task_id)
+        return automated_pending, not_verified
 
     def _record_apply_failure(self, uow: Any, run: OrchestrationRun) -> int:
         """Increment the durable Apply-failure counter and return the new value."""
@@ -3720,7 +3759,10 @@ class NativeOrchestrationCoordinator:
             return False
         tasks_text = tasks_path.read_text(encoding="utf-8", errors="replace")
         # A successful CLI exit cannot replace the native Apply task postcondition.
-        return not bool(re.search(r"(?m)^\s*-\s*\[\s\]\s+", tasks_text))
+        # NOT_VERIFIED tasks require human physical evidence and are not part of the
+        # automatable postcondition; they are escalated upstream rather than gating Apply.
+        automated_pending, _ = self._classify_pending_tasks(tasks_text)
+        return not automated_pending
 
     async def _run_automated_tests(self, worktree_path: Path) -> tuple[bool, str]:
         """Execute project automated tests and verify exit code 0."""

@@ -347,3 +347,37 @@ async def test_native_apply_requires_tasks_not_just_success_text(tmp_path: Path)
     assert not await c._run_apply(tmp_path, "codex", "change")
     (change / "tasks.md").write_text("## Tasks\n- [x] 1.1 Implement\n")
     assert await c._run_apply(tmp_path, "codex", "change")
+
+
+def test_classify_pending_tasks_splits_not_verified():
+    tasks = (
+        "## Tasks\n"
+        "- [x] 1.1 Done\n"
+        "- [ ] 2.1 Pending automated work\n"
+        "- [ ] 3.1 Validar en un iPhone real. (NOT_VERIFIED: no hay evidencia física disponible.)\n"
+        "- [ ] 3.2 Vincular SHA. (NOT_VERIFIED: no existe SHA candidato inmutable.)\n"
+    )
+    automated, not_verified = NativeOrchestrationCoordinator._classify_pending_tasks(tasks)
+    assert automated == ["2.1"]
+    assert not_verified == ["3.1", "3.2"]
+
+
+@pytest.mark.asyncio
+async def test_run_apply_succeeds_when_only_not_verified_remain(tmp_path: Path):
+    """NOT_VERIFIED physical-validation tasks are not part of the Apply postcondition."""
+    runner = ScriptedRunner("Apply completed")
+    c = coordinator(tmp_path, runner)
+    change = tmp_path / "openspec" / "changes" / "change"
+    change.mkdir(parents=True)
+    (change / "tasks.md").write_text(
+        "## Tasks\n"
+        "- [x] 1.1 Implement\n"
+        "- [ ] 6.1 Validar en iPhone real. (NOT_VERIFIED: no hay evidencia física disponible.)\n"
+    )
+    assert await c._run_apply(tmp_path, "codex", "change")
+
+    # A genuinely-pending non-NOT_VERIFIED task still gates Apply fail-closed.
+    (change / "tasks.md").write_text(
+        "## Tasks\n- [x] 1.1 Implement\n- [ ] 2.1 Pending automated work\n"
+    )
+    assert not await c._run_apply(tmp_path, "codex", "change")
