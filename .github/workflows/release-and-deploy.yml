@@ -1,0 +1,177 @@
+name: Release and deploy
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+concurrency:
+  group: production-release
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+
+jobs:
+  version:
+    name: Calculate incremental version
+    runs-on: ubuntu-latest
+    outputs:
+      tag: ${{ steps.version.outputs.tag }}
+      sha: ${{ steps.version.outputs.sha }}
+    steps:
+      - name: Checkout merged commit
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Calculate next patch version
+        id: version
+        shell: bash
+        run: |
+          set -euo pipefail
+          git fetch --force --tags
+          latest="$(git tag --list 'v[0-9]*.[0-9]*.[0-9]*' --sort=-version:refname | head -n 1)"
+          if [[ -z "$latest" ]]; then
+            latest="v0.1.0"
+          fi
+          base="${latest#v}"
+          IFS=. read -r major minor patch <<< "$base"
+          next="v${major}.${minor}.$((patch + 1))"
+          if git rev-parse -q --verify "refs/tags/$next" >/dev/null; then
+            echo "Tag $next already exists; refusing to guess a version." >&2
+            exit 1
+          fi
+          echo "tag=$next" >> "$GITHUB_OUTPUT"
+          echo "sha=$GITHUB_SHA" >> "$GITHUB_OUTPUT"
+          echo "Release: $next ($GITHUB_SHA)"
+
+  build:
+    name: Build immutable deployment artifact
+    needs: version
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout released commit
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.version.outputs.sha }}
+          fetch-depth: 1
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Build frontend
+        working-directory: frontend
+        run: |
+          npm ci
+          npm test
+          npm run build
+
+      - name: Assemble deployment tree
+        shell: bash
+        run: |
+          set -euo pipefail
+          rm -rf src/minime/static
+          mkdir -p src/minime/static
+          cp -a frontend/dist/minime-frontend/. src/minime/static/
+          tar --sort=name --owner=0 --group=0 --numeric-owner \
+            --exclude='*.pyc' --exclude='__pycache__' --exclude='.pytest_cache' \
+            --exclude='frontend' --exclude='.git' \
+            -czf "minime-${{ needs.version.outputs.tag }}.tar.gz" \
+            src alembic alembic.ini pyproject.toml
+
+      - name: Upload deployment artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: minime-${{ needs.version.outputs.tag }}
+          path: minime-${{ needs.version.outputs.tag }}.tar.gz
+          if-no-files-found: error
+          retention-days: 14
+
+  release:
+    name: Create incremental release
+    needs: [version, build]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Create GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ needs.version.outputs.tag }}
+        run: gh release create "$RELEASE_TAG" --target "${{ needs.version.outputs.sha }}" --generate-notes --title "$RELEASE_TAG"
+
+  deploy:
+    name: Deploy production release
+    needs: [version, build, release]
+    runs-on: ubuntu-latest
+    environment: production
+    steps:
+      - name: Download deployment artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: minime-${{ needs.version.outputs.tag }}
+
+      - name: Configure SSH trust
+        shell: bash
+        env:
+          DEPLOY_KNOWN_HOSTS: ${{ secrets.DEPLOY_KNOWN_HOSTS }}
+        run: |
+          set -euo pipefail
+          test -n "$DEPLOY_KNOWN_HOSTS"
+          install -m 700 -d "$HOME/.ssh"
+          printf '%s\n' "$DEPLOY_KNOWN_HOSTS" > "$HOME/.ssh/known_hosts"
+          chmod 600 "$HOME/.ssh/known_hosts"
+          install -m 600 /dev/null "$HOME/.ssh/minime_deploy"
+          printf '%s\n' '${{ secrets.DEPLOY_SSH_PRIVATE_KEY }}' > "$HOME/.ssh/minime_deploy"
+
+      - name: Upload release
+        env:
+          DEPLOY_HOST: ${{ secrets.DEPLOY_HOST }}
+          DEPLOY_USER: ${{ secrets.DEPLOY_USER }}
+          DEPLOY_PATH: ${{ secrets.DEPLOY_PATH }}
+          RELEASE_TAG: ${{ needs.version.outputs.tag }}
+        run: |
+          set -euo pipefail
+          test -n "$DEPLOY_HOST"
+          test -n "$DEPLOY_USER"
+          test -n "$DEPLOY_PATH"
+          scp -i "$HOME/.ssh/minime_deploy" \
+            "minime-${RELEASE_TAG}.tar.gz" \
+            "${DEPLOY_USER}@${DEPLOY_HOST}:/tmp/minime-${RELEASE_TAG}.tar.gz"
+
+      - name: Install and verify release
+        env:
+          DEPLOY_HOST: ${{ secrets.DEPLOY_HOST }}
+          DEPLOY_USER: ${{ secrets.DEPLOY_USER }}
+          DEPLOY_PATH: ${{ secrets.DEPLOY_PATH }}
+          RELEASE_TAG: ${{ needs.version.outputs.tag }}
+        run: |
+          set -euo pipefail
+          ssh -i "$HOME/.ssh/minime_deploy" "${DEPLOY_USER}@${DEPLOY_HOST}" \
+            "RELEASE_TAG='$RELEASE_TAG' DEPLOY_PATH='$DEPLOY_PATH' bash -s" <<'REMOTE'
+          set -euo pipefail
+          : "${RELEASE_TAG:?missing RELEASE_TAG}"
+          : "${DEPLOY_PATH:?missing DEPLOY_PATH}"
+          archive="/tmp/minime-${RELEASE_TAG}.tar.gz"
+          test -s "$archive"
+          test -d "$DEPLOY_PATH"
+          sudo tar --no-same-owner --no-same-permissions -xzf "$archive" -C "$DEPLOY_PATH"
+          sudo chown -R minime:minime "$DEPLOY_PATH/src/minime/static" "$DEPLOY_PATH/src/minime" 
+          sudo systemctl restart minime-api minime-scheduler
+          for attempt in $(seq 1 30); do
+            if curl --fail --silent --show-error --max-time 5 https://mini-me.silverman.pro/health >/tmp/minime-health.json; then
+              grep -q '"status":"healthy"' /tmp/minime-health.json
+              break
+            fi
+            if [[ "$attempt" == 30 ]]; then
+              cat /tmp/minime-health.json 2>/dev/null || true
+              exit 1
+            fi
+            sleep 2
+          done
+          rm -f "$archive"
+          REMOTE
