@@ -162,7 +162,7 @@ def _has_explicit_result(stdout: tuple[str, ...]) -> bool:
             pass
 
     import re
-    full_text = "\n".join(stdout)
+    full_text = "\n".join(stdout).strip()
     json_blocks = re.findall(r"```(?:json)?\s*(\{.*?\})\s*```", full_text, re.DOTALL)
     for block in json_blocks:
         try:
@@ -174,6 +174,19 @@ def _has_explicit_result(stdout: tuple[str, ...]) -> bool:
                     return True
         except Exception:
             pass
+
+    m = re.search(r"\{.*\}", full_text, re.DOTALL)
+    if m:
+        try:
+            payload = json.loads(m.group(0))
+            if isinstance(payload, dict):
+                status = str(payload.get("status", "")).upper()
+                verdict = str(payload.get("verdict", "")).upper()
+                if status in valid_results or verdict in valid_results:
+                    return True
+        except Exception:
+            pass
+
     return False
 
 
