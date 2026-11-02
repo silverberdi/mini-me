@@ -19,6 +19,7 @@ from minime.domain.enums import (
     ExternalActionStatus,
     ExternalActionType,
     ExternalOutcome,
+    HumanGate,
     OperatorActionStatus,
     OperatorActionType,
     OrchestrationStage,
@@ -1628,15 +1629,32 @@ class NativeOrchestrationCoordinator:
                 corrections=pending_corrections,
             )
             if not apply_ok:
+                # Never loop silently: a failed Apply is a terminal outcome for
+                # this attempt. Escalate to the operator after the governed
+                # correction ceiling so the scheduler stops re-dispatching.
+                attempts = self._record_apply_failure(uow, active_run)
+                ceiling = max(self.max_correction_attempts, 1)
+                if attempts >= ceiling:
+                    return self._escalate_apply_to_human(
+                        uow,
+                        active_run,
+                        "Native Apply failed repeatedly without authoritative evidence; "
+                        f"{attempts} attempts reached the correction ceiling. Worktree preserved "
+                        "for operator review.",
+                    )
                 return OrchestrationCoordinationResult(
                     status="PAUSED",
                     run_id=active_run.run_id,
                     current_stage=OrchestrationStage.IMPLEMENTING,
-                    message="Native Apply failed or produced no authoritative evidence. Worktree preserved.",
+                    message=(
+                        f"Native Apply failed (attempt {attempts}/{ceiling}); "
+                        "no authoritative evidence. Worktree preserved."
+                    ),
                 )
-            if pending_corrections:
+            if pending_corrections or self._apply_attempts(active_run):
                 details = dict(active_run.stop_details or {})
                 details.pop("pending_corrections", None)
+                details.pop("apply_failure_count", None)
                 active_run.stop_details = details
                 if hasattr(uow, "orchestration_runs"):
                     uow.orchestration_runs.save(active_run)
@@ -2520,6 +2538,50 @@ class NativeOrchestrationCoordinator:
                 if isinstance(candidate, int) and candidate >= 1:
                     max_rounds = candidate
         return round_num, max_rounds
+
+    def _apply_attempts(self, run: OrchestrationRun) -> int:
+        """Return the durable count of consecutive Apply failures for this run."""
+        details = dict(run.stop_details or {})
+        attempts = details.get("apply_failure_count")
+        return attempts if isinstance(attempts, int) and attempts >= 0 else 0
+
+    def _record_apply_failure(self, uow: Any, run: OrchestrationRun) -> int:
+        """Increment the durable Apply-failure counter and return the new value."""
+        details = dict(run.stop_details or {})
+        next_count = self._apply_attempts(run) + 1
+        details["apply_failure_count"] = next_count
+        run.stop_details = details
+        if hasattr(uow, "orchestration_runs"):
+            uow.orchestration_runs.save(run)
+            if hasattr(uow, "commit"):
+                uow.commit()
+        return next_count
+
+    def _escalate_apply_to_human(
+        self, uow: Any, run: OrchestrationRun, reason: str
+    ) -> OrchestrationCoordinationResult:
+        """Mark the run for human attention so the scheduler stops re-dispatching."""
+        if hasattr(uow, "orchestration_runs"):
+            updater = getattr(uow.orchestration_runs, "update_stop_outcome", None)
+            if updater is not None:
+                # Preserve durable stop_details (correction counters, findings)
+                # while recording the escalation marker.
+                preserved = dict(run.stop_details or {})
+                preserved["apply_escalated"] = True
+                updater(
+                    run.run_id,
+                    OrchestrationStopOutcome.NEEDS_HUMAN,
+                    HumanGate.NEEDS_HUMAN,
+                    reason,
+                    preserved,
+                    is_active=True,
+                )
+        return OrchestrationCoordinationResult(
+            status="PAUSED",
+            run_id=run.run_id,
+            current_stage=OrchestrationStage.IMPLEMENTING,
+            message=reason,
+        )
 
     def _route_changes_required(
         self,

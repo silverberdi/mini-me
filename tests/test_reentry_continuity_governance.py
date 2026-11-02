@@ -989,3 +989,39 @@ async def test_apply_injects_pending_corrections(base_setup):
     assert "Missing tests" in prompt
     assert "Add tests" in prompt
     assert "[BLOCKER] src/x.py" in prompt
+
+
+@pytest.mark.asyncio
+async def test_apply_failure_escalates_after_ceiling(base_setup):
+    """A repeatedly-failing Apply must escalate to the operator, never loop silently."""
+    uow, candidate_worktree, change_dir = base_setup
+    run = OrchestrationRun(
+        project_id="mini-me",
+        run_id="run-apply-loop",
+        change_name="gacela-05-ui-self-hosted",
+        base_sha="base_sha_123",
+        current_stage=OrchestrationStage.IMPLEMENTING,
+        stop_details=make_stop_details({"apply_failure_count": 2}),
+    )
+    uow.orchestration_runs.save(run)
+
+    coordinator = NativeOrchestrationCoordinator(
+        github_adapter=MagicMock(),
+        worktree_manager=MagicMock(),
+        agent_runner=MagicMock(),
+        uow_factory=lambda: uow,
+    )
+    coordinator.worktree_manager.create_request_worktree = AsyncMock(
+        return_value=WorktreeInfo(
+            path=candidate_worktree, branch_name="feature/f5", base_sha="base_sha_123"
+        )
+    )
+    coordinator._run_apply = AsyncMock(return_value=False)
+
+    res = await coordinator.execute_project_request("mini-me")
+    assert res.status == "PAUSED"
+    assert res.current_stage == OrchestrationStage.IMPLEMENTING
+    assert "ceiling" in res.message
+    updated = uow.orchestration_runs.get_by_id("run-apply-loop")
+    assert updated.stop_details["apply_failure_count"] == 3
+    assert updated.stop_details["apply_escalated"] is True
