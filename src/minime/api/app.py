@@ -3429,7 +3429,9 @@ def get_static_root_file(file_name: str) -> Response:
                 media_type = "application/javascript"
             elif file_name.endswith(".css"):
                 media_type = "text/css"
-            elif file_name.endswith(".json") or file_name.endswith(".webmanifest"):
+            elif file_name.endswith(".webmanifest"):
+                media_type = "application/manifest+json"
+            elif file_name.endswith(".json"):
                 media_type = "application/json"
             elif file_name.endswith(".svg"):
                 media_type = "image/svg+xml"
