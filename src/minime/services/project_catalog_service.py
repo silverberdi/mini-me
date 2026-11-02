@@ -9,7 +9,7 @@ from typing import Any
 
 from minime.adapters.openspec import OpenSpecAdapter, OpenSpecConfigurationIncomplete
 from minime.adapters.provider_adapter import get_provider_adapter
-from minime.config import OPENCODE_DEEPSEEK_MODELS, AppConfig, load_config, resolve_cli_invocation
+from minime.config import AppConfig, load_config, resolve_cli_invocation
 
 
 class ProjectCatalogService:
@@ -138,7 +138,7 @@ class ProjectCatalogService:
 
             capabilities: dict[str, Any] = {}
             capability_status = "UNAVAILABLE"
-            if provider_id in {"codex", "antigravity"}:
+            if provider_id in {"codex", "antigravity", "opencode"}:
                 try:
                     adapter = get_provider_adapter(provider_id, self.config)
                     capabilities = await asyncio.wait_for(
@@ -148,17 +148,6 @@ class ProjectCatalogService:
                         capability_status = "OBSERVED_READ_ONLY"
                 except (OSError, RuntimeError, TimeoutError, ValueError):
                     capabilities = {}
-            elif provider_id == "opencode":
-                # OpenCode exposes its own model namespace, not the direct-API
-                # DeepSeek ids (deepseek-chat / deepseek-reasoner are invalid).
-                # Advertise only the identities OpenCode actually serves.
-                capabilities = {
-                    "models": {
-                        model: entry["efforts"]
-                        for model, entry in OPENCODE_DEEPSEEK_MODELS.items()
-                    }
-                }
-                capability_status = "OBSERVED_READ_ONLY"
 
             models: dict[str, list[str] | None] = {}
             observed_models = capabilities.get("models", {})
@@ -191,6 +180,7 @@ class ProjectCatalogService:
                     & set(invocation_profiles)
                 ),
                 "models": models,
+                "model_routes": capabilities.get("model_routes", {}),
                 "native_openspec_setup": False,
                 "native_openspec_setup_status": "UNOBSERVED",
             }

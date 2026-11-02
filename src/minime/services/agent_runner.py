@@ -637,11 +637,13 @@ class CliAgentRunner:
                 profile_key = "independent_review" if opencode_role == "independent_review" else "execution"
                 p = self.profiles.get((profile_key, "opencode")) if hasattr(self, "profiles") and self.profiles else None
                 if p:
-                    model_val = p.model or "deepseek-flash"
-                    # Translate persisted direct-API DeepSeek ids to the models
-                    # OpenCode actually exposes.
+                    # Canonical OpenCode model identity, e.g. deepseek/deepseek-v4-pro
+                    # or openrouter/deepseek/...; legacy bare ids are normalized below.
+                    model_val = p.model or "deepseek/deepseek-flash"
                     model_val = OPENCODE_DEEPSEEK_MODEL_ALIASES.get(model_val, model_val)
-                    is_openrouter = "/" in model_val or "openrouter" in model_val.lower()
+                    # Route by transport prefix, not by the mere presence of a "/":
+                    # deepseek/* is the direct DeepSeek API, openrouter/* is OpenRouter.
+                    is_openrouter = model_val.lower().startswith("openrouter/")
                     if not is_openrouter and model_val not in OPENCODE_DEEPSEEK_MODELS:
                         # Fail closed instead of dispatching an invalid --model.
                         return AgentExecutionResult(

@@ -205,3 +205,77 @@ def test_openrouter_drain_never_accepts_reviewer_role():
     )
     assert not result.eligible
     assert any("executor rescue" in reason for reason in result.reasons)
+
+
+@pytest.mark.asyncio
+async def test_opencode_adapter_classifies_model_routes():
+    """OpenCode model identities are classified by transport namespace."""
+    from minime.adapters.provider_adapter import OpenCodeProviderAdapter
+
+    adapter = OpenCodeProviderAdapter()
+    assert adapter._route_for("deepseek/deepseek-v4-pro") == "deepseek_direct"
+    assert adapter._route_for("deepseek/deepseek-flash") == "deepseek_direct"
+    assert adapter._route_for("openrouter/deepseek/deepseek-v4-pro") == "openrouter"
+    assert adapter._route_for("openrouter/~deepseek/deepseek-flash-latest") == "openrouter"
+    assert adapter._route_for("opencode/beam-free") == "opencode_native"
+    assert adapter._route_for("random/thing") == "unknown"
+
+
+@pytest.mark.asyncio
+async def test_opencode_adapter_discovery_parses_models(monkeypatch, tmp_path):
+    """discover_account_capabilities runs `opencode models` and returns models + routes."""
+    import asyncio as _asyncio
+
+    from minime.adapters.provider_adapter import OpenCodeProviderAdapter
+
+    adapter = OpenCodeProviderAdapter(executable="/bin/opencode")
+    monkeypatch.setattr("minime.adapters.provider_adapter.shutil.which", lambda _: "/bin/opencode")
+
+    async def fake_exec(*args, **kwargs):
+        class _Proc:
+            returncode = 0
+
+            async def communicate(self):
+                return (
+                    b"deepseek/deepseek-flash\ndeepseek/deepseek-v4-pro\n"
+                    b"openrouter/deepseek/deepseek-v4-pro\nopencode/beam-free\n",
+                    b"",
+                )
+
+        return _Proc()
+
+    monkeypatch.setattr(_asyncio, "create_subprocess_exec", fake_exec)
+    caps = await adapter.discover_account_capabilities()
+    assert set(caps["models"]) == {
+        "deepseek/deepseek-flash",
+        "deepseek/deepseek-v4-pro",
+        "openrouter/deepseek/deepseek-v4-pro",
+        "opencode/beam-free",
+    }
+    assert caps["model_routes"]["deepseek/deepseek-v4-pro"] == "deepseek_direct"
+    assert caps["model_routes"]["openrouter/deepseek/deepseek-v4-pro"] == "openrouter"
+    assert caps["model_routes"]["opencode/beam-free"] == "opencode_native"
+
+
+@pytest.mark.asyncio
+async def test_opencode_adapter_check_model_supported(monkeypatch):
+    """check_model_supported validates against the discovered catalog."""
+    from minime.adapters.provider_adapter import OpenCodeProviderAdapter
+
+    adapter = OpenCodeProviderAdapter()
+    adapter._cached_capabilities = {
+        "models": {"deepseek/deepseek-v4-pro": None, "openrouter/deepseek/deepseek-v4-pro": None},
+        "model_routes": {
+            "deepseek/deepseek-v4-pro": "deepseek_direct",
+            "openrouter/deepseek/deepseek-v4-pro": "openrouter",
+        },
+    }
+    adapter._capabilities_expires_at = __import__("datetime").datetime.now(
+        __import__("datetime").timezone.utc
+    ) + __import__("datetime").timedelta(seconds=60)
+
+    ok, _ = await adapter.check_model_supported("deepseek/deepseek-v4-pro")
+    assert ok is True
+    ok2, reason = await adapter.check_model_supported("deepseek-reasoner")
+    assert ok2 is False
+    assert "absent" in reason

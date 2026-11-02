@@ -130,7 +130,7 @@ def test_catalog_does_not_fabricate_models_when_discovery_fails(monkeypatch):
 
 
 def test_opencode_catalog_advertises_only_exposed_models(monkeypatch):
-    """OpenCode must advertise its own model namespace, never direct-API ids."""
+    """OpenCode catalog surfaces the adapter's discovered models with routes."""
     import minime.services.project_catalog_service as catalog_module
 
     opencode = ProviderConfig(
@@ -145,26 +145,52 @@ def test_opencode_catalog_advertises_only_exposed_models(monkeypatch):
     )
     config = AppConfig(providers={"opencode": opencode})
     monkeypatch.setattr(catalog_module.shutil, "which", lambda _: "/bin/opencode")
+    monkeypatch.setattr(
+        catalog_module,
+        "get_provider_adapter",
+        lambda provider_id, config: _Capabilities(
+            provider_id,
+            {
+                "models": {
+                    "deepseek/deepseek-flash": None,
+                    "deepseek/deepseek-v4-pro": None,
+                    "openrouter/deepseek/deepseek-v4-pro": None,
+                },
+                "model_routes": {
+                    "deepseek/deepseek-flash": "deepseek_direct",
+                    "deepseek/deepseek-v4-pro": "deepseek_direct",
+                    "openrouter/deepseek/deepseek-v4-pro": "openrouter",
+                },
+            },
+        ),
+    )
 
     catalog = asyncio.run(ProjectCatalogService(config, _NativeSetup()).agent_catalog())
 
     assert len(catalog["agents"]) == 1
-    models = catalog["agents"][0]["models"]
+    agent = catalog["agents"][0]
+    models = agent["models"]
+    routes = agent["model_routes"]
     # Only identities OpenCode actually exposes are advertised.
     assert "deepseek-reasoner" not in models
     assert "deepseek-chat" not in models
-    assert "deepseek/deepseek-chat" not in models
-    assert "deepseek-flash" in models
-    assert "deepseek-v4-pro" in models
-    assert models["deepseek-v4-pro"] == ["high", "medium"]
+    assert "deepseek/deepseek-flash" in models
+    assert "deepseek/deepseek-v4-pro" in models
+    assert "openrouter/deepseek/deepseek-v4-pro" in models
+    # Routes distinguish direct API from OpenRouter.
+    assert routes["deepseek/deepseek-v4-pro"] == "deepseek_direct"
+    assert routes["openrouter/deepseek/deepseek-v4-pro"] == "openrouter"
 
 
 def test_opencode_model_alias_translates_direct_api_ids():
-    """deepseek-chat/reasoner must map to OpenCode's exposed identities."""
+    """Legacy direct-API ids must map to OpenCode's canonical identities."""
     from minime.config import OPENCODE_DEEPSEEK_MODEL_ALIASES
 
-    assert OPENCODE_DEEPSEEK_MODEL_ALIASES["deepseek-chat"] == "deepseek-flash"
-    assert OPENCODE_DEEPSEEK_MODEL_ALIASES["deepseek-reasoner"] == "deepseek-v4-pro"
+    assert OPENCODE_DEEPSEEK_MODEL_ALIASES["deepseek-chat"] == "deepseek/deepseek-flash"
+    assert OPENCODE_DEEPSEEK_MODEL_ALIASES["deepseek-reasoner"] == "deepseek/deepseek-v4-pro"
+    # Bare ids from earlier profiles also normalize to canonical full ids.
+    assert OPENCODE_DEEPSEEK_MODEL_ALIASES["deepseek-flash"] == "deepseek/deepseek-flash"
+    assert OPENCODE_DEEPSEEK_MODEL_ALIASES["deepseek-v4-pro"] == "deepseek/deepseek-v4-pro"
     assert "deepseek-garbage" not in OPENCODE_DEEPSEEK_MODEL_ALIASES
 
 
