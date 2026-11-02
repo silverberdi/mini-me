@@ -673,6 +673,7 @@ def scheduler_run_cmd(
     from minime.services.budget_service import BudgetService
     from minime.services.capacity_lifecycle_service import CapacityLifecycleService
     from minime.services.orchestration_coordinator import NativeOrchestrationCoordinator
+    from minime.services.web_push_service import web_push_service
     from minime.services.worktree_manager import WorktreeManager
 
     iterations = 0
@@ -761,6 +762,43 @@ def scheduler_run_cmd(
                         )
                     )
                     typer.echo(f"[{project_id}] Result: status={result.status}, run_id={result.run_id}, message={result.message}")
+                    # Notify via Web Push, mirroring the API async worker, so the
+                    # autonomous scheduler path also reaches the operator.
+                    try:
+                        run_url = f"/trabajo-actual?run={result.run_id}&project={project_id}"
+                        if getattr(result, "human_payload", None):
+                            preview = (
+                                result.human_payload.get("prompt")
+                                or result.human_payload.get("message")
+                                or "Se requiere atención para continuar."
+                            )[:100]
+                            web_push_service.broadcast_to_active_operators(
+                                uow=uow,
+                                title="Atención Requerida — mini me",
+                                body=f"[{project_id}] {preview}",
+                                data={"url": run_url},
+                                category="human_required",
+                            )
+                        elif result.status in ("COMPLETED", "FAILED", "BLOCKED"):
+                            web_push_service.broadcast_to_active_operators(
+                                uow=uow,
+                                title=f"Ejecución {result.status} — mini me",
+                                body=f"Proyecto {project_id}: la ejecución finalizó en estado {result.status}.",
+                                data={"url": run_url},
+                                category="terminal_outcomes",
+                            )
+                        else:
+                            stage_name = getattr(result, "current_stage", result.status)
+                            web_push_service.broadcast_to_active_operators(
+                                uow=uow,
+                                title="Avance de Etapa — mini me",
+                                body=f"[{project_id}] Etapa actual: {stage_name}",
+                                data={"url": run_url},
+                                category="stage_transitions",
+                            )
+                        uow.commit()
+                    except Exception as push_err:
+                        typer.echo(f"[{project_id}] Push notification failed: {push_err}", err=True)
 
         except Exception as exc:
             typer.echo(f"Scheduler loop error: {exc}", err=True)
