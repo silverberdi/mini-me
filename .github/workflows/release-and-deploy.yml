@@ -97,6 +97,12 @@ jobs:
     needs: [version, build]
     runs-on: ubuntu-latest
     steps:
+      - name: Checkout released commit
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.version.outputs.sha }}
+          fetch-depth: 1
+
       - name: Create GitHub Release
         env:
           GH_TOKEN: ${{ github.token }}
