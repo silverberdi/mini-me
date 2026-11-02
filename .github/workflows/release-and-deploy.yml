@@ -112,7 +112,7 @@ jobs:
   deploy:
     name: Deploy production release
     needs: [version, build, release]
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, linux, x64, mini-me-prod]
     environment: production
     steps:
       - name: Download deployment artifact
