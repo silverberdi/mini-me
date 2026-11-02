@@ -4,6 +4,7 @@ import { RouterModule, Router } from '@angular/router';
 import { AuthService } from './core/auth.service';
 import { PushNotificationService } from './core/push-notification.service';
 import { RefreshService } from './core/refresh.service';
+import { VersionService } from './core/version.service';
 
 @Component({
   selector: 'app-root',
@@ -26,6 +27,9 @@ import { RefreshService } from './core/refresh.service';
              class="mt-6 inline-flex w-full items-center justify-center rounded-xl bg-sky-500 px-4 py-3 text-sm font-bold text-slate-950 transition-colors hover:bg-sky-400 focus:outline-none focus:ring-2 focus:ring-sky-300">
             Continuar con Google
           </a>
+          <p class="mt-8 text-[11px] text-slate-600 font-mono">
+            v{{ version.info()?.version || '—' }}<span *ngIf="version.info()?.commit_sha"> · {{ version.info()?.commit_sha?.slice(0, 7) }}</span>
+          </p>
         </section>
       </main>
     </ng-container>
@@ -227,8 +231,8 @@ import { RefreshService } from './core/refresh.service';
         </nav>
 
         <div class="p-3 bg-slate-800/40 border border-slate-700/40 rounded-xl text-xs text-slate-400 space-y-1">
-          <div class="font-medium text-slate-300">Fase 8: Angular + Tailwind</div>
-          <div class="text-[11px] text-slate-500">Contrato Rector v1.3</div>
+          <div class="font-medium text-slate-300">v{{ version.info()?.version || '—' }}</div>
+          <div class="text-[11px] text-slate-500 font-mono">{{ version.info()?.commit_sha?.slice(0, 7) || '' }}</div>
         </div>
       </aside>
 
@@ -247,10 +251,12 @@ export class AppComponent implements OnInit {
     public auth: AuthService,
     public refresh: RefreshService,
     public pushService: PushNotificationService,
+    public version: VersionService,
     private router: Router
   ) {}
 
   async ngOnInit(): Promise<void> {
+    this.version.load();
     const isAuthed = await this.auth.checkSession();
     if (isAuthed) {
       this.refresh.start();

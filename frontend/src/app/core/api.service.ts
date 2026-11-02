@@ -68,6 +68,16 @@ export class ApiService {
         // empty response or not json
       }
 
+      if (response.status === 401 && path !== "/api/v1/auth/me") {
+        // Session expired or revoked. The SPA otherwise keeps showing a stale
+        // authenticated view (dashboard) while every data call 401s. Reload so
+        // the shell re-runs /auth/me and renders the login card.
+        if (typeof window !== "undefined") {
+          window.location.reload();
+        }
+        return { ok: false, status: 401, data: null, error: "Sesión expirada" };
+      }
+
       return {
         ok: response.ok,
         status: response.status,
