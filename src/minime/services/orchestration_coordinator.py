@@ -3593,6 +3593,24 @@ class NativeOrchestrationCoordinator:
         return f"Independent {kind} review did not approve. Worktree preserved."
 
     @staticmethod
+    def _review_failure_error(res: Any) -> str:
+        """Build a diagnostic error string for a failed review execution.
+
+        The CLI runner reports the classified reason in ``preflight_error`` (e.g.
+        PROVIDER_PROCESS_FAILURE) but the raw provider message that explains it lives in
+        ``stderr``. Persist both so a PAUSED run shows the real cause instead of the
+        generic "Reviewer agent execution failed" fallback.
+        """
+        reason = getattr(res, "preflight_error", None) or getattr(res, "error_message", None)
+        if not reason:
+            return "Reviewer agent execution failed"
+        stderr = getattr(res, "stderr", None) or []
+        tail = " | ".join(str(line) for line in stderr[-4:]).strip()
+        if tail:
+            return f"{reason} :: {tail[:500]}"
+        return reason
+
+    @staticmethod
     def _compute_proposal_artifacts_hashes(worktree_path: Path, change_name: str) -> dict[str, str]:
         """Compute stable SHA256 hashes of all proposal planning artifacts."""
         change_dir = worktree_path / "openspec" / "changes" / change_name
@@ -3667,8 +3685,7 @@ class NativeOrchestrationCoordinator:
                     "status": "provider_error",
                     "verdict": None,
                     "findings": [],
-                    "error": getattr(res, "error_message", None)
-                    or "Reviewer agent execution failed",
+                    "error": self._review_failure_error(res),
                 }
             )
         try:
@@ -3922,8 +3939,7 @@ class NativeOrchestrationCoordinator:
                     "status": "provider_error",
                     "verdict": None,
                     "findings": [],
-                    "error": getattr(res, "error_message", None)
-                    or "Reviewer agent execution failed",
+                    "error": self._review_failure_error(res),
                 }
             )
         try:
