@@ -300,6 +300,23 @@ async def test_real_confinement_e2e_implementer_and_read_only_review(tmp_path):
     assert review_outcome.evidence.failure_reason in ("PROVIDER_PROCESS_FAILURE", "NON_AUTHORITATIVE_PROCESS_RESULT")
 
 
+def test_forbidden_external_action_uses_word_boundaries():
+    """A proposal non-goal naming a forbidden action must not read as an instruction."""
+    from minime.services.opencode_adapter import _forbidden_external_action
+
+    # Real instructions still trigger.
+    assert _forbidden_external_action("deploy production cluster now") is True
+    assert _forbidden_external_action("merge pull request and close ticket #123") is True
+
+    # A non-goal that names the action as forbidden must NOT trigger.
+    assert (
+        _forbidden_external_action(
+            "No production deployment, scheduler restart, or remote ticket closure."
+        )
+        is False
+    )
+
+
 @pytest.mark.asyncio
 async def test_real_confinement_e2e_negative_cases(tmp_path):
     """Task 4.3: Real negative E2E cases for worktree escape, deployment commands, closure requests."""
