@@ -575,6 +575,52 @@ def request_ack_cmd(
     return request_run_cmd(project_id=project_id, operator_ack=True, json_output=json_output)
 
 
+@request_app.command("complete")
+def request_complete_cmd(
+    project_id: str = typer.Argument(..., help="Target project ID"),
+    reason: str = typer.Option(
+        "Physical validation accepted by operator",
+        "--reason",
+        help="Closure reason recorded on the run",
+    ),
+    json_output: bool = typer.Option(False, "--json", help="Emit output as JSON"),
+) -> None:
+    """Close the active run as COMPLETED (accept pending physical validation).
+
+    Operator-only escape hatch for runs blocked on NOT_VERIFIED physical
+    validation that has now been performed on real devices. Marks the run's
+    stage and outcome COMPLETED and deactivates it through the run repository
+    (not raw SQL), so the scheduler stops re-dispatching it.
+    """
+    from minime.domain.enums import OrchestrationStage, OrchestrationStopOutcome
+
+    with db_manager.session() as session:
+        uow = PostgresPersistenceUnitOfWork(session)
+        active = uow.orchestration_runs.list_runs(project_id=project_id, is_active=True)
+        if not active:
+            typer.echo(f"No active run for project '{project_id}'.", err=True)
+            raise typer.Exit(code=1)
+        run = active[0]
+        details = dict(run.stop_details or {})
+        details["physical_validation_accepted"] = True
+        run.current_stage = OrchestrationStage.COMPLETED
+        run.resumable_stage = OrchestrationStage.COMPLETED
+        run.stop_outcome = OrchestrationStopOutcome.COMPLETED
+        run.human_gate = None
+        run.is_active = False
+        run.stop_details = details
+        uow.orchestration_runs.save(run)
+        uow.commit()
+        if json_output:
+            typer.echo(json.dumps({
+                "status": "COMPLETED",
+                "run_id": run.run_id,
+                "change_name": run.change_name,
+            }))
+        else:
+            typer.echo(f"Run {run.run_id} ({run.change_name}) closed as COMPLETED.")
+
+
 @app.command("run")
 def run_legacy() -> NoReturn:
     _unavailable("legacy_execution")
