@@ -266,7 +266,7 @@ import { ProjectAgentProfile, ProjectExecutionPolicy } from '../../core/models';
               <div class="font-semibold text-slate-300 flex items-center gap-1.5">
                 <span>ℹ️</span> <span>Modelos y Proveedores (Contrato Rector 1.3):</span>
               </div>
-              <p>• <strong>OpenCode CLI</strong>: Ejecuta modelos API externos (<strong class="text-sky-300">opencode-deepseek (API)</strong> y <strong class="text-sky-300">opencode-deepseek (openrouter)</strong>).</p>
+              <p>• <strong>OpenCode CLI</strong>: Ejecuta modelos API externos (<strong class="text-sky-300">DeepSeek (API directa)</strong> y <strong class="text-sky-300">DeepSeek (OpenRouter)</strong>).</p>
               <p>• <strong>Anthropic Claude & Google Gemini</strong>: Operan vía el harness <strong>Antigravity</strong> con capacidades OpenSpec.</p>
               <p>• <strong>OpenAI GPT</strong>: Opera vía el harness <strong>Codex</strong>.</p>
               <p>• <strong>DeepSeek Directo</strong>: Auditor de solo lectura (<code class="text-sky-300">CONTRACT_REVIEW</code> y <code class="text-sky-300">REVIEW</code>).</p>
@@ -366,7 +366,7 @@ import { ProjectAgentProfile, ProjectExecutionPolicy } from '../../core/models';
               <div class="font-semibold text-slate-300 flex items-center gap-1.5">
                 <span>ℹ️</span> <span>Modelos y Proveedores (Contrato Rector 1.3):</span>
               </div>
-              <p>• <strong>OpenCode CLI</strong>: Ejecuta modelos API externos (<strong class="text-sky-300">opencode-deepseek (API)</strong> y <strong class="text-sky-300">opencode-deepseek (openrouter)</strong>).</p>
+              <p>• <strong>OpenCode CLI</strong>: Ejecuta modelos API externos (<strong class="text-sky-300">DeepSeek (API directa)</strong> y <strong class="text-sky-300">DeepSeek (OpenRouter)</strong>).</p>
               <p>• <strong>Anthropic Claude & Google Gemini</strong>: Operan vía el harness <strong>Antigravity</strong> con capacidades OpenSpec.</p>
               <p>• <strong>OpenAI GPT</strong>: Opera vía el harness <strong>Codex</strong>.</p>
               <p>• <strong>DeepSeek Directo</strong>: Auditor de solo lectura (<code class="text-sky-300">CONTRACT_REVIEW</code> y <code class="text-sky-300">REVIEW</code>).</p>
@@ -408,10 +408,9 @@ export class ProyectosComponent implements OnInit {
     effort: string;
     group: string;
   }[] = [
-    // OpenCode CLI (Modelos API)
-    { id: 'deepseek-chat', label: 'opencode-deepseek (API)', agent: 'opencode', effort: 'medium', group: 'OpenCode CLI (Modelos API)' },
-    { id: 'deepseek/deepseek-chat', label: 'opencode-deepseek (OpenRouter)', agent: 'opencode', effort: 'medium', group: 'OpenCode CLI (Modelos API)' },
-    { id: 'deepseek-reasoner', label: 'opencode-deepseek-r1 (API)', agent: 'opencode', effort: 'medium', group: 'OpenCode CLI (Modelos API)' },
+    // OpenCode · DeepSeek (API directa) — real OpenCode namespace
+    { id: 'deepseek/deepseek-flash', label: 'DeepSeek Flash — API directa', agent: 'opencode', effort: 'medium', group: 'OpenCode · DeepSeek (API directa)' },
+    { id: 'deepseek/deepseek-v4-pro', label: 'DeepSeek V4 Pro — API directa', agent: 'opencode', effort: 'high', group: 'OpenCode · DeepSeek (API directa)' },
 
     // Anthropic Claude via Antigravity
     { id: 'claude-sonnet-5-5-medium', label: 'Claude Sonnet 5.5 — Medio', agent: 'antigravity', effort: 'medium', group: 'Anthropic Claude (vía Antigravity)' },
@@ -484,6 +483,7 @@ export class ProyectosComponent implements OnInit {
         for (const agent of res.data.agents) {
           const providerId = (agent.id || '').toLowerCase();
           const modelsObj = agent.models || {};
+          const routes: Record<string, string> = agent.model_routes || {};
           for (const modelKey of Object.keys(modelsObj)) {
             const efforts: string[] = modelsObj[modelKey] || [];
             let group = 'Otros Modelos';
@@ -500,14 +500,23 @@ export class ProyectosComponent implements OnInit {
               effort = efforts[0];
             }
 
-            if (providerId === 'opencode' || modelKey.includes('deepseek')) {
-              group = 'OpenCode CLI (Modelos API)';
-              if (modelKey.includes('/') || modelKey.includes('openrouter')) {
-                label = 'opencode-deepseek (OpenRouter)';
-              } else if (modelKey.includes('reasoner') || modelKey.includes('r1')) {
-                label = 'opencode-deepseek-r1 (API)';
+            if (providerId === 'opencode') {
+              const route = routes[modelKey] || '';
+              const isOpenRouter = route === 'openrouter' || modelKey.startsWith('openrouter/');
+              const isDirectDeepseek = route === 'deepseek_direct' || modelKey.startsWith('deepseek/');
+              const isNative = route === 'opencode_native' || modelKey.startsWith('opencode/');
+              if (isDirectDeepseek) {
+                group = 'OpenCode · DeepSeek (API directa)';
+                label = `DeepSeek ${this.friendlyDeepseekName(modelKey)} — API directa`;
+              } else if (isOpenRouter) {
+                group = 'OpenCode · DeepSeek (OpenRouter)';
+                label = `DeepSeek ${this.friendlyDeepseekName(modelKey)} — OpenRouter`;
+              } else if (isNative) {
+                group = 'OpenCode · modelos nativos (free)';
+                label = modelKey;
               } else {
-                label = 'opencode-deepseek (API)';
+                group = 'OpenCode · otros';
+                label = modelKey;
               }
             } else if (modelKey.startsWith('claude')) {
               group = 'Anthropic Claude (vía Antigravity)';
@@ -552,6 +561,15 @@ export class ProyectosComponent implements OnInit {
     return reviewAgent === execAgent || reviewAgent === thinkAgent;
   }
 
+  friendlyDeepseekName(modelKey: string): string {
+    // Derive a short human name from the last path segment, e.g.
+    // deepseek/deepseek-v4-pro -> "V4 Pro", openrouter/deepseek/deepseek-v4-pro -> "V4 Pro".
+    const segments = modelKey.split('/').filter(s => s && s !== 'deepseek');
+    const last = segments[segments.length - 1] || modelKey;
+    const cleaned = last.replace(/^deepseek-/, '').replace(/-latest$/, '').replace(/-/g, ' ');
+    return cleaned.split(' ').filter(Boolean).map(w => w[0].toUpperCase() + w.slice(1)).join(' ');
+  }
+
   getRoleModel(role: string): string {
     const proj = this.refresh.activeProject();
     if (!proj || !proj.agent_profiles) return 'Configuración por defecto';
@@ -562,14 +580,16 @@ export class ProyectosComponent implements OnInit {
     if (found) {
       return `${found.label}${effort}`;
     }
-    if (profile.model_id === 'deepseek/deepseek-chat') {
-      return `opencode-deepseek (OpenRouter)${effort}`;
-    }
-    if (profile.model_id === 'deepseek-chat') {
-      return `opencode-deepseek (API)${effort}`;
-    }
-    if (profile.model_id === 'deepseek-reasoner') {
-      return `opencode-deepseek-r1 (API)${effort}`;
+    // Legacy persisted ids: translate to the operator-friendly deepseek routes.
+    const legacyRoutes: Record<string, string> = {
+      'deepseek-chat': 'DeepSeek — API directa',
+      'deepseek-reasoner': 'DeepSeek R1 — API directa',
+      'deepseek/deepseek-chat': 'DeepSeek — OpenRouter',
+      'deepseek-flash': 'DeepSeek Flash — API directa',
+      'deepseek-v4-pro': 'DeepSeek V4 Pro — API directa',
+    };
+    if (legacyRoutes[profile.model_id]) {
+      return `${legacyRoutes[profile.model_id]}${effort}`;
     }
     return `${profile.agent_id} (${profile.model_id})${effort}`;
   }

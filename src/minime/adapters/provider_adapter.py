@@ -1646,6 +1646,121 @@ class FakeProviderAdapter(ProviderAdapterInterface):
         return True, None
 
 
+class OpenCodeProviderAdapter(ProviderAdapterInterface):
+    """Provider adapter for the OpenCode CLI harness (F9).
+
+    OpenCode is a wildcard CLI that fronts external API models. Its ``opencode
+    models`` command lists the real identities it can dispatch, each already
+    namespaced by transport: ``deepseek/*`` (direct DeepSeek API), ``openrouter/*``
+    (via OpenRouter), and ``opencode/*`` (native free models). Discovery here is
+    read-only and does not infer tokens.
+    """
+
+    def __init__(self, executable: str = "opencode"):
+        self._executable = executable
+        self._cached_capabilities: dict[str, Any] | None = None
+        self._capabilities_expires_at: datetime | None = None
+
+    @property
+    def provider_name(self) -> str:
+        return "opencode"
+
+    @property
+    def supported_roles(self) -> set[str]:
+        # F9 authorizes OpenCode for execution and independent_review only.
+        return {"execution", "independent_review"}
+
+    async def check_cli_present(self) -> bool:
+        return shutil.which(self._executable) is not None
+
+    async def probe_availability(self, timeout_seconds: float = 30.0) -> bool:
+        resolved = shutil.which(self._executable)
+        if not resolved:
+            return False
+        try:
+            proc = await asyncio.create_subprocess_exec(
+                resolved,
+                "--version",
+                stdin=asyncio.subprocess.DEVNULL,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+                start_new_session=True,
+            )
+            stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=timeout_seconds)
+            return proc.returncode == 0 and bool((stdout + stderr).strip())
+        except (OSError, asyncio.TimeoutError):
+            return False
+
+    @staticmethod
+    def _route_for(model_id: str) -> str:
+        """Classify an OpenCode model identity by its transport namespace."""
+        norm = model_id.strip().lower()
+        if norm.startswith("deepseek/"):
+            return "deepseek_direct"
+        if norm.startswith("openrouter/"):
+            return "openrouter"
+        if norm.startswith("opencode/"):
+            return "opencode_native"
+        return "unknown"
+
+    async def discover_account_capabilities(self, timeout_seconds: float = 10.0) -> dict[str, Any]:
+        """List real OpenCode models via ``opencode models`` (0 inference tokens)."""
+        now = datetime.now(UTC)
+        if self._cached_capabilities and self._capabilities_expires_at:
+            if now < self._capabilities_expires_at:
+                return self._cached_capabilities
+        resolved = shutil.which(self._executable)
+        if not resolved:
+            return {}
+        try:
+            proc = await asyncio.create_subprocess_exec(
+                resolved,
+                "models",
+                stdin=asyncio.subprocess.DEVNULL,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+                start_new_session=True,
+            )
+            stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=timeout_seconds)
+            if proc.returncode != 0:
+                return {}
+            out_str = stdout.decode("utf-8", errors="replace")
+            models: dict[str, list[str] | None] = {}
+            model_routes: dict[str, str] = {}
+            for line in out_str.splitlines():
+                slug = line.strip().lower()
+                if not slug or " " in slug:
+                    continue
+                models[slug] = None
+                model_routes[slug] = self._route_for(slug)
+            caps: dict[str, Any] = {"models": models, "model_routes": model_routes}
+            self._cached_capabilities = caps
+            self._capabilities_expires_at = now + timedelta(seconds=60)
+            return caps
+        except (OSError, asyncio.TimeoutError):
+            return {}
+
+    async def check_model_supported(
+        self, model: str, effort: str | None = None, timeout_seconds: float = 10.0
+    ) -> tuple[bool, str | None]:
+        caps = await self.discover_account_capabilities(timeout_seconds=timeout_seconds)
+        models = caps.get("models", {})
+        if not models:
+            if not await self.check_cli_present():
+                return False, "EXECUTABLE_MISSING: OpenCode executable not found"
+            return (
+                False,
+                "CAPABILITY_DISCOVERY_UNAVAILABLE: Unable to discover models from OpenCode CLI",
+            )
+        norm_model = model.strip().lower()
+        if norm_model not in models:
+            return (
+                False,
+                f"Model '{model}' is absent from the OpenCode model catalog.",
+            )
+        return True, None
+
+
 # Global registry for pluggable provider adapters
 _ADAPTER_REGISTRY: dict[str, ProviderAdapterInterface] = {}
 
@@ -1688,6 +1803,9 @@ def get_provider_adapter(
         url = p_config.base_url if p_config and p_config.base_url else "https://api.deepseek.com"
         key_env = p_config.api_key_env if p_config and p_config.api_key_env else "DEEPSEEK_API_KEY"
         adapter = DeepSeekProviderAdapter(base_url=url, api_key_env=key_env)
+    elif provider == "opencode":
+        cmd = p_config.command if p_config and p_config.command else "opencode"
+        adapter = OpenCodeProviderAdapter(executable=cmd)
     else:
         raise ValueError(
             f"No operational provider adapter registered for unknown provider '{provider}'."

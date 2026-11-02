@@ -12,7 +12,14 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from minime.config import AppConfig, CliInvocationProfile, load_config, resolve_cli_invocation
+from minime.config import (
+    OPENCODE_DEEPSEEK_MODELS,
+    OPENCODE_DEEPSEEK_MODEL_ALIASES,
+    AppConfig,
+    CliInvocationProfile,
+    load_config,
+    resolve_cli_invocation,
+)
 from minime.domain.enums import ExternalOutcome
 from minime.logging import get_logger, redact_secrets
 from minime.services.agent_confinement import AgentConfinementError, AgentProcessConfinement
@@ -630,10 +637,27 @@ class CliAgentRunner:
                 profile_key = "independent_review" if opencode_role == "independent_review" else "execution"
                 p = self.profiles.get((profile_key, "opencode")) if hasattr(self, "profiles") and self.profiles else None
                 if p:
-                    model_val = p.model or "deepseek-flash"
-                    if model_val == "deepseek-chat":
-                        model_val = "deepseek-flash"
-                    is_openrouter = "/" in model_val or "openrouter" in model_val.lower()
+                    # Canonical OpenCode model identity, e.g. deepseek/deepseek-v4-pro
+                    # or openrouter/deepseek/...; legacy bare ids are normalized below.
+                    model_val = p.model or "deepseek/deepseek-flash"
+                    model_val = OPENCODE_DEEPSEEK_MODEL_ALIASES.get(model_val, model_val)
+                    # Route by transport prefix, not by the mere presence of a "/":
+                    # deepseek/* is the direct DeepSeek API, openrouter/* is OpenRouter.
+                    is_openrouter = model_val.lower().startswith("openrouter/")
+                    if not is_openrouter and model_val not in OPENCODE_DEEPSEEK_MODELS:
+                        # Fail closed instead of dispatching an invalid --model.
+                        return AgentExecutionResult(
+                            exit_code=-2,
+                            timed_out=False,
+                            stdout=[],
+                            stderr=[
+                                f"OpenCode does not expose model '{model_val}'; "
+                                f"available: {', '.join(sorted(OPENCODE_DEEPSEEK_MODELS))}."
+                            ],
+                            duration_ms=0,
+                            environment_error=True,
+                            workflow=workflow,
+                        )
                     opencode_cfg = OpenCodeCapabilityConfig(
                         enabled=True,
                         executable=p.executable or "opencode",

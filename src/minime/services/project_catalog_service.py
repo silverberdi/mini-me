@@ -138,7 +138,7 @@ class ProjectCatalogService:
 
             capabilities: dict[str, Any] = {}
             capability_status = "UNAVAILABLE"
-            if provider_id in {"codex", "antigravity"}:
+            if provider_id in {"codex", "antigravity", "opencode"}:
                 try:
                     adapter = get_provider_adapter(provider_id, self.config)
                     capabilities = await asyncio.wait_for(
@@ -148,15 +148,6 @@ class ProjectCatalogService:
                         capability_status = "OBSERVED_READ_ONLY"
                 except (OSError, RuntimeError, TimeoutError, ValueError):
                     capabilities = {}
-            elif provider_id == "opencode":
-                capabilities = {
-                    "models": {
-                        "deepseek-chat": ["low", "medium", "high"],
-                        "deepseek-reasoner": ["medium", "high"],
-                        "deepseek/deepseek-chat": ["low", "medium", "high"],
-                    }
-                }
-                capability_status = "OBSERVED_READ_ONLY"
 
             models: dict[str, list[str] | None] = {}
             observed_models = capabilities.get("models", {})
@@ -189,6 +180,7 @@ class ProjectCatalogService:
                     & set(invocation_profiles)
                 ),
                 "models": models,
+                "model_routes": capabilities.get("model_routes", {}),
                 "native_openspec_setup": False,
                 "native_openspec_setup_status": "UNOBSERVED",
             }
