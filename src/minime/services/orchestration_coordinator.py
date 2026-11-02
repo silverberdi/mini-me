@@ -1256,6 +1256,7 @@ class NativeOrchestrationCoordinator:
             ) or (
                 active_run.current_stage == OrchestrationStage.VALIDATING and not complete_proposal
             )
+            pending_revision = (active_run.stop_details or {}).get("pending_proposal_revision")
             stored_propose_gate = (active_run.stop_details or {}).get("propose_human_required")
             verified_propose_human_gate = (
                 propose_recovery_needed
@@ -1279,7 +1280,11 @@ class NativeOrchestrationCoordinator:
                         stored_propose_gate.get("human_payload")
                     ),
                 )
-            if propose_recovery_needed and not propose_recovery_authorization_id:
+            if (
+                propose_recovery_needed
+                and not propose_recovery_authorization_id
+                and not pending_revision
+            ):
                 return OrchestrationCoordinationResult(
                     status="PAUSED",
                     run_id=active_run.run_id,
@@ -1326,9 +1331,11 @@ class NativeOrchestrationCoordinator:
                         issue_title=issue_title,
                         issue_body=issue_body,
                         project_id=project_id,
-                        continue_existing=propose_recovery_needed,
+                        continue_existing=propose_recovery_needed or bool(pending_revision),
                         operator_clarification=(
-                            operator_clarification if verified_propose_human_gate else None
+                            self._proposal_revision_prompt(pending_revision)
+                            if pending_revision
+                            else (operator_clarification if verified_propose_human_gate else None)
                         ),
                     ),
                     lambda result: result.get("status") in {"READY_TO_VALIDATE", "HUMAN_REQUIRED"},
@@ -1361,9 +1368,10 @@ class NativeOrchestrationCoordinator:
                         ),
                     )
 
-                if verified_propose_human_gate:
+                if verified_propose_human_gate or pending_revision:
                     details = dict(active_run.stop_details or {})
                     details.pop("propose_human_required", None)
+                    details.pop("pending_proposal_revision", None)
                     self._persist_run_stop_details(active_run, details)
                 self._update_stage(uow, active_run, OrchestrationStage.VALIDATING)
             validate_pass = False
@@ -1465,6 +1473,37 @@ class NativeOrchestrationCoordinator:
 
         # Independent Proposal Review Stage (Dedicated reentry block)
         if active_run.current_stage == OrchestrationStage.PROPOSAL_REVIEW:
+            if (active_run.stop_details or {}).get("proposal_review_escalated"):
+                # The review hit its correction ceiling and escalated to the operator.
+                # Only an explicit operator clarification authorizes a fresh revision
+                # pass; without it the run stays gated for the human decision.
+                if isinstance(operator_clarification, str) and operator_clarification.strip():
+                    details = dict(active_run.stop_details or {})
+                    stored_review = details.get("proposal_review")
+                    findings = (stored_review or {}).get("findings") or []
+                    details.pop("proposal_review_escalated", None)
+                    details.pop("proposal_review", None)
+                    details.pop("proposal_correction", None)
+                    details["pending_proposal_revision"] = {
+                        "clarification": operator_clarification.strip(),
+                        "findings": findings,
+                    }
+                    active_run.stop_details = details
+                    active_run.human_gate = None
+                    active_run.stop_outcome = None
+                    self._update_stage(uow, active_run, OrchestrationStage.PROPOSING)
+                    return OrchestrationCoordinationResult(
+                        status="RUNNING",
+                        run_id=active_run.run_id,
+                        current_stage=OrchestrationStage.PROPOSING,
+                        message="Operator authorized a proposal revision; dispatching the thinker to re-propose.",
+                    )
+                return OrchestrationCoordinationResult(
+                    status="HUMAN_REQUIRED",
+                    run_id=active_run.run_id,
+                    current_stage=OrchestrationStage.PROPOSAL_REVIEW,
+                    message="Independent proposal review reached its correction ceiling; operator decision required.",
+                )
             stored_review = (active_run.stop_details or {}).get("proposal_review")
             current_hashes = self._compute_proposal_artifacts_hashes(worktree_path, change_name)
             action = self._classify_review_reentry(
@@ -3455,6 +3494,23 @@ class NativeOrchestrationCoordinator:
                 status = found.group(1).replace(" ", "_")
                 matches.append((status, index))
         return matches[0] if len(matches) == 1 else (None, -1)
+
+    @staticmethod
+    def _proposal_revision_prompt(revision: dict[str, Any] | None) -> str:
+        """Format an operator-authorized proposal revision as a prompt fragment."""
+        if not isinstance(revision, dict):
+            return ""
+        clarification = str(revision.get("clarification") or "").strip()
+        findings = revision.get("findings") or []
+        parts = ["Operator-authorized proposal revision."]
+        if clarification:
+            parts.append(f"Operator guidance: {clarification}")
+        if findings:
+            parts.append(
+                "Prior independent-review findings to resolve: "
+                + json.dumps(findings, ensure_ascii=False)
+            )
+        return "\n".join(parts)
 
     async def _run_propose(
         self,
