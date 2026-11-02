@@ -12,7 +12,7 @@ test('service worker is shell-only and has no API data groups', () => {
   assert.equal(config.assetGroups.length, 1);
   assert.equal(config.assetGroups[0].name, 'public-shell');
   assert.equal(config.dataGroups, undefined);
-  assert.ok(!JSON.stringify(config).includes('/api/'));
+  assert.ok(config.navigationUrls.includes('!/api/**'));
 });
 
 test('Angular entrypoint registers the public-shell worker', () => {
