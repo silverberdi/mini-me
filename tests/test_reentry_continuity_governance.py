@@ -432,12 +432,24 @@ async def test_proposal_artifact_hash_change_invalidates_previous_approval(base_
     mock_res = make_mock_execution(
         '```json\n{"verdict":"CHANGES_REQUIRED","summary":"New specs have issues","findings":[{"severity":"MAJOR","location":"design.md","violated_requirement":"R2","expected_correction":"Revise"}]}\n```'
     )
-    coordinator.agent_runner.run = AsyncMock(return_value=mock_res)
+    async def correct_proposal(*args, **kwargs):
+        (change_dir / "design.md").write_text("# Design\nCorrected design")
+        return mock_res
+
+    coordinator.agent_runner.run = AsyncMock(side_effect=correct_proposal)
 
     res = await coordinator.execute_project_request("mini-me")
-    assert res.status == "PAUSED"
+    assert res.status == "RUNNING"
     assert res.current_stage == OrchestrationStage.PROPOSAL_REVIEW
-    assert "Independent proposal review requested changes: New specs have issues" in res.message
+    assert "native OpenSpec correction completed" in res.message
+    assert "second independent review is pending" in res.message
+    assert coordinator.agent_runner.run.await_count == 2
+    coordinator.agent_runner.resolve_workflow.assert_any_call(
+        worktree_path=candidate_worktree,
+        provider="antigravity",
+        operation="update",
+        change_name="gacela-05-ui-self-hosted",
+    )
 
 
 @pytest.mark.asyncio
@@ -486,6 +498,122 @@ async def test_proposal_changes_required_with_changed_hashes_triggers_new_review
     assert updated_run.current_stage == OrchestrationStage.IMPLEMENTING
     # Agent runner was invoked because hashes changed, superseding the old rejection
     coordinator.agent_runner.run.assert_called_once()
+
+
+@pytest.mark.asyncio
+async def test_proposal_changes_required_second_review_requires_human_without_third_attempt(base_setup):
+    uow, candidate_worktree, change_dir = base_setup
+    current_hashes = NativeOrchestrationCoordinator._compute_proposal_artifacts_hashes(
+        candidate_worktree, "gacela-05-ui-self-hosted"
+    )
+    run = OrchestrationRun(
+        project_id="mini-me",
+        run_id="run-test-proposal-round-limit",
+        change_name="gacela-05-ui-self-hosted",
+        base_sha="base_sha_123",
+        current_stage=OrchestrationStage.PROPOSAL_REVIEW,
+        stop_details=make_stop_details(
+            {
+                "proposal_review": {
+                    "status": "changes_required",
+                    "verdict": "CHANGES_REQUIRED",
+                    "summary": "Still inconsistent",
+                    "findings": [
+                        {
+                            "severity": "MAJOR",
+                            "location": "design.md",
+                            "violated_requirement": "scope",
+                            "expected_correction": "remove stale behavior",
+                        }
+                    ],
+                    "artifact_hashes": current_hashes,
+                    "round": 1,
+                },
+            }
+        ),
+    )
+    uow.orchestration_runs.save(run)
+    coordinator = NativeOrchestrationCoordinator(
+        github_adapter=MagicMock(),
+        worktree_manager=MagicMock(),
+        agent_runner=MagicMock(),
+        uow_factory=lambda: uow,
+    )
+    coordinator.worktree_manager.create_request_worktree = AsyncMock(
+        return_value=WorktreeInfo(
+            path=candidate_worktree, branch_name="feature/f5", base_sha="base_sha_123"
+        )
+    )
+
+    res = await coordinator.execute_project_request("mini-me")
+    assert res.status == "HUMAN_REQUIRED"
+    assert "Maximum independent proposal-review attempts reached" in res.message
+    coordinator.agent_runner.run.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_proposal_review_e2e_correction_then_second_failure_stops_without_third_attempt(base_setup):
+    uow, candidate_worktree, change_dir = base_setup
+    old_hashes = NativeOrchestrationCoordinator._compute_proposal_artifacts_hashes(
+        candidate_worktree, "gacela-05-ui-self-hosted"
+    )
+    run = OrchestrationRun(
+        project_id="mini-me",
+        run_id="run-test-proposal-e2e-rounds",
+        change_name="gacela-05-ui-self-hosted",
+        base_sha="base_sha_123",
+        current_stage=OrchestrationStage.PROPOSAL_REVIEW,
+        stop_details=make_stop_details(
+            {
+                "proposal_review": {
+                    "status": "changes_required",
+                    "verdict": "CHANGES_REQUIRED",
+                    "summary": "First finding",
+                    "findings": [
+                        {
+                            "severity": "MAJOR",
+                            "location": "design.md",
+                            "violated_requirement": "scope",
+                            "expected_correction": "clarify scope",
+                        }
+                    ],
+                    "artifact_hashes": old_hashes,
+                },
+            }
+        ),
+    )
+    uow.orchestration_runs.save(run)
+    coordinator = NativeOrchestrationCoordinator(
+        github_adapter=MagicMock(),
+        worktree_manager=MagicMock(),
+        agent_runner=MagicMock(),
+        uow_factory=lambda: uow,
+    )
+    coordinator.worktree_manager.create_request_worktree = AsyncMock(
+        return_value=WorktreeInfo(
+            path=candidate_worktree, branch_name="feature/f5", base_sha="base_sha_123"
+        )
+    )
+    second_review = make_mock_execution(
+        '```json\n{"verdict":"CHANGES_REQUIRED","summary":"Second finding","findings":[{"severity":"MAJOR","location":"tasks.md","violated_requirement":"coverage","expected_correction":"add evidence"}]}\n```'
+    )
+
+    async def correction_or_review(*args, **kwargs):
+        (change_dir / "design.md").write_text("# Design\nCorrected design")
+        return make_mock_execution("updated")
+
+    # The first call is a re-review after the first finding; the update must
+    # happen before the second call is allowed to review again.
+    coordinator.agent_runner.run = AsyncMock(side_effect=correction_or_review)
+    first = await coordinator.execute_project_request("mini-me")
+    assert first.status == "RUNNING"
+    assert uow.orchestration_runs.get_by_id(run.run_id).stop_details["proposal_review"]["round"] == 1
+
+    coordinator.agent_runner.run = AsyncMock(return_value=second_review)
+    second = await coordinator.execute_project_request("mini-me")
+    assert second.status == "HUMAN_REQUIRED"
+    assert "Maximum independent proposal-review attempts reached" in second.message
+    coordinator.agent_runner.run.assert_awaited_once()
 
 
 @pytest.mark.asyncio
@@ -978,7 +1106,7 @@ async def test_apply_injects_pending_corrections(base_setup):
             "expected_correction": "Add tests",
         }
     ]
-    ok = await coordinator._run_apply(
+    await coordinator._run_apply(
         candidate_worktree, "codex", "gacela-05-ui-self-hosted", corrections=corrections
     )
     # _run_apply will attempt the agent; verify the prompt reached the runner.

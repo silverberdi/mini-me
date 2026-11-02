@@ -13,8 +13,8 @@ from pathlib import Path
 from typing import Any
 
 from minime.config import (
-    OPENCODE_DEEPSEEK_MODELS,
     OPENCODE_DEEPSEEK_MODEL_ALIASES,
+    OPENCODE_DEEPSEEK_MODELS,
     AppConfig,
     CliInvocationProfile,
     load_config,
@@ -313,6 +313,7 @@ class CliAgentRunner:
             op_to_skill = {
                 "explore": "openspec-explore",
                 "propose": "openspec-propose",
+                "update": "openspec-update-change",
                 "apply": "openspec-apply-change",
                 "continue": "openspec-continue-change",
                 "verify": "openspec-verify-change",
@@ -354,6 +355,7 @@ class CliAgentRunner:
                 op_to_file = {
                     "explore": "opsx-explore.md",
                     "propose": "opsx-propose.md",
+                    "update": "opsx-update.md",
                     "apply": "opsx-apply.md",
                     "verify": "opsx-verify.md",
                     "sync": "opsx-sync.md",
@@ -391,6 +393,7 @@ class CliAgentRunner:
             op_to_skill = {
                 "explore": "openspec-explore",
                 "propose": "openspec-propose",
+                "update": "openspec-update-change",
                 "apply": "openspec-apply-change",
                 "continue": "openspec-continue-change",
                 "verify": "openspec-verify-change",
