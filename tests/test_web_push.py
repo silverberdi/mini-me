@@ -68,6 +68,49 @@ def test_send_to_subscription_respects_categories(tmp_path: Any) -> None:
         mock_webpush.assert_called_once()
 
 
+def test_send_to_subscription_does_not_leak_aud_between_endpoints(tmp_path: Any) -> None:
+    """Each webpush call must get its own claims copy so `aud` is derived per endpoint.
+
+    pywebpush mutates the passed vapid_claims dict to inject the endpoint-derived `aud`.
+    If the service shared one dict, the first endpoint's `aud` (e.g. fcm.googleapis.com)
+    would leak into the second (e.g. web.push.apple.com) and yield 403 "aud claim MUST
+    include the origin".
+    """
+    key_file = tmp_path / "test_vapid.pem"
+    svc = WebPushService(key_path=key_file)
+
+    class MockSub:
+        is_active = True
+        category_human_required = True
+
+        def __init__(self, endpoint: str) -> None:
+            self.endpoint = endpoint
+            self.p256dh = "fake-p256dh"
+            self.auth = "fake-auth"
+
+    with patch("minime.services.web_push_service.webpush") as mock_webpush:
+        svc.send_to_subscription(
+            MockSub("https://fcm.googleapis.com/fcm/send/one"),
+            title="t",
+            body="b",
+        )
+        svc.send_to_subscription(
+            MockSub("https://web.push.apple.com/two"),
+            title="t",
+            body="b",
+        )
+
+    assert mock_webpush.call_count == 2
+    # The shared service dict must not have been mutated by pywebpush.
+    assert "aud" not in svc.claims
+    # Each call must have received a distinct claims dict (not the shared one).
+    first_claims = mock_webpush.call_args_list[0].kwargs["vapid_claims"]
+    second_claims = mock_webpush.call_args_list[1].kwargs["vapid_claims"]
+    assert first_claims is not svc.claims
+    assert second_claims is not svc.claims
+    assert first_claims is not second_claims
+
+
 def test_send_to_subscription_deactivates_on_410_gone(tmp_path: Any) -> None:
     from pywebpush import WebPushException
 
