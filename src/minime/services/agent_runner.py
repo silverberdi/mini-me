@@ -605,7 +605,9 @@ class CliAgentRunner:
                 profile_key = "independent_review" if opencode_role == "independent_review" else "execution"
                 p = self.profiles.get((profile_key, "opencode")) if hasattr(self, "profiles") and self.profiles else None
                 if p:
-                    model_val = p.model or "deepseek-chat"
+                    model_val = p.model or "deepseek-flash"
+                    if model_val == "deepseek-chat":
+                        model_val = "deepseek-flash"
                     is_openrouter = "/" in model_val or "openrouter" in model_val.lower()
                     opencode_cfg = OpenCodeCapabilityConfig(
                         enabled=True,
@@ -614,7 +616,7 @@ class CliAgentRunner:
                         model=model_val,
                         api_key_env="OPENROUTER_API_KEY" if is_openrouter else "DEEPSEEK_API_KEY",
                         roles=["execution", "independent_review"],
-                        args=list(p.args),
+                        args=[],
                     )
 
             operation = workflow.operation if workflow and workflow.operation in {"explore", "propose", "apply", "verify"} else "apply"

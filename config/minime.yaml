@@ -70,11 +70,11 @@ providers:
     read_only_roles: [reviewer]
     invocation:
       implementer:
-        args: [run, "--stdio"]
-        prompt_transport: stdin
+        args: [run, "{prompt}"]
+        prompt_transport: argument
       reviewer:
-        args: [run, "--stdio"]
-        prompt_transport: stdin
+        args: [run, "{prompt}"]
+        prompt_transport: argument
     probe:
       cooldown_seconds: 300
       backoff_base_seconds: 300
