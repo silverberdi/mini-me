@@ -846,3 +846,146 @@ async def test_recovery_authorization_binds_prior_attempt_id(base_setup):
     )
     _, kwargs = uow.operator_actions.consume_single_use.call_args
     assert kwargs["expected_parameters"]["prior_attempt_id"] == "prev-attempt-1"
+
+
+@pytest.mark.asyncio
+async def test_code_review_changes_required_with_findings_rewinds_to_apply(base_setup):
+    """CHANGES_REQUIRED with actionable findings auto-dispatch to the implementer."""
+    uow, candidate_worktree, change_dir = base_setup
+    run = OrchestrationRun(
+        project_id="mini-me",
+        run_id="run-corr-1",
+        change_name="gacela-05-ui-self-hosted",
+        base_sha="base_sha_123",
+        current_stage=OrchestrationStage.CODE_REVIEW,
+        stop_details=make_stop_details(
+            {
+                "code_review": {
+                    "status": "changes_required",
+                    "summary": "Fix lints",
+                    "candidate_sha": "sha123456",
+                    "findings": [
+                        {
+                            "severity": "BLOCKER",
+                            "location": "src/a.py",
+                            "violated_requirement": "No tests",
+                            "expected_correction": "Add unit tests",
+                        }
+                    ],
+                },
+            }
+        ),
+    )
+    uow.orchestration_runs.save(run)
+
+    coordinator = NativeOrchestrationCoordinator(
+        github_adapter=MagicMock(),
+        worktree_manager=MagicMock(),
+        agent_runner=MagicMock(),
+        uow_factory=lambda: uow,
+    )
+    coordinator.worktree_manager.create_request_worktree = AsyncMock(
+        return_value=WorktreeInfo(
+            path=candidate_worktree, branch_name="feature/f5", base_sha="base_sha_123"
+        )
+    )
+    coordinator._get_git_head_sha = AsyncMock(return_value="sha123456")
+    coordinator._git_run = AsyncMock(return_value=MagicMock(stdout="diff content"))
+    coordinator._run_apply = AsyncMock(return_value=False)
+
+    res = await coordinator.execute_project_request("mini-me")
+    # Correction loop, not a human pause.
+    assert res.status == "RUNNING"
+    assert res.current_stage == OrchestrationStage.IMPLEMENTING
+    assert "round 1" in res.message
+    updated = uow.orchestration_runs.get_by_id("run-corr-1")
+    assert updated.stop_details["code_review"]["round"] == 1
+    assert updated.stop_details["pending_corrections"][0]["severity"] == "BLOCKER"
+
+
+@pytest.mark.asyncio
+async def test_code_review_changes_required_exhausts_rounds_then_pauses(base_setup):
+    """After max_review_rounds the ladder escalates to the operator."""
+    uow, candidate_worktree, change_dir = base_setup
+    run = OrchestrationRun(
+        project_id="mini-me",
+        run_id="run-corr-2",
+        change_name="gacela-05-ui-self-hosted",
+        base_sha="base_sha_123",
+        current_stage=OrchestrationStage.CODE_REVIEW,
+        stop_details=make_stop_details(
+            {
+                "code_review": {
+                    "status": "changes_required",
+                    "summary": "Still failing",
+                    "candidate_sha": "sha123456",
+                    "round": 3,
+                    "findings": [
+                        {
+                            "severity": "MAJOR",
+                            "location": "src/b.py",
+                            "violated_requirement": "Security gap",
+                            "expected_correction": "Fix auth",
+                        }
+                    ],
+                },
+            }
+        ),
+    )
+    uow.orchestration_runs.save(run)
+
+    coordinator = NativeOrchestrationCoordinator(
+        github_adapter=MagicMock(),
+        worktree_manager=MagicMock(),
+        agent_runner=MagicMock(),
+        uow_factory=lambda: uow,
+    )
+    coordinator.worktree_manager.create_request_worktree = AsyncMock(
+        return_value=WorktreeInfo(
+            path=candidate_worktree, branch_name="feature/f5", base_sha="base_sha_123"
+        )
+    )
+    coordinator._get_git_head_sha = AsyncMock(return_value="sha123456")
+    coordinator._git_run = AsyncMock(return_value=MagicMock(stdout="diff content"))
+
+    res = await coordinator.execute_project_request("mini-me")
+    assert res.status == "PAUSED"
+    assert res.current_stage == OrchestrationStage.CODE_REVIEW
+    coordinator.agent_runner.run.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_apply_injects_pending_corrections(base_setup):
+    """The implementer Apply prompt carries the reviewer findings as correction context."""
+    uow, candidate_worktree, change_dir = base_setup
+    coordinator = NativeOrchestrationCoordinator(
+        github_adapter=MagicMock(),
+        worktree_manager=MagicMock(),
+        agent_runner=MagicMock(),
+        uow_factory=lambda: uow,
+    )
+    coordinator.agent_runner.resolve_workflow = MagicMock(
+        return_value=MagicMock(dispatch_command="$openspec-apply-change")
+    )
+    coordinator.agent_runner.run = AsyncMock(
+        return_value=make_mock_execution("applied", exit_code=0)
+    )
+    corrections = [
+        {
+            "severity": "BLOCKER",
+            "location": "src/x.py",
+            "violated_requirement": "Missing tests",
+            "expected_correction": "Add tests",
+        }
+    ]
+    ok = await coordinator._run_apply(
+        candidate_worktree, "codex", "gacela-05-ui-self-hosted", corrections=corrections
+    )
+    # _run_apply will attempt the agent; verify the prompt reached the runner.
+    call = coordinator.agent_runner.run.call_args
+    assert call is not None
+    prompt = call.kwargs["prompt_context"]
+    assert "CHANGES_REQUIRED" in prompt
+    assert "Missing tests" in prompt
+    assert "Add tests" in prompt
+    assert "[BLOCKER] src/x.py" in prompt
