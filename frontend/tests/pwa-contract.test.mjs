@@ -18,7 +18,7 @@ test('service worker is shell-only and has no API data groups', () => {
 test('Angular entrypoint registers the public-shell worker', () => {
   const main = read('src/main.ts');
   assert.match(main, /provideServiceWorker\('ngsw-worker\.js'/);
-  assert.match(main, /registerWhenStable:30000/);
+  assert.match(main, /registerImmediately/);
 });
 
 test('offline API policy blocks non-GET requests before fetch', () => {
