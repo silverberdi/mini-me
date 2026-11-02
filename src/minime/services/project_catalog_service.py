@@ -310,10 +310,19 @@ class ProjectCatalogService:
                 )
             if agent["capability_status"] != "OBSERVED_READ_ONLY":
                 raise ValueError(f"Selected agent '{provider_id}' model catalog is unobservable")
-            supported_efforts = agent["models"].get(profile.model_id)
-            if supported_efforts is None or profile.effort.lower() not in supported_efforts:
+            if profile.model_id not in agent["models"]:
                 raise ValueError(
-                    f"Model/effort for profile '{profile_name}' is not in the live {provider_id} catalog"
+                    f"Model '{profile.model_id}' for profile '{profile_name}' "
+                    f"is not in the live {provider_id} catalog"
+                )
+            supported_efforts = agent["models"].get(profile.model_id)
+            # A model observed without effort metadata (e.g. OpenCode reports the
+            # identity but not its effort tiers) must not fail closed — only an
+            # explicitly-advertised effort list is authoritative for the check.
+            if supported_efforts is not None and profile.effort.lower() not in supported_efforts:
+                raise ValueError(
+                    f"Effort '{profile.effort}' for profile '{profile_name}' "
+                    f"is not in the live {provider_id} catalog"
                 )
             if provider_id in {"codex", "antigravity"} and not agent["native_openspec_setup"]:
                 raise ValueError(

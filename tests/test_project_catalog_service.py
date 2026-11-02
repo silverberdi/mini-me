@@ -272,6 +272,54 @@ def test_project_profile_workflows_and_skills_must_exist_in_target_workspace(mon
         asyncio.run(service.validate_project_profiles(profiles, "/verified/workspace"))
 
 
+def test_profile_validation_tolerates_null_effort_metadata(monkeypatch):
+    """A model observed without effort tiers must not fail closed; a missing model still does."""
+    import minime.services.project_catalog_service as catalog_module
+    from minime.domain.models import ProjectAgentProfile
+
+    opencode = ProviderConfig(
+        command="opencode",
+        roles=["reviewer"],
+        file_edit_roles=[],
+        read_only_roles=["reviewer"],
+        invocation={"reviewer": CliInvocationConfig(args=["run", "{prompt}"])},
+    )
+    config = AppConfig(providers={"opencode": opencode})
+    monkeypatch.setattr(catalog_module.shutil, "which", lambda _: "/bin/opencode")
+    monkeypatch.setattr(
+        catalog_module,
+        "get_provider_adapter",
+        lambda provider_id, config: _Capabilities(
+            provider_id, {"models": {"deepseek/deepseek-flash": None}}
+        ),
+    )
+
+    service = ProjectCatalogService(config, _NativeSetup())
+    profiles = {
+        "independent_review": ProjectAgentProfile(
+            agent_id="opencode",
+            model_id="deepseek/deepseek-flash",
+            effort="medium",
+            workflows=[],
+            skills=[],
+        )
+    }
+
+    # None effort metadata (OpenCode reports identity without effort tiers) is tolerated.
+    asyncio.run(service.validate_project_profiles(profiles))
+
+    # A model genuinely absent from the catalog still fails closed.
+    profiles["independent_review"] = ProjectAgentProfile(
+        agent_id="opencode",
+        model_id="deepseek/deepseek-v4-pro",
+        effort="medium",
+        workflows=[],
+        skills=[],
+    )
+    with pytest.raises(ValueError, match="not in the live opencode catalog"):
+        asyncio.run(service.validate_project_profiles(profiles))
+
+
 def test_text_only_provider_is_not_exposed_as_an_agent_capability():
     text_provider = ProviderConfig(
         type="api",
