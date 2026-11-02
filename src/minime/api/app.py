@@ -3345,7 +3345,14 @@ def get_dashboard_page() -> Response:
     """Serve the operations dashboard single-page web interface."""
     index_file = STATIC_DIR / "index.html"
     if index_file.exists():
-        return FileResponse(index_file)
+        # The HTML is the asset manifest for the Angular shell. It must be
+        # revalidated on every navigation so a deployment can advance the
+        # hashed JS bundle instead of pinning a stale shell in browser/CDN
+        # caches. Hashed assets remain cacheable independently.
+        return FileResponse(
+            index_file,
+            headers={"Cache-Control": "no-cache, no-store, must-revalidate"},
+        )
     logger.error("Dashboard index.html not found at '%s'.", index_file)
     return HTMLResponse(
         "<!DOCTYPE html><html><head><title>mini me dashboard</title></head><body>"
@@ -3360,7 +3367,11 @@ def get_dashboard_page() -> Response:
 def get_service_worker() -> Response:
     sw_file = STATIC_DIR / "sw.js"
     if sw_file.exists():
-        return FileResponse(sw_file, media_type="application/javascript")
+        return FileResponse(
+            sw_file,
+            media_type="application/javascript",
+            headers={"Cache-Control": "no-cache, no-store, must-revalidate"},
+        )
     return Response(status_code=404)
 
 
