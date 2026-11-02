@@ -98,12 +98,13 @@ SUPPORTED_PROVIDER_MODELS: dict[str, dict[str, bool]] = {
 }
 
 # DeepSeek model identities that the OpenCode CLI actually exposes, mapped to
-# their premium flag and the effort levels OpenCode serves. OpenCode does NOT
-# expose the direct-API ids ``deepseek-chat``/``deepseek-reasoner``; it serves
-# its own namespaced identities (``deepseek/deepseek-flash``,
-# ``deepseek/deepseek-v4-pro``), plus DeepSeek variants via OpenRouter
-# (``openrouter/deepseek/...``). These keys are the canonical full identities
-# that OpenCode reports from ``opencode models``.
+# their premium flag and the effort levels OpenCode serves. OpenCode's DIRECT
+# DeepSeek integration exposes only two namespaced identities:
+# ``deepseek/deepseek-flash`` (non-premium) and ``deepseek/deepseek-v4-pro``
+# (premium). It does NOT expose the direct-API reasoning id ``deepseek-reasoner``
+# (R1) — that model is only reachable through OpenRouter
+# (``openrouter/deepseek/deepseek-r1-0528``). These keys are the canonical full
+# identities that OpenCode reports from ``opencode models``.
 OPENCODE_DEEPSEEK_MODELS: dict[str, dict[str, object]] = {
     "deepseek/deepseek-flash": {"premium": False, "efforts": ["low", "medium", "high"]},
     "deepseek/deepseek-v4-pro": {"premium": True, "efforts": ["medium", "high"]},
@@ -111,14 +112,18 @@ OPENCODE_DEEPSEEK_MODELS: dict[str, dict[str, object]] = {
 
 # Legacy/direct-API DeepSeek model id -> canonical OpenCode model id. Only these
 # aliases are honored; anything else is left untouched and will fail closed at
-# dispatch. Bare ids (deepseek-flash / deepseek-v4-pro) from earlier profiles are
-# also normalized so a persisted profile keeps working after the namespace
-# correction.
+# dispatch. Bare ids (deepseek-flash / deepseek-v4-pro) and the prefixed
+# ``deepseek/deepseek-chat`` from earlier profiles are normalized so a persisted
+# profile keeps working after the namespace correction. ``deepseek-reasoner``
+# (R1) is deliberately NOT aliased to ``deepseek/deepseek-v4-pro`` — that premium
+# model is not R1 and is frequently unavailable on non-premium accounts — it
+# routes through OpenRouter to the actual R1 instead.
 OPENCODE_DEEPSEEK_MODEL_ALIASES: dict[str, str] = {
     "deepseek-chat": "deepseek/deepseek-flash",
-    "deepseek-reasoner": "deepseek/deepseek-v4-pro",
+    "deepseek/deepseek-chat": "deepseek/deepseek-flash",
     "deepseek-flash": "deepseek/deepseek-flash",
     "deepseek-v4-pro": "deepseek/deepseek-v4-pro",
+    "deepseek-reasoner": "openrouter/deepseek/deepseek-r1-0528",
 }
 
 SUPPORTED_PROVIDER_EFFORTS: dict[str, set[str]] = {
