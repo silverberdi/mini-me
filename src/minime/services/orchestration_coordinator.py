@@ -1479,6 +1479,16 @@ class NativeOrchestrationCoordinator:
             if action == _REVIEW_ADVANCE:
                 self._update_stage(uow, active_run, OrchestrationStage.READY_TO_APPLY)
             elif action == _REVIEW_REJECTED:
+                if isinstance(stored_review, dict) and stored_review.get("findings"):
+                    return await self._route_proposal_changes_required(
+                        uow=uow,
+                        project_id=project_id,
+                        run=active_run,
+                        result=stored_review,
+                        worktree_path=worktree_path,
+                        thinker_provider=thinker_provider,
+                        change_name=change_name,
+                    )
                 return OrchestrationCoordinationResult(
                     status="PAUSED",
                     run_id=active_run.run_id,
@@ -1544,12 +1554,19 @@ class NativeOrchestrationCoordinator:
                 # Record dispatch intent before executing I/O
                 attempt_id = str(uuid4())
                 details = dict(active_run.stop_details or {})
+                prior_review = details.get("proposal_review")
+                prior_round = (
+                    prior_review.get("round")
+                    if isinstance(prior_review, dict) and isinstance(prior_review.get("round"), int)
+                    else 0
+                )
                 details["proposal_review"] = {
                     "attempt_id": attempt_id,
                     "status": "dispatched",
                     "reviewer_provider": reviewer_provider,
                     "artifact_hashes": current_hashes,
                     "recorded_at": utc_now().isoformat(),
+                    "round": prior_round,
                 }
                 active_run.stop_details = details
                 if hasattr(uow, "orchestration_runs"):
@@ -1573,6 +1590,7 @@ class NativeOrchestrationCoordinator:
                 details["proposal_review"] = {
                     "attempt_id": attempt_id,
                     **res_dict,
+                    "round": prior_round,
                 }
                 active_run.stop_details = details
                 if hasattr(uow, "orchestration_runs"):
@@ -1584,6 +1602,16 @@ class NativeOrchestrationCoordinator:
                     res_dict.get("status") != "approved"
                     or res_dict.get("verdict") != "READY_TO_MERGE"
                 ):
+                    if res_dict.get("status") == "changes_required":
+                        return await self._route_proposal_changes_required(
+                            uow=uow,
+                            project_id=project_id,
+                            run=active_run,
+                            result=res_dict,
+                            worktree_path=worktree_path,
+                            thinker_provider=thinker_provider,
+                            change_name=change_name,
+                        )
                     return OrchestrationCoordinationResult(
                         status="PAUSED",
                         run_id=active_run.run_id,
@@ -2534,7 +2562,13 @@ class NativeOrchestrationCoordinator:
             if hasattr(uow, "commit"):
                 uow.commit()
 
-    def _review_round(self, uow: Any, project_id: str, run: OrchestrationRun) -> tuple[int, int]:
+    def _review_round(
+        self,
+        uow: Any,
+        project_id: str,
+        run: OrchestrationRun,
+        review_key: str = "code_review",
+    ) -> tuple[int, int]:
         """Return (current_review_round, max_review_rounds) from durable run state.
 
         The round counter is persisted in stop_details so a scheduler re-entry
@@ -2543,17 +2577,17 @@ class NativeOrchestrationCoordinator:
         """
         details = dict(run.stop_details or {})
         round_num = 0
-        review_state = details.get("code_review")
+        review_state = details.get(review_key)
         if isinstance(review_state, dict) and isinstance(review_state.get("round"), int):
             round_num = review_state["round"]
-        max_rounds = 3
+        max_rounds = 2
         if hasattr(uow, "projects"):
             proj = uow.projects.get_by_id(project_id)
             policy = getattr(proj, "execution_policy", {}) or {}
             if isinstance(policy, dict):
                 candidate = policy.get("max_review_rounds")
                 if isinstance(candidate, int) and candidate >= 1:
-                    max_rounds = candidate
+                    max_rounds = min(candidate, 2)
         return round_num, max_rounds
 
     def _apply_attempts(self, run: OrchestrationRun) -> int:
@@ -3523,18 +3557,19 @@ class NativeOrchestrationCoordinator:
         error_output: str,
         project_id: str | None = None,
     ) -> bool:
-        """Run correction pass by thinking agent on strict validation failure."""
+        """Run the native OpenSpec update workflow for review findings."""
         wf = self.agent_runner.resolve_workflow(
             worktree_path=worktree_path,
             provider=provider,
-            operation="propose",
+            operation="update",
             change_name=change_name,
         )
         prompt = (
             f"OpenSpec strict CLI validation failed for change '{change_name}'.\n"
             f"Errors reported:\n{error_output}\n\n"
-            f"Please correct the planning artifacts under openspec/changes/{change_name}/ so that "
-            f"'openspec validate {change_name} --strict --type change' passes cleanly."
+            f"Use the native OpenSpec update workflow to correct only the planning artifacts under "
+            f"openspec/changes/{change_name}/. Preserve valid decisions and keep the change within "
+            f"its authorized scope. Then ensure the planning artifacts validate cleanly."
         )
         result = await self.agent_runner.run(
             worktree_path=worktree_path,
@@ -3545,6 +3580,124 @@ class NativeOrchestrationCoordinator:
             workflow=wf,
         )
         return self._execution_is_successful(result)
+
+    async def _route_proposal_changes_required(
+        self,
+        *,
+        uow: Any,
+        project_id: str,
+        run: OrchestrationRun,
+        result: dict[str, Any],
+        worktree_path: Path,
+        thinker_provider: str,
+        change_name: str,
+    ) -> OrchestrationCoordinationResult:
+        """Correct proposal findings once, then require a second independent review."""
+        findings = result.get("findings") or []
+        round_num, max_rounds = self._review_round(uow, project_id, run, "proposal_review")
+        if not findings or round_num + 1 >= max_rounds:
+            reason = self._review_pause_message("proposal", result) + (
+                " Maximum independent proposal-review attempts reached; human decision required."
+                if findings
+                else " No actionable findings were returned."
+            )
+            if hasattr(uow, "orchestration_runs"):
+                updater = getattr(uow.orchestration_runs, "update_stop_outcome", None)
+                if updater is not None:
+                    preserved = dict(run.stop_details or {})
+                    preserved["proposal_review_escalated"] = True
+                    updater(
+                        run.run_id,
+                        OrchestrationStopOutcome.NEEDS_HUMAN,
+                        HumanGate.NEEDS_HUMAN,
+                        reason,
+                        preserved,
+                        is_active=True,
+                    )
+            return OrchestrationCoordinationResult(
+                status="HUMAN_REQUIRED",
+                run_id=run.run_id,
+                current_stage=OrchestrationStage.PROPOSAL_REVIEW,
+                message=reason,
+                human_payload={
+                    "question": reason,
+                    "options": [],
+                    "run_id": run.run_id,
+                    "stage": OrchestrationStage.PROPOSAL_REVIEW.value,
+                },
+            )
+
+        details = dict(run.stop_details or {})
+        review_state = dict(details.get("proposal_review") or {})
+        review_state["round"] = round_num + 1
+        details["proposal_review"] = review_state
+        details["pending_proposal_corrections"] = findings
+        details["proposal_correction"] = {
+            "status": "dispatched",
+            "round": round_num + 1,
+            "recorded_at": utc_now().isoformat(),
+        }
+        run.stop_details = details
+        if hasattr(uow, "orchestration_runs"):
+            uow.orchestration_runs.save(run)
+            if hasattr(uow, "commit"):
+                uow.commit()
+
+        correction_ok = await self._run_propose_correction(
+            worktree_path,
+            thinker_provider,
+            change_name,
+            json.dumps(findings, ensure_ascii=False),
+            project_id=project_id,
+        )
+        new_hashes = self._compute_proposal_artifacts_hashes(worktree_path, change_name)
+        old_hashes = result.get("artifact_hashes") or {}
+        details = dict(run.stop_details or {})
+        correction = dict(details.get("proposal_correction") or {})
+        correction.update(
+            {
+                "status": "completed" if correction_ok else "failed",
+                "artifact_hashes": new_hashes,
+                "finished_at": utc_now().isoformat(),
+            }
+        )
+        details["proposal_correction"] = correction
+        details.pop("pending_proposal_corrections", None)
+        run.stop_details = details
+        if hasattr(uow, "orchestration_runs"):
+            uow.orchestration_runs.save(run)
+            if hasattr(uow, "commit"):
+                uow.commit()
+
+        if not correction_ok:
+            reason = "Native OpenSpec update failed after independent proposal findings; human decision required."
+            return OrchestrationCoordinationResult(
+                status="HUMAN_REQUIRED",
+                run_id=run.run_id,
+                current_stage=OrchestrationStage.PROPOSAL_REVIEW,
+                message=reason,
+                human_payload={"question": reason, "options": [], "run_id": run.run_id},
+            )
+        if new_hashes == old_hashes:
+            reason = "Proposal correction produced no artifact change; human decision required."
+            return OrchestrationCoordinationResult(
+                status="HUMAN_REQUIRED",
+                run_id=run.run_id,
+                current_stage=OrchestrationStage.PROPOSAL_REVIEW,
+                message=reason,
+                human_payload={"question": reason, "options": [], "run_id": run.run_id},
+            )
+
+        self._update_stage(uow, run, OrchestrationStage.PROPOSAL_REVIEW)
+        return OrchestrationCoordinationResult(
+            status="RUNNING",
+            run_id=run.run_id,
+            current_stage=OrchestrationStage.PROPOSAL_REVIEW,
+            message=(
+                f"Independent proposal review requested changes (round {round_num + 1}/{max_rounds}); "
+                "native OpenSpec correction completed and a second independent review is pending."
+            ),
+        )
 
     @staticmethod
     def _classify_review_reentry(
