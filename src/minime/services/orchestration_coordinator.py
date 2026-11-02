@@ -1616,8 +1616,16 @@ class NativeOrchestrationCoordinator:
             OrchestrationStage.IMPLEMENTING,
         ):
             self._update_stage(uow, active_run, OrchestrationStage.IMPLEMENTING)
+            # Durable correction context from a prior CHANGES_REQUIRED verdict.
+            pending_corrections = list(
+                (active_run.stop_details or {}).get("pending_corrections") or []
+            )
             apply_ok = await self._run_apply(
-                worktree_path, implementer_provider, change_name, project_id=project_id
+                worktree_path,
+                implementer_provider,
+                change_name,
+                project_id=project_id,
+                corrections=pending_corrections,
             )
             if not apply_ok:
                 return OrchestrationCoordinationResult(
@@ -1626,6 +1634,14 @@ class NativeOrchestrationCoordinator:
                     current_stage=OrchestrationStage.IMPLEMENTING,
                     message="Native Apply failed or produced no authoritative evidence. Worktree preserved.",
                 )
+            if pending_corrections:
+                details = dict(active_run.stop_details or {})
+                details.pop("pending_corrections", None)
+                active_run.stop_details = details
+                if hasattr(uow, "orchestration_runs"):
+                    uow.orchestration_runs.save(active_run)
+                    if hasattr(uow, "commit"):
+                        uow.commit()
             self._update_stage(uow, active_run, OrchestrationStage.RUNNING_TESTS)
 
         if active_run.current_stage == OrchestrationStage.RUNNING_TESTS:
@@ -1704,11 +1720,8 @@ class NativeOrchestrationCoordinator:
             if action == _REVIEW_ADVANCE:
                 self._update_stage(uow, active_run, OrchestrationStage.READY_FOR_PR)
             elif action == _REVIEW_REJECTED:
-                return OrchestrationCoordinationResult(
-                    status="PAUSED",
-                    run_id=active_run.run_id,
-                    current_stage=OrchestrationStage.CODE_REVIEW,
-                    message=self._review_pause_message("code", stored_code_review),
+                return self._route_changes_required(
+                    uow, project_id, active_run, stored_code_review
                 )
             elif action == _REVIEW_CORRUPT:
                 return OrchestrationCoordinationResult(
@@ -1765,12 +1778,19 @@ class NativeOrchestrationCoordinator:
 
                 attempt_id = str(uuid4())
                 details = dict(active_run.stop_details or {})
+                prior_review = details.get("code_review")
+                prior_round = (
+                    prior_review.get("round")
+                    if isinstance(prior_review, dict) and isinstance(prior_review.get("round"), int)
+                    else 0
+                )
                 details["code_review"] = {
                     "attempt_id": attempt_id,
                     "status": "dispatched",
                     "reviewer_provider": reviewer_provider,
                     "candidate_sha": candidate_sha,
                     "recorded_at": utc_now().isoformat(),
+                    "round": prior_round,
                 }
                 active_run.stop_details = details
                 if hasattr(uow, "orchestration_runs"):
@@ -1800,6 +1820,7 @@ class NativeOrchestrationCoordinator:
                 details["code_review"] = {
                     "attempt_id": attempt_id,
                     **c_dict,
+                    "round": prior_round,
                 }
                 active_run.stop_details = details
                 if hasattr(uow, "orchestration_runs"):
@@ -1808,6 +1829,8 @@ class NativeOrchestrationCoordinator:
                         uow.commit()
 
                 if c_dict.get("status") != "approved" or c_dict.get("verdict") != "READY_TO_MERGE":
+                    if c_dict.get("status") == "changes_required":
+                        return self._route_changes_required(uow, project_id, active_run, c_dict)
                     return OrchestrationCoordinationResult(
                         status="PAUSED",
                         run_id=active_run.run_id,
@@ -2475,6 +2498,73 @@ class NativeOrchestrationCoordinator:
             uow.orchestration_runs.save(run)
             if hasattr(uow, "commit"):
                 uow.commit()
+
+    def _review_round(self, uow: Any, project_id: str, run: OrchestrationRun) -> tuple[int, int]:
+        """Return (current_review_round, max_review_rounds) from durable run state.
+
+        The round counter is persisted in stop_details so a scheduler re-entry
+        cannot silently reset the escalation ladder and loop forever. The ceiling
+        comes from the project's persisted execution_policy.
+        """
+        details = dict(run.stop_details or {})
+        round_num = 0
+        review_state = details.get("code_review")
+        if isinstance(review_state, dict) and isinstance(review_state.get("round"), int):
+            round_num = review_state["round"]
+        max_rounds = 3
+        if hasattr(uow, "projects"):
+            proj = uow.projects.get_by_id(project_id)
+            policy = getattr(proj, "execution_policy", {}) or {}
+            if isinstance(policy, dict):
+                candidate = policy.get("max_review_rounds")
+                if isinstance(candidate, int) and candidate >= 1:
+                    max_rounds = candidate
+        return round_num, max_rounds
+
+    def _route_changes_required(
+        self,
+        uow: Any,
+        project_id: str,
+        run: OrchestrationRun,
+        result: dict[str, Any],
+    ) -> OrchestrationCoordinationResult:
+        """Route a CHANGES_REQUIRED code-review outcome.
+
+        With actionable findings and rounds remaining, this persists the next
+        round and rewinds to IMPLEMENTING so the executor consumes the findings
+        and re-enters Verify/review automatically. It escalates to the operator
+        (PAUSED) only when the round limit is exhausted or no findings exist.
+        """
+        findings = result.get("findings") or []
+        round_num, max_rounds = self._review_round(uow, project_id, run)
+        if findings and round_num < max_rounds:
+            details = dict(run.stop_details or {})
+            review_state = dict(details.get("code_review") or {})
+            review_state["round"] = round_num + 1
+            details["code_review"] = review_state
+            details["pending_corrections"] = findings
+            run.stop_details = details
+            if hasattr(uow, "orchestration_runs"):
+                uow.orchestration_runs.save(run)
+                if hasattr(uow, "commit"):
+                    uow.commit()
+            self._update_stage(uow, run, OrchestrationStage.IMPLEMENTING)
+            return OrchestrationCoordinationResult(
+                status="RUNNING",
+                run_id=run.run_id,
+                current_stage=OrchestrationStage.IMPLEMENTING,
+                message=(
+                    f"Independent review requested changes (round {round_num + 1}/{max_rounds}); "
+                    "dispatching corrections to the implementer automatically."
+                ),
+            )
+        return OrchestrationCoordinationResult(
+            status="PAUSED",
+            run_id=run.run_id,
+            current_stage=OrchestrationStage.CODE_REVIEW,
+            message=self._review_pause_message("code", result)
+            + ("" if findings else " No actionable findings were returned."),
+        )
 
     @staticmethod
     def _execution_is_successful(result: Any) -> bool:
@@ -3520,6 +3610,7 @@ class NativeOrchestrationCoordinator:
         provider: str,
         change_name: str,
         project_id: str | None = None,
+        corrections: list[dict[str, Any]] | None = None,
     ) -> bool:
         """Dispatch configured implementer agent to execute official OpenSpec Apply workflow."""
         wf = self.agent_runner.resolve_workflow(
@@ -3528,11 +3619,29 @@ class NativeOrchestrationCoordinator:
             operation="apply",
             change_name=change_name,
         )
+        correction_instruction = ""
+        if corrections:
+            rendered = []
+            for idx, finding in enumerate(corrections, 1):
+                sev = str(finding.get("severity", "MAJOR")).upper()
+                loc = str(finding.get("location") or "unspecified").strip()
+                req = str(finding.get("violated_requirement") or "").strip()
+                fix = str(finding.get("expected_correction") or "").strip()
+                rendered.append(
+                    f"{idx}. [{sev}] {loc}\n   Violated: {req or 'unspecified'}\n   Fix: {fix or 'unspecified'}"
+                )
+            correction_instruction = (
+                "\n\nThe independent reviewer returned CHANGES_REQUIRED with the following findings. "
+                "Correct every finding in this same change, then re-run the test suite:\n\n"
+                + "\n\n".join(rendered)
+                + "\n\nDo not expand scope beyond these findings; preserve the existing OpenSpec change."
+            )
         prompt = (
             f"You are the implementer agent. Execute official OpenSpec Apply for change '{change_name}'.\n"
             f"Workflow command: {wf.dispatch_command}\n\n"
             f"Implement all pending tasks specified in tasks.md, write unit and E2E tests, "
             f"ensure the test suite passes, and mark completed tasks as [x]."
+            f"{correction_instruction}"
         )
         result = await self.agent_runner.run(
             worktree_path=worktree_path,
