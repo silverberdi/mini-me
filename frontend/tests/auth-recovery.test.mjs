@@ -7,7 +7,8 @@ const refresh = await readFile(new URL("../src/app/core/refresh.service.ts", imp
 
 test("unauthenticated shell exposes the Google login action", () => {
   assert.match(app, /auth\.isLoaded\(\) && !auth\.session\(\)\.authenticated/);
-  assert.match(app, /href=\"\/api\/v1\/auth\/google\/login\"/);
+  assert.match(app, /click\)=\"beginLogin\(\)\"/);
+  assert.match(app, /window\.location\.assign\('\/api\/v1\/auth\/google\/login'\)/);
   assert.match(app, /Continuar con Google/);
 });
 
