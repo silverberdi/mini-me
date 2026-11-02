@@ -675,8 +675,13 @@ def scheduler_run_cmd(
                     active_runs = uow.orchestration_runs.list_runs(project_id=project_id, is_active=True)
                     if active_runs:
                         active_run = active_runs[0]
-                        if getattr(active_run, "human_gate", None) == "HUMAN_REQUIRED":
-                            # Awaiting human attention
+                        if getattr(active_run, "human_gate", None) in (
+                            "NEEDS_HUMAN",
+                            "READY_FOR_HUMAN_MERGE",
+                        ):
+                            # Awaiting human attention (human_gate is the HumanGate enum,
+                            # whose values are NEEDS_HUMAN / READY_FOR_HUMAN_MERGE — not
+                            # the legacy "HUMAN_REQUIRED" string, which never matched).
                             continue
 
                     repo_root = Path(binding.managed_repository_root)
