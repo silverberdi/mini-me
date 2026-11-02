@@ -11,6 +11,7 @@ import asyncio
 import hashlib
 import json
 import os
+import re
 import shutil
 import subprocess
 import tempfile
@@ -127,21 +128,24 @@ def _native_workflow(worktree: Path, operation: str) -> tuple[str, str] | None:
     return None
 
 
+_FORBIDDEN_EXTERNAL_ACTION_PATTERNS: tuple[re.Pattern[str], ...] = tuple(
+    re.compile(rf"\b{phrase}\b")
+    for phrase in (
+        r"deploy\s+production",
+        r"production\s+deploy",
+        r"restart\s+scheduler",
+        r"close\s+remote\s+request",
+        r"close\s+the\s+ticket",
+        r"close\s+ticket",
+        r"merge\s+pull\s+request",
+        r"merge\s+pr",
+    )
+)
+
+
 def _forbidden_external_action(prompt: str) -> bool:
     normalized = prompt.lower()
-    return any(
-        marker in normalized
-        for marker in (
-            "deploy production",
-            "production deploy",
-            "restart scheduler",
-            "close remote request",
-            "close the ticket",
-            "close ticket",
-            "merge pull request",
-            "merge pr",
-        )
-    )
+    return any(pattern.search(normalized) for pattern in _FORBIDDEN_EXTERNAL_ACTION_PATTERNS)
 
 
 def _has_explicit_result(stdout: tuple[str, ...]) -> bool:
