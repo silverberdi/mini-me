@@ -167,7 +167,11 @@ class WebPushService:
                 subscription_info=subscription_info,
                 data=payload_data,
                 vapid_private_key=self._vapid,
-                vapid_claims=self.claims,
+                # Copy the claims: pywebpush mutates the dict to inject the
+                # endpoint-derived `aud` (and `exp`). Sharing one dict across
+                # subscriptions would leak the first endpoint's `aud` into the
+                # next, producing a 403 "aud claim MUST include the origin".
+                vapid_claims=dict(self.claims),
                 timeout=10.0,
             )
             if hasattr(subscription, "last_success_at"):
