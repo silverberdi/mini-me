@@ -10,6 +10,27 @@ import { RefreshService } from './core/refresh.service';
   standalone: true,
   imports: [CommonModule, RouterModule],
   template: `
+    <ng-container *ngIf="!auth.isLoaded()">
+      <main class="min-h-screen bg-slate-900 text-slate-100 flex items-center justify-center p-6">
+        <p class="text-sm text-slate-400" role="status" aria-live="polite">Comprobando sesión…</p>
+      </main>
+    </ng-container>
+
+    <ng-container *ngIf="auth.isLoaded() && !auth.session().authenticated">
+      <main class="min-h-screen bg-slate-900 text-slate-100 flex items-center justify-center p-6">
+        <section class="w-full max-w-md rounded-2xl border border-slate-800 bg-slate-900/90 p-8 text-center shadow-2xl">
+          <div class="mx-auto mb-4 flex h-14 w-14 items-center justify-center rounded-2xl bg-sky-500/20 text-3xl">🤖</div>
+          <h1 class="text-2xl font-bold text-white">Ingresar a mini me</h1>
+          <p class="mt-2 text-sm text-slate-400">Tu sesión no está activa. Inicia sesión con la cuenta autorizada para continuar.</p>
+          <a href="/api/v1/auth/google/login"
+             class="mt-6 inline-flex w-full items-center justify-center rounded-xl bg-sky-500 px-4 py-3 text-sm font-bold text-slate-950 transition-colors hover:bg-sky-400 focus:outline-none focus:ring-2 focus:ring-sky-300">
+            Continuar con Google
+          </a>
+        </section>
+      </main>
+    </ng-container>
+
+    <ng-container *ngIf="auth.isLoaded() && auth.session().authenticated">
     <!-- Top Global Header -->
     <header class="h-16 border-b border-slate-800 bg-slate-900/80 backdrop-blur-md sticky top-0 z-50 flex items-center justify-between px-4 sm:px-6">
       <div class="flex items-center gap-6">
@@ -216,6 +237,7 @@ import { RefreshService } from './core/refresh.service';
         <router-outlet></router-outlet>
       </main>
     </div>
+    </ng-container>
   `
 })
 export class AppComponent implements OnInit {
@@ -231,6 +253,7 @@ export class AppComponent implements OnInit {
   async ngOnInit(): Promise<void> {
     const isAuthed = await this.auth.checkSession();
     if (isAuthed) {
+      this.refresh.start();
       await this.refresh.read();
     }
   }

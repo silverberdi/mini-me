@@ -9,6 +9,7 @@ export class RefreshService implements OnDestroy {
   private timer: any = null;
   private abortController: AbortController | null = null;
   private generation = 0;
+  private started = false;
 
   // Signals for state
   readonly interval = signal<string>("10"); // "manual", "5", "10", "30"
@@ -60,9 +61,15 @@ export class RefreshService implements OnDestroy {
     window.addEventListener('offline', this.onOffline);
     effect(() => {
       const sec = this.interval();
-      this.setupTimer(sec);
+      if (this.started) this.setupTimer(sec);
     });
+  }
+
+  start(): void {
+    if (this.started) return;
+    this.started = true;
     this.connectEvents();
+    this.setupTimer(this.interval());
   }
 
   setInterval(val: string) {
