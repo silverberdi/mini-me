@@ -78,6 +78,23 @@ _REVIEW_TECHNICAL_FAILURE = "technical_failure"
 _REVIEW_AMBIGUOUS = "ambiguous"
 _REVIEW_STALE = "stale"
 
+# Exact output contract for independent reviews. parse_review_verdict rejects
+# anything that does not match this shape, so the prompt must state it verbatim —
+# field names, severity enum, and the READY_TO_MERGE ⇔ empty-findings invariant —
+# or an API-backed model emits prose-shaped JSON and the review fails closed as
+# invalid_response.
+_REVIEW_VERDICT_SCHEMA_HINT = (
+    "Return exactly one JSON object matching this schema: "
+    '{"verdict":"READY_TO_MERGE|CHANGES_REQUIRED",'
+    '"summary":"brief concrete result",'
+    '"findings":[{"severity":"BLOCKER|MAJOR|MINOR",'
+    '"location":"file or requirement",'
+    '"violated_requirement":"what was violated",'
+    '"expected_correction":"what must change"}]}. '
+    "Use READY_TO_MERGE only when the review is clean and findings is empty; otherwise "
+    "use CHANGES_REQUIRED with at least one concrete finding."
+)
+
 
 def _quarantine_response_content(raw_response: str) -> str:
     """Retain rejected JSON diagnostically while masking sensitive fields."""
@@ -3431,9 +3448,7 @@ class NativeOrchestrationCoordinator:
             f"Design Artifacts:\n{design_text[:2000]}\n\n"
             f"Tasks Artifacts:\n{tasks_text[:1000]}\n\n"
             f"Evaluate architectural soundness, requirement coverage, and absence of overengineering.\n"
-            "Emit exactly one JSON review payload matching ReviewVerdictPayload. Use verdict "
-            "READY_TO_MERGE only with an empty findings list; otherwise use CHANGES_REQUIRED "
-            "with concrete findings."
+            f"{_REVIEW_VERDICT_SCHEMA_HINT}\n"
         )
         model = (
             self._configured_model(uow, project_id, "reviewer") if (uow and project_id) else None
@@ -3666,9 +3681,8 @@ class NativeOrchestrationCoordinator:
             f"You are the independent reviewer agent (read-only). Perform code review on OpenSpec change '{change_name}'.\n\n"
             f"Candidate Diff:\n{diff[:4000]}\n\n"
             f"Evaluate implementation correctness, security, maintainability, and absence of overengineering.\n"
-            "Return exactly one JSON review object with verdict READY_TO_MERGE and empty "
-            "findings only on verified success, otherwise CHANGES_REQUIRED with "
-            "concrete findings and required corrections. Do not use APPROVED prose."
+            f"{_REVIEW_VERDICT_SCHEMA_HINT}\n"
+            "Do not use APPROVED prose."
         )
         model = (
             self._configured_model(uow, project_id, "reviewer") if (uow and project_id) else None

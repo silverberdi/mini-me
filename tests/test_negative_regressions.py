@@ -309,3 +309,20 @@ async def test_negative_pr1_merge_failure_pauses(base_coordinator_env):
     assert res.current_stage == OrchestrationStage.PR1_PENDING
     assert "Failed to merge PR1" in res.message
     assert candidate_wt.exists()
+
+
+def test_review_prompt_embeds_exact_verdict_schema():
+    """The reviewer prompt must state the exact verdict schema parse_review_verdict enforces.
+
+    A previous regression let the reviewer emit prose-shaped JSON (no severity
+    enum, no violated_requirement/expected_correction), which failed closed as
+    invalid_response. Guard that the shared hint is present and complete.
+    """
+    from minime.services.orchestration_coordinator import _REVIEW_VERDICT_SCHEMA_HINT
+
+    assert '"verdict":"READY_TO_MERGE|CHANGES_REQUIRED"' in _REVIEW_VERDICT_SCHEMA_HINT
+    assert '"findings"' in _REVIEW_VERDICT_SCHEMA_HINT
+    assert '"severity":"BLOCKER|MAJOR|MINOR"' in _REVIEW_VERDICT_SCHEMA_HINT
+    assert '"violated_requirement"' in _REVIEW_VERDICT_SCHEMA_HINT
+    assert '"expected_correction"' in _REVIEW_VERDICT_SCHEMA_HINT
+    assert "READY_TO_MERGE only when" in _REVIEW_VERDICT_SCHEMA_HINT
