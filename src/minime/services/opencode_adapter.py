@@ -323,10 +323,10 @@ class OpenCodeAdapter:
             f"using {workflow[0]} (workflow command: {workflow_dispatch_cmd})."
         )
         if request.prompt:
-            if workflow_dispatch_cmd not in request.prompt and workflow[0] not in request.prompt:
-                effective_prompt = f"{workflow_instruction}\n\n{request.prompt}"
-            else:
+            if role == "independent_review" or workflow_dispatch_cmd in request.prompt or workflow[0] in request.prompt:
                 effective_prompt = request.prompt
+            else:
+                effective_prompt = f"{workflow_instruction}\n\n{request.prompt}"
         else:
             effective_prompt = workflow_instruction
 

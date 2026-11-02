@@ -619,7 +619,11 @@ class CliAgentRunner:
                         args=[],
                     )
 
-            operation = workflow.operation if workflow and workflow.operation in {"explore", "propose", "apply", "verify"} else "apply"
+            operation = (
+                workflow.operation
+                if workflow and workflow.operation in {"explore", "propose", "apply", "verify"}
+                else ("verify" if opencode_role == "independent_review" else "apply")
+            )
             candidate_sha = _git_head(Path(worktree_path)) or ""
 
             verified_candidate_author = candidate_author
