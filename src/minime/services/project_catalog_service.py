@@ -9,7 +9,7 @@ from typing import Any
 
 from minime.adapters.openspec import OpenSpecAdapter, OpenSpecConfigurationIncomplete
 from minime.adapters.provider_adapter import get_provider_adapter
-from minime.config import AppConfig, load_config, resolve_cli_invocation
+from minime.config import OPENCODE_DEEPSEEK_MODELS, AppConfig, load_config, resolve_cli_invocation
 
 
 class ProjectCatalogService:
@@ -149,11 +149,13 @@ class ProjectCatalogService:
                 except (OSError, RuntimeError, TimeoutError, ValueError):
                     capabilities = {}
             elif provider_id == "opencode":
+                # OpenCode exposes its own model namespace, not the direct-API
+                # DeepSeek ids (deepseek-chat / deepseek-reasoner are invalid).
+                # Advertise only the identities OpenCode actually serves.
                 capabilities = {
                     "models": {
-                        "deepseek-chat": ["low", "medium", "high"],
-                        "deepseek-reasoner": ["medium", "high"],
-                        "deepseek/deepseek-chat": ["low", "medium", "high"],
+                        model: entry["efforts"]
+                        for model, entry in OPENCODE_DEEPSEEK_MODELS.items()
                     }
                 }
                 capability_status = "OBSERVED_READ_ONLY"

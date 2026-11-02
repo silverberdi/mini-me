@@ -129,6 +129,45 @@ def test_catalog_does_not_fabricate_models_when_discovery_fails(monkeypatch):
     assert catalog["agents"][0]["capability_status"] == "UNAVAILABLE"
 
 
+def test_opencode_catalog_advertises_only_exposed_models(monkeypatch):
+    """OpenCode must advertise its own model namespace, never direct-API ids."""
+    import minime.services.project_catalog_service as catalog_module
+
+    opencode = ProviderConfig(
+        command="opencode",
+        roles=["implementer", "reviewer"],
+        file_edit_roles=["implementer"],
+        read_only_roles=["reviewer"],
+        invocation={
+            "implementer": CliInvocationConfig(args=["run", "{prompt}"]),
+            "reviewer": CliInvocationConfig(args=["run", "{prompt}"]),
+        },
+    )
+    config = AppConfig(providers={"opencode": opencode})
+    monkeypatch.setattr(catalog_module.shutil, "which", lambda _: "/bin/opencode")
+
+    catalog = asyncio.run(ProjectCatalogService(config, _NativeSetup()).agent_catalog())
+
+    assert len(catalog["agents"]) == 1
+    models = catalog["agents"][0]["models"]
+    # Only identities OpenCode actually exposes are advertised.
+    assert "deepseek-reasoner" not in models
+    assert "deepseek-chat" not in models
+    assert "deepseek/deepseek-chat" not in models
+    assert "deepseek-flash" in models
+    assert "deepseek-v4-pro" in models
+    assert models["deepseek-v4-pro"] == ["high", "medium"]
+
+
+def test_opencode_model_alias_translates_direct_api_ids():
+    """deepseek-chat/reasoner must map to OpenCode's exposed identities."""
+    from minime.config import OPENCODE_DEEPSEEK_MODEL_ALIASES
+
+    assert OPENCODE_DEEPSEEK_MODEL_ALIASES["deepseek-chat"] == "deepseek-flash"
+    assert OPENCODE_DEEPSEEK_MODEL_ALIASES["deepseek-reasoner"] == "deepseek-v4-pro"
+    assert "deepseek-garbage" not in OPENCODE_DEEPSEEK_MODEL_ALIASES
+
+
 def test_catalog_distinguishes_incomplete_openspec_configuration(monkeypatch):
     import minime.services.project_catalog_service as catalog_module
     from minime.adapters.openspec import OpenSpecConfigurationIncomplete

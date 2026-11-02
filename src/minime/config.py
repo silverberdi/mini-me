@@ -97,6 +97,25 @@ SUPPORTED_PROVIDER_MODELS: dict[str, dict[str, bool]] = {
     },
 }
 
+# DeepSeek model identities that the OpenCode CLI actually exposes, mapped to
+# their premium flag and the effort levels OpenCode serves. OpenCode does NOT
+# expose the direct-API ids ``deepseek-chat``/``deepseek-reasoner``; it serves
+# its own namespace (``deepseek-flash``, ``deepseek-v4-pro``). A persisted F2
+# profile that still carries a direct-API id must be translated here before
+# dispatch, otherwise the adapter builds an invalid ``--model`` and the review
+# fails. Values are the ONLY identities proven available via OpenCode.
+OPENCODE_DEEPSEEK_MODELS: dict[str, dict[str, object]] = {
+    "deepseek-flash": {"premium": False, "efforts": ["low", "medium", "high"]},
+    "deepseek-v4-pro": {"premium": True, "efforts": ["medium", "high"]},
+}
+
+# Direct-API DeepSeek model id -> OpenCode CLI model id. Only these aliases are
+# honored; anything else is left untouched and will fail closed at dispatch.
+OPENCODE_DEEPSEEK_MODEL_ALIASES: dict[str, str] = {
+    "deepseek-chat": "deepseek-flash",
+    "deepseek-reasoner": "deepseek-v4-pro",
+}
+
 SUPPORTED_PROVIDER_EFFORTS: dict[str, set[str]] = {
     "antigravity": {"low", "medium", "high", "xhigh", "max"},
     "codex": {"low", "medium", "high", "xhigh", "max"},
