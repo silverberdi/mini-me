@@ -1,6 +1,6 @@
 # Reconciliación de documentación, specs y backlog heredados
 
-**Autoridad vigente:** [CONTRATO_RECTOR.md](CONTRATO_RECTOR.md) v1.3, [BACKLOG.md](BACKLOG.md) y [F5_UX_CONTRATO.md](F5_UX_CONTRATO.md). Este documento NO prueba que las implementaciones antiguas ya hayan sido retiradas.
+**Autoridad vigente:** [CONTRATO_RECTOR.md](CONTRATO_RECTOR.md) v2.0 y [F5_UX_CONTRATO.md](F5_UX_CONTRATO.md). Este documento NO prueba que las implementaciones antiguas ya hayan sido retiradas.
 
 ## Cambio de dirección
 La historia 001–022, el backlog de recuperación MM-R01–MM-R10, los tickets N01–N05 y los dossiers respectivos describen trabajo anterior con componentes y políticas que el nuevo contrato puede sustituir. Permanece como evidencia/historia técnica. **No debe tratarse como una segunda ruta vigente de ejecución.** No borrar Issues/PR, worktrees o datos operativos mediante este ajuste documental.
