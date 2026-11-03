@@ -1484,6 +1484,14 @@ class NativeOrchestrationCoordinator:
                     details.pop("proposal_review_escalated", None)
                     details.pop("proposal_review", None)
                     details.pop("proposal_correction", None)
+                    # The revised proposal changes the artifacts, so the prior
+                    # complexity assessment no longer matches. Drop the durable
+                    # one-shot gate so the complexity is re-evaluated (the issue
+                    # scope is unchanged, so it stays high).
+                    details.pop("complexity_attempts", None)
+                    details.pop("complexity_assessment", None)
+                    details.pop("complexity", None)
+                    details.pop("complexity_evidence", None)
                     details["pending_proposal_revision"] = {
                         "clarification": operator_clarification.strip(),
                         "findings": findings,
