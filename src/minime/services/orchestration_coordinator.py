@@ -144,6 +144,27 @@ class GitCommandResult:
 
 
 @dataclass(frozen=True)
+class ApplyOutcome:
+    status: str
+    completed_tasks: tuple[str, ...]
+    pending_tasks: tuple[str, ...]
+    candidate_sha: str | None
+    changed_files: tuple[str, ...]
+    diff_fingerprint: str | None
+    tests_passed: bool | None
+    test_evidence: str
+    error: str | None = None
+    human_question: str | None = None
+    human_options: tuple[str, ...] = ()
+    branch: str | None = None
+    worktree: str | None = None
+    run_id: str | None = None
+
+    def __bool__(self) -> bool:
+        return self.status == "COMPLETE"
+
+
+@dataclass(frozen=True)
 class ComplexityAssessment:
     """Typed, fail-closed result of the thinking-agent complexity stage."""
 
@@ -1713,35 +1734,63 @@ class NativeOrchestrationCoordinator:
             pending_corrections = list(
                 (active_run.stop_details or {}).get("pending_corrections") or []
             )
-            apply_ok = await self._run_apply(
-                worktree_path,
-                implementer_provider,
-                change_name,
-                project_id=project_id,
-                corrections=pending_corrections,
-            )
-            if not apply_ok:
-                # Never loop silently: a failed Apply is a terminal outcome for
-                # this attempt. Escalate to the operator after the governed
-                # correction ceiling so the scheduler stops re-dispatching.
-                attempts = self._record_apply_failure(uow, active_run)
-                ceiling = max(self.max_correction_attempts, 1)
-                if attempts >= ceiling:
-                    return self._escalate_apply_to_human(
-                        uow,
-                        active_run,
-                        "Native Apply failed repeatedly without authoritative evidence; "
-                        f"{attempts} attempts reached the correction ceiling. Worktree preserved "
-                        "for operator review.",
-                    )
-                return OrchestrationCoordinationResult(
-                    status="PAUSED",
+            prior = (active_run.stop_details or {}).get("apply_snapshot")
+            attempts = int((active_run.stop_details or {}).get("apply_total_attempts", self._apply_attempts(active_run)))
+            no_progress = int((active_run.stop_details or {}).get("apply_no_progress", 0))
+            outcome = None
+            policy = {}
+            if hasattr(uow, "projects"):
+                project = uow.projects.get_by_id(project_id)
+                policy = getattr(project, "execution_policy", {}) or {}
+            hard_limit = self._positive_policy_limit(policy, "apply_max_attempts", max(1, min(self.max_correction_attempts, 5)))
+            no_progress_limit = self._positive_policy_limit(policy, "apply_max_no_progress", 2)
+            details = dict(active_run.stop_details or {})
+            details["apply_limits"] = {"max_attempts": hard_limit, "max_no_progress": no_progress_limit}
+            self._persist_run_stop_details(active_run, details)
+            while attempts < hard_limit:
+                outcome = await self._run_apply(
+                    worktree_path, implementer_provider, change_name,
+                    project_id=project_id, corrections=pending_corrections,
+                    recovery_context=self._apply_recovery_context(prior),
                     run_id=active_run.run_id,
-                    current_stage=OrchestrationStage.IMPLEMENTING,
-                    message=(
-                        f"Native Apply failed (attempt {attempts}/{ceiling}); "
-                        "no authoritative evidence. Worktree preserved."
-                    ),
+                )
+                if isinstance(outcome, bool):
+                    outcome = ApplyOutcome("COMPLETE" if outcome else "FAILED", (), (), None, (), None,
+                                           None, "Legacy boolean Apply result; no structured evidence.")
+                attempts += 1
+                if outcome.status == "HUMAN_REQUIRED":
+                    return OrchestrationCoordinationResult(
+                        status="HUMAN_REQUIRED", run_id=active_run.run_id,
+                        current_stage=OrchestrationStage.IMPLEMENTING,
+                        message=outcome.human_question or "OpenSpec Apply requires operator input.",
+                        human_payload={"question": outcome.human_question,
+                                       "options": list(outcome.human_options)},
+                    )
+                if outcome.status == "COMPLETE":
+                    break
+                if prior and self._apply_regressed(prior, outcome):
+                    return self._escalate_apply_to_human(
+                        uow, active_run, "Apply recovery detected candidate regression; automatic retries stopped. Candidate preserved."
+                    )
+                progressed = prior is None or self._apply_made_progress(prior, outcome)
+                if not progressed:
+                    no_progress += 1
+                else:
+                    no_progress = 0
+                prior = self._apply_snapshot(outcome)
+                details = dict(active_run.stop_details or {})
+                details.update(apply_snapshot=prior, apply_total_attempts=attempts,
+                               apply_no_progress=no_progress)
+                active_run.stop_details = details
+                self._persist_run_stop_details(active_run, details)
+                if outcome.status == "FAILED" or no_progress >= no_progress_limit:
+                    break
+            if outcome is None or outcome.status != "COMPLETE":
+                return self._escalate_apply_to_human(
+                    uow, active_run,
+                    f"Native Apply failed or recovery stopped ({outcome.status if outcome is not None else 'NO_RESULT'}); "
+                    f"hard attempt ceiling {hard_limit} reached or recovery halted; "
+                    f"attempts={attempts}/{hard_limit}, no_progress={no_progress}. Candidate preserved.",
                 )
             if pending_corrections or self._apply_attempts(active_run):
                 details = dict(active_run.stop_details or {})
@@ -1755,7 +1804,9 @@ class NativeOrchestrationCoordinator:
             self._update_stage(uow, active_run, OrchestrationStage.RUNNING_TESTS)
 
         if active_run.current_stage == OrchestrationStage.RUNNING_TESTS:
-            tests_ok, test_evidence = await self._run_automated_tests(worktree_path)
+            tests_ok, test_evidence = (outcome.tests_passed, outcome.test_evidence) if outcome else (None, "")
+            if tests_ok is None:
+                tests_ok, test_evidence = await self._run_automated_tests(worktree_path)
             active_run.stop_details["test_evidence"] = test_evidence
             if hasattr(uow, "orchestration_runs"):
                 uow.orchestration_runs.save(active_run)
@@ -2689,6 +2740,52 @@ class NativeOrchestrationCoordinator:
             if hasattr(uow, "commit"):
                 uow.commit()
         return next_count
+
+    @staticmethod
+    def _apply_snapshot(outcome: ApplyOutcome) -> dict[str, Any]:
+        return {"pending": list(outcome.pending_tasks), "completed": list(outcome.completed_tasks),
+                "sha": outcome.candidate_sha, "files": list(outcome.changed_files),
+                "fingerprint": outcome.diff_fingerprint, "tests_passed": outcome.tests_passed,
+                "test_evidence": outcome.test_evidence, "branch": outcome.branch,
+                "worktree": outcome.worktree, "run_id": outcome.run_id}
+
+    @staticmethod
+    def _apply_made_progress(previous: dict[str, Any], current: ApplyOutcome) -> bool:
+        return (len(current.pending_tasks) < len(previous.get("pending", [])) or
+                (current.diff_fingerprint is not None and current.changed_files and
+                 current.diff_fingerprint != previous.get("fingerprint")))
+
+    @staticmethod
+    def _apply_regressed(previous: dict[str, Any], current: ApplyOutcome) -> bool:
+        identity_changed = any((previous.get(key) and value and previous[key] != value)
+                               for key, value in (("branch", current.branch),
+                                                  ("worktree", current.worktree),
+                                                  ("run_id", current.run_id)))
+        files_removed = set(previous.get("files", ())) - set(current.changed_files)
+        tasks_lost = set(previous.get("completed", ())) - set(current.completed_tasks)
+        tests_regressed = previous.get("tests_passed") is True and current.tests_passed is False
+        return identity_changed or bool(files_removed or tasks_lost or tests_regressed)
+
+    @staticmethod
+    def _positive_policy_limit(policy: Any, key: str, default: int) -> int:
+        value = policy.get(key) if isinstance(policy, dict) else None
+        if isinstance(value, int) and not isinstance(value, bool) and value > 0:
+            return min(value, 10)
+        return default
+
+    @staticmethod
+    def _apply_recovery_context(previous: dict[str, Any] | None) -> str:
+        if not previous:
+            return ""
+        return ("\n\nApply recovery context (observed by coordinator):\n"
+                f"Completed tasks: {previous.get('completed', [])}\n"
+                f"Pending tasks: {previous.get('pending', [])}\n"
+                f"Git changed files: {previous.get('files', [])}\n"
+                f"Candidate SHA: {previous.get('sha')}\n"
+                f"Prior test result: {previous.get('tests_passed')}\n"
+                f"Prior test evidence: {previous.get('test_evidence', '')[-3000:]}\n"
+                "Inspect and preserve valid existing work. Mark [x] only tasks supported by observed diff and passing relevant tests. "
+                "Do not redo or discard valid work. This recovery context is separate from reviewer corrections.")
 
     def _escalate_apply_to_human(
         self, uow: Any, run: OrchestrationRun, reason: str
@@ -3971,7 +4068,9 @@ class NativeOrchestrationCoordinator:
         change_name: str,
         project_id: str | None = None,
         corrections: list[dict[str, Any]] | None = None,
-    ) -> bool:
+        recovery_context: str = "",
+        run_id: str | None = None,
+    ) -> ApplyOutcome:
         """Dispatch configured implementer agent to execute official OpenSpec Apply workflow."""
         wf = self.agent_runner.resolve_workflow(
             worktree_path=worktree_path,
@@ -4000,9 +4099,15 @@ class NativeOrchestrationCoordinator:
             f"You are the implementer agent. Execute official OpenSpec Apply for change '{change_name}'.\n"
             f"Workflow command: {wf.dispatch_command}\n\n"
             f"Implement all pending tasks specified in tasks.md, write unit and E2E tests, "
-            f"ensure the test suite passes, and mark completed tasks as [x]."
+            f"ensure the test suite passes, and mark completed tasks as [x] only when coordinator-observed diff and passing relevant tests support completion."
             f"{correction_instruction}"
+            f"{recovery_context}"
         )
+        try:
+            await self._git_run(worktree_path, ["rev-parse", "HEAD"])
+            await self._git_run(worktree_path, ["status", "--porcelain"])
+        except GitOperationError as exc:
+            return ApplyOutcome("FAILED", (), (), None, (), None, None, "", error=str(exc))
         result = await self.agent_runner.run(
             worktree_path=worktree_path,
             prompt_context=prompt,
@@ -4011,17 +4116,41 @@ class NativeOrchestrationCoordinator:
             provider=provider,
             workflow=wf,
         )
-        if not self._execution_is_successful(result):
-            return False
         tasks_path = worktree_path / "openspec" / "changes" / change_name / "tasks.md"
         if not tasks_path.is_file():
-            return False
-        tasks_text = tasks_path.read_text(encoding="utf-8", errors="replace")
-        # A successful CLI exit cannot replace the native Apply task postcondition.
-        # NOT_VERIFIED tasks require human physical evidence and are not part of the
-        # automatable postcondition; they are escalated upstream rather than gating Apply.
-        automated_pending, _ = self._classify_pending_tasks(tasks_text)
-        return not automated_pending
+            return ApplyOutcome("FAILED", (), (), None, (), None, None, "", error="tasks.md missing")
+        tasks_text = tasks_path.read_text(encoding="utf-8", errors="replace") if tasks_path.is_file() else ""
+        pending, _ = self._classify_pending_tasks(tasks_text)
+        completed = re.findall(r"(?m)^\s*-\s*\[x\]\s+([^\n]*)$", tasks_text, re.I)
+        completed_ids = tuple(line.strip().split()[0] for line in completed if line.strip())
+        try:
+            sha = await self._git_run(worktree_path, ["rev-parse", "HEAD"])
+            diff = await self._git_run(worktree_path, ["diff", "--binary", "HEAD"])
+            paths = await self._git_run(worktree_path, ["status", "--porcelain"])
+            branch = await self._git_run(worktree_path, ["branch", "--show-current"])
+        except GitOperationError as exc:
+            return ApplyOutcome("FAILED", completed_ids, tuple(pending), None, (), None, None, "", error=str(exc))
+        sha_text = sha.stdout if hasattr(sha, "stdout") else str(sha)
+        diff_text = diff.stdout if hasattr(diff, "stdout") else str(diff)
+        paths_text = paths.stdout if hasattr(paths, "stdout") else str(paths)
+        branch_text = branch.stdout if hasattr(branch, "stdout") else str(branch)
+        changed_files = tuple(sorted({line[3:].strip() for line in paths_text.splitlines() if len(line) > 3}))
+        diff_ok = getattr(diff, "ok", getattr(diff, "returncode", 0) == 0)
+        digest = hashlib.sha256(diff_text.encode()).hexdigest() if diff_ok and diff_text else None
+        handoff = getattr(result, "workflow_handoff", None)
+        tests_passed, test_evidence = await self._run_automated_tests(worktree_path)
+        if getattr(result, "workflow_handoff_required", False) and handoff and handoff.status == "HUMAN_REQUIRED":
+            return ApplyOutcome("HUMAN_REQUIRED", completed_ids, tuple(pending), sha_text.strip() if getattr(sha, "ok", True) else None,
+                                changed_files, digest, tests_passed, test_evidence,
+                                human_question=handoff.summary, human_options=handoff.pending,
+                                branch=branch_text.strip(), worktree=str(worktree_path), run_id=run_id)
+        successful = self._execution_is_successful(result)
+        ready = successful and not pending
+        status = "COMPLETE" if ready else ("PARTIAL" if successful else "FAILED")
+        error = None if successful else self._review_failure_error(result)
+        return ApplyOutcome(status, completed_ids, tuple(pending), sha_text.strip() if getattr(sha, "ok", True) else None,
+                            changed_files, digest, tests_passed, test_evidence, error=error,
+                            branch=branch_text.strip(), worktree=str(worktree_path), run_id=run_id)
 
     async def _run_automated_tests(self, worktree_path: Path) -> tuple[bool, str]:
         """Execute project automated tests and verify exit code 0."""

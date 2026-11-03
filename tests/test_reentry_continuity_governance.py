@@ -1,3 +1,4 @@
+import subprocess
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock
 
@@ -19,11 +20,17 @@ def base_setup(tmp_path: Path):
 
     candidate_worktree = managed_root / "request-173-gacela-05-ui-self-hosted"
     candidate_worktree.mkdir(parents=True, exist_ok=True)
+    subprocess.run(["git", "init", "-q", str(candidate_worktree)], check=True)
+    subprocess.run(["git", "-C", str(candidate_worktree), "config", "user.email", "test@example.com"], check=True)
+    subprocess.run(["git", "-C", str(candidate_worktree), "config", "user.name", "Test"], check=True)
     change_dir = candidate_worktree / "openspec" / "changes" / "gacela-05-ui-self-hosted"
     change_dir.mkdir(parents=True, exist_ok=True)
     (change_dir / "proposal.md").write_text("# Proposal\nValid proposal")
     (change_dir / "design.md").write_text("# Design\nValid design")
     (change_dir / "tasks.md").write_text("# Tasks\n- [ ] Task 1")
+    (change_dir / "tasks.md").write_text("# Tasks\n- [ ] Task 1")
+    subprocess.run(["git", "-C", str(candidate_worktree), "add", "."], check=True)
+    subprocess.run(["git", "-C", str(candidate_worktree), "commit", "-qm", "seed candidate"], check=True)
 
     uow = InMemoryPersistenceUnitOfWork()
     setup_managed_repository_fixture(
@@ -1238,5 +1245,5 @@ async def test_apply_failure_escalates_after_ceiling(base_setup):
     assert res.current_stage == OrchestrationStage.IMPLEMENTING
     assert "ceiling" in res.message
     updated = uow.orchestration_runs.get_by_id("run-apply-loop")
-    assert updated.stop_details["apply_failure_count"] == 3
+    assert updated.stop_details["apply_total_attempts"] == 3
     assert updated.stop_details["apply_escalated"] is True
