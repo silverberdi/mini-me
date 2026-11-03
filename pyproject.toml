@@ -22,7 +22,6 @@ dependencies = [
     "PyJWT>=2.8.0",
     "cryptography>=42.0.0",
     "pywebpush>=2.5.0",
-    "textual>=0.70.0",
     "dbus-next>=0.2.3; sys_platform == 'linux'",
 ]
 
