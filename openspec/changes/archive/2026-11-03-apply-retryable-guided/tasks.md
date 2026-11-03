@@ -9,6 +9,7 @@
 - [x] 2.1 Implement the three outcome routes: human-required without retry consumption, partial progress retry, and terminal failure escalation.
 - [x] 2.2 Build corrective context from observed state, require evidence-backed `[x]` task marking, preserve valid work, and keep it distinct from reviewer `corrections`.
 - [x] 2.3 Reuse the same Change, branch, worktree, and candidate; select native Continue only when directly resumable, otherwise invoke native Apply.
+  - Implementation note: the recovery path always invokes guided native Apply; native Continue was not implemented because the delta permits it but does not require it.
 - [x] 2.4 Enforce no-progress and hard total attempt limits together with existing correction and budget limits.
 - [x] 2.5 Stop retries on candidate identity changes or detected file, supported-task, or test regression.
 - [x] 2.6 Gate Verify on evidence-backed Apply completion or native readiness.
