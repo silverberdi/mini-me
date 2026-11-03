@@ -27,4 +27,4 @@
 - Seguridad, aislamiento repo, identidad del candidato, presupuesto y decisiones humanas siguen vigentes sin construir un motor de gates superpuestos.
 
 ## Secuencia
-Ver Issues F1–F6 #169–#174, futuras fases F7 [#189](https://github.com/silverberdi/mini-me/issues/189) y F8 [#190](https://github.com/silverberdi/mini-me/issues/190) **disabled**, [BACKLOG.md](BACKLOG.md) y [F5_UX_CONTRATO.md](F5_UX_CONTRATO.md). Un Issue planificado/deshabilitado no es autorización de crear Change, consumir modelos, activar scheduler ni desplegar. R01–R10 son historia, no Changes autorizados por esta dirección.
+Ver Issues F1–F6 #169–#174, futuras fases F7 [#189](https://github.com/silverberdi/mini-me/issues/189) y F8 [#190](https://github.com/silverberdi/mini-me/issues/190) **disabled**, [F5_UX_CONTRATO.md](F5_UX_CONTRATO.md). Un Issue planificado/deshabilitado no es autorización de crear Change, consumir modelos, activar scheduler ni desplegar. R01–R10 son historia, no Changes autorizados por esta dirección.

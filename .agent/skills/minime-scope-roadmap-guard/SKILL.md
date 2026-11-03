@@ -3,7 +3,7 @@ name: minime-scope-roadmap-guard
 description: Keep implementation confined to one vertical-value OpenSpec Change while mandating safe retirement of superseded code within that scope.
 ---
 # Scope and Roadmap Guard — v1
-Read `docs/ROADMAP.md`, `docs/BACKLOG.md`, matching `docs/backlog/MM-Rxx.md`, `docs/ENGINEERING_DISCIPLINE.md` and active OpenSpec `proposal/design/specs/tasks`.
+Read `docs/ROADMAP.md`, matching `docs/backlog/MM-Rxx.md`, `docs/ENGINEERING_DISCIPLINE.md` and active OpenSpec `proposal/design/specs/tasks`.
 
 - Implement **only** the authorized Change; no future-stage features, unrelated dependencies, speculative abstraction/framework, opportunistic refactor or scope shrinking.
 - Do include all backend/UI/DB/provider/skills/tests needed for the **promised vertical value**. A necessary adjacent component is **in scope** when traceable to a SHALL/E2E; if not, stop and request `update`.

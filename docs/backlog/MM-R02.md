@@ -8,7 +8,7 @@ Intake produce proposal/specs/design/tasks por plantillas Python; pueden parecer
 **Después del despliegue:** Al crear una necesidad real en GitHub, mini me obtiene el contexto del proyecto y un agente utiliza `propose` para producir una propuesta multi-spec y DoR verificable; el operador no redacta artefactos ni prompts largos.
 
 ## Contexto y contratos que debe leer el agente
-docs/GITHUB_WORK_MANAGEMENT.md; docs/DOR_DOD.md; docs/BACKLOG.md; Issue N03 #135; src/minime/services/intake_service.py; openspec_generator.py.. `docs/CHANGE_DELIVERY_CONTRACT.md` obliga a G0–G6, matriz de trazabilidad y gates E2E. El agente debe inspeccionar implementación actual, documentos, schema y skills instalados **antes de** proponer arquitectura; hechos heredados de ROADMAP “DELIVERED” deben verificarse.
+docs/GITHUB_WORK_MANAGEMENT.md; docs/DOR_DOD.md; Issue N03 #135; src/minime/services/intake_service.py; openspec_generator.py.. `docs/CHANGE_DELIVERY_CONTRACT.md` obliga a G0–G6, matriz de trazabilidad y gates E2E. El agente debe inspeccionar implementación actual, documentos, schema y skills instalados **antes de** proponer arquitectura; hechos heredados de ROADMAP “DELIVERED” deben verificarse.
 
 ## Specs mínimas obligatorias en el Change OpenSpec
 Las siguientes capacidades deben materializarse como `openspec/changes/intelligent-github-to-openspec-intake/specs/<capability>/spec.md` (el agente decide agrupación razonable y resuelve design). No basta enumerarlas en `tasks.md`.
