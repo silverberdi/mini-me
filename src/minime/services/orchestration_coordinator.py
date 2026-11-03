@@ -2392,6 +2392,19 @@ class NativeOrchestrationCoordinator:
         active_run.stop_outcome = OrchestrationStopOutcome.COMPLETED
         self._update_stage(uow, active_run, OrchestrationStage.COMPLETED)
 
+        # Clean up the managed worktree now that the change is complete and merged.
+        try:
+            cleanup = await self.worktree_manager.remove_clean_worktree_path(
+                worktree_path, active_run.run_id, project_id
+            )
+            if cleanup.outcome != ExternalOutcome.SUCCESS:
+                logger.warning(
+                    f"Worktree cleanup for completed run {active_run.run_id} did not succeed: "
+                    f"{cleanup.reason_code} — {cleanup.provider_detail}"
+                )
+        except Exception as exc:  # cleanup is best-effort; never block completion on it
+            logger.warning(f"Worktree cleanup for completed run {active_run.run_id} failed: {exc}")
+
         # Apply any pending deferred transitions for this project or global pause
         applied_transitions = self._apply_deferred_transitions(uow, project_id)
         if applied_transitions:
@@ -3876,10 +3889,16 @@ class NativeOrchestrationCoordinator:
         )
         prompt = (
             f"You are the independent reviewer agent (read-only). Perform independent review on OpenSpec change '{change_name}'.\n\n"
-            f"Proposal Artifacts:\n{proposal_text[:3000]}\n\n"
-            f"Design Artifacts:\n{design_text[:2000]}\n\n"
-            f"Tasks Artifacts:\n{tasks_text[:1000]}\n\n"
-            f"Evaluate architectural soundness, requirement coverage, and absence of overengineering.\n"
+            f"Proposal Artifacts:\n{proposal_text}\n\n"
+            f"Design Artifacts:\n{design_text}\n\n"
+            f"Tasks Artifacts:\n{tasks_text}\n\n"
+            f"Evaluate architectural soundness, correctness, security, and scope. Flag only "
+            f"substantive defects that would make the change incorrect, unsafe, or out of scope. "
+            f"Do NOT flag documentation completeness, wording, or formatting. A BLOCKER must mean "
+            f"the change cannot be implemented safely at all; a MAJOR must mean a real "
+            f"correctness or security gap; a MINOR is a nit that must not block. Do not re-flag a "
+            f"requirement that is already covered by an existing task; report only findings that "
+            f"are new and material.\n"
             f"{_REVIEW_VERDICT_SCHEMA_HINT}\n"
         )
         model = (
