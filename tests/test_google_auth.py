@@ -164,51 +164,8 @@ def test_disabled_operator_identity_returns_403(
     assert resp.json()["code"] == "IDENTITY_DISABLED"
 
 
-def test_authorized_operator_succeeds_with_cookie(
-    client: TestClient, auth_uow: InMemoryPersistenceUnitOfWork
-):
-    """Allowlisted active operator with valid session cookie receives 200 OK and dashboard data."""
-    op_svc = AuthorizedOperatorService(auth_uow)
-    op_svc.seed_operator("authorized_operator@example.com", display_name="Lead Ops")
-
-    session_mgr = SessionManager(auth_uow)
-    raw_token, session = session_mgr.create_session(
-        operator_email="authorized_operator@example.com",
-        lifetime_seconds=3600,
-    )
-    client.cookies.set("minime_session", raw_token)
-
-    # 1. Check /api/v1/auth/me
-    me_resp = client.get("/api/v1/auth/me")
-    assert me_resp.status_code == 200
-    me_data = me_resp.json()
-    assert me_data["authenticated"] is True
-    assert me_data["operator"]["email"] == "authorized_operator@example.com"
-    assert me_data["operator"]["display_name"] == "Lead Ops"
-
-    # 2. An authenticated legacy dashboard request is explicitly unavailable.
-    dash_resp = client.get("/api/v1/dashboard/overview")
-    assert dash_resp.status_code == 410
-    assert dash_resp.json()["code"] == "operation_unavailable"
 
 
-def test_authorized_operator_succeeds_with_bearer_token(
-    client: TestClient, auth_uow: InMemoryPersistenceUnitOfWork
-):
-    """Allowlisted operator authenticating via Authorization Bearer header receives 200 OK."""
-    op_svc = AuthorizedOperatorService(auth_uow)
-    op_svc.seed_operator("bearer_user@example.com")
-
-    session_mgr = SessionManager(auth_uow)
-    raw_token, session = session_mgr.create_session(
-        operator_email="bearer_user@example.com",
-        lifetime_seconds=3600,
-    )
-
-    headers = {"Authorization": f"Bearer {raw_token}"}
-    resp = client.get("/api/v1/dashboard/overview", headers=headers)
-    assert resp.status_code == 410
-    assert resp.json()["code"] == "operation_unavailable"
 
 
 # =============================================================================

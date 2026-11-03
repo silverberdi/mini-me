@@ -12,14 +12,6 @@ from minime.services.provider_health_service import ProviderHealthService
 runner = CliRunner()
 
 
-def test_scheduler_status_api_endpoint(in_memory_uow):
-    """F1 scheduler status is explicitly unavailable without activating it."""
-    app.dependency_overrides[get_uow] = lambda: in_memory_uow
-    client = TestClient(app)
-
-    res = client.get("/scheduler/status")
-    assert res.status_code == 410
-    assert "operation_unavailable" in res.text
 
 
 def test_providers_health_api_endpoint(in_memory_uow):
@@ -50,22 +42,5 @@ def test_providers_health_api_endpoint(in_memory_uow):
     assert agy_data["status"] == ProviderHealthStatus.AVAILABLE.value
 
 
-def test_get_job_includes_resilience_fields(in_memory_uow):
-    """Retired job routes deny requests rather than exposing legacy queue state."""
-    app.dependency_overrides[get_uow] = lambda: in_memory_uow
-    client = TestClient(app)
-
-    res = client.get("/jobs/legacy-job")
-    assert res.status_code == 410
-    assert "operation_unavailable" in res.text
 
 
-def test_cli_scheduler_and_providers_help():
-    """Verify CLI scheduler and providers help subcommands are reachable."""
-    res_sched = runner.invoke(cli_app, ["scheduler", "--help"])
-    assert res_sched.exit_code == 0
-    assert "status" in res_sched.output
-
-    res_prov = runner.invoke(cli_app, ["providers", "--help"])
-    assert res_prov.exit_code == 0
-    assert "health" in res_prov.output

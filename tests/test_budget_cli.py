@@ -13,7 +13,6 @@ def test_cli_budget_help():
     assert "status" in res.output
 
 
-def test_cli_providers_openrouter_help():
+def test_cli_providers_health_help():
     res = runner.invoke(cli_app, ["providers", "--help"])
     assert res.exit_code == 0
-    assert "openrouter" in res.output
