@@ -192,6 +192,56 @@ async def test_review_verdict_ignores_stderr_and_tool_noise(tmp_path):
     assert not await coordinator._run_code_review(tmp_path, "codex", "change")
 
 
+@pytest.mark.asyncio
+async def test_code_review_prompt_includes_complete_diff_and_convergence_guidance(tmp_path):
+    from unittest.mock import AsyncMock
+
+    coordinator = NativeOrchestrationCoordinator(
+        uow_factory=lambda: None,
+        github_adapter=SimpleNamespace(),
+        worktree_manager=SimpleNamespace(),
+        agent_runner=SimpleNamespace(
+            run=AsyncMock(
+                return_value=AgentExecutionResult(
+                    exit_code=0,
+                    timed_out=False,
+                    stdout=[],
+                    stderr=[],
+                    duration_ms=1,
+                    final_response=(
+                        '{"verdict":"READY_TO_MERGE","summary":"Clean",'
+                        '"findings":[]}'
+                    ),
+                    final_response_status="COMPLETE",
+                )
+            )
+        ),
+    )
+    diff = "diff --git a/module.py b/module.py\n" + "x" * 4_500 + "\nEND_OF_DIFF_SENTINEL"
+    coordinator._git_run = AsyncMock(return_value=SimpleNamespace(stdout=diff))
+
+    result = await coordinator._run_code_review(
+        tmp_path, "codex", "change", candidate_sha="candidate-sha"
+    )
+
+    assert result["status"] == "approved"
+    coordinator._git_run.assert_awaited_once_with(tmp_path, ["diff", "HEAD~1..HEAD"])
+    call = coordinator.agent_runner.run.await_args
+    prompt = call.kwargs["prompt_context"]
+    assert len(diff) > 4_000
+    assert f"Candidate Diff:\n{diff}\n\n" in prompt
+    assert "END_OF_DIFF_SENTINEL" in prompt
+    assert "A BLOCKER means the change cannot be implemented safely at all" in prompt
+    assert "a MAJOR means a real correctness or security gap" in prompt
+    assert "a MINOR is a nit that must not block" in prompt
+    assert "Do not re-flag a requirement that is already covered by an existing task" in prompt
+    assert "Do NOT request wording or formatting changes" in prompt
+    assert '"verdict":"READY_TO_MERGE|CHANGES_REQUIRED"' in prompt
+    assert call.kwargs["role"] == "reviewer"
+    assert call.kwargs["provider"] == "codex"
+    assert call.kwargs["reviewer_identity"] == "codex:reviewer"
+
+
 def test_canonical_explore_verdict_accepts_spaces_and_underscores():
     parse = NativeOrchestrationCoordinator._explore_disposition
     assert parse("READY TO PROPOSE\nSin dudas")[0] == "READY_TO_PROPOSE"

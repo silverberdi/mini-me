@@ -4280,8 +4280,13 @@ class NativeOrchestrationCoordinator:
         diff = diff_result.stdout
         prompt = (
             f"You are the independent reviewer agent (read-only). Perform code review on OpenSpec change '{change_name}'.\n\n"
-            f"Candidate Diff:\n{diff[:4000]}\n\n"
-            f"Evaluate implementation correctness, security, maintainability, and absence of overengineering.\n"
+            f"Candidate Diff:\n{diff}\n\n"
+            f"Evaluate only substantive correctness, security, and scope defects. "
+            f"Do NOT request wording or formatting changes. "
+            f"A BLOCKER means the change cannot be implemented safely at all; a MAJOR means a real "
+            f"correctness or security gap; a MINOR is a nit that must not block. Do not re-flag a "
+            f"requirement that is already covered by an existing task; report only findings that "
+            f"are new and material.\n"
             f"{_REVIEW_VERDICT_SCHEMA_HINT}\n"
             "Do not use APPROVED prose."
         )
