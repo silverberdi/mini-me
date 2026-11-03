@@ -176,6 +176,9 @@ class ProjectAgentProfile(BaseModel):
 
     agent_id: str = Field(min_length=1, max_length=64)
     model_id: str = Field(min_length=1, max_length=128)
+    provider_id: str | None = Field(default=None, min_length=1, max_length=128)
+    harness_id: str | None = Field(default=None, min_length=1, max_length=128)
+    route: str | None = Field(default=None, min_length=1, max_length=128)
     effort: str = Field(min_length=1, max_length=32)
     workflows: list[str] = Field(default_factory=list)
     skills: list[str] = Field(default_factory=list)

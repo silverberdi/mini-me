@@ -405,6 +405,9 @@ export class ProyectosComponent implements OnInit {
     id: string;
     label: string;
     agent: string;
+    provider_id?: string;
+    harness_id?: string;
+    route?: string;
     effort: string;
     group: string;
   }[] = [
@@ -535,12 +538,15 @@ export class ProyectosComponent implements OnInit {
               label = `GPT-OSS 120B — ${effort.toUpperCase()}`;
             }
 
-            parsed.push({
-              id: modelKey,
-              label,
-              agent: providerId,
-              effort,
-              group,
+              parsed.push({
+                id: modelKey,
+                label,
+                agent: providerId,
+                provider_id: providerId === 'opencode' && routes[modelKey] === 'deepseek_direct' ? 'deepseek' : providerId,
+                harness_id: providerId,
+                route: routes[modelKey],
+                effort,
+                group,
             });
           }
         }
@@ -640,23 +646,19 @@ export class ProyectosComponent implements OnInit {
   resolveAgentForModel(modelId: string): string {
     const found = this.availableModels.find(m => m.id === modelId);
     if (found) return found.agent;
-    if (modelId.includes('deepseek')) return 'opencode';
-    if (modelId.includes('gemini') || modelId.includes('claude') || modelId.includes('oss')) return 'antigravity';
-    return 'codex';
+    const legacyRoutes: Record<string, string> = {
+      'deepseek-chat': 'deepseek',
+      'deepseek-reasoner': 'openrouter',
+      'deepseek-flash': 'deepseek',
+      'deepseek-v4-pro': 'deepseek',
+    };
+    return legacyRoutes[modelId] || '';
   }
 
   private buildProfile(role: string, modelId: string) {
     const found = this.availableModels.find(m => m.id === modelId);
     let agent_id = found?.agent;
-    if (!agent_id) {
-      if (modelId.includes('deepseek')) {
-        agent_id = 'opencode';
-      } else if (modelId.includes('gemini') || modelId.includes('claude') || modelId.includes('oss')) {
-        agent_id = 'antigravity';
-      } else {
-        agent_id = 'codex';
-      }
-    }
+    if (!agent_id) agent_id = this.resolveAgentForModel(modelId);
 
     let effort = 'medium';
     if (modelId.endsWith('-high')) effort = 'high';
@@ -676,7 +678,7 @@ export class ProyectosComponent implements OnInit {
         workflows = ['/opsx-apply', '/opsx-update'];
       }
       skills = [];
-    } else {
+    } else if (agent_id) {
       if (role === 'independent_review') {
         workflows = ['$openspec-verify-change'];
         skills = ['openspec-verify-change'];
@@ -687,11 +689,19 @@ export class ProyectosComponent implements OnInit {
         workflows = ['$openspec-apply-change', '$openspec-update-change'];
         skills = ['openspec-apply-change', 'openspec-update-change'];
       }
+    } else {
+      // Unknown identifiers remain invalid; the backend validates the exact
+      // canonical provider/harness/model identity before persistence.
+      workflows = [];
+      skills = [];
     }
 
     return {
       agent_id,
       model_id: modelId,
+      provider_id: found?.provider_id || (agent_id === 'opencode' && modelId.startsWith('deepseek/') ? 'deepseek' : agent_id),
+      harness_id: found?.harness_id || agent_id,
+      route: found?.route,
       effort,
       workflows,
       skills,

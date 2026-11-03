@@ -1,6 +1,9 @@
 export interface ProjectAgentProfile {
   agent_id: string;
   model_id: string;
+  provider_id?: string;
+  harness_id?: string;
+  route?: string;
   effort: string;
   workflows?: string[];
   skills?: string[];
