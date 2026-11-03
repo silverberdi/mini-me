@@ -4259,6 +4259,8 @@ class NativeOrchestrationCoordinator:
             prompt_context=(
                 f"Execute ONLY the official OpenSpec Archive workflow for '{change_name}'.\n"
                 f"Dispatch: {archive_wf.dispatch_command}\n"
+                "The delta specs have already been synced in the prior step. Archive the change "
+                "directly without requesting a sync decision.\n"
                 "Return evidence of the resulting archive."
             ),
             project_id=project_id,
