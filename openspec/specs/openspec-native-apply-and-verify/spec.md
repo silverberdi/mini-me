@@ -90,7 +90,7 @@ Upon successful completion of OpenSpec Verify, the system SHALL evaluate the cha
 - **AND** schedules independent code review by the distinct review agent.
 
 ### Requirement: Independent Implementation Code Review for High Complexity
-For high-complexity changes, the configured independent reviewer agent SHALL receive a read-only prompt containing the Request, approved proposal, specifications, code, diff, and test evidence, SHALL NOT modify code or execute OpenSpec workflows, and SHALL evaluate requirement fulfillment, functional correctness, security, maintainability, and absence of overengineering. Python coordinator code SHALL NOT return static `True` stubs.
+For high-complexity changes, the configured independent reviewer agent SHALL receive a read-only prompt containing the Request, approved proposal, specifications, code, the complete candidate diff without truncation, and test evidence. The reviewer SHALL NOT modify code or execute OpenSpec workflows, and SHALL evaluate requirement fulfillment, functional correctness, security, and scope. The review prompt SHALL require findings to use these severities: BLOCKER means the change cannot be implemented safely; MAJOR means a real correctness or security gap; MINOR means a non-blocking nit. The reviewer SHALL focus on new, material defects, SHALL NOT re-flag requirements already covered, and SHALL NOT request wording or formatting changes. Python coordinator code SHALL NOT return static `True` stubs.
 
 #### Scenario: Independent reviewer approves implementation with structured verdict
 - **GIVEN** a high-complexity change in `READY FOR INDEPENDENT REVIEW`
@@ -106,6 +106,18 @@ For high-complexity changes, the configured independent reviewer agent SHALL rec
 - **THEN** the reviewer emits a CHANGES REQUESTED verdict with specific, actionable findings
 - **AND** mini me routes the change back to the implementer agent via Apply correction prompt
 - **AND** requires green test execution and OpenSpec Verify re-check before re-submitting to the reviewer.
+
+#### Scenario: Reviewer receives the complete candidate diff
+- **GIVEN** a high-complexity candidate whose diff exceeds 4,000 characters
+- **WHEN** the independent code review prompt is prepared
+- **THEN** the prompt includes the complete candidate diff without truncation.
+
+#### Scenario: Code review findings converge on substantive defects
+- **GIVEN** a high-complexity candidate under independent code review
+- **WHEN** the reviewer evaluates its requirements, implementation, and complete diff
+- **THEN** it reports only new, material correctness, security, or scope defects
+- **AND** assigns BLOCKER, MAJOR, or non-blocking MINOR according to the stated severity definitions
+- **AND** does not re-flag requirements already covered or request wording or formatting changes.
 
 ### Requirement: Guided Recovery of Partial OpenSpec Apply
 When native Apply leaves automatic tasks incomplete without a terminal failure or human-required question, the system SHALL evaluate recovery from coordinator-observed evidence and, when progress is observable, retry the native workflow on the same Change, branch, worktree, and candidate. The structured outcome SHALL include completed and pending automatic tasks, candidate SHA/fingerprint, errors, blockers, and original human-required questions and options. Git SHALL provide changed-file and diff evidence, and the coordinator SHALL provide test results; agent self-report alone SHALL NOT establish task completion. A task may be marked `[x]` only when observed diff and passing relevant tests support completion. Recovery instructions SHALL describe observed prior work and pending work, direct the agent to mark supported completed tasks and preserve valid work, and remain distinct from reviewer findings supplied via `corrections`. Native Continue SHALL be used only when the workflow permits direct resumption. Retries SHALL stop at configured no-progress and hard total-attempt limits, respecting correction and budget limits, and SHALL stop fail-closed on worktree, branch, or run identity change or observed regression. Verify SHALL run only after evidence-backed completion or native readiness.
