@@ -401,6 +401,9 @@ class CliInvocationProfile:
     prompt_transport: str
     model: str | None = None
     effort: str | None = None
+    canonical_provider_id: str | None = None
+    harness_id: str | None = None
+    route: str | None = None
 
 
 @dataclass(frozen=True)

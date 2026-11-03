@@ -8,7 +8,7 @@ import json
 import os
 import re
 import shutil
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any
 
@@ -276,18 +276,25 @@ class CliAgentRunner:
                 raw = raw.model_dump()
             if not isinstance(raw, dict):
                 raise ValueError(f"Project profile '{profile_name}' is missing or invalid.")
-            provider = str(raw.get("agent_id") or "").strip().lower()
-            if not provider:
+            harness = str(raw.get("harness_id") or raw.get("agent_id") or "").strip().lower()
+            canonical_provider = str(raw.get("provider_id") or harness).strip().lower()
+            if not harness:
                 raise ValueError(
                     f"Project profile '{profile_name}' has no verified agent identity."
                 )
-            provider = "antigravity" if provider == "agy" else provider
+            provider = "antigravity" if harness == "agy" else harness
             profile = resolve_cli_invocation(
                 provider,
                 role,
                 config or load_config(),
                 model=str(raw.get("model_id") or "").strip() or None,
                 effort=str(raw.get("effort") or "").strip() or None,
+            )
+            profile = replace(
+                profile,
+                canonical_provider_id=canonical_provider,
+                harness_id=harness,
+                route=str(raw.get("route") or "").strip() or None,
             )
             resolved[(profile_name, provider)] = profile
         return cls(

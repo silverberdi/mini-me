@@ -608,7 +608,7 @@ async def test_agent_runner_dispatches_opencode_independent_review_authorized(tm
     from minime.services.agent_runner import CliAgentRunner
 
     _ = _git_worktree(tmp_path)
-    skill_dir = tmp_path / ".agents" / "skills" / "openspec-apply-change"
+    skill_dir = tmp_path / ".agents" / "skills" / "openspec-verify-change"
     skill_dir.mkdir(parents=True, exist_ok=True)
     (skill_dir / "SKILL.md").write_text("# Skill\n")
 

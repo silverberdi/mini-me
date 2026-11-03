@@ -54,6 +54,7 @@ from minime.db.models import (
     ProjectModel,
     ProviderEfficiencyMetricsModel,
     ProviderHealthModel,
+    ProviderModelRegistryModel,
     PushSubscriptionModel,
     RecoveryClaimModel,
     RecoveryDecisionModel,
@@ -5620,6 +5621,29 @@ class PostgresPushSubscriptionRepository(PushSubscriptionRepositoryInterface):
         return False
 
 
+class PostgresProviderModelRegistryRepository:
+    """Persistence adapter kept separate from project connections and secrets."""
+
+    def __init__(self, session: Session):
+        from minime.services.provider_registry import ProviderModelRepository
+        self._delegate = ProviderModelRepository(session)
+
+    def get(self, provider_id: str, harness_id: str, model_id: str):
+        return self._delegate.get(provider_id, harness_id, model_id)
+
+    def list(self):
+        return self._delegate.list()
+
+    def upsert_observation(self, observation):
+        return self._delegate.upsert_observation(observation)
+
+    def record_harness_diagnostic(self, harness_id, result):
+        return self._delegate.record_harness_diagnostic(harness_id, result)
+
+    def upsert_custom(self, payload):
+        return self._delegate.upsert_custom(payload)
+
+
 class PostgresPersistenceUnitOfWork(PersistenceUnitOfWork):
     """Encapsulates a database session for atomic operations across repositories."""
 
@@ -5677,6 +5701,7 @@ class PostgresPersistenceUnitOfWork(PersistenceUnitOfWork):
         self.claims = PostgresRecoveryClaimRepository(session)
         self.recovery_decisions = PostgresRecoveryDecisionRepository(session)
         self.external_action_attempts = PostgresExternalActionAttemptRepository(session)
+        self.provider_model_registry = PostgresProviderModelRegistryRepository(session)
 
     def commit(self) -> None:
         self.session.commit()

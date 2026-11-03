@@ -76,6 +76,14 @@ from minime.services.greenfield_bootstrap import (
     GreenfieldBootstrapError,
 )
 from minime.services.project_catalog_service import ProjectCatalogService
+from minime.services.provider_registry import (
+    CanonicalProfileResolver,
+    CustomModelRequest,
+    SafeCliHarness,
+    catalog_payload,
+    classify_discovered_model,
+    reject_secret_payload,
+)
 from minime.services.project_connection_service import ProjectConnectionService
 from minime.services.project_service import ProjectService
 from minime.services.provider_health_service import ProviderHealthService
@@ -470,6 +478,104 @@ def get_current_operator(
 AuthenticatedOperatorDep = Annotated[AuthorizedOperator, Depends(get_current_operator)]
 
 
+def _validate_live_canonical_profiles(profiles: dict[str, Any], uow: Any) -> None:
+    """Validate new canonical selections before any project write or dispatch."""
+    data_by_name = {
+        name: profile.model_dump() if hasattr(profile, "model_dump") else dict(profile)
+        for name, profile in profiles.items()
+    }
+    canonical_selected = any(
+        data.get("provider_id") is not None or data.get("harness_id") is not None
+        for data in data_by_name.values()
+    )
+    if not canonical_selected:
+        return
+    missing = [
+        name for name, data in data_by_name.items()
+        if not data.get("provider_id") or not data.get("harness_id")
+    ]
+    if missing:
+        raise ValueError(
+            "Canonical provider and harness are required for every role: "
+            + ", ".join(sorted(missing))
+        )
+    selections = {}
+    role_names = {"thinking": "thinker", "execution": "implementer", "independent_review": "reviewer", "fallback": "backup"}
+    for name, data in data_by_name.items():
+        selections[role_names[name]] = {
+            "provider_id": data.get("provider_id") or data.get("agent_id"),
+            "harness_id": data.get("harness_id") or data.get("agent_id"),
+            "canonical_model_id": data.get("model_id"),
+            "effort": data.get("effort"),
+            "route": data.get("route"),
+        }
+    CanonicalProfileResolver(uow.provider_model_registry).resolve_roles(selections)
+
+
+@app.get("/api/v1/admin/providers/catalog", tags=["admin-providers"])
+def administrative_provider_catalog(
+    _operator: AuthenticatedOperatorDep, uow: UowDep
+) -> dict[str, Any]:
+    """Return the durable non-secret provider/model catalog."""
+    return catalog_payload(uow.provider_model_registry.list())
+
+
+@app.post("/api/v1/admin/providers/models", status_code=status.HTTP_200_OK, tags=["admin-providers"])
+def administrative_custom_model(
+    payload: CustomModelRequest,
+    _operator: AuthenticatedOperatorDep,
+    uow: UowDep,
+) -> dict[str, Any]:
+    """Create or update one custom route with optimistic versioning."""
+    try:
+        reject_secret_payload(payload.model_dump())
+        row = uow.provider_model_registry.upsert_custom(payload)
+        uow.flush()
+        result = catalog_payload([row])["models"][0]
+        uow.commit()
+        return result
+    except ValueError as exc:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
+
+
+@app.post("/api/v1/admin/providers/refresh", tags=["admin-providers"])
+async def refresh_administrative_provider_catalog(
+    _operator: AuthenticatedOperatorDep, uow: UowDep
+) -> dict[str, Any]:
+    """Run bounded, read-only configured harness discovery; never dispatches work."""
+    results: list[dict[str, Any]] = []
+    config = load_config()
+    for harness_id in ("opencode", "ollama"):
+        provider = config.providers.get(harness_id)
+        executable = (provider.command if provider else None) or harness_id
+        credential_env = provider.api_key_env if provider else None
+        result = await SafeCliHarness(
+            harness_id,
+            executable,
+            credential_env=credential_env,
+        ).inspect()
+        uow.provider_model_registry.record_harness_diagnostic(harness_id, result)
+        results.append({"harness_id": result.harness_id, "status": result.status, "code": result.code, "summary": result.summary})
+        for model_id in result.models:
+            provider_id, canonical_harness, route = classify_discovered_model(harness_id, model_id)
+            uow.provider_model_registry.upsert_observation({
+                "provider_id": provider_id,
+                "harness_id": canonical_harness,
+                "canonical_model_id": model_id,
+                "origin": "discovered",
+                "capabilities": {"model_route": route},
+                "discovery_status": "available",
+                "diagnostic_code": result.code,
+                "diagnostic_summary": result.summary,
+                "observed_cli_version": result.cli_version,
+                "last_observed_at": datetime.now(UTC),
+            })
+    uow.flush()
+    response = {"results": results, "catalog": catalog_payload(uow.provider_model_registry.list())}
+    uow.commit()
+    return response
+
+
 @app.get("/api/v1/catalogs/providers", tags=["catalogs"])
 def project_provider_catalog(_operator: AuthenticatedOperatorDep) -> list[dict[str, Any]]:
     """Return provider metadata only; project connections and secrets are never included."""
@@ -510,6 +616,7 @@ async def create_project_configuration(
 ) -> dict[str, Any]:
     """Create a configuration-only Brownfield registration; Greenfield needs ZIP bootstrap."""
     try:
+        _validate_live_canonical_profiles(configuration.agent_profiles, uow)
         await ProjectCatalogService().validate_project_profiles(configuration.agent_profiles)
         service = ProjectService(uow)
         return service.public_project_payload(service.create_configured_project(configuration))
@@ -542,6 +649,7 @@ async def bootstrap_greenfield_project(
         if not isinstance(encoded_archive, str):
             raise ValueError("context_zip_base64 is required")
         archive = base64.b64decode(encoded_archive, validate=True)
+        _validate_live_canonical_profiles(configuration.agent_profiles, uow)
         await ProjectCatalogService().validate_project_profiles(configuration.agent_profiles)
         result = await run_in_threadpool(
             _run_greenfield_bootstrap_in_session,
@@ -566,6 +674,7 @@ async def update_project_configuration(
         if service.get_project(project_id) is None:
             raise ValueError(f"Project '{project_id}' not found")
         if patch.agent_profiles is not None:
+            _validate_live_canonical_profiles(patch.agent_profiles, uow)
             workspace_root = service.verified_managed_workspace_root(project_id)
             binding = uow.project_managed_repository_bindings.get_by_project_id(project_id)
             if binding is not None and workspace_root is None:
@@ -838,8 +947,9 @@ def activate_project(
 ) -> dict[str, Any]:
     try:
         service = ProjectService(uow)
+        service.set_lifecycle(project_id, active=True)
         service.resume_project(project_id)
-        return service.public_project_payload(service.set_lifecycle(project_id, active=True))
+        return service.public_project_payload(service.get_project(project_id))
     except ValueError as exc:
         message = str(exc)
         code = (
@@ -3030,4 +3140,3 @@ def get_static_root_file(file_name: str) -> Response:
                 headers = {"Cache-Control": "no-cache, no-store, must-revalidate"}
             return FileResponse(target, media_type=media_type, headers=headers)
     raise HTTPException(status_code=404)
-
