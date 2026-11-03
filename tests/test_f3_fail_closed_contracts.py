@@ -1,5 +1,6 @@
 """Focused regression coverage for the F3 audit corrections."""
 
+import subprocess
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
@@ -7,7 +8,7 @@ from unittest.mock import AsyncMock
 import pytest
 
 from minime.services.agent_runner import AgentExecutionResult
-from minime.services.orchestration_coordinator import NativeOrchestrationCoordinator
+from minime.services.orchestration_coordinator import ApplyOutcome, NativeOrchestrationCoordinator
 
 
 class ScriptedRunner:
@@ -31,6 +32,16 @@ class ScriptedRunner:
 
 
 def coordinator(tmp_path: Path, runner: ScriptedRunner) -> NativeOrchestrationCoordinator:
+    if not (tmp_path / ".git").exists():
+        subprocess.run(["git", "init", "-q", str(tmp_path)], check=True)
+    subprocess.run(["git", "-C", str(tmp_path), "config", "user.email", "test@example.com"], check=True)
+    subprocess.run(["git", "-C", str(tmp_path), "config", "user.name", "Test"], check=True)
+    seed = tmp_path / ".test-seed"
+    seed.write_text("seed")
+    subprocess.run(["git", "-C", str(tmp_path), "add", ".test-seed"], check=True)
+    if subprocess.run(["git", "-C", str(tmp_path), "rev-parse", "HEAD"], capture_output=True).returncode:
+        subprocess.run(["git", "-C", str(tmp_path), "commit", "-qm", "seed"], check=True)
+    (tmp_path / "test_seed.py").write_text("def test_seed():\n    assert True\n")
     return NativeOrchestrationCoordinator(
         uow_factory=lambda: None,
         github_adapter=SimpleNamespace(),
@@ -326,6 +337,7 @@ async def test_apply_and_sync_fail_closed_on_agent_error(tmp_path: Path):
 @pytest.mark.asyncio
 async def test_pytest_exit_five_is_not_pass(tmp_path: Path):
     c = coordinator(tmp_path, ScriptedRunner("unused"))
+    (tmp_path / "test_seed.py").unlink()
     ok, evidence = await c._run_automated_tests(tmp_path)
     assert not ok
     assert "no tests" in evidence.lower() or "collected" in evidence.lower()
@@ -360,6 +372,54 @@ def test_classify_pending_tasks_splits_not_verified():
     automated, not_verified = NativeOrchestrationCoordinator._classify_pending_tasks(tasks)
     assert automated == ["2.1"]
     assert not_verified == ["3.1", "3.2"]
+
+
+def test_apply_recovery_progress_uses_pending_count_or_diff_fingerprint():
+    previous = {"pending": ["1.1", "1.2"], "fingerprint": "old"}
+    fewer_tasks = ApplyOutcome("PARTIAL", ("1.1",), ("1.2",), "sha-1", (), None, False, "red")
+    changed_diff = ApplyOutcome("PARTIAL", (), ("1.1", "1.2"), "sha-2", ("src/a.py",), "new", False, "red")
+    no_progress = ApplyOutcome("PARTIAL", (), ("1.1", "1.2"), "sha-1", (), "old", False, "red")
+
+    assert NativeOrchestrationCoordinator._apply_made_progress(previous, fewer_tasks)
+    assert NativeOrchestrationCoordinator._apply_made_progress(previous, changed_diff)
+    assert not NativeOrchestrationCoordinator._apply_made_progress(previous, no_progress)
+
+    context = NativeOrchestrationCoordinator._apply_recovery_context(
+        NativeOrchestrationCoordinator._apply_snapshot(changed_diff)
+    )
+    assert "Git changed files: ['src/a.py']" in context
+    assert "Mark [x]" in context
+
+
+def test_apply_regression_guard_detects_identity_files_tasks_and_test_loss():
+    previous = {"branch": "request-259", "worktree": "/candidate", "run_id": "run-1",
+                "files": ["src/a.py", "src/b.py"], "completed": ["1.1", "1.2"],
+                "tests_passed": True}
+    same = ApplyOutcome("PARTIAL", ("1.1", "1.2"), ("1.3",), "sha", ("src/a.py", "src/b.py"),
+                        "digest", True, "ok", branch="request-259", worktree="/candidate", run_id="run-1")
+    changed_branch = ApplyOutcome("PARTIAL", same.completed_tasks, same.pending_tasks, "sha", same.changed_files,
+                                  "digest", True, "ok", branch="other", worktree="/candidate", run_id="run-1")
+    missing_file = ApplyOutcome("PARTIAL", same.completed_tasks, same.pending_tasks, "sha", ("src/a.py",),
+                                "digest", True, "ok", branch="request-259", worktree="/candidate", run_id="run-1")
+    failing_tests = ApplyOutcome("PARTIAL", same.completed_tasks, same.pending_tasks, "sha", same.changed_files,
+                                 "digest", False, "failed", branch="request-259", worktree="/candidate", run_id="run-1")
+
+    assert not NativeOrchestrationCoordinator._apply_regressed(previous, same)
+    assert NativeOrchestrationCoordinator._apply_regressed(previous, changed_branch)
+    assert NativeOrchestrationCoordinator._apply_regressed(previous, missing_file)
+    assert NativeOrchestrationCoordinator._apply_regressed(previous, failing_tests)
+
+
+def test_apply_retry_limits_are_persistable_and_bounded():
+    assert NativeOrchestrationCoordinator._positive_policy_limit(
+        {"apply_max_attempts": 4}, "apply_max_attempts", 3
+    ) == 4
+    assert NativeOrchestrationCoordinator._positive_policy_limit(
+        {"apply_max_attempts": 100}, "apply_max_attempts", 3
+    ) == 10
+    assert NativeOrchestrationCoordinator._positive_policy_limit(
+        {"apply_max_attempts": 0}, "apply_max_attempts", 3
+    ) == 3
 
 
 @pytest.mark.asyncio
