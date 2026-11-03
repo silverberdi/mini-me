@@ -5,7 +5,6 @@ from __future__ import annotations
 import asyncio
 import json
 from pathlib import Path
-from typing import NoReturn
 
 import typer
 import uvicorn
@@ -18,7 +17,6 @@ from minime.logging import configure_logging
 from minime.services.budget_service import BudgetService
 from minime.services.context_discovery_service import ContextDiscoveryService
 from minime.services.greenfield_bootstrap import GreenfieldBootstrapCoordinator
-from minime.services.legacy_unavailable import unavailable_payload
 from minime.services.project_catalog_service import ProjectCatalogService
 from minime.services.project_connection_service import ProjectConnectionService
 from minime.services.project_service import ProjectService
@@ -50,11 +48,6 @@ app.add_typer(orchestrate_app, name="orchestrate")
 app.add_typer(action_app, name="action")
 app.add_typer(providers_app, name="providers")
 app.add_typer(budget_app, name="budget")
-
-
-def _unavailable(operation: str, phase: str = "F3") -> NoReturn:
-    typer.echo(json.dumps(unavailable_payload(operation, phase)))
-    raise typer.Exit(code=2)
 
 
 @app.callback()
@@ -421,11 +414,6 @@ def providers_health_cmd(json_output: bool = typer.Option(False, "--json")) -> N
             typer.echo(f"  Retry After: {capacity.retry_after_seconds}s")
 
 
-@providers_app.command("openrouter")
-def providers_openrouter_cmd() -> NoReturn:
-    _unavailable("legacy_openrouter_dashboard", "F6")
-
-
 @budget_app.command("status")
 def budget_status_cmd(project_id: str | None = typer.Option(None, "--project-id")) -> None:
     """Inspect retained budget records without reserving or spending."""
@@ -619,46 +607,6 @@ def request_complete_cmd(
             }))
         else:
             typer.echo(f"Run {run.run_id} ({run.change_name}) closed as COMPLETED.")
-
-
-@app.command("run")
-def run_legacy() -> NoReturn:
-    _unavailable("legacy_execution")
-
-
-@app.command("readiness")
-def readiness_legacy() -> NoReturn:
-    _unavailable("legacy_readiness", "F2")
-
-
-@app.command("discover")
-def discover_legacy() -> NoReturn:
-    _unavailable("legacy_discovery", "F2")
-
-
-@app.command("tui")
-def tui_legacy() -> NoReturn:
-    _unavailable("legacy_tui", "F5")
-
-
-def _legacy_group_command(operation: str, phase: str = "F3"):
-    def command(
-        json_output: bool = typer.Option(False, "--json", help="Emit the unavailable result as JSON"),
-    ) -> NoReturn:
-        del json_output
-        return _unavailable(operation, phase)
-
-    return command
-
-
-for _group, _operation, _commands in (
-    (scheduler_app, "legacy_scheduler", ("status", "tick")),
-    (queue_app, "legacy_queue", ("list", "explain")),
-    (orchestrate_app, "legacy_orchestration", ("start", "resume", "status", "list", "cancel", "retry", "reassign")),
-    (action_app, "legacy_control_plane", ("list", "execute", "history")),
-):
-    for _command_name in _commands:
-        _group.command(_command_name)(_legacy_group_command(_operation))
 
 
 @scheduler_app.command("run")

@@ -109,13 +109,6 @@ def test_openrouter_status_get_uses_no_write_locks(lock_monitoring_client):
     assert len(lock_queries) == 0, f"FOR UPDATE queries executed: {lock_queries}"
 
 
-def test_retired_scheduler_status_is_denied_without_write_locks(lock_monitoring_client):
-    client, _, lock_queries, _ = lock_monitoring_client
-    lock_queries.clear()
-
-    response = client.get("/scheduler/status")
-    assert response.status_code == 410
-    assert len(lock_queries) == 0, f"FOR UPDATE queries executed: {lock_queries}"
 
 
 def test_providers_health_get_uses_no_write_locks(lock_monitoring_client):
@@ -127,28 +120,8 @@ def test_providers_health_get_uses_no_write_locks(lock_monitoring_client):
     assert len(lock_queries) == 0, f"FOR UPDATE queries executed: {lock_queries}"
 
 
-def test_dashboard_queries_get_uses_no_write_locks(lock_monitoring_client):
-    client, _, lock_queries, _ = lock_monitoring_client
-    lock_queries.clear()
-
-    r1 = client.get("/dashboard")
-    assert r1.status_code == 200
-    assert len(lock_queries) == 0, f"FOR UPDATE queries executed: {lock_queries}"
-
-    r2 = client.get("/api/v1/dashboard/overview")
-    assert r2.status_code == 410
-    assert len(lock_queries) == 0, f"FOR UPDATE queries executed: {lock_queries}"
 
 
-def test_retired_readiness_is_denied_without_write_locks(lock_monitoring_client):
-    client, _, lock_queries, tmp_root = lock_monitoring_client
-    lock_queries.clear()
-
-    response = client.get(
-        f"/projects/p-lock-test/changes/sample-change/readiness?project_root={tmp_root}"
-    )
-    assert response.status_code == 410
-    assert len(lock_queries) == 0, f"FOR UPDATE queries executed: {lock_queries}"
 
 
 def test_write_lock_instrumentation_spy_detects_command_locking(lock_monitoring_client):
