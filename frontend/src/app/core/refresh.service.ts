@@ -186,6 +186,11 @@ export class RefreshService implements OnDestroy {
     this.events.addEventListener('run.transition', refresh);
     this.events.addEventListener('run.accepted', refresh);
     this.events.addEventListener('run.failed', refresh);
+    this.events.addEventListener('run.gate_acknowledged', refresh);
+    this.events.addEventListener('project.pause_changed', refresh);
+    this.events.addEventListener('request.created', refresh);
+    this.events.addEventListener('request.deactivated', refresh);
+    this.events.addEventListener('request.reactivated', refresh);
     this.events.addEventListener('quota.update', (event: MessageEvent) => {
       try { this.quotas.set(JSON.parse(event.data).providers || []); } catch { /* polling repairs malformed events */ }
     });

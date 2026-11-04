@@ -16,7 +16,7 @@ from typing import Annotated, Any, Generator
 from urllib.parse import urlparse
 from uuid import uuid4
 
-from fastapi import Depends, FastAPI, HTTPException, Query, Request, status
+from fastapi import BackgroundTasks, Depends, FastAPI, HTTPException, Query, Request, status
 from fastapi.concurrency import run_in_threadpool
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import (
@@ -846,6 +846,7 @@ def pause_project(
     project_id: str,
     _operator: AuthenticatedOperatorDep,
     uow: UowDep,
+    background_tasks: BackgroundTasks,
     defer_if_active: bool = Query(True, description="Defer pause if an active run is in progress"),
 ) -> dict[str, Any]:
     try:
@@ -860,21 +861,42 @@ def pause_project(
             has_active_run = any(getattr(r, "is_active", False) for r in runs)
 
         if has_active_run and defer_if_active:
-            return service.pause_project(project_id, defer_if_active=True)
+            result = service.pause_project(project_id, defer_if_active=True)
+            background_tasks.add_task(
+                event_broker.publish,
+                "project.pause_changed",
+                {"scope": "project", "project_id": project_id},
+            )
+            return result
 
         service.pause_project(project_id, defer_if_active=False)
-        return service.public_project_payload(service.set_lifecycle(project_id, active=False))
+        result = service.public_project_payload(service.set_lifecycle(project_id, active=False))
+        background_tasks.add_task(
+            event_broker.publish,
+            "project.pause_changed",
+            {"scope": "project", "project_id": project_id},
+        )
+        return result
     except ValueError as exc:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
 
 
 @app.post("/api/v1/projects/{project_id}/resume", tags=["projects"])
 def resume_project(
-    project_id: str, _operator: AuthenticatedOperatorDep, uow: UowDep
+    project_id: str,
+    _operator: AuthenticatedOperatorDep,
+    uow: UowDep,
+    background_tasks: BackgroundTasks,
 ) -> dict[str, Any]:
     try:
         service = ProjectService(uow)
-        return service.resume_project(project_id)
+        result = service.resume_project(project_id)
+        background_tasks.add_task(
+            event_broker.publish,
+            "project.pause_changed",
+            {"scope": "project", "project_id": project_id},
+        )
+        return result
     except ValueError as exc:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
 
@@ -883,18 +905,33 @@ def resume_project(
 def pause_system(
     _operator: AuthenticatedOperatorDep,
     uow: UowDep,
+    background_tasks: BackgroundTasks,
     defer_if_active: bool = Query(True, description="Defer pause if an active run is in progress"),
 ) -> dict[str, Any]:
     service = ProjectService(uow)
-    return service.pause_global(defer_if_active=defer_if_active)
+    result = service.pause_global(defer_if_active=defer_if_active)
+    background_tasks.add_task(
+        event_broker.publish,
+        "project.pause_changed",
+        {"scope": "global"},
+    )
+    return result
 
 
 @app.post("/api/v1/system/resume", tags=["system"])
 def resume_system(
-    _operator: AuthenticatedOperatorDep, uow: UowDep
+    _operator: AuthenticatedOperatorDep,
+    uow: UowDep,
+    background_tasks: BackgroundTasks,
 ) -> dict[str, Any]:
     service = ProjectService(uow)
-    return service.resume_global()
+    result = service.resume_global()
+    background_tasks.add_task(
+        event_broker.publish,
+        "project.pause_changed",
+        {"scope": "global"},
+    )
+    return result
 
 
 class DocumentContextUpdateRequest(BaseModel):
@@ -1263,6 +1300,7 @@ def create_project_request(
     payload: CreateProjectRequestPayload,
     _operator: AuthenticatedOperatorDep,
     uow: UowDep,
+    background_tasks: BackgroundTasks,
 ) -> dict[str, Any]:
     """Create a new human request governed by F4 normalization."""
     from minime.domain.exceptions import RequestMutationNotAllowedError
@@ -1276,6 +1314,11 @@ def create_project_request(
             description=payload.description,
             acceptance_criteria=payload.acceptance_criteria,
         )
+        request_id = res.get("number") or res.get("issue_number") or res.get("id")
+        event_payload = {"project_id": project_id}
+        if request_id is not None:
+            event_payload["request_id"] = request_id
+        background_tasks.add_task(event_broker.publish, "request.created", event_payload)
         return {"project_id": project_id, "request": res}
     except ValueError as exc:
         raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(exc))
@@ -1320,6 +1363,7 @@ def deactivate_project_request(
     issue_number: int,
     _operator: AuthenticatedOperatorDep,
     uow: UowDep,
+    background_tasks: BackgroundTasks,
     payload: MutateProjectRequestPayload | None = None,
 ) -> dict[str, Any]:
     """Deactivate an unadmitted request, excluding it from FIFO."""
@@ -1335,6 +1379,11 @@ def deactivate_project_request(
             expected_version=p.expected_version,
             idempotency_key=p.idempotency_key,
         )
+        background_tasks.add_task(
+            event_broker.publish,
+            "request.deactivated",
+            {"project_id": project_id, "issue_number": issue_number},
+        )
         return {"project_id": project_id, "issue_number": issue_number, "request": res}
     except RequestMutationNotAllowedError as exc:
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc))
@@ -1348,6 +1397,7 @@ def reactivate_project_request(
     issue_number: int,
     _operator: AuthenticatedOperatorDep,
     uow: UowDep,
+    background_tasks: BackgroundTasks,
     payload: MutateProjectRequestPayload | None = None,
 ) -> dict[str, Any]:
     """Reactivate a previously disabled request."""
@@ -1362,6 +1412,11 @@ def reactivate_project_request(
             issue_number=issue_number,
             expected_version=p.expected_version,
             idempotency_key=p.idempotency_key,
+        )
+        background_tasks.add_task(
+            event_broker.publish,
+            "request.reactivated",
+            {"project_id": project_id, "issue_number": issue_number},
         )
         return {"project_id": project_id, "issue_number": issue_number, "request": res}
     except RequestMutationNotAllowedError as exc:
@@ -1436,6 +1491,7 @@ async def run_project_request(
 
     # Check durable orchestration runs in PostgreSQL during request admission
     active_runs = uow.orchestration_runs.list_runs(project_id=project_id, is_active=True)
+    active_run_id = None
     if active_runs:
         active_run = active_runs[0]
         active_run_id = getattr(active_run, "run_id", getattr(active_run, "id", None))
@@ -1452,11 +1508,20 @@ async def run_project_request(
 
     intent_key = body.idempotency_key or f"{project_id}:active"
     operation_id = _accepted_operations.get((project_id, intent_key))
+    newly_scheduled = operation_id is None
     if operation_id is None:
         operation_id = _schedule_request_worker(project_id, body, intent_key)
         # The map is deliberately bounded to active intent identities; terminal
         # state remains authoritative in PostgreSQL and recovery can reconcile it.
         _accepted_operations[(project_id, intent_key)] = operation_id
+        has_gate_response = bool(
+            body.operator_ack or body.operator_response or body.operator_clarification
+        )
+        if newly_scheduled and has_gate_response and active_run_id is not None:
+            await event_broker.publish(
+                "run.gate_acknowledged",
+                {"project_id": project_id, "run_id": str(active_run_id)},
+            )
     return {
         "status": "ACCEPTED",
         "operation_id": operation_id,
