@@ -17,6 +17,7 @@ from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from time import perf_counter
 from typing import Any
 from urllib.parse import urlparse
 
@@ -57,6 +58,91 @@ class CapacityObservation:
     quota_scope: str | None = None
 
 
+@dataclass(frozen=True)
+class ProviderConnectionDiagnostic:
+    """Safe, transient result of an operator-requested provider connection check."""
+
+    status: str
+    latency_ms: int | None
+    code: str
+    detail: str
+
+
+PROVIDER_DIAGNOSTIC_TIMEOUT_SECONDS = 5.0
+
+
+async def _diagnose_models_endpoint(
+    base_url: str,
+    api_key_env: str,
+    timeout_seconds: float = PROVIDER_DIAGNOSTIC_TIMEOUT_SECONDS,
+) -> ProviderConnectionDiagnostic:
+    api_key = os.environ.get(api_key_env, "").strip()
+    if not api_key:
+        return ProviderConnectionDiagnostic(
+            status="unavailable",
+            latency_ms=None,
+            code="credentials_not_configured",
+            detail="Provider credentials are not configured in the runtime.",
+        )
+
+    started_at = perf_counter()
+    try:
+        async with httpx.AsyncClient(
+            base_url=base_url,
+            timeout=timeout_seconds,
+            follow_redirects=False,
+        ) as client:
+            # Read only response headers. Provider-controlled bodies may contain
+            # account data or secrets and are not needed to establish auth.
+            async with client.stream(
+                "GET", "/models", headers={"Authorization": f"Bearer {api_key}"}
+            ) as response:
+                status_code = response.status_code
+    except httpx.TimeoutException:
+        return ProviderConnectionDiagnostic(
+            status="failure",
+            latency_ms=max(0, round((perf_counter() - started_at) * 1000)),
+            code="provider_timeout",
+            detail="The provider did not answer within the diagnostic time limit.",
+        )
+    except httpx.HTTPError:
+        return ProviderConnectionDiagnostic(
+            status="failure",
+            latency_ms=max(0, round((perf_counter() - started_at) * 1000)),
+            code="provider_unreachable",
+            detail="The provider could not be reached for the diagnostic.",
+        )
+
+    latency_ms = max(0, round((perf_counter() - started_at) * 1000))
+    if status_code == 200:
+        return ProviderConnectionDiagnostic(
+            status="success",
+            latency_ms=latency_ms,
+            code="credentials_accepted",
+            detail="The provider accepted a non-inference catalog request.",
+        )
+    if status_code in (401, 403):
+        return ProviderConnectionDiagnostic(
+            status="failure",
+            latency_ms=latency_ms,
+            code="credentials_rejected",
+            detail="The provider rejected the configured credentials.",
+        )
+    if status_code == 429:
+        return ProviderConnectionDiagnostic(
+            status="failure",
+            latency_ms=latency_ms,
+            code="provider_rate_limited",
+            detail="The provider rate-limited this connection check.",
+        )
+    return ProviderConnectionDiagnostic(
+        status="failure",
+        latency_ms=latency_ms,
+        code="provider_unavailable",
+        detail="The provider did not accept the non-inference catalog request.",
+    )
+
+
 class ProviderAdapterInterface(ABC):
     """Generic contract for execution, review, audit, and drain providers."""
 
@@ -93,6 +179,15 @@ class ProviderAdapterInterface(ABC):
         # adapters cannot prove more locally and default to ready.
         del timeout_seconds
         return True
+
+    async def diagnose_connection(self) -> ProviderConnectionDiagnostic:
+        """Return unavailable unless an adapter implements a safe diagnostic."""
+        return ProviderConnectionDiagnostic(
+            status="unavailable",
+            latency_ms=None,
+            code="diagnostic_unsupported",
+            detail="A bounded non-inference connection check is not available for this provider.",
+        )
 
     @property
     def probe_is_expensive(self) -> bool:
@@ -1369,6 +1464,13 @@ class OpenRouterProviderAdapter(ProviderAdapterInterface):
         del timeout_seconds
         return bool(os.environ.get(self._api_key_env, "").strip())
 
+    async def diagnose_connection(self) -> ProviderConnectionDiagnostic:
+        return await _diagnose_models_endpoint(
+            self._base_url,
+            self._api_key_env,
+            timeout_seconds=PROVIDER_DIAGNOSTIC_TIMEOUT_SECONDS,
+        )
+
     @property
     def provider_name(self) -> str:
         return "openrouter"
@@ -1409,6 +1511,20 @@ class DeepSeekProviderAdapter(ProviderAdapterInterface):
     async def check_auth_ready(self, timeout_seconds: float = 10.0) -> bool:
         del timeout_seconds
         return bool(os.environ.get(self._api_key_env, "").strip())
+
+    async def diagnose_connection(self) -> ProviderConnectionDiagnostic:
+        if not self._direct_endpoint_valid():
+            return ProviderConnectionDiagnostic(
+                status="unavailable",
+                latency_ms=None,
+                code="diagnostic_endpoint_unsupported",
+                detail="A safe connection check is not available for this provider endpoint.",
+            )
+        return await _diagnose_models_endpoint(
+            self._base_url,
+            self._api_key_env,
+            timeout_seconds=PROVIDER_DIAGNOSTIC_TIMEOUT_SECONDS,
+        )
 
     @property
     def provider_name(self) -> str:
