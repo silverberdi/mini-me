@@ -61,7 +61,7 @@ Before dispatching any agent invocation, the system SHALL check provider health,
 - **AND** preserves worktree files and current stage without advancing or dispatching.
 
 ### Requirement: Human Intervention Protocol and Option Fidelity
-When human intervention is required, the system SHALL preserve the exact original prompt and options emitted by OpenSpec or the agent, SHALL present them clearly in plain Spanish distinguishing native options from agent-generated recommendations, and SHALL resume execution seamlessly upon receiving the operator's response.
+When human intervention is required, the system SHALL persist and expose the exact question and options for the currently blocking gate, preserving original wording emitted by OpenSpec or the agent and distinguishing native options from agent-generated recommendations. The active payload SHALL be replaced when a scoped later gate is reached and SHALL NOT be sourced from a resolved earlier gate. The scoped gates are review escalation, Apply escalation, PR1 merge acknowledgement, and physical validation. The system SHALL resume execution through the existing authorized response workflow upon receiving the operator's response.
 
 #### Scenario: Verbatim options displayed to operator
 - **GIVEN** OpenSpec Explore or Propose emitting explicit options during clarification
@@ -69,6 +69,12 @@ When human intervention is required, the system SHALL preserve the exact origina
 - **THEN** it presents the exact verbatim options in Spanish
 - **AND** clearly separates native OpenSpec options from agent advice
 - **AND** pauses execution cleanly until human input is received.
+
+#### Scenario: Each scoped gate persists its active question and options
+- **GIVEN** a Run has a prior gate payload or no gate payload
+- **WHEN** review escalation, Apply escalation, PR1 merge acknowledgement, or physical validation blocks that Run
+- **THEN** the Run durably records the current gate's question and options as its active human request
+- **AND** the active payload identifies the current gate and does not retain the prior gate's question or options.
 
 #### Scenario: Resume preserves progress without duplicate execution
 - **GIVEN** a paused run in `HUMAN REQUIRED` status
