@@ -24,7 +24,7 @@ class SchemaInvariantResult:
     reason: str | None = None
 
 
-EXPECTED_ALEMBIC_HEAD = "f13_provider_model_registry"
+EXPECTED_ALEMBIC_HEAD = "f14_provider_model_enablement"
 
 
 def verify_physical_schema_invariants(engine: Engine) -> SchemaInvariantResult:

@@ -5634,6 +5634,9 @@ class PostgresProviderModelRegistryRepository:
     def list(self):
         return self._delegate.list()
 
+    def set_enabled(self, model_id, payload):
+        return self._delegate.set_enabled(model_id, payload)
+
     def upsert_observation(self, observation):
         return self._delegate.upsert_observation(observation)
 

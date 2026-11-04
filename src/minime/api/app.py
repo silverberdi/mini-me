@@ -79,6 +79,7 @@ from minime.services.project_catalog_service import ProjectCatalogService
 from minime.services.provider_registry import (
     CanonicalProfileResolver,
     CustomModelRequest,
+    ModelEnablementRequest,
     SafeCliHarness,
     catalog_payload,
     classify_discovered_model,
@@ -535,6 +536,27 @@ def administrative_custom_model(
         uow.commit()
         return result
     except ValueError as exc:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
+
+
+@app.patch("/api/v1/admin/providers/models/{model_id}/enabled", tags=["admin-providers"])
+def set_administrative_model_enabled(
+    model_id: str,
+    payload: ModelEnablementRequest,
+    _operator: AuthenticatedOperatorDep,
+    uow: UowDep,
+) -> dict[str, Any]:
+    try:
+        row = uow.provider_model_registry.set_enabled(model_id, payload)
+        uow.flush()
+        result = catalog_payload([row])["models"][0]
+        uow.commit()
+        return result
+    except LookupError as exc:
+        uow.rollback()
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
+    except ValueError as exc:
+        uow.rollback()
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
 
 
