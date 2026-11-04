@@ -2350,9 +2350,8 @@ class NativeOrchestrationCoordinator:
             )
             doc_path = doc_worktree_info.path
 
-            # Run native Sync & Archive
             try:
-                sync_archive_ok = await self._run_sync_and_archive(
+                sync_archive_ok, state_detail = await self._ensure_doc_closing_sync_archive(
                     doc_path, thinker_provider, change_name, project_id=project_id
                 )
             except GitOperationError as exc:
@@ -2369,7 +2368,10 @@ class NativeOrchestrationCoordinator:
                     run_id=active_run.run_id,
                     current_stage=OrchestrationStage.DOC_CLOSING,
                     pr1_url=pr1_url,
-                    message="Native Sync or Archive failed. Documentation worktree preserved.",
+                    message=(
+                        f"{state_detail or 'Native Sync or Archive failed.'} "
+                        "Documentation worktree preserved."
+                    ),
                 )
             try:
                 doc_head_sha = await self._get_git_head_sha(doc_path)
@@ -4667,15 +4669,7 @@ class NativeOrchestrationCoordinator:
         if not self._execution_is_successful(archive_result):
             return False
         archive_root = doc_path / "openspec" / "changes" / "archive"
-        archived = (
-            [
-                p
-                for p in archive_root.iterdir()
-                if p.is_dir() and (p.name == change_name or p.name.endswith(f"-{change_name}"))
-            ]
-            if archive_root.is_dir()
-            else []
-        )
+        archived = self._matching_archived_changes(archive_root, change_name)
         # A success narrative cannot substitute for a real OpenSpec archive.
         if len(archived) != 1:
             return False
@@ -4696,6 +4690,92 @@ class NativeOrchestrationCoordinator:
                 doc_path, ["commit", "-m", f"docs({change_name}): sync specs and archive change"]
             )
         return True
+
+    async def _ensure_doc_closing_sync_archive(
+        self,
+        doc_path: Path,
+        provider: str,
+        change_name: str,
+        project_id: str | None = None,
+    ) -> tuple[bool, str | None]:
+        """Observe DOC_CLOSING before deciding whether native workflows are needed."""
+        state, detail = self._observe_doc_closing_change(doc_path, change_name)
+        if state == "archived_complete":
+            return True, None
+        if state != "active":
+            return False, f"Documentation Change state is {state}: {detail}."
+        if not await self._run_sync_and_archive(
+            doc_path, provider, change_name, project_id=project_id
+        ):
+            return False, "Native Sync or Archive failed."
+        return True, None
+
+    @staticmethod
+    def _matching_archived_changes(archive_root: Path, change_name: str) -> list[Path]:
+        """Find exact or date-prefixed OpenSpec archive directories for a Change."""
+        if not archive_root.is_dir() or archive_root.is_symlink():
+            return []
+        dated_name = re.compile(rf"\d{{4}}-\d{{2}}-\d{{2}}-{re.escape(change_name)}\Z")
+        return [
+            entry
+            for entry in archive_root.iterdir()
+            if entry.is_dir()
+            and (entry.name == change_name or dated_name.fullmatch(entry.name))
+        ]
+
+    @classmethod
+    def _observe_doc_closing_change(cls, doc_path: Path, change_name: str) -> tuple[str, str]:
+        """Read the reused documentation worktree before repeating Sync/Archive."""
+        changes_root = doc_path / "openspec" / "changes"
+        active_change = changes_root / change_name
+        archive_root = changes_root / "archive"
+
+        if changes_root.is_symlink():
+            return "incomplete", "openspec/changes is a symbolic link"
+        if archive_root.is_symlink():
+            return "incomplete", "openspec/changes/archive is a symbolic link"
+
+        archived = cls._matching_archived_changes(archive_root, change_name)
+        if active_change.exists() and active_change.is_symlink():
+            return "incomplete", "active Change path is a symbolic link"
+        if active_change.exists() and not active_change.is_dir():
+            return "incomplete", "active Change path is not a directory"
+        if active_change.is_dir() and archived:
+            return "ambiguous", "both an active Change and matching archive entries exist"
+        if active_change.is_dir():
+            return "active", "active Change is present"
+        if len(archived) != 1:
+            return "ambiguous", f"expected one matching archive entry, found {len(archived)}"
+
+        archived_change = archived[0]
+        if archived_change.is_symlink():
+            return "incomplete", "archived Change path is a symbolic link"
+        required = ("proposal.md", "design.md", "tasks.md")
+        missing = [name for name in required if not (archived_change / name).is_file()]
+        if missing:
+            return "incomplete", f"archived Change is missing required artifacts: {', '.join(missing)}"
+
+        delta_root = archived_change / "specs"
+        if not delta_root.is_dir() or delta_root.is_symlink():
+            return "incomplete", "archived Change has no regular specs directory"
+        delta_specs = sorted(delta_root.rglob("*.md"))
+        if not delta_specs:
+            return "incomplete", "archived Change contains no delta spec files"
+
+        main_specs_root = doc_path / "openspec" / "specs"
+        if not main_specs_root.is_dir() or main_specs_root.is_symlink():
+            return "incomplete", "main OpenSpec specs directory is unavailable"
+        for delta_spec in delta_specs:
+            if delta_spec.is_symlink() or not delta_spec.is_file():
+                return "incomplete", f"delta spec is not a regular file: {delta_spec.name}"
+            relative_spec = delta_spec.relative_to(delta_root)
+            main_spec = main_specs_root / relative_spec
+            if main_spec.is_symlink() or not main_spec.is_file():
+                return "incomplete", f"corresponding main spec is missing: {relative_spec.as_posix()}"
+            if not main_spec.resolve().is_relative_to(main_specs_root.resolve()):
+                return "incomplete", f"corresponding main spec escapes specs/: {relative_spec.as_posix()}"
+
+        return "archived_complete", "archived Change and corresponding main specs are present"
 
     async def _push_branch(self, worktree_path: Path, branch_name: str) -> None:
         """Publish a candidate through the configured GitHub adapter identity."""
