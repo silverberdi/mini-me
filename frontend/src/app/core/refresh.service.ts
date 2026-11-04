@@ -22,6 +22,7 @@ export class RefreshService implements OnDestroy {
   readonly projects = signal<Project[]>([]);
   readonly runs = signal<OrchestrationRun[]>([]);
   readonly requests = signal<RequestItem[]>([]);
+  readonly allRequests = signal<RequestItem[]>([]);
   readonly closedRequests = signal<RequestItem[]>([]);
   readonly quotas = signal<QuotaObservation[]>([]);
   readonly syncState = signal<'idle' | 'syncing' | 'error'>('idle');
@@ -137,9 +138,14 @@ export class RefreshService implements OnDestroy {
         const payload: any = reqsRes.data;
         if (Array.isArray(payload)) {
           this.requests.set(payload);
+          this.allRequests.set(payload);
         } else if (typeof payload === 'object') {
-          const reqList = payload.eligible_requests || payload.all_requests || [];
-          this.requests.set(Array.isArray(reqList) ? reqList : []);
+          const allRequests = Array.isArray(payload.all_requests) ? payload.all_requests : [];
+          const eligibleRequests = Array.isArray(payload.eligible_requests)
+            ? payload.eligible_requests
+            : allRequests;
+          this.requests.set(eligibleRequests);
+          this.allRequests.set(allRequests.length > 0 ? allRequests : eligibleRequests);
           if (payload.closed_requests && Array.isArray(payload.closed_requests)) {
             this.closedRequests.set(payload.closed_requests);
           }
