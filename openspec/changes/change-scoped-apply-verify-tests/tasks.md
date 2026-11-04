@@ -1,0 +1,12 @@
+## 1. Select tests for the candidate change
+
+- [x] 1.1 Pass the configured candidate base branch into test selection and collect changed paths from Git's base-to-candidate diff plus staged, unstaged, and untracked worktree files; fail closed when the change set cannot be determined. Evidence: Git-backed selection tests cover committed, staged, unstaged, and untracked paths, and an invalid base fails without running pytest.
+- [x] 1.2 Select added or modified test files and map changed executable files to tests using mirrored paths, test-module naming conventions, and direct imports; deduplicate selectors and never fall back to the complete suite. Evidence: focused tests verify changed test inclusion, module-name and direct-import mapping, and unrelated test exclusion.
+- [x] 1.3 Treat an empty selection or no-tests-collected result as non-passing evidence, without introducing a new stage or persistent state. Evidence: empty selection returns non-pass without invoking pytest, and a selected empty test file returns pytest exit code 5 without passing.
+- [x] 1.4 Build an inverse module-to-tests import index by parsing each candidate pytest file once, use `import_index.get(module)` for changed modules, and preserve existing path/name/import selection semantics. Evidence: `tests/test_focused_automated_test_selection.py` passes (10 passed), including an AST-parse counter asserting one parse per candidate test file and unchanged import selection.
+
+## 2. Preserve focused test execution evidence
+
+- [x] 2.1 Run only the selected test paths through the existing pytest subprocess and preserve the exact command, exit code, stdout, and stderr through the current coordinator evidence path. Evidence: a real nested pytest invocation asserts the rendered command, exit code, captured failure output, and output channels.
+- [x] 2.2 Add focused coordinator tests using a temporary Git repository to verify changed-path discovery, own-test inclusion, source-to-test mapping, unrelated-test exclusion, and empty-selection behavior. Evidence: `tests/test_focused_automated_test_selection.py` uses isolated temporary Git repositories for each scenario.
+- [x] 2.3 Verify focused tests assert the executed command and captured process output/status, and that the existing Apply/Verify gate consumes the focused result without changing other stages or CI/CD. Evidence: tests assert exact command/output and verify `_run_apply` passes its candidate base branch and retains test evidence; the stage and CI/CD files are untouched.
