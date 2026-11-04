@@ -335,15 +335,21 @@ async def test_apply_and_sync_fail_closed_on_agent_error(tmp_path: Path):
 
 
 @pytest.mark.asyncio
-async def test_pytest_exit_five_is_not_pass(tmp_path: Path):
+async def test_empty_selection_is_not_pass(tmp_path: Path):
     c = coordinator(tmp_path, ScriptedRunner("unused"))
+    base_branch = subprocess.run(
+        ["git", "-C", str(tmp_path), "branch", "--show-current"],
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
     (tmp_path / "test_seed.py").unlink()
-    ok, evidence = await c._run_automated_tests(tmp_path)
+    ok, evidence = await c._run_automated_tests(tmp_path, base_branch)
     assert not ok
     assert "no tests" in evidence.lower() or "collected" in evidence.lower()
 
     (tmp_path / "test_real.py").write_text("def test_real():\n    assert True\n")
-    ok, evidence = await c._run_automated_tests(tmp_path)
+    ok, evidence = await c._run_automated_tests(tmp_path, base_branch)
     assert ok
     assert "passed" in evidence.lower()
 

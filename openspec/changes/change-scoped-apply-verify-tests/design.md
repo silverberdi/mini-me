@@ -33,6 +33,10 @@ Deduplicate selectors and pass only those paths to the existing pytest invocatio
 
 This bounded convention-based mapping is chosen over running the full suite and filtering afterward (which still executes unrelated failures and incurs the full cost), and over a new coverage/dependency plugin (which adds a dependency and execution model not required by Issue #264). It may miss tests reached only through dynamic imports or indirect behavior not represented by file/module conventions; directly changed tests are always included, and the non-empty focused suite remains the evidence boundary.
 
+### Build direct-import mappings in one pass
+
+For each selection operation, visit every candidate pytest file once, parse its AST once, and have `_imported_modules` return the set of imported module names. Build an inverse `module → test paths` index from those sets. For each changed source module, use `import_index.get(module)` to retrieve its tests. Keep the existing path/name matching selectors and union their results with the import-index results; do not re-parse files per changed module. This makes import matching proportional to the number of test files plus changed modules and preserves the prior selection semantics.
+
 ### Preserve runner evidence in the existing path
 
 Keep the existing subprocess runner and caller. Extend its evidence text with the exact argument vector rendered as a reproducible command and the process exit code, followed by captured stdout and stderr. The caller continues persisting this coordinator-observed evidence; the agent's description is not used to establish the test result. Do not add a database field or separate evidence subsystem.

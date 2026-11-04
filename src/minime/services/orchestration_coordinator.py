@@ -2,11 +2,13 @@
 
 from __future__ import annotations
 
+import ast
 import asyncio
 import hashlib
 import inspect
 import json
 import re
+import shlex
 from dataclasses import dataclass
 from dataclasses import replace as dataclass_replace
 from pathlib import Path
@@ -1753,6 +1755,7 @@ class NativeOrchestrationCoordinator:
                     project_id=project_id, corrections=pending_corrections,
                     recovery_context=self._apply_recovery_context(prior),
                     run_id=active_run.run_id,
+                    base_branch=base_branch,
                 )
                 if isinstance(outcome, bool):
                     outcome = ApplyOutcome("COMPLETE" if outcome else "FAILED", (), (), None, (), None,
@@ -1806,7 +1809,7 @@ class NativeOrchestrationCoordinator:
         if active_run.current_stage == OrchestrationStage.RUNNING_TESTS:
             tests_ok, test_evidence = (outcome.tests_passed, outcome.test_evidence) if outcome else (None, "")
             if tests_ok is None:
-                tests_ok, test_evidence = await self._run_automated_tests(worktree_path)
+                tests_ok, test_evidence = await self._run_automated_tests(worktree_path, base_branch)
             active_run.stop_details["test_evidence"] = test_evidence
             if hasattr(uow, "orchestration_runs"):
                 uow.orchestration_runs.save(active_run)
@@ -4070,6 +4073,7 @@ class NativeOrchestrationCoordinator:
         corrections: list[dict[str, Any]] | None = None,
         recovery_context: str = "",
         run_id: str | None = None,
+        base_branch: str = "main",
     ) -> ApplyOutcome:
         """Dispatch configured implementer agent to execute official OpenSpec Apply workflow."""
         wf = self.agent_runner.resolve_workflow(
@@ -4138,7 +4142,7 @@ class NativeOrchestrationCoordinator:
         diff_ok = getattr(diff, "ok", getattr(diff, "returncode", 0) == 0)
         digest = hashlib.sha256(diff_text.encode()).hexdigest() if diff_ok and diff_text else None
         handoff = getattr(result, "workflow_handoff", None)
-        tests_passed, test_evidence = await self._run_automated_tests(worktree_path)
+        tests_passed, test_evidence = await self._run_automated_tests(worktree_path, base_branch)
         if getattr(result, "workflow_handoff_required", False) and handoff and handoff.status == "HUMAN_REQUIRED":
             return ApplyOutcome("HUMAN_REQUIRED", completed_ids, tuple(pending), sha_text.strip() if getattr(sha, "ok", True) else None,
                                 changed_files, digest, tests_passed, test_evidence,
@@ -4152,14 +4156,146 @@ class NativeOrchestrationCoordinator:
                             changed_files, digest, tests_passed, test_evidence, error=error,
                             branch=branch_text.strip(), worktree=str(worktree_path), run_id=run_id)
 
-    async def _run_automated_tests(self, worktree_path: Path) -> tuple[bool, str]:
-        """Execute project automated tests and verify exit code 0."""
+    async def _git_changed_paths_for_tests(
+        self, worktree_path: Path, base_branch: str
+    ) -> tuple[set[str] | None, str | None]:
+        """Read candidate changes from Git; agent-reported paths are never authoritative."""
+        commands = (
+            ["diff", "--name-only", "-z", "--diff-filter=ACMR", f"{base_branch}...HEAD"],
+            ["diff", "--cached", "--name-only", "-z", "--diff-filter=ACMR"],
+            ["diff", "--name-only", "-z", "--diff-filter=ACMR"],
+            ["ls-files", "--others", "--exclude-standard", "-z"],
+        )
+        changed_paths: set[str] = set()
+        for command in commands:
+            try:
+                result = await self._git_run(worktree_path, command)
+            except (GitOperationError, OSError) as exc:
+                return None, f"git {' '.join(command)} failed: {exc}"
+            changed_paths.update(path for path in result.stdout.split("\0") if path)
+        return changed_paths, None
+
+    @staticmethod
+    def _is_pytest_file(path: str) -> bool:
+        name = Path(path).name
+        return path.endswith(".py") and (name.startswith("test_") or name.endswith("_test.py"))
+
+    @staticmethod
+    def _python_module_name(path: str) -> str | None:
+        source_path = Path(path)
+        if source_path.suffix != ".py":
+            return None
+        parts = list(source_path.with_suffix("").parts)
+        if parts and parts[0] in {"src", "lib"}:
+            parts = parts[1:]
+        if parts and parts[-1] == "__init__":
+            parts.pop()
+        return ".".join(parts) if parts else None
+
+    @staticmethod
+    def _imported_modules(test_path: Path) -> set[str]:
+        """Parse a test file once and return its directly imported module names."""
+        try:
+            tree = ast.parse(test_path.read_text(encoding="utf-8", errors="replace"))
+        except (OSError, SyntaxError, UnicodeError):
+            return set()
+        imported_modules: set[str] = set()
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Import):
+                imported_modules.update(alias.name for alias in node.names)
+            elif isinstance(node, ast.ImportFrom) and node.module:
+                imported_modules.add(node.module)
+                imported_modules.update(f"{node.module}.{alias.name}" for alias in node.names)
+        return imported_modules
+
+    @classmethod
+    def _select_relevant_test_paths(
+        cls, worktree_path: Path, changed_paths: set[str], candidate_paths: set[str]
+    ) -> list[str]:
+        changed_tests = {
+            path for path in changed_paths
+            if cls._is_pytest_file(path) and (worktree_path / path).is_file()
+        }
+        changed_sources = [
+            path for path in changed_paths
+            if path.endswith(".py") and not cls._is_pytest_file(path)
+            and (worktree_path / path).is_file()
+        ]
+        source_stems = {Path(path).stem for path in changed_sources}
+        source_modules = {
+            module for path in changed_sources
+            if (module := cls._python_module_name(path)) is not None
+        }
+        import_index: dict[str, set[str]] = {}
+        for test in candidate_paths:
+            if not cls._is_pytest_file(test) or not (worktree_path / test).is_file():
+                continue
+            for module in cls._imported_modules(worktree_path / test):
+                import_index.setdefault(module, set()).add(test)
+
+        tests_by_changed_imports: set[str] = set()
+        for module in source_modules:
+            tests_by_changed_imports.update(import_index.get(module, set()))
+
+        selected = set(changed_tests)
+        for test in candidate_paths:
+            if not cls._is_pytest_file(test) or not (worktree_path / test).is_file():
+                continue
+            test_path = Path(test)
+            test_name = test_path.name
+            mapped_by_name = any(
+                test_name in {f"test_{stem}.py", f"{stem}_test.py"}
+                for stem in source_stems
+            )
+            mapped_by_path = any(
+                len(Path(module).parts) > 1
+                and test_path.parent.parts[-(len(Path(module).parts) - 1):]
+                == Path(module).parts[:-1]
+                and test_name in {
+                    f"test_{Path(module).stem}.py",
+                    f"{Path(module).stem}_test.py",
+                }
+                for module in source_modules
+            )
+            mapped_by_import = test in tests_by_changed_imports
+            if mapped_by_name or mapped_by_path or mapped_by_import:
+                selected.add(test)
+        return sorted(selected)
+
+    async def _run_automated_tests(
+        self, worktree_path: Path, base_branch: str = "main"
+    ) -> tuple[bool, str]:
+        """Run only pytest files selected from Git-observed candidate changes."""
         import sys
 
         # Use the runtime interpreter that launched mini me.  A PATH-resolved
         # pytest may belong to another environment and can produce a false
         # failure even when the candidate's declared dependencies pass.
-        cmd = [sys.executable, "-m", "pytest", "-q"]
+        try:
+            changed_paths, selection_error = await self._git_changed_paths_for_tests(
+                worktree_path, base_branch
+            )
+            if changed_paths is None:
+                return False, f"Test selection failed; pytest was not run. {selection_error}"
+            files_result = await self._git_run(
+                worktree_path,
+                ["ls-files", "--cached", "--others", "--exclude-standard", "-z"],
+            )
+            candidate_paths = {path for path in files_result.stdout.split("\0") if path}
+        except (GitOperationError, OSError) as exc:
+            return False, f"Test selection failed; pytest was not run. {exc}"
+        selected_tests = self._select_relevant_test_paths(
+            worktree_path, changed_paths, candidate_paths
+        )
+        if not selected_tests:
+            return False, (
+                "Test selection failed: no tests were selected; pytest was not run. "
+                f"Changed files: {', '.join(sorted(changed_paths)) or '(none)'}"
+            )
+
+        cmd = [sys.executable, "-m", "pytest", "-q", *selected_tests]
+        command_text = shlex.join(cmd)
+        selected_text = ", ".join(selected_tests)
         try:
             proc = await asyncio.create_subprocess_exec(
                 *cmd,
@@ -4168,7 +4304,15 @@ class NativeOrchestrationCoordinator:
                 stderr=asyncio.subprocess.PIPE,
             )
             stdout, stderr = await proc.communicate()
-            evidence = stdout.decode(errors="replace") + stderr.decode(errors="replace")
+            stdout_text = stdout.decode(errors="replace")
+            stderr_text = stderr.decode(errors="replace")
+            evidence = (
+                f"selected_tests: {selected_text}\n"
+                f"command: {command_text}\n"
+                f"exit_code: {proc.returncode}\n"
+                f"stdout:\n{stdout_text}\n"
+                f"stderr:\n{stderr_text}"
+            )
             if proc.returncode == 0:
                 normalized = evidence.lower()
                 has_execution = bool(
@@ -4179,11 +4323,14 @@ class NativeOrchestrationCoordinator:
                     return True, evidence
                 return False, evidence or "Tests produced no collection/execution evidence."
             if "no tests ran" in evidence.lower() or proc.returncode == 5:
-                return False, evidence or "No tests collected (pytest code 5)."
+                return False, evidence
             return False, evidence
-        except (OSError, FileNotFoundError) as exc:
+        except OSError as exc:
             logger.warning(f"Automated test runner exception: {exc}")
-            return False, f"Test execution failed to launch: {exc}"
+            return False, (
+                f"selected_tests: {selected_text}\ncommand: {command_text}\n"
+                f"exit_code: NOT_STARTED\nstdout:\n\nstderr:\n{exc}"
+            )
 
     async def _run_verify(
         self,

@@ -6,6 +6,7 @@ Apply/Verify currently invokes `pytest -q` for the whole repository. Unrelated p
 
 - Replace whole-suite execution in `_run_automated_tests` with test selection derived from candidate files changed by the OpenSpec change and the change's own tests.
 - Define and document a bounded test-to-code mapping, including its fallback and limits, so selection is relevant without expanding to the complete suite.
+- Build direct-import mappings in one pass over test files using an inverse module-to-tests index, avoiding repeated AST parsing as changed modules grow.
 - Preserve the exact selected command, exit status, and runner output as coordinator-observed evidence.
 - Keep full-suite execution in the project's CI/CD before merge, outside mini me.
 
