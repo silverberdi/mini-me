@@ -1,4 +1,4 @@
-import { Component, computed, signal, inject } from '@angular/core';
+import { Component, computed, effect, signal, inject } from '@angular/core';
 import { CommonModule } from '@angular/common';
 import { RouterModule, ActivatedRoute } from '@angular/router';
 import { FormsModule } from '@angular/forms';
@@ -110,6 +110,10 @@ interface PipelineStage {
           </div>
         </div>
 
+        <div *ngIf="isGateResponsePending()" class="p-4 rounded-xl bg-sky-500/10 border border-sky-500/30 text-sm text-sky-200" role="status" aria-live="polite">
+          {{ submissionMessage() || 'Respuesta enviada, procesando…' }}
+        </div>
+
         <!-- HUMAN_REQUIRED Interactive Attention Gate -->
         <div *ngIf="isHumanRequired()" class="p-6 rounded-2xl bg-amber-500/10 border-2 border-amber-500/40 space-y-4 shadow-xl">
           <div class="flex items-start gap-3">
@@ -182,7 +186,7 @@ interface PipelineStage {
         </div>
 
         <!-- Normal State Gate Banner (when not human required) -->
-        <div *ngIf="!isHumanRequired()" class="p-4 rounded-xl bg-slate-800/40 border border-slate-700/50 flex items-center justify-between text-xs text-slate-400">
+        <div *ngIf="!isHumanRequired() && !isGateResponsePending()" class="p-4 rounded-xl bg-slate-800/40 border border-slate-700/50 flex items-center justify-between text-xs text-slate-400">
           <span class="flex items-center gap-2">
             <span class="w-2 h-2 rounded-full bg-emerald-400"></span>
             <span>No existe bloqueo de atención humana activo. El workflow avanza de forma autónoma.</span>
@@ -298,6 +302,7 @@ export class TrabajoActualComponent {
   readonly isSubmitting = signal<boolean>(false);
   readonly submissionMessage = signal<string | null>(null);
   readonly submissionSuccess = signal<boolean>(false);
+  readonly pendingGateAcknowledgement = signal<{ runId: string; identity: string } | null>(null);
   readonly isRecoveringCodeReview = signal<boolean>(false);
   readonly codeReviewRecoveryMessage = signal<string | null>(null);
   readonly codeReviewRecoverySuccess = signal<boolean>(false);
@@ -329,12 +334,51 @@ export class TrabajoActualComponent {
     return runs.find(r => r.is_active) || runs.find(r => r.status === 'RUNNING' || r.status === 'IN_PROGRESS' || r.status === 'HUMAN_REQUIRED') || runs[0] || null;
   });
 
+  constructor() {
+    effect(() => {
+      const pending = this.pendingGateAcknowledgement();
+      if (!pending) return;
+
+      const run = this.refresh.runs().find(candidate => candidate.run_id === pending.runId);
+      if (!run || !this.hasHumanGate(run) || this.humanGateIdentity(run) !== pending.identity) {
+        this.pendingGateAcknowledgement.set(null);
+        this.submissionMessage.set(null);
+        this.submissionSuccess.set(false);
+      }
+    });
+  }
+
+  private hasHumanGate(run: any): boolean {
+    const status = String(run.status || '').toUpperCase();
+    if (['COMPLETED', 'SUCCEEDED', 'FAILED', 'CANCELLED'].includes(status) || run.stage === 'COMPLETED') {
+      return false;
+    }
+    const gate = run.human_gate || run.status;
+    return gate === 'HUMAN_REQUIRED' || gate === 'NEEDS_HUMAN' || !!run.stop_details?.['human_payload'];
+  }
+
+  private humanGateIdentity(run: any): string {
+    const payload = run.stop_details?.['human_payload'] || {};
+    return JSON.stringify(Object.keys(payload).length > 0 ? payload : {
+      gate: run.human_gate || run.status,
+      stage: run.stage,
+      question: '',
+      options: [],
+    });
+  }
+
+  isGateResponsePending(): boolean {
+    const pending = this.pendingGateAcknowledgement();
+    const run = this.targetRun();
+    return !!pending && !!run && pending.runId === run.run_id && this.hasHumanGate(run)
+      && this.humanGateIdentity(run) === pending.identity;
+  }
+
   isHumanRequired(): boolean {
     const run = this.targetRun();
     if (!run) return false;
-    const gate = (run as any).human_gate || run.status;
-    const details = run.stop_details?.['human_payload'];
-    return gate === 'HUMAN_REQUIRED' || gate === 'NEEDS_HUMAN' || !!details;
+    if (this.isGateResponsePending()) return false;
+    return this.hasHumanGate(run);
   }
 
   private codeReviewDetails(): Record<string, any> | null {
@@ -501,8 +545,11 @@ export class TrabajoActualComponent {
     const answer = this.operatorResponse().trim();
     if (!run || !answer) return;
 
+    const gateIdentity = this.humanGateIdentity(run);
+    this.pendingGateAcknowledgement.set({ runId: run.run_id, identity: gateIdentity });
     this.isSubmitting.set(true);
-    this.submissionMessage.set(null);
+    this.submissionSuccess.set(false);
+    this.submissionMessage.set('Enviando respuesta…');
 
     try {
       const response = await this.api.post(
@@ -512,14 +559,16 @@ export class TrabajoActualComponent {
 
       if (response.ok) {
         this.submissionSuccess.set(true);
-        this.submissionMessage.set('Respuesta aceptada por el backend. Actualizando estado de la autoridad…');
+        this.submissionMessage.set('Respuesta enviada, procesando…');
         this.operatorResponse.set('');
         await this.refresh.read();
       } else {
+        this.pendingGateAcknowledgement.set(null);
         this.submissionSuccess.set(false);
         this.submissionMessage.set(`Error al confirmar respuesta: ${response.error || 'Error no especificado'}`);
       }
     } catch (e: any) {
+      this.pendingGateAcknowledgement.set(null);
       this.submissionSuccess.set(false);
       this.submissionMessage.set(`Error de comunicación: ${e.message || e}`);
     } finally {
