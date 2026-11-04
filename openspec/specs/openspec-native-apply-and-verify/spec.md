@@ -23,21 +23,42 @@ The system SHALL dynamically resolve the official OpenSpec Apply workflow for th
 - **AND** routes the change back to the native Propose/Validate loop instead of permitting silent or unreviewed spec modifications.
 
 ### Requirement: Mandatory Real Unit and E2E Test Execution
-The implementer agent SHALL design, execute, and verify real unit and E2E tests within the project's testing conventions and environment, SHALL autocorrect test and code defects during Apply, and SHALL emit `READY TO VERIFY` only after all tests pass with exit code 0 and observable test evidence is preserved. The system SHALL reject any transition where tests were skipped, mocked out as vacuous stubs, or failed.
+During Apply/Verify, the system SHALL execute real automated tests selected for the candidate change, based on files changed by that change and tests added or modified for it, within the project's test conventions. The selected tests SHALL execute with exit code 0 before the change advances, and the system SHALL preserve coordinator-observed evidence containing the exact command, exit code, and captured output. The system SHALL reject skipped, mocked-out/vacuous, failed, or empty test execution as a passing result. The coordinator SHALL NOT run the complete project test suite as its Apply/Verify gate; the project's full-suite CI/CD remains outside mini me and runs before merge.
 
 #### Scenario: Implementation includes passing unit and E2E tests with real test runner execution
-- **GIVEN** the implementer agent completing source code changes in the candidate worktree
-- **WHEN** the agent writes corresponding unit and integration tests under `tests/`
-- **AND** invokes the project's authentic test suite runner (e.g. `pytest`) in the worktree environment
-- **THEN** the test suite executes completely and exits with code 0
-- **AND** the observable test output is captured in the execution run logs as durable evidence.
+- **GIVEN** the implementer completes source changes and writes corresponding unit, integration, or E2E tests
+- **WHEN** the Apply/Verify automated test gate runs
+- **THEN** it executes the changed tests and relevant tests mapped to the changed source files, without invoking the complete project suite
+- **AND** it preserves the exact test command, exit code, and captured output as observable evidence
+- **AND** it advances only when the selected tests execute and pass with exit code 0
+
+#### Scenario: Unrelated pre-existing test failure is outside the focused gate
+- **GIVEN** the candidate change modifies one code area and an unrelated, pre-existing test fails outside the selected set
+- **WHEN** the Apply/Verify automated test gate runs
+- **THEN** the unrelated test is not run by that gate
+- **AND** the focused gate's result is determined by the selected tests and their captured execution evidence
+
+#### Scenario: No relevant tests cannot produce a passing result
+- **GIVEN** changed executable code has no tests selected by the documented mapping and no changed tests are present
+- **WHEN** the Apply/Verify automated test gate attempts to execute its selection
+- **THEN** it records that no tests were selected or collected
+- **AND** it does not treat the empty selection as a passing test result or fall back to the complete suite
 
 #### Scenario: Failing tests trigger immediate self-correction loop
-- **GIVEN** the implementer agent executing tests during Apply
-- **WHEN** test execution produces errors, failures, or non-zero exit codes
-- **THEN** the implementer inspects the failure output and stack traces
-- **AND** adjusts code or test logic in the candidate worktree
-- **AND** re-executes the test suite until all tests succeed (exit code 0) before declaring Apply complete.
+- **GIVEN** the Apply/Verify automated test gate runs the selected tests
+- **WHEN** a selected test fails or returns a non-zero exit code
+- **THEN** the existing Apply self-correction flow receives the observed failure evidence
+- **AND** the change does not advance until a subsequent focused execution passes
+
+### Requirement: Single-Pass Test Import Mapping
+For each focused test-selection operation, the system SHALL parse each candidate pytest file's imports at most once and SHALL build an inverse module-to-tests index for direct imports. It SHALL use that index to find tests for changed source modules and SHALL NOT re-parse every test file for each changed module. Existing test path and module-name matching behavior SHALL remain unchanged.
+
+#### Scenario: Import mapping indexes each test file once
+- **GIVEN** a candidate has multiple changed source modules and multiple candidate pytest files
+- **WHEN** the test selector builds direct-import relationships
+- **THEN** it parses each candidate pytest file's AST once and records its imported modules in an inverse module-to-tests index
+- **AND** it looks up each changed source module in that index without re-parsing test files
+- **AND** it retains the existing test path, module-name, and direct-import selection results
 
 ### Requirement: Native OpenSpec Verify Executed by Implementer with Capability Verification
 The system SHALL verify that the configured implementer agent has the official OpenSpec Verify workflow installed and compatible in the candidate worktree (`.agent/workflows/opsx-verify.md` for Antigravity or `.agents/skills/openspec-verify-change/SKILL.md` for Codex) before dispatching. If the Verify workflow is missing or unverified, the system SHALL block fail-closed, report the missing capability, and preserve the Request. Upon successful Apply, the system SHALL invoke the official OpenSpec Verify workflow using the SAME implementer agent that executed Apply (and NOT the thinking agent), utilizing the verified project context and preflighted capacity.
