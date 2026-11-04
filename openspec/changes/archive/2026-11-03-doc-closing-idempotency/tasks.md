@@ -8,3 +8,7 @@
 
 - [x] 2.1 Add focused coordinator tests proving active Changes use native Sync/Archive, completed archived state skips both dispatches and reaches PR2, and incomplete or duplicate archive evidence does not falsely pass.
 - [ ] 2.2 Add an E2E against an authorized isolated GitHub fixture: seed completed state through native OpenSpec Sync/Archive, re-enter DOC_CLOSING, and verify the PR2 is created and bound to the documentation candidate without another Sync/Archive invocation.
+
+### Issue #268 evidence audit — unresolved items
+
+> Tarea 2.2 sigue abierta: la E2E real contra fixture GitHub quedó diferida en PR #276; el test simulado y el archive documental de PR #277 no la satisfacen. Detalle en [auditoría #268](../../../../docs/evidence/issue-268_archive-validation-audit_2026-11-04.md).

@@ -35,3 +35,7 @@
   - Bootstrap a real bounded work item (GitHub Issue + Project item + OpenSpec + binding + READY).
   - Run `mini me` autonomously to execute the complete pipeline to `READY_FOR_HUMAN_MERGE`.
   - Verify all 8 hard efficiency gates and self-hosting >= 75%.
+
+### Issue #268 evidence audit — unresolved items
+
+> Tareas 7 y 8 siguen abiertas: el PR #52 no aporta prueba de revisión independiente/DeepSeek ni resultado del bounded proving run real. Detalle en [auditoría #268](../../../../docs/evidence/issue-268_archive-validation-audit_2026-11-04.md).

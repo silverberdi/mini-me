@@ -49,3 +49,7 @@
 - [x] 6.4 Publicar el PR de implementación de F4 con evidencias y mantener las autorizaciones de merge bajo las reglas de F3.
 - [ ] 6.5 Tras el merge autorizado, ejecutar Sync/Archive nativos y publicar el PR documental de F4 sin inventar resultados ni cerrar el Issue antes del segundo merge confirmado.
 - [ ] 6.6 Verificar los 35 criterios S01-S07, GF, HA, H, F3 y DONE del Issue #172 mediante una matriz de evidencia contra el Issue de prueba controlado; conservar #172 como fuente ya normalizada sin reescribirlo, limitar sus cambios a comentarios/cierre legítimos de F3, reutilizar evidencia F3 válida y dejar evidencia de perfiles, workflows, coordinación y preparación aislada lista para que mini me pueda ejecutar F5 sin implementar F5.
+
+### Issue #268 evidence audit — unresolved items
+
+> Tareas 6.2, 6.5 y 6.6 siguen abiertas según el propio PR #187 (Verify 31/34); no se completan por el merge del PR documental. Detalle en [auditoría #268](../../../../docs/evidence/issue-268_archive-validation-audit_2026-11-04.md).
