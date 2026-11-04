@@ -14,6 +14,8 @@ export interface ProjectExecutionPolicy {
   max_correction_attempts?: number;
   code_review_policy?: 'required' | 'risk_based' | 'disabled';
   fallback_authorized?: boolean;
+  effective_pause?: boolean;
+  global_pause?: boolean;
 }
 
 export interface Project {

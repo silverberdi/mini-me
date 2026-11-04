@@ -35,6 +35,12 @@ import { ProjectAgentProfile, ProjectExecutionPolicy } from '../../core/models';
         <button (click)="actionMsg.set(null)" class="text-slate-400 hover:text-white ml-2">✕</button>
       </div>
 
+      <div *ngIf="isGlobalPauseActive()"
+           class="px-4 py-3 rounded-xl bg-amber-500/10 text-amber-300 border border-amber-500/30 text-sm font-semibold"
+           role="status">
+        Pausado globalmente
+      </div>
+
       <!-- Projects Grid -->
       <div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
         <div *ngFor="let proj of refresh.projects()"
@@ -49,6 +55,11 @@ import { ProjectAgentProfile, ProjectExecutionPolicy } from '../../core/models';
                 {{ proj.status || 'ACTIVE' }}
               </span>
             </div>
+            <span *ngIf="proj.execution_policy?.effective_pause === true"
+                  class="inline-flex mt-2 px-2.5 py-0.5 text-xs font-semibold rounded-full bg-amber-500/10 text-amber-300 border border-amber-500/30"
+                  role="status">
+              Pausado
+            </span>
 
             <p class="text-xs text-slate-400 font-mono mt-1 text-[11px]">ID: {{ proj.project_id }}</p>
             <p class="text-xs text-slate-400 font-mono mt-2 truncate">{{ proj.repo_path || proj.repository || 'Ruta local no especificada' }}</p>
@@ -472,6 +483,10 @@ export class ProyectosComponent implements OnInit {
       groupsMap.get(m.group)!.push(m);
     }
     return Array.from(groupsMap.entries()).map(([name, models]) => ({ name, models }));
+  }
+
+  isGlobalPauseActive(): boolean {
+    return this.refresh.projects().some(project => project.execution_policy?.global_pause === true);
   }
 
   async ngOnInit(): Promise<void> {
