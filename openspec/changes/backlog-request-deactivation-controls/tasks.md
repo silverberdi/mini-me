@@ -1,0 +1,12 @@
+## 1. Backlog state and actions
+
+- [x] 1.1 Project the existing eligible Requests together with disabled Requests from `all_requests`, deduplicated by issue number while preserving eligible FIFO order; keep unrelated Request statuses out of the actionable list.
+- [x] 1.2 Correct Backlog state labels and action visibility to use the authoritative `DISABLED` status; render an available reason only when the existing payload supplies it.
+- [x] 1.3 Reuse the existing deactivate/reactivate endpoints and refresh authoritative Backlog data after success; preserve existing error behavior and never show success for a rejected or failed mutation.
+
+## 2. Verification
+
+- [x] 2.1 Add focused frontend tests for active/disabled projection, state and reason display, correct action/endpoint selection, refreshed state after success, and rejection without false success.
+- [ ] 2.2 Exercise the real authenticated Backlog-to-existing-endpoint flow against a disposable GitHub-backed project; observe the remote disabled label, refreshed UI state, and FIFO exclusion, then reactivate and observe the label removal and existing FIFO eligibility rules. Record the exact run and external effects; do not use a mock as E2E evidence.
+
+> Deferred follow-up: task 2.2 was not executed and is intentionally left incomplete; the real GitHub-backed E2E evidence is required before claiming the full Change complete.

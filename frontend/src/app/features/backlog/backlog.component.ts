@@ -1,4 +1,4 @@
-import { Component, signal, inject } from '@angular/core';
+import { Component, signal, computed, inject } from '@angular/core';
 import { CommonModule } from '@angular/common';
 import { FormsModule } from '@angular/forms';
 import { RefreshService } from '../../core/refresh.service';
@@ -115,7 +115,7 @@ import { RequestItem } from '../../core/models';
           <span>Solicitudes Pendientes</span>
           <span class="px-2 py-0.5 rounded-full text-[11px] font-mono"
                 [ngClass]="activeTab() === 'pending' ? 'bg-sky-500 text-white' : 'bg-slate-800 text-slate-400'">
-            {{ refresh.requests().length }}
+            {{ backlogRequests().length }}
           </span>
         </button>
 
@@ -135,17 +135,18 @@ import { RequestItem } from '../../core/models';
       <div class="bg-slate-800/40 rounded-2xl border border-slate-700/50 overflow-hidden backdrop-blur-sm shadow-xl">
         <!-- PENDING REQUESTS TAB -->
         <div *ngIf="activeTab() === 'pending'" class="divide-y divide-slate-800/60">
-          <div *ngFor="let req of refresh.requests()" class="p-5 hover:bg-slate-800/30 transition-colors flex flex-col md:flex-row md:items-center justify-between gap-4">
+          <div *ngFor="let req of backlogRequests()" class="p-5 hover:bg-slate-800/30 transition-colors flex flex-col md:flex-row md:items-center justify-between gap-4">
             <div class="min-w-0 pr-4">
               <div class="flex items-center gap-2.5 flex-wrap">
                 <span *ngIf="req.issue_number" class="text-sm font-mono font-bold text-sky-400">#{{ req.issue_number }}</span>
                 <h3 class="text-base font-semibold text-white">{{ req.title }}</h3>
-                <span class="px-2 py-0.5 text-[11px] font-semibold rounded-md uppercase font-mono"
-                      [ngClass]="req.status === 'ELIGIBLE' ? 'bg-emerald-500/10 text-emerald-400 border border-emerald-500/20' : 'bg-slate-800 text-slate-400 border border-slate-700'">
-                  {{ req.status }}
+                <span class="px-2 py-0.5 text-[11px] font-semibold rounded-md font-mono"
+                      [ngClass]="req.status === 'DISABLED' ? 'bg-slate-800 text-slate-400 border border-slate-700' : 'bg-emerald-500/10 text-emerald-400 border border-emerald-500/20'">
+                  {{ req.status === 'DISABLED' ? 'Desactivado' : 'Activo' }}
                 </span>
               </div>
               <p *ngIf="req.body" class="text-xs text-slate-400 mt-1 line-clamp-2">{{ req.body }}</p>
+              <p *ngIf="req.reason" class="text-xs text-amber-300 mt-1">Motivo: {{ req.reason }}</p>
               <div class="flex flex-wrap items-center gap-x-4 gap-y-1 text-xs text-slate-500 mt-2 font-mono">
                 <span>ID: {{ req.request_id }}</span>
                 <span>Actualizado: {{ req.updated_at || req.created_at || 'Reciente' }}</span>
@@ -163,16 +164,16 @@ import { RequestItem } from '../../core/models';
               </button>
 
               <button
-                *ngIf="req.issue_number && req.status !== 'PAUSED'"
+                *ngIf="req.issue_number && req.status === 'ELIGIBLE'"
                 (click)="deactivateRequest(req.issue_number)"
                 [disabled]="isSubmitting()"
                 class="px-3 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 border border-slate-700 text-slate-300 text-xs font-semibold transition-colors cursor-pointer"
-                title="Pausar elegibilidad de este ticket">
-                Pausar
+                title="Desactivar este Request y excluirlo de la admisión FIFO">
+                Desactivar
               </button>
 
               <button
-                *ngIf="req.issue_number && req.status === 'PAUSED'"
+                *ngIf="req.issue_number && req.status === 'DISABLED'"
                 (click)="reactivateRequest(req.issue_number)"
                 [disabled]="isSubmitting()"
                 class="px-3 py-1.5 rounded-lg bg-sky-600/20 hover:bg-sky-600/30 border border-sky-500/30 text-sky-300 text-xs font-semibold transition-colors cursor-pointer"
@@ -182,7 +183,7 @@ import { RequestItem } from '../../core/models';
             </div>
           </div>
 
-          <div *ngIf="refresh.requests().length === 0" class="text-center py-16 text-slate-500 text-sm space-y-1">
+          <div *ngIf="backlogRequests().length === 0" class="text-center py-16 text-slate-500 text-sm space-y-1">
             <div class="text-2xl mb-1">📭</div>
             <div class="font-medium text-slate-400">No hay solicitudes pendientes en este proyecto</div>
             <p class="text-xs">Usa el botón "+ Nueva Solicitud" para registrar una nueva tarea en el repositorio.</p>
@@ -229,10 +230,31 @@ export class BacklogComponent {
   readonly isSubmitting = signal<boolean>(false);
   readonly actionMessage = signal<string | null>(null);
   readonly actionSuccess = signal<boolean>(false);
+  readonly backlogRequests = computed(() => {
+    const eligibleByIssue = new Map<number, RequestItem>();
+    for (const request of this.refresh.requests()) {
+      if (request.status !== 'ELIGIBLE') continue;
+      const normalized = this.withIssueNumber(request);
+      if (normalized.issue_number != null && !eligibleByIssue.has(normalized.issue_number)) {
+        eligibleByIssue.set(normalized.issue_number, normalized);
+      }
+    }
+    const eligible = [...eligibleByIssue.values()];
+    const issueNumbers = new Set(eligibleByIssue.keys());
+    const disabled = this.refresh.allRequests()
+      .filter(request => request.status === 'DISABLED')
+      .map(request => this.withIssueNumber(request))
+      .filter(request => request.issue_number != null && !issueNumbers.has(request.issue_number));
+    return [...eligible, ...disabled];
+  });
 
   newTitle = '';
   newDescription = '';
   newCriteria = '';
+
+  private withIssueNumber(request: RequestItem): RequestItem {
+    return { ...request, issue_number: request.issue_number ?? request.number ?? null };
+  }
 
   async createRequest(event: Event): Promise<void> {
     event.preventDefault();
@@ -305,15 +327,15 @@ export class BacklogComponent {
       const res = await this.api.post(`/api/v1/projects/${encodeURIComponent(pid)}/requests/${issueNumber}/deactivate`, {});
       if (res.ok) {
         this.actionSuccess.set(true);
-        this.actionMessage.set(`Solicitud #${issueNumber} pausada.`);
+        this.actionMessage.set(`Solicitud #${issueNumber} desactivada.`);
         await this.refresh.read();
       } else {
         this.actionSuccess.set(false);
-        this.actionMessage.set(`Error al pausar: ${res.error || 'Error'}`);
+        this.actionMessage.set(`Error al desactivar: ${res.error || 'Error'}`);
       }
     } catch (e: any) {
       this.actionSuccess.set(false);
-      this.actionMessage.set(`Error: ${e.message || e}`);
+      this.actionMessage.set(`Error al desactivar: ${e.message || e}`);
     } finally {
       this.isSubmitting.set(false);
     }
@@ -336,7 +358,7 @@ export class BacklogComponent {
       }
     } catch (e: any) {
       this.actionSuccess.set(false);
-      this.actionMessage.set(`Error: ${e.message || e}`);
+      this.actionMessage.set(`Error al reactivar: ${e.message || e}`);
     } finally {
       this.isSubmitting.set(false);
     }

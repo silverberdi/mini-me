@@ -60,9 +60,11 @@ export interface RequestItem {
   request_id: string;
   project_id: string;
   issue_number?: number | null;
+  number?: number | null;
   title: string;
   body?: string | null;
   status: string;
+  reason?: string | null;
   created_at?: string;
   updated_at?: string;
 }
