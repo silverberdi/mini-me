@@ -132,7 +132,7 @@ interface PipelineStage {
 
           <!-- Options (if available) -->
           <div *ngIf="humanGateOptions().length > 0" class="space-y-2">
-            <span class="text-xs font-semibold text-slate-300 font-mono">Opciones sugeridas por el agente:</span>
+            <span class="text-xs font-semibold text-slate-300 font-mono">Opciones para responder a este gate:</span>
             <div class="grid grid-cols-1 sm:grid-cols-2 gap-2">
               <button *ngFor="let opt of humanGateOptions()"
                       type="button"
@@ -333,8 +333,8 @@ export class TrabajoActualComponent {
     const run = this.targetRun();
     if (!run) return false;
     const gate = (run as any).human_gate || run.status;
-    const details = (run as any).stop_details?.human_payload || (run as any).stop_details?.human_request || run.metadata?.['human_payload'];
-    return gate === 'HUMAN_REQUIRED' || !!details;
+    const details = run.stop_details?.human_payload;
+    return gate === 'HUMAN_REQUIRED' || gate === 'NEEDS_HUMAN' || !!details;
   }
 
   private codeReviewDetails(): Record<string, any> | null {
@@ -458,14 +458,14 @@ export class TrabajoActualComponent {
   humanGateQuestion(): string {
     const run = this.targetRun();
     if (!run) return '';
-    const payload = (run as any).stop_details?.human_payload || (run as any).stop_details?.human_request || run.metadata?.['human_payload'];
+    const payload = run.stop_details?.human_payload;
     return payload?.question || payload?.prompt || 'El workflow requiere aclaración u autorización del operador para continuar.';
   }
 
   humanGateOptions(): any[] {
     const run = this.targetRun();
     if (!run) return [];
-    const payload = (run as any).stop_details?.human_payload || (run as any).stop_details?.human_request || run.metadata?.['human_payload'];
+    const payload = run.stop_details?.human_payload;
     return Array.isArray(payload?.options) ? payload.options : [];
   }
 

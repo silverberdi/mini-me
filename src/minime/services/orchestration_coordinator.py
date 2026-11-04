@@ -235,6 +235,110 @@ class NativeOrchestrationCoordinator:
         clean = redact_secrets(payload)
         return clean if isinstance(clean, dict) else {}
 
+    def _record_current_human_gate(
+        self,
+        uow: Any,
+        run: OrchestrationRun,
+        *,
+        gate: str,
+        question: str,
+        options: list[Any] | tuple[Any, ...] = (),
+        payload: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        """Replace and persist the one active operator request for this Run."""
+        choice_list = list(options) if isinstance(options, (list, tuple)) else []
+        active_payload = {
+            **(payload or {}),
+            "gate": gate,
+            "stage": run.current_stage.value,
+            "run_id": run.run_id,
+            "question": question,
+            "options": choice_list,
+        }
+        active_payload = self._safe_human_payload(active_payload)
+        details = dict(run.stop_details or {})
+        details["human_payload"] = active_payload
+        run.stop_details = details
+        run.human_gate = HumanGate.NEEDS_HUMAN
+        run.stop_outcome = OrchestrationStopOutcome.NEEDS_HUMAN
+        run.stop_reason = question
+
+        runs = getattr(uow, "orchestration_runs", None)
+        updater = getattr(runs, "update_stop_outcome", None)
+        if callable(updater):
+            updater(
+                run.run_id,
+                OrchestrationStopOutcome.NEEDS_HUMAN,
+                HumanGate.NEEDS_HUMAN,
+                question,
+                details,
+                is_active=run.is_active,
+            )
+        elif runs is not None:
+            runs.save(run)
+        if hasattr(uow, "commit"):
+            uow.commit()
+        return active_payload
+
+    def _clear_current_human_gate(self, uow: Any, run: OrchestrationRun) -> None:
+        """Clear an active gate only after its existing flow confirms resolution."""
+        details = dict(run.stop_details or {})
+        payload = details.get("human_payload")
+        if not (
+            isinstance(payload, dict)
+            and payload.get("gate") in {
+                "proposal_review_escalation",
+                "code_review_escalation",
+                "apply_escalation",
+                "physical_validation",
+                "pr1_merge_acknowledgement",
+            }
+        ) and run.human_gate != HumanGate.NEEDS_HUMAN and run.stop_outcome != OrchestrationStopOutcome.NEEDS_HUMAN:
+            return
+        details.pop("human_payload", None)
+        run.stop_details = details
+        run.human_gate = None
+        run.stop_outcome = None
+        run.stop_reason = None
+        runs = getattr(uow, "orchestration_runs", None)
+        updater = getattr(runs, "update_stop_outcome", None)
+        if callable(updater):
+            updater(
+                run.run_id,
+                None,
+                None,
+                None,
+                details,
+                is_active=run.is_active,
+            )
+        elif runs is not None:
+            runs.save(run)
+        if hasattr(uow, "commit"):
+            uow.commit()
+
+    def _record_pr1_acknowledgement_gate(
+        self,
+        uow: Any,
+        run: OrchestrationRun,
+        *,
+        issue_number: int,
+        issue_title: str,
+        pr_number: int,
+    ) -> dict[str, Any]:
+        question = "Por favor confirme con «Estoy enterado» para proceder a la fusión remota."
+        return self._record_current_human_gate(
+            uow,
+            run,
+            gate="pr1_merge_acknowledgement",
+            question=question,
+            options=["Estoy enterado"],
+            payload={
+                "action": "operator_ack",
+                "summary_es": f"Cambio de alta complejidad para el Issue #{issue_number}: {issue_title}. PR #{pr_number} listo para fusión.",
+                "prompt": question,
+            },
+        )
+
     async def _run_claimed(self, uow: Any, claim: RecoveryClaimContext, operation: Any) -> Any:
         """Keep the durable claim owned by this live worker, or fence the child."""
         renew = getattr(uow, "renew_claim_heartbeat_isolated", None)
@@ -1520,8 +1624,7 @@ class NativeOrchestrationCoordinator:
                         "findings": findings,
                     }
                     active_run.stop_details = details
-                    active_run.human_gate = None
-                    active_run.stop_outcome = None
+                    self._clear_current_human_gate(uow, active_run)
                     self._update_stage(uow, active_run, OrchestrationStage.PROPOSING)
                     return OrchestrationCoordinationResult(
                         status="RUNNING",
@@ -1547,6 +1650,7 @@ class NativeOrchestrationCoordinator:
             )
 
             if action == _REVIEW_ADVANCE:
+                self._clear_current_human_gate(uow, active_run)
                 self._update_stage(uow, active_run, OrchestrationStage.READY_TO_APPLY)
             elif action == _REVIEW_REJECTED:
                 if isinstance(stored_review, dict) and stored_review.get("findings"):
@@ -1731,7 +1835,9 @@ class NativeOrchestrationCoordinator:
                         "scenarios) and are marked NOT_VERIFIED in tasks.md. Automated Apply "
                         "cannot satisfy them; worktree preserved for operator validation."
                     )
-                    return self._escalate_apply_to_human(uow, active_run, reason)
+                    return self._escalate_apply_to_human(
+                        uow, active_run, reason, gate="physical_validation"
+                    )
             # Durable correction context from a prior CHANGES_REQUIRED verdict.
             pending_corrections = list(
                 (active_run.stop_details or {}).get("pending_corrections") or []
@@ -1762,12 +1868,18 @@ class NativeOrchestrationCoordinator:
                                            None, "Legacy boolean Apply result; no structured evidence.")
                 attempts += 1
                 if outcome.status == "HUMAN_REQUIRED":
+                    payload = self._record_current_human_gate(
+                        uow,
+                        active_run,
+                        gate="apply_escalation",
+                        question=outcome.human_question or "OpenSpec Apply requires operator input.",
+                        options=outcome.human_options,
+                    )
                     return OrchestrationCoordinationResult(
                         status="HUMAN_REQUIRED", run_id=active_run.run_id,
                         current_stage=OrchestrationStage.IMPLEMENTING,
-                        message=outcome.human_question or "OpenSpec Apply requires operator input.",
-                        human_payload={"question": outcome.human_question,
-                                       "options": list(outcome.human_options)},
+                        message=payload["question"],
+                        human_payload=payload,
                     )
                 if outcome.status == "COMPLETE":
                     break
@@ -1795,6 +1907,7 @@ class NativeOrchestrationCoordinator:
                     f"hard attempt ceiling {hard_limit} reached or recovery halted; "
                     f"attempts={attempts}/{hard_limit}, no_progress={no_progress}. Candidate preserved.",
                 )
+            self._clear_current_human_gate(uow, active_run)
             if pending_corrections or self._apply_attempts(active_run):
                 details = dict(active_run.stop_details or {})
                 details.pop("pending_corrections", None)
@@ -1882,6 +1995,7 @@ class NativeOrchestrationCoordinator:
             )
 
             if action == _REVIEW_ADVANCE:
+                self._clear_current_human_gate(uow, active_run)
                 self._update_stage(uow, active_run, OrchestrationStage.READY_FOR_PR)
             elif action == _REVIEW_REJECTED:
                 return self._route_changes_required(
@@ -2160,17 +2274,20 @@ class NativeOrchestrationCoordinator:
         # Differentiated Merge Policy for PR1
         if active_run.current_stage == OrchestrationStage.PR1_PENDING:
             if complexity == "high" and not operator_ack:
+                payload = self._record_pr1_acknowledgement_gate(
+                    uow,
+                    active_run,
+                    issue_number=issue_number,
+                    issue_title=issue_title,
+                    pr_number=pr1_number,
+                )
                 return OrchestrationCoordinationResult(
                     status="HUMAN_REQUIRED",
                     run_id=active_run.run_id,
                     current_stage=OrchestrationStage.PR1_PENDING,
                     pr1_url=pr1_url,
                     message="High-complexity change requires operator acknowledgement («Estoy enterado») before merging PR1.",
-                    human_payload={
-                        "action": "operator_ack",
-                        "summary_es": f"Cambio de alta complejidad para el Issue #{issue_number}: {issue_title}. PR #{pr1_number} listo para fusión.",
-                        "prompt": "Por favor confirme con «Estoy enterado» para proceder a la fusión remota.",
-                    },
+                    human_payload=payload,
                 )
 
             # Merge PR1
@@ -2203,6 +2320,7 @@ class NativeOrchestrationCoordinator:
                     pr1_url=pr1_url,
                     message=f"Failed to merge PR1: {err_msg}. Worktree preserved.",
                 )
+            self._clear_current_human_gate(uow, active_run)
             self._update_stage(uow, active_run, OrchestrationStage.PR1_MERGED)
 
         # Step 11: Fresh Documentation Worktree & Sync/Archive (PR2)
@@ -2791,29 +2909,30 @@ class NativeOrchestrationCoordinator:
                 "Do not redo or discard valid work. This recovery context is separate from reviewer corrections.")
 
     def _escalate_apply_to_human(
-        self, uow: Any, run: OrchestrationRun, reason: str
+        self,
+        uow: Any,
+        run: OrchestrationRun,
+        reason: str,
+        *,
+        gate: str = "apply_escalation",
     ) -> OrchestrationCoordinationResult:
         """Mark the run for human attention so the scheduler stops re-dispatching."""
-        if hasattr(uow, "orchestration_runs"):
-            updater = getattr(uow.orchestration_runs, "update_stop_outcome", None)
-            if updater is not None:
-                # Preserve durable stop_details (correction counters, findings)
-                # while recording the escalation marker.
-                preserved = dict(run.stop_details or {})
-                preserved["apply_escalated"] = True
-                updater(
-                    run.run_id,
-                    OrchestrationStopOutcome.NEEDS_HUMAN,
-                    HumanGate.NEEDS_HUMAN,
-                    reason,
-                    preserved,
-                    is_active=True,
-                )
+        details = dict(run.stop_details or {})
+        details["apply_escalated"] = True
+        run.stop_details = details
+        payload = self._record_current_human_gate(
+            uow,
+            run,
+            gate=gate,
+            question=reason,
+            options=(),
+        )
         return OrchestrationCoordinationResult(
             status="PAUSED",
             run_id=run.run_id,
             current_stage=OrchestrationStage.IMPLEMENTING,
             message=reason,
+            human_payload=payload,
         )
 
     def _route_changes_required(
@@ -2859,6 +2978,16 @@ class NativeOrchestrationCoordinator:
             current_stage=OrchestrationStage.CODE_REVIEW,
             message=self._review_pause_message("code", result)
             + ("" if findings else " No actionable findings were returned."),
+            human_payload=self._record_current_human_gate(
+                uow,
+                run,
+                gate="code_review_escalation",
+                question=(
+                    self._review_pause_message("code", result)
+                    + ("" if findings else " No actionable findings were returned.")
+                ),
+                options=result.get("options") or (),
+            ),
         )
 
     @staticmethod
@@ -3778,36 +3907,22 @@ class NativeOrchestrationCoordinator:
                 if findings
                 else " No actionable findings were returned."
             )
-            if hasattr(uow, "orchestration_runs"):
-                updater = getattr(uow.orchestration_runs, "update_stop_outcome", None)
-                if updater is not None:
-                    preserved = dict(run.stop_details or {})
-                    preserved["proposal_review_escalated"] = True
-                    preserved["human_payload"] = {
-                        "question": reason,
-                        "options": [],
-                        "run_id": run.run_id,
-                        "stage": OrchestrationStage.PROPOSAL_REVIEW.value,
-                    }
-                    updater(
-                        run.run_id,
-                        OrchestrationStopOutcome.NEEDS_HUMAN,
-                        HumanGate.NEEDS_HUMAN,
-                        reason,
-                        preserved,
-                        is_active=True,
-                    )
+            details = dict(run.stop_details or {})
+            details["proposal_review_escalated"] = True
+            run.stop_details = details
+            payload = self._record_current_human_gate(
+                uow,
+                run,
+                gate="proposal_review_escalation",
+                question=reason,
+                options=result.get("options") or (),
+            )
             return OrchestrationCoordinationResult(
                 status="HUMAN_REQUIRED",
                 run_id=run.run_id,
                 current_stage=OrchestrationStage.PROPOSAL_REVIEW,
                 message=reason,
-                human_payload={
-                    "question": reason,
-                    "options": [],
-                    "run_id": run.run_id,
-                    "stage": OrchestrationStage.PROPOSAL_REVIEW.value,
-                },
+                human_payload=payload,
             )
 
         details = dict(run.stop_details or {})

@@ -2422,17 +2422,26 @@ def list_orchestration_runs(
     for r in runs:
         d = r.model_dump()
         stop_details = d.get("stop_details") or {}
+        current_stage = getattr(r.current_stage, "value", r.current_stage)
+        human_payload = stop_details.get("human_payload")
+        if not (
+            isinstance(human_payload, dict)
+            and human_payload.get("stage") == current_stage
+        ):
+            human_payload = None
 
-        # Check if human intervention is required from checkpoint
-        human_payload = (
-            stop_details.get("human_payload")
-            or stop_details.get("explore_checkpoint", {}).get("human_payload")
-            or stop_details.get("propose_checkpoint", {}).get("human_payload")
-        )
-        is_human_required = bool(
-            human_payload
-            or stop_details.get("explore_checkpoint", {}).get("status") == "HUMAN_REQUIRED"
-            or stop_details.get("propose_checkpoint", {}).get("status") == "HUMAN_REQUIRED"
+        if not isinstance(human_payload, dict):
+            human_payload = None
+
+        if human_payload is None:
+            stop_details.pop("human_payload", None)
+        else:
+            stop_details["human_payload"] = human_payload
+
+        human_gate = getattr(r.human_gate, "value", r.human_gate)
+        stop_outcome = getattr(r.stop_outcome, "value", r.stop_outcome)
+        is_human_required = bool(human_payload) or (
+            human_gate == "NEEDS_HUMAN" or stop_outcome == "NEEDS_HUMAN"
         )
 
         # Calculate tokens from budget ledger or stop_details
@@ -2456,11 +2465,9 @@ def list_orchestration_runs(
         if is_human_required:
             d["status"] = "HUMAN_REQUIRED"
             d["human_gate"] = "HUMAN_REQUIRED"
-            if human_payload and "human_payload" not in stop_details:
-                stop_details["human_payload"] = human_payload
-                d["stop_details"] = stop_details
         else:
             d["status"] = "RUNNING" if r.is_active else "COMPLETED"
+        d["stop_details"] = stop_details
         d["stage"] = r.current_stage.value if r.current_stage else None
         results.append(d)
     return results
