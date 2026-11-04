@@ -9,6 +9,7 @@ import json
 import logging
 import os
 from contextlib import asynccontextmanager
+from dataclasses import asdict
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Annotated, Any, Generator
@@ -29,6 +30,11 @@ from fastapi.responses import (
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field, field_validator
 
+from minime.adapters.provider_adapter import (
+    PROVIDER_DIAGNOSTIC_TIMEOUT_SECONDS,
+    ProviderConnectionDiagnostic,
+    get_provider_adapter,
+)
 from minime.config import load_config
 from minime.db.repository import PostgresPersistenceUnitOfWork
 from minime.db.session import db_manager
@@ -76,6 +82,9 @@ from minime.services.greenfield_bootstrap import (
     GreenfieldBootstrapError,
 )
 from minime.services.project_catalog_service import ProjectCatalogService
+from minime.services.project_connection_service import ProjectConnectionService
+from minime.services.project_service import ProjectService
+from minime.services.provider_health_service import ProviderHealthService
 from minime.services.provider_registry import (
     CanonicalProfileResolver,
     CustomModelRequest,
@@ -85,9 +94,6 @@ from minime.services.provider_registry import (
     classify_discovered_model,
     reject_secret_payload,
 )
-from minime.services.project_connection_service import ProjectConnectionService
-from minime.services.project_service import ProjectService
-from minime.services.provider_health_service import ProviderHealthService
 from minime.services.quota_telemetry import quota_telemetry
 from minime.services.run_recovery import RunRecoveryService
 from minime.services.status_service import StatusService
@@ -519,6 +525,56 @@ def administrative_provider_catalog(
 ) -> dict[str, Any]:
     """Return the durable non-secret provider/model catalog."""
     return catalog_payload(uow.provider_model_registry.list())
+
+
+@app.post("/api/v1/admin/providers/{provider}/test", tags=["admin-providers"])
+async def test_administrative_provider_connection(
+    provider: str,
+    _operator: AuthenticatedOperatorDep,
+    uow: UowDep,
+) -> dict[str, Any]:
+    """Run a bounded non-inference diagnostic for a configured catalog provider."""
+    config = load_config()
+    catalog_provider_ids = {
+        row.provider_id for row in uow.provider_model_registry.list()
+    }
+    if provider not in catalog_provider_ids or provider not in config.providers:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Configured catalog provider was not found.",
+        )
+
+    try:
+        adapter = get_provider_adapter(provider, config)
+    except ValueError:
+        diagnostic = ProviderConnectionDiagnostic(
+            status="unavailable",
+            latency_ms=None,
+            code="diagnostic_unsupported",
+            detail="A bounded non-inference connection check is not available for this provider.",
+        )
+    else:
+        try:
+            diagnostic = await asyncio.wait_for(
+                adapter.diagnose_connection(),
+                timeout=PROVIDER_DIAGNOSTIC_TIMEOUT_SECONDS + 1,
+            )
+        except TimeoutError:
+            diagnostic = ProviderConnectionDiagnostic(
+                status="failure",
+                latency_ms=round((PROVIDER_DIAGNOSTIC_TIMEOUT_SECONDS + 1) * 1000),
+                code="provider_timeout",
+                detail="The provider did not answer within the diagnostic time limit.",
+            )
+        except Exception:
+            diagnostic = ProviderConnectionDiagnostic(
+                status="failure",
+                latency_ms=None,
+                code="diagnostic_failed",
+                detail="The provider connection diagnostic could not be completed.",
+            )
+
+    return {"provider": provider, **asdict(diagnostic)}
 
 
 @app.post("/api/v1/admin/providers/models", status_code=status.HTTP_200_OK, tags=["admin-providers"])

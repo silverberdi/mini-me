@@ -30,6 +30,14 @@ interface HarnessResult {
   summary: string;
 }
 
+interface ProviderConnectionDiagnostic {
+  provider: string;
+  status: 'success' | 'failure' | 'unavailable';
+  latency_ms: number | null;
+  code: string;
+  detail: string;
+}
+
 interface AgentCatalogEntry {
   id: string;
   roles: string[];
@@ -97,7 +105,20 @@ interface RoleChoice {
                     <span>{{ model.is_enabled ? 'Habilitado' : 'Deshabilitado' }}</span>
                   </label>
                 </td>
-                <td class="p-3"><button type="button" disabled title="Diagnóstico de credenciales disponible en el Issue #254" class="cursor-not-allowed rounded-md border border-slate-700 px-3 py-1.5 text-xs text-slate-500 opacity-70">Test Connection</button></td>
+                <td class="p-3">
+                  <button type="button" (click)="testConnection(model.provider_id)" [disabled]="testingProviders.has(model.provider_id)"
+                          class="rounded-md border border-sky-500/40 px-3 py-1.5 text-xs text-sky-200 disabled:opacity-50">
+                    {{ testingProviders.has(model.provider_id) ? 'Probando…' : 'Test Connection' }}
+                  </button>
+                  <div *ngIf="connectionDiagnostics[model.provider_id] as diagnostic" role="status" class="mt-2 max-w-sm text-xs">
+                    <span class="font-semibold">{{ diagnosticStatusLabel(diagnostic.status) }}</span>
+                    <span *ngIf="diagnostic.latency_ms !== null" class="ml-2 text-slate-400">{{ diagnostic.latency_ms }} ms</span>
+                    <p class="mt-1 text-slate-400">{{ diagnostic.detail }}</p>
+                  </div>
+                  <p *ngIf="connectionErrors[model.provider_id]" role="alert" class="mt-2 max-w-sm text-xs text-rose-300">
+                    {{ connectionErrors[model.provider_id] }}
+                  </p>
+                </td>
               </tr>
               <tr *ngIf="!catalog?.models?.length"><td colspan="5" class="p-4 text-center text-slate-400">El catálogo aún no contiene modelos.</td></tr>
             </tbody>
@@ -159,6 +180,9 @@ export class AdminModelsComponent implements OnInit {
   busyModelId: string | null = null;
   refreshingHarnesses = false;
   savingRoles = false;
+  testingProviders = new Set<string>();
+  connectionDiagnostics: Record<string, ProviderConnectionDiagnostic> = {};
+  connectionErrors: Record<string, string> = {};
   errorMessage = '';
   successMessage = '';
 
@@ -232,6 +256,33 @@ export class AdminModelsComponent implements OnInit {
       this.errorMessage = `No se pudo cambiar ${model.canonical_model_id}: ${response.error || 'conflicto o error del servidor'}`;
     }
     this.busyModelId = null;
+  }
+
+  async testConnection(providerId: string): Promise<void> {
+    delete this.connectionDiagnostics[providerId];
+    delete this.connectionErrors[providerId];
+    this.testingProviders.add(providerId);
+    try {
+      const response = await this.api.post<ProviderConnectionDiagnostic>(
+        `/api/v1/admin/providers/${encodeURIComponent(providerId)}/test`,
+        {}
+      );
+      if (response.ok && response.data) {
+        this.connectionDiagnostics[providerId] = response.data;
+      } else {
+        this.connectionErrors[providerId] = `No se pudo completar el diagnóstico: ${response.error || 'error del servidor'}`;
+      }
+    } catch {
+      this.connectionErrors[providerId] = 'No se pudo completar el diagnóstico por un error inesperado.';
+    } finally {
+      this.testingProviders.delete(providerId);
+    }
+  }
+
+  diagnosticStatusLabel(status: ProviderConnectionDiagnostic['status']): string {
+    if (status === 'success') return 'Conexión verificada';
+    if (status === 'failure') return 'Error de conexión';
+    return 'No disponible';
   }
 
   async selectProject(projectId: string): Promise<void> {

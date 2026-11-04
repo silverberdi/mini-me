@@ -39,8 +39,15 @@ test('role assignment uses selected project profiles and the existing project AP
   assert.match(component, /Asignaciones guardadas y confirmadas por el servidor/);
 });
 
-test('Test Connection remains a disabled Issue 254 handoff with no credential-test request', () => {
+test('Test Connection invokes the configured provider diagnostic and renders server results', () => {
   assert.match(component, /Test Connection/);
-  assert.match(component, /disabled title="Diagnóstico de credenciales disponible en el Issue #254"/);
-  assert.doesNotMatch(component, /\/test(?:-connection)?(?:['"`])/);
+  assert.match(component, /\(click\)="testConnection\(model\.provider_id\)"/);
+  assert.match(component, /\$\{encodeURIComponent\(providerId\)\}\/test/);
+  assert.match(component, /this\.api\.post<ProviderConnectionDiagnostic>/);
+  assert.match(component, /if \(response\.ok && response\.data\) \{[\s\S]*?this\.connectionDiagnostics\[providerId\] = response\.data/);
+  assert.match(component, /this\.connectionErrors\[providerId\] = `No se pudo completar el diagnóstico/);
+  assert.match(component, /diagnosticStatusLabel\(status:[\s\S]*?return 'No disponible'/);
+  assert.match(component, /diagnostic\.latency_ms !== null/);
+  assert.doesNotMatch(component, /disabled title="Diagnóstico de credenciales disponible en el Issue #254"/);
+  assert.doesNotMatch(component, /connectionDiagnostics\[providerId\]\s*=\s*\{[^}]*status:\s*'success'/);
 });
