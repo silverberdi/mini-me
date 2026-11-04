@@ -2518,8 +2518,13 @@ def list_orchestration_runs(
 
         human_gate = getattr(r.human_gate, "value", r.human_gate)
         stop_outcome = getattr(r.stop_outcome, "value", r.stop_outcome)
-        is_human_required = bool(human_payload) or (
-            human_gate == "NEEDS_HUMAN" or stop_outcome == "NEEDS_HUMAN"
+        is_terminal = stop_outcome in {"COMPLETED", "FAILED", "CANCELLED"} or (
+            current_stage == "COMPLETED"
+        )
+        is_human_required = not is_terminal and (
+            bool(human_payload)
+            or human_gate == "NEEDS_HUMAN"
+            or stop_outcome == "NEEDS_HUMAN"
         )
 
         # Calculate tokens from budget ledger or stop_details

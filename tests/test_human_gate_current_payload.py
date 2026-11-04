@@ -198,6 +198,45 @@ def _get_runs_client(uow):
     return TestClient(app)
 
 
+@pytest.mark.parametrize(
+    ("stage", "stop_outcome"),
+    [
+        (OrchestrationStage.COMPLETED, OrchestrationStopOutcome.COMPLETED),
+        (OrchestrationStage.ADMITTED, OrchestrationStopOutcome.FAILED),
+        (OrchestrationStage.ADMITTED, OrchestrationStopOutcome.CANCELLED),
+        (OrchestrationStage.COMPLETED, OrchestrationStopOutcome.NEEDS_HUMAN),
+    ],
+)
+def test_terminal_run_projection_ignores_stale_human_gate(
+    in_memory_uow, stage, stop_outcome
+):
+    run = _run(
+        stage,
+        details={
+            "human_payload": {
+                "stage": stage.value,
+                "question": "Stale terminal question",
+                "options": ["old option"],
+            }
+        },
+    )
+    run.is_active = False
+    run.human_gate = HumanGate.NEEDS_HUMAN
+    run.stop_outcome = stop_outcome
+    in_memory_uow.orchestration_runs.save(run)
+
+    try:
+        with _get_runs_client(in_memory_uow) as client:
+            response = client.get("/api/v1/orchestration/runs")
+        projected = response.json()[0]
+    finally:
+        app.dependency_overrides.clear()
+
+    assert response.status_code == 200
+    assert projected["status"] == "COMPLETED"
+    assert projected["status"] != "HUMAN_REQUIRED"
+
+
 def test_run_projection_ignores_payload_from_resolved_earlier_checkpoint(in_memory_uow):
     run = _run(
         OrchestrationStage.PR1_PENDING,
