@@ -1,8 +1,8 @@
 # Tasks: 020 — Operator Experience Parity & Production Console Reliability
 
 ## 1. TUI Production Runtime Configuration (020.2)
-- [ ] 1.1 Implement `discover_and_load_env_file()` in `src/minime/config.py` with multi-path discovery (`MINIME_CONFIG_PATH`, `MINIME_ENV_FILE`, `/etc/minime/minime.env`, `.env`).
-- [ ] 1.2 Call `discover_and_load_env_file()` at CLI startup in `src/minime/cli/main.py` and in `load_config()`.
+- [x] 1.1 Implement `discover_and_load_env_file()` in `src/minime/config.py` with multi-path discovery (`MINIME_CONFIG_PATH`, `MINIME_ENV_FILE`, `/etc/minime/minime.env`, `.env`).
+- [x] 1.2 Call `discover_and_load_env_file()` at CLI startup in `src/minime/cli/main.py` and in `load_config()`.
 - [ ] 1.3 Add unit tests in `tests/unit/test_config.py` validating automatic env discovery, override preservation, and error handling.
 
 ## 2. PWA Operator Parity & Action Safety (020.1)
@@ -23,3 +23,7 @@
 - [ ] 4.3 Verify interactive TUI launch (`minime console`, `minime status`) over SSH as user `silverman` with zero manual environment exports.
 - [ ] 4.4 Verify public PWA at `https://mini-me.silverman.pro` (desktop, tablet, mobile viewports, action modals, efficiency tab, action history tab).
 - [ ] 4.5 Verify shared host health (14 Docker containers and 4 Cloudflare domains).
+
+### Issue #268 evidence audit — unresolved items
+
+> Siguen abiertas 1.3, 2.1–2.6, 3.1–3.2 y 4.1–4.5: la prueba existente no cubre autodiscovery/error handling completo; el PR #60 no acredita los controles de consola de este Change ni las verificaciones de producción. Detalle en [auditoría #268](../../../../docs/evidence/issue-268_archive-validation-audit_2026-11-04.md).

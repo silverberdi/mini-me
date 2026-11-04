@@ -56,5 +56,9 @@
 
 - [ ] 8.1 Consolidar trazas existentes y posteriores de mini me para Explore, Propose/Continue, Apply, Verify y revisión pertinente con agentes reales, mismo Request/Change/Run/worktree y candidato. Verificar invocaciones, resultados, decisiones y uso medido o UNKNOWN preservado como tal; no sustituirlas por prompts manuales, scripts o reportes históricos ni repetir despachos ambiguos.
 - [ ] 8.2 Preparar PR1 de implementación con evidencia y referencia informativa a #173 sin palabras de cierre automático; observar merge por mini me conforme a complejidad y autorizaciones vigentes, incluido acuse humano Estoy enterado para alta. Verificar SHA/resultado remoto del merge y conservar gates pendientes sin automatizar autorizaciones.
-- [ ] 8.3 Tras merge confirmado de PR1, ejecutar Sync/Archive nativos desde rama documental fresca basada en main actualizado y preparar PR2 documental del mismo Change. Verificar trazas de workflows y diff exclusivamente documental; no sustituirlos por mergers Markdown o movimientos manuales de archivos.
+- [x] 8.3 Tras merge confirmado de PR1, ejecutar Sync/Archive nativos desde rama documental fresca basada en main actualizado y preparar PR2 documental del mismo Change. Verificar trazas de workflows y diff exclusivamente documental; no sustituirlos por mergers Markdown o movimientos manuales de archivos.
 - [ ] 8.4 Verificar merge remoto de PR2 antes de cierre remoto #173 y liberación durable del bloqueo; registrar secuencia y efectos como evidencia final de autoejecución. No declarar entrega completa por checkboxes ni tests aislados; conservar pendiente cualquier prueba ausente, sin desplegar, migrar, activar scheduler ni iniciar F6/F7/F8 por estas tareas.
+
+### Issue #268 evidence audit — unresolved items
+
+> Tareas 7.2, 7.3, 7.4, 8.1, 8.2 y 8.4 siguen abiertas: PR #198 deja pendiente la autoejecución y sus gates; PR #199 prueba el cierre documental, no los E2E, gates humanos ni la liberación durable restante. Detalle en [auditoría #268](../../../../docs/evidence/issue-268_archive-validation-audit_2026-11-04.md).

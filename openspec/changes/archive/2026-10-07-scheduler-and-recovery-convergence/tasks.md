@@ -103,3 +103,7 @@
 - [x] 11.5 Post-merge sync/archive Stage G.
 - [x] 11.6 Archive/resolve stale active scheduler-capacity-policy-convergence contract without changing delivered behavior.
 - [ ] 11.7 Keep minime-scheduler.service disabled; no deployment in Stage G.
+
+### Issue #268 evidence audit — unresolved items
+
+> Tareas 11.2, 11.3 y 11.7 siguen abiertas: no hay evidencia de revisión independiente contra SHA inmutable ni captura verificable de systemctl; el texto del PR no basta para el estado externo del servicio. Detalle en [auditoría #268](../../../../docs/evidence/issue-268_archive-validation-audit_2026-11-04.md).
