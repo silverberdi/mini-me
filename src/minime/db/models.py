@@ -64,6 +64,7 @@ class ProviderModelRegistryModel(Base):
         default=dict,
     )
     discovery_status: Mapped[str] = mapped_column(String(16), nullable=False)
+    is_enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True, server_default=text("true"))
     diagnostic_code: Mapped[str | None] = mapped_column(String(64), nullable=True)
     diagnostic_summary: Mapped[str | None] = mapped_column(Text, nullable=True)
     observed_cli_version: Mapped[str | None] = mapped_column(String(128), nullable=True)

@@ -12,7 +12,7 @@ from typing import Any, Protocol, Sequence
 from uuid import NAMESPACE_URL, uuid5
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
-from sqlalchemy import select
+from sqlalchemy import select, text
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
@@ -39,6 +39,7 @@ class ProviderModelDTO(BaseModel):
     max_context_tokens: int | None = None
     capabilities: dict[str, Any] = Field(default_factory=dict)
     discovery_status: str
+    is_enabled: bool
     diagnostic: DiagnosticDTO | None = None
     observed_cli_version: str | None = None
     last_observed_at: datetime | None = None
@@ -70,6 +71,12 @@ class CustomModelRequest(BaseModel):
         return {str(key): bool(flag) for key, flag in value.items()}
 
 
+class ModelEnablementRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    is_enabled: bool
+    version: int = Field(gt=0)
+
+
 def _identity_id(provider_id: str, harness_id: str, model_id: str) -> str:
     return uuid5(NAMESPACE_URL, f"mini-me/provider-model/{provider_id}/{harness_id}/{model_id}").hex
 
@@ -87,6 +94,7 @@ def _dto(row: ProviderModelRegistryModel) -> ProviderModelDTO:
         canonical_model_id=row.canonical_model_id, origin=row.origin,
         max_context_tokens=row.max_context_tokens, capabilities=dict(row.capabilities or {}),
         discovery_status=row.discovery_status, diagnostic=diagnostic,
+        is_enabled=row.is_enabled,
         observed_cli_version=row.observed_cli_version,
         last_observed_at=row.last_observed_at, version=row.version,
     )
@@ -112,6 +120,35 @@ class ProviderModelRepository:
             ProviderModelRegistryModel.harness_id,
             ProviderModelRegistryModel.canonical_model_id,
         )))
+
+    def set_enabled(self, model_id: str, payload: ModelEnablementRequest) -> ProviderModelRegistryModel:
+        row = self.session.scalar(
+            select(ProviderModelRegistryModel)
+            .where(ProviderModelRegistryModel.id == model_id)
+            .with_for_update()
+        )
+        if row is None:
+            raise LookupError("provider model not found")
+        if row.version != payload.version:
+            raise ValueError("stale provider model version")
+        if row.is_enabled != payload.is_enabled:
+            result = self.session.execute(
+                text(
+                    "UPDATE provider_model_registry "
+                    "SET is_enabled = :is_enabled, version = version + 1 "
+                    "WHERE id = :model_id AND version = :expected_version"
+                ),
+                {
+                    "is_enabled": payload.is_enabled,
+                    "model_id": model_id,
+                    "expected_version": payload.version,
+                },
+            )
+            if result.rowcount != 1:
+                raise ValueError("stale provider model version")
+            self.session.expire(row)
+            self.session.refresh(row)
+        return row
 
     def record_harness_diagnostic(
         self,
@@ -382,6 +419,8 @@ class CanonicalProfileResolver:
         row = self.repository.get(provider, harness, model)
         if row is None:
             raise ValueError(f"{role}: model is absent from provider catalog")
+        if not row.is_enabled:
+            raise ValueError(f"{role}: model is disabled by operator")
         if row.discovery_status != "available":
             raise ValueError(f"{role}: model diagnostic is {row.discovery_status}")
         if row.last_observed_at is not None and row.last_observed_at < utc_now() - self.freshness:

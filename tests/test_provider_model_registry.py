@@ -8,6 +8,7 @@ from minime.services.provider_registry import (
     CanonicalProfileResolver,
     CustomModelRequest,
     IntrospectionResult,
+    ModelEnablementRequest,
     ProviderModelRepository,
     SafeCliHarness,
     _parse_model_output,
@@ -107,6 +108,7 @@ def test_canonical_resolver_requires_exact_identity_and_capabilities():
         harness_id = "direct"
         canonical_model_id = "deepseek-chat"
         discovery_status = "available"
+        is_enabled = True
         diagnostic_code = "ok"
         diagnostic_summary = "verified"
         last_observed_at = None
@@ -134,6 +136,7 @@ def test_canonical_resolver_rejects_route_drift():
         harness_id = "opencode"
         canonical_model_id = "deepseek/deepseek-flash"
         discovery_status = "available"
+        is_enabled = True
         diagnostic_code = "ok"
         last_observed_at = None
         capabilities = {
@@ -168,6 +171,7 @@ def test_failed_harness_observation_blocks_existing_non_custom_rows():
         observed_cli_version = "old"
         last_observed_at = None
         version = 2
+        is_enabled = True
         updated_at = None
 
     row = Row()
@@ -186,6 +190,104 @@ def test_failed_harness_observation_blocks_existing_non_custom_rows():
     assert row.discovery_status == "blocked"
     assert row.diagnostic_code == "timeout"
     assert row.version == 3
+
+
+def test_provider_model_toggle_is_persisted_without_changing_discovery_or_diagnostic():
+    from datetime import UTC, datetime
+
+    from sqlalchemy import create_engine
+    from sqlalchemy.orm import Session
+
+    from minime.db.models import ProviderModelRegistryModel
+
+    engine = create_engine("sqlite+pysqlite:///:memory:")
+    ProviderModelRegistryModel.__table__.create(engine)
+    now = datetime.now(UTC)
+    with Session(engine) as session:
+        row = ProviderModelRegistryModel(
+            id="model-1", provider_id="deepseek", harness_id="opencode",
+            canonical_model_id="deepseek/deepseek-flash", origin="discovered",
+            capabilities={"model_route": "deepseek_direct"}, discovery_status="available",
+            diagnostic_code="ok", diagnostic_summary="observed", version=1,
+            created_at=now, updated_at=now,
+        )
+        session.add(row)
+        session.flush()
+        assert row.is_enabled is True
+        session.expire(row)
+        session.refresh(row)
+        original_updated_at = row.updated_at
+
+        disabled = ProviderModelRepository(session).set_enabled(
+            "model-1", ModelEnablementRequest(is_enabled=False, version=1)
+        )
+        assert disabled.is_enabled is False
+        assert disabled.version == 2
+        assert disabled.updated_at == original_updated_at
+        assert disabled.discovery_status == "available"
+        assert disabled.diagnostic_code == "ok"
+
+        with pytest.raises(ValueError, match="stale"):
+            ProviderModelRepository(session).set_enabled(
+                "model-1", ModelEnablementRequest(is_enabled=True, version=1)
+            )
+
+        ProviderModelRepository(session).record_harness_diagnostic(
+            "opencode", IntrospectionResult("opencode", "blocked", "cli_missing", "not installed")
+        )
+        refreshed = ProviderModelRepository(session).get(
+            "deepseek", "opencode", "deepseek/deepseek-flash"
+        )
+        assert refreshed.is_enabled is False
+        assert refreshed.discovery_status == "blocked"
+        assert refreshed.diagnostic_code == "cli_missing"
+
+        ProviderModelRepository(session).upsert_observation({
+            "provider_id": "deepseek",
+            "harness_id": "opencode",
+            "canonical_model_id": "deepseek/deepseek-flash",
+            "origin": "discovered",
+            "capabilities": {"model_route": "deepseek_direct"},
+            "discovery_status": "available",
+            "diagnostic_code": "ok",
+            "diagnostic_summary": "observed again",
+        })
+        refreshed = ProviderModelRepository(session).get(
+            "deepseek", "opencode", "deepseek/deepseek-flash"
+        )
+        assert refreshed.is_enabled is False
+        assert refreshed.discovery_status == "available"
+        assert refreshed.diagnostic_summary == "observed again"
+
+
+def test_enablement_migration_adds_enabled_default_and_downgrades():
+    import importlib.util
+    from pathlib import Path
+
+    from alembic.migration import MigrationContext
+    from alembic.operations import Operations
+    from sqlalchemy import create_engine, inspect, text
+
+    migration_path = Path(__file__).parents[1] / "alembic/versions/f14_provider_model_enablement.py"
+    spec = importlib.util.spec_from_file_location("f14_provider_model_enablement", migration_path)
+    migration = importlib.util.module_from_spec(spec)
+    assert spec and spec.loader
+    spec.loader.exec_module(migration)
+    assert migration.down_revision == "f13_provider_model_registry"
+
+    engine = create_engine("sqlite+pysqlite:///:memory:")
+    with engine.begin() as connection:
+        connection.execute(text("CREATE TABLE provider_model_registry (id VARCHAR(64) PRIMARY KEY)"))
+        connection.execute(text("INSERT INTO provider_model_registry (id) VALUES ('existing')"))
+        context = MigrationContext.configure(connection)
+        with Operations.context(context):
+            migration.upgrade()
+        assert bool(connection.execute(
+            text("SELECT is_enabled FROM provider_model_registry WHERE id='existing'")
+        ).scalar_one()) is True
+        with Operations.context(context):
+            migration.downgrade()
+        assert "is_enabled" not in {column["name"] for column in inspect(connection).get_columns("provider_model_registry")}
 
 
 def test_run_invocation_preserves_canonical_route():
