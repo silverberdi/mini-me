@@ -228,6 +228,12 @@ import { VersionService } from './core/version.service';
             <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M3 7v10a2 2 0 002 2h14a2 2 0 002-2V9a2 2 0 00-2-2h-6l-2-2H5a2 2 0 00-2 2z"/></svg>
             Proyectos
           </a>
+
+          <a routerLink="/administracion/modelos-proveedores" routerLinkActive="bg-sky-500/10 text-sky-400 border-sky-500/30"
+             class="flex items-center gap-3 px-3.5 py-2.5 rounded-xl text-sm font-medium text-slate-400 hover:text-white hover:bg-slate-800/60 border border-transparent transition-colors">
+            <span class="w-4 text-center">⚙</span>
+            Administración
+          </a>
         </nav>
 
         <div class="p-3 bg-slate-800/40 border border-slate-700/40 rounded-xl text-xs text-slate-400 space-y-1">

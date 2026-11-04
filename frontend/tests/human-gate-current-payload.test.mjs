@@ -11,7 +11,7 @@ const component = fs.readFileSync(
 );
 
 test('Trabajo actual reads the current Run payload without stale fallbacks', () => {
-  assert.match(component, /run\.stop_details\?\.human_payload/);
+  assert.match(component, /run\.stop_details\?\.\['human_payload'\]/);
   assert.doesNotMatch(component, /human_request/);
   assert.doesNotMatch(component, /metadata\?\.\['human_payload'\]/);
 });
