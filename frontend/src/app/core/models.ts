@@ -87,6 +87,32 @@ export interface QuotaObservation {
   reason?: string | null;
 }
 
+export interface DashboardCostModel {
+  model: string;
+  amount_usd: string;
+}
+
+export interface DashboardCostProvider {
+  provider: 'deepseek_direct' | 'openrouter' | string;
+  label: string;
+  amount_usd: string;
+  models: DashboardCostModel[];
+}
+
+export interface DashboardCostSeriesPoint {
+  day: string;
+  provider: string;
+  model: string;
+  amount_usd: string;
+  source_timestamps: string[];
+}
+
+export interface DashboardCost {
+  status: 'available' | 'no_data';
+  providers: DashboardCostProvider[];
+  series: DashboardCostSeriesPoint[];
+}
+
 export interface UserSession {
   authenticated: boolean;
   user?: {

@@ -1,0 +1,188 @@
+{
+  "test_project_id": "dashboard-cost-ce120c160da7403a9955643581988b55",
+  "test_job_id": "job-c8ba2f21f8374c75b9afe8bb6add404c",
+  "database_rows": [
+    {
+      "provider": "deepseek",
+      "canonical_model_identity": "deepseek/deepseek-flash",
+      "amount_usd": "0.123456",
+      "created_at": "2026-08-01 09:00:00+00:00"
+    },
+    {
+      "provider": "openrouter",
+      "canonical_model_identity": "openrouter/deepseek/deepseek-r1-0528",
+      "amount_usd": "1.200000",
+      "created_at": "2026-08-01 09:15:00+00:00"
+    },
+    {
+      "provider": "openrouter",
+      "canonical_model_identity": "",
+      "amount_usd": "0.010000",
+      "created_at": "2026-08-01 09:30:00+00:00"
+    },
+    {
+      "provider": "openrouter",
+      "canonical_model_identity": "vendor/unrecognized-model",
+      "amount_usd": "0.010000",
+      "created_at": "2026-08-01 09:45:00+00:00"
+    }
+  ],
+  "http_status": 200,
+  "cost_payload": {
+    "status": "available",
+    "providers": [
+      {
+        "provider": "deepseek_direct",
+        "label": "DeepSeek Direct",
+        "amount_usd": "0.123456",
+        "models": [
+          {
+            "model": "deepseek/deepseek-flash",
+            "amount_usd": "0.123456"
+          }
+        ]
+      },
+      {
+        "provider": "openrouter",
+        "label": "OpenRouter",
+        "amount_usd": "1.220000",
+        "models": [
+          {
+            "model": "Modelo no identificado",
+            "amount_usd": "0.020000"
+          },
+          {
+            "model": "openrouter/deepseek/deepseek-r1-0528",
+            "amount_usd": "1.200000"
+          }
+        ]
+      }
+    ],
+    "series": [
+      {
+        "day": "2026-08-01",
+        "provider": "deepseek_direct",
+        "model": "deepseek/deepseek-flash",
+        "amount_usd": "0.123456",
+        "source_timestamps": [
+          "2026-08-01T09:00:00+00:00"
+        ]
+      },
+      {
+        "day": "2026-08-01",
+        "provider": "openrouter",
+        "model": "Modelo no identificado",
+        "amount_usd": "0.020000",
+        "source_timestamps": [
+          "2026-08-01T09:30:00+00:00",
+          "2026-08-01T09:45:00+00:00"
+        ]
+      },
+      {
+        "day": "2026-08-01",
+        "provider": "openrouter",
+        "model": "openrouter/deepseek/deepseek-r1-0528",
+        "amount_usd": "1.200000",
+        "source_timestamps": [
+          "2026-08-01T09:15:00+00:00"
+        ]
+      }
+    ]
+  },
+  "visible_ui_contract": {
+    "provider_labels": [
+      "DeepSeek Direct",
+      "OpenRouter"
+    ],
+    "provider_amounts": [
+      {
+        "label": "DeepSeek Direct",
+        "amount_usd": "0.123456"
+      },
+      {
+        "label": "OpenRouter",
+        "amount_usd": "1.220000"
+      }
+    ],
+    "chart_view_model": [
+      {
+        "x": 70,
+        "y": 132,
+        "label": "deepseek_direct · deepseek/deepseek-flash",
+        "displayVal": "$0.123456"
+      },
+      {
+        "x": 320,
+        "y": 143,
+        "label": "openrouter · Modelo no identificado",
+        "displayVal": "$0.020000"
+      },
+      {
+        "x": 570,
+        "y": 20,
+        "label": "openrouter · openrouter/deepseek/deepseek-r1-0528",
+        "displayVal": "$1.200000"
+      }
+    ],
+    "angular_template_bindings": [
+      "[attr.points]=chartPoints",
+      "{{ pt.displayVal }}",
+      "{{ pt.label }}"
+    ],
+    "expected_visualization": "deepseek_direct · deepseek/deepseek-flash: $0.123456\nopenrouter · Modelo no identificado: $0.020000\nopenrouter · openrouter/deepseek/deepseek-r1-0528: $1.200000"
+  },
+  "candidate_sha": "c163d374f75d910019d0a7f912380de9e9ae5d49",
+  "candidate_worktree_fingerprint": "61f47a1ffa317e94fce4e6463f3707e82eee8975c5b61f892589edd6a80f35b0",
+  "commands": {
+    "focused_backend": "MINIME_TEST_DATABASE_URL=$MINIME_DATABASE_URL python -m pytest -q -rs tests/test_dashboard_cost.py tests/test_dashboard_cost_postgres_e2e.py tests/test_dashboard_security.py tests/test_dashboard_stale_isolation.py tests/test_dashboard_ui.py",
+    "frontend_tests": "npm --prefix frontend test",
+    "frontend_build": "npm --prefix frontend run build",
+    "browser_render": "Chrome headless 1280x900 against the production Angular build with the captured PostgreSQL-backed Dashboard response replayed unchanged",
+    "diff_check": "git diff --check",
+    "openspec_validation": "openspec validate req-238-dashboard-mostrar-costo-real-por-deepsee --strict"
+  },
+  "exit_codes": {
+    "focused_backend": 0,
+    "postgres_e2e_included": 0,
+    "frontend_tests": 0,
+    "frontend_build": 0,
+    "browser_render": 0,
+    "diff_check": 0,
+    "openspec_validation": 0
+  },
+  "browser_render": {
+    "browser": "Chrome headless 1280x900",
+    "exit_code": 0,
+    "angular_build": "frontend/dist/minime-frontend",
+    "dashboard_response": "captured from PostgreSQL-backed TestClient invocation, replayed unchanged to Angular",
+    "visible_text_checks": [
+      "DeepSeek Direct",
+      "OpenRouter",
+      "$0.123456",
+      "$1.200000",
+      "$0.020000",
+      "deepseek/deepseek-flash",
+      "openrouter/deepseek/deepseek-r1-0528",
+      "Modelo no identificado"
+    ],
+    "svg_polyline_present": true,
+    "captured_dom": "dashboard-cost-browser-dom.html",
+    "dom_sha256": "a3af5103b7f5e9e7569a369ca1a9793683267004e0cedb807dd9ff23b3d91942"
+  },
+  "database_target": "configured MINIME_DATABASE_URL (credential value not recorded)",
+  "cleanup_verified": {
+    "projects": 0,
+    "jobs": 0,
+    "budget_ledger": 0,
+    "budget_reservations": 0,
+    "openrouter_pricing_snapshots": 0
+  },
+  "results": {
+    "focused_backend": "11 passed",
+    "frontend_tests": "28 passed",
+    "frontend_build": "exit 0; pre-existing NG8107 and bundle-budget warnings (517.52 kB vs 512 kB)",
+    "postgres_e2e": "1 passed; four August 1, 2026 ledger rows observed before API request",
+    "browser_render": "actual Angular DOM contains both providers, exact USD values, model labels, unknown-model bucket and SVG polyline",
+    "cleanup": "all temporary project, job, reservation, pricing snapshot and ledger row counts verified zero"
+  }
+}

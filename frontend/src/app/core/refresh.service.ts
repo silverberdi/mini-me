@@ -1,6 +1,6 @@
 import { Injectable, signal, computed, effect, OnDestroy } from "@angular/core";
 import { ApiService } from "./api.service";
-import { Project, OrchestrationRun, RequestItem, QuotaObservation } from "./models";
+import { DashboardCost, Project, OrchestrationRun, RequestItem, QuotaObservation } from "./models";
 
 @Injectable({
   providedIn: "root"
@@ -25,6 +25,7 @@ export class RefreshService implements OnDestroy {
   readonly allRequests = signal<RequestItem[]>([]);
   readonly closedRequests = signal<RequestItem[]>([]);
   readonly quotas = signal<QuotaObservation[]>([]);
+  readonly cost = signal<DashboardCost>({ status: 'no_data', providers: [], series: [] });
   readonly syncState = signal<'idle' | 'syncing' | 'error'>('idle');
   private events: EventSource | null = null;
 
@@ -108,10 +109,11 @@ export class RefreshService implements OnDestroy {
     const query = activeId ? `?project_id=${encodeURIComponent(activeId)}` : "";
 
     try {
-      const [projRes, runsRes, reqsRes] = await Promise.all([
+      const [projRes, runsRes, reqsRes, dashboardRes] = await Promise.all([
         this.api.get<Project[]>("/api/v1/projects", { signal }),
         this.api.get<OrchestrationRun[]>(`/api/v1/orchestration/runs${query}`, { signal }),
-        activeId ? this.api.get<RequestItem[]>(`/api/v1/projects/${encodeURIComponent(activeId)}/requests`, { signal }) : Promise.resolve(null)
+        activeId ? this.api.get<RequestItem[]>(`/api/v1/projects/${encodeURIComponent(activeId)}/requests`, { signal }) : Promise.resolve(null),
+        this.api.get<{ cost: DashboardCost }>(`/api/v1/dashboard/overview${query}`, { signal }),
       ]);
 
       if (currentGen !== this.generation || projRes.aborted || runsRes.aborted) {
@@ -132,6 +134,10 @@ export class RefreshService implements OnDestroy {
 
       if (runsRes.ok && Array.isArray(runsRes.data)) {
         this.runs.set(runsRes.data);
+      }
+
+      if (dashboardRes.ok && dashboardRes.data?.cost) {
+        this.cost.set(dashboardRes.data.cost);
       }
 
       if (reqsRes && reqsRes.ok && reqsRes.data) {

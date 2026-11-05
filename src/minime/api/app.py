@@ -76,6 +76,7 @@ from minime.services.budget_service import BudgetService
 from minime.services.capacity_lifecycle_service import CapacityLifecycleService
 from minime.services.context_discovery_service import ContextDiscoveryService
 from minime.services.current_check_batch import validate_current_checks_batch
+from minime.services.dashboard_service import DashboardOverviewResponse, OperationsDashboardService
 from minime.services.event_broker import event_broker
 from minime.services.greenfield_bootstrap import (
     GreenfieldBootstrapCoordinator,
@@ -2624,6 +2625,24 @@ def list_orchestration_runs(
 # -----------------------------------------------------------------------------
 # Operations Dashboard Endpoints
 # -----------------------------------------------------------------------------
+
+
+@app.get(
+    "/api/v1/dashboard/overview",
+    response_model=DashboardOverviewResponse,
+    tags=["dashboard"],
+)
+def get_dashboard_overview(
+    _operator: AuthenticatedOperatorDep,
+    uow: UowDep,
+    project_id: str | None = None,
+) -> DashboardOverviewResponse:
+    """Return the authenticated Dashboard read model and ledger-backed costs."""
+    selected_project_id = project_id
+    if selected_project_id is None:
+        projects = uow.projects.list_all()
+        selected_project_id = projects[0].project_id if projects else None
+    return OperationsDashboardService(uow).get_overview(selected_project_id)
 
 
 
