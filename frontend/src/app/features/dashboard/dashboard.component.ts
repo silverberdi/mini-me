@@ -3,6 +3,7 @@ import { CommonModule } from '@angular/common';
 import { RouterModule } from '@angular/router';
 import { RefreshService } from '../../core/refresh.service';
 import { AnalogGaugeComponent } from '../../shared/analog-gauge.component';
+import { toDashboardCostChartPoints } from './dashboard-cost-chart';
 
 @Component({
   selector: 'app-dashboard',
@@ -76,7 +77,7 @@ import { AnalogGaugeComponent } from '../../shared/analog-gauge.component';
         </div>
       </div>
 
-      <!-- Line Chart Section (3 Independent Dimensions: Autonomy, Delivery Time, Token Cost) -->
+      <!-- Line Chart Section (3 Independent Dimensions: Autonomy, Delivery Time, Settled Cost) -->
       <div class="bg-slate-800/40 rounded-2xl border border-slate-700/50 p-6 backdrop-blur-sm space-y-4 shadow-xl">
         <div class="flex flex-col sm:flex-row sm:items-center justify-between gap-3 border-b border-slate-700/60 pb-4">
           <div>
@@ -84,7 +85,7 @@ import { AnalogGaugeComponent } from '../../shared/analog-gauge.component';
               <span>Gráfica de Líneas de Efectividad</span>
               <span class="text-xs font-mono font-normal text-slate-400">(Tres Dimensiones Independientes)</span>
             </h2>
-            <p class="text-xs text-slate-400 mt-0.5">Observabilidad de calidad/autonomía, duración efectiva y recursos IA por ejecución terminada.</p>
+            <p class="text-xs text-slate-400 mt-0.5">Observabilidad de calidad/autonomía, duración efectiva y costo liquidado por ejecución terminada.</p>
           </div>
           <div class="flex items-center gap-1.5 bg-slate-900/80 p-1 rounded-xl border border-slate-800 self-start sm:self-auto">
             <button
@@ -103,7 +104,7 @@ import { AnalogGaugeComponent } from '../../shared/analog-gauge.component';
               (click)="selectedDimension.set('cost')"
               [ngClass]="selectedDimension() === 'cost' ? 'bg-amber-500 text-white shadow' : 'text-slate-400 hover:text-slate-200'"
               class="px-3 py-1.5 text-xs font-semibold rounded-lg transition-all cursor-pointer">
-              3. Tokens / Costo
+              3. Costo liquidado (USD)
             </button>
           </div>
         </div>
@@ -118,9 +119,9 @@ import { AnalogGaugeComponent } from '../../shared/analog-gauge.component';
           </div>
 
           <div class="relative w-full h-52">
-            <div *ngIf="dataPoints.length === 0" class="h-full flex flex-col items-center justify-center text-center p-6 text-slate-500 space-y-1">
-              <span class="text-sm font-medium text-slate-400">Sin ejecuciones históricas registradas</span>
-              <span class="text-xs font-mono">Las métricas de efectividad se trazarán automáticamente al completarse ciclos reales.</span>
+            <div *ngIf="dataPoints.length === 0" class="h-full flex flex-col items-center justify-center text-center p-6 text-slate-500 space-y-1" role="status" aria-live="polite">
+              <span class="text-sm font-medium text-slate-400">{{ selectedDimension() === 'cost' ? 'Sin datos de costo liquidado' : 'Sin ejecuciones históricas registradas' }}</span>
+              <span class="text-xs font-mono">{{ selectedDimension() === 'cost' ? 'No existe un importe verificable en el ledger.' : 'Las métricas de efectividad se trazarán automáticamente al completarse ciclos reales.' }}</span>
             </div>
 
             <svg *ngIf="dataPoints.length > 0" viewBox="0 0 600 170" preserveAspectRatio="none" class="w-full h-full overflow-visible">
@@ -158,8 +159,20 @@ import { AnalogGaugeComponent } from '../../shared/analog-gauge.component';
             </svg>
           </div>
 
+          <div *ngIf="selectedDimension() === 'cost' && refresh.cost().status === 'available'" class="grid grid-cols-1 md:grid-cols-2 gap-3" aria-label="Costos liquidados por proveedor">
+            <div *ngFor="let provider of refresh.cost().providers" class="rounded-xl border border-slate-700/50 bg-slate-900/60 p-4">
+              <div class="flex items-center justify-between">
+                <span class="text-sm font-semibold text-slate-200">{{ provider.label }}</span>
+                <span class="font-mono text-sm text-amber-300">&#36;{{ provider.amount_usd }} USD</span>
+              </div>
+              <div *ngFor="let model of provider.models" class="mt-2 flex justify-between text-xs text-slate-400">
+                <span>{{ model.model }}</span><span class="font-mono">&#36;{{ model.amount_usd }}</span>
+              </div>
+            </div>
+          </div>
+
           <div class="flex items-center justify-between text-[11px] text-slate-500 pt-2 border-t border-slate-900 font-mono">
-            <span>{{ dataPoints.length }} ejecuciones históricas trazadas</span>
+            <span>{{ selectedDimension() === 'cost' ? (refresh.cost().status === 'available' ? dataPoints.length + ' puntos de costo liquidados' : 'Costo liquidado no disponible') : dataPoints.length + ' ejecuciones históricas trazadas' }}</span>
             <span>Métricas duraderas calculadas sin simulación ni interpolación</span>
           </div>
         </div>
@@ -331,7 +344,7 @@ export class DashboardComponent {
     switch (this.selectedDimension()) {
       case 'autonomy': return 'Tasa de Autonomía (% éxito directo sin intervención humana)';
       case 'time': return 'Duración Total del Run (minutos transcurridos)';
-      case 'cost': return 'Tokens / Recursos IA consumidos';
+      case 'cost': return 'Costo liquidado por proveedor / modelo';
     }
   }
 
@@ -339,7 +352,7 @@ export class DashboardComponent {
     switch (this.selectedDimension()) {
       case 'autonomy': return '%';
       case 'time': return 'min';
-      case 'cost': return 'tokens';
+      case 'cost': return 'USD';
     }
   }
 
@@ -355,7 +368,7 @@ export class DashboardComponent {
     switch (this.selectedDimension()) {
       case 'autonomy': return '100%';
       case 'time': return '24h';
-      case 'cost': return '100k';
+      case 'cost': return '$100';
     }
   }
 
@@ -363,7 +376,7 @@ export class DashboardComponent {
     switch (this.selectedDimension()) {
       case 'autonomy': return '50%';
       case 'time': return '12h';
-      case 'cost': return '50k';
+      case 'cost': return '$50';
     }
   }
 
@@ -371,11 +384,14 @@ export class DashboardComponent {
     switch (this.selectedDimension()) {
       case 'autonomy': return '0%';
       case 'time': return '0h';
-      case 'cost': return '0';
+      case 'cost': return '$0';
     }
   }
 
   get dataPoints(): Array<{ x: number; y: number; label: string; displayVal: string }> {
+    if (this.selectedDimension() === 'cost') {
+      return toDashboardCostChartPoints(this.refresh.cost().series);
+    }
     const runs = this.refresh.runs().slice(0, 5).reverse();
     if (runs.length === 0) {
       return [];
@@ -398,15 +414,6 @@ export class DashboardComponent {
         const dm = Math.max(1, Math.round((t2 - t1) / 60000));
         displayVal = dm >= 60 ? `${(dm / 60).toFixed(1)}h` : `${dm}m`;
         y = Math.max(20, Math.round(145 - Math.min(1, dm / 1440) * 125));
-      } else {
-        const tk = (r as any).tokens || (r.metadata as any)?.tokens || 0;
-        if (tk > 0) {
-          displayVal = `${(tk / 1000).toFixed(0)}k`;
-          y = Math.max(20, Math.round(145 - Math.min(1, tk / 100000) * 125));
-        } else {
-          displayVal = 'CLI';
-          y = 145;
-        }
       }
 
       const shortId = r.run_id.length > 8 ? r.run_id.substring(0, 8) : r.run_id;

@@ -5,8 +5,11 @@ from __future__ import annotations
 import logging
 import os
 import subprocess
+from collections import defaultdict
 from datetime import UTC, datetime
+from decimal import Decimal
 from typing import Any
+from uuid import NAMESPACE_URL, uuid5
 
 from pydantic import BaseModel, Field
 
@@ -32,8 +35,10 @@ from minime.domain.models import (
     OrchestrationRun,
     Project,
     ProviderEfficiencyMetrics,
+    BudgetLedgerEntry,
     utc_now,
 )
+from minime.config import OPENCODE_DEEPSEEK_MODEL_ALIASES, OPENCODE_DEEPSEEK_MODELS
 from minime.logging import redact_secrets
 from minime.services.capacity_lifecycle_service import CapacityLifecycleService
 from minime.services.efficiency_telemetry_service import EfficiencyTelemetryService
@@ -335,6 +340,32 @@ class TimelineEventDTO(BaseModel):
     details: dict[str, Any] = Field(default_factory=dict)
 
 
+class DashboardCostModelDTO(BaseModel):
+    model: str
+    amount_usd: str
+
+
+class DashboardCostProviderDTO(BaseModel):
+    provider: str
+    label: str
+    amount_usd: str
+    models: list[DashboardCostModelDTO] = Field(default_factory=list)
+
+
+class DashboardCostSeriesPointDTO(BaseModel):
+    day: str
+    provider: str
+    model: str
+    amount_usd: str
+    source_timestamps: list[str] = Field(default_factory=list)
+
+
+class DashboardCostDTO(BaseModel):
+    status: str
+    providers: list[DashboardCostProviderDTO] = Field(default_factory=list)
+    series: list[DashboardCostSeriesPointDTO] = Field(default_factory=list)
+
+
 class DashboardOverviewResponse(BaseModel):
     observed_at: str | None = None
     system_status: SystemStatusDTO
@@ -342,6 +373,9 @@ class DashboardOverviewResponse(BaseModel):
     active_executions: list[ActiveExecutionDTO] = Field(default_factory=list)
     recent_completions: list[RecentCompletionDTO] = Field(default_factory=list)
     changes: list[ChangeSummaryDTO] = Field(default_factory=list)
+    cost: DashboardCostDTO = Field(
+        default_factory=lambda: DashboardCostDTO(status="no_data")
+    )
 
 
 class DashboardChangeDetailResponse(BaseModel):
@@ -382,7 +416,7 @@ class OperationsDashboardService:
         self.uow = uow
         self.scheduler_observer = scheduler_observer or SystemdSchedulerObserver()
 
-    def get_overview(self) -> DashboardOverviewResponse:
+    def get_overview(self, project_id: str | None = None) -> DashboardOverviewResponse:
         """Construct high-level operational overview."""
         # 1. Capacity & Scheduler Status
         cap_service = CapacityLifecycleService(self.uow)
@@ -760,19 +794,28 @@ class OperationsDashboardService:
         ownership_repo = getattr(self.uow, "orchestration_worktree_ownerships", None)
         active_ownerships = ownership_repo.list_active() if ownership_repo else []
         active_wts = len(active_ownerships)
-        active_wts_list = [
-            {
-                "worktree_id": o.worktree_id,
-                "project_id": o.project_id,
-                "job_id": o.job_id,
-                "worktree_path": o.canonical_worktree_path,
-                "state": o.state.value if hasattr(o.state, "value") else str(o.state),
-                "created_at": o.created_at.isoformat()
-                if hasattr(o.created_at, "isoformat")
-                else str(o.created_at),
-            }
-            for o in active_ownerships
-        ]
+        active_wts_list = []
+        for ownership in active_ownerships:
+            ownership_state = getattr(ownership, "state", None)
+            if ownership_state is None:
+                ownership_state = getattr(ownership, "creation_state", None)
+            state_label = (
+                ownership_state.value
+                if hasattr(ownership_state, "value")
+                else str(ownership_state) if ownership_state is not None else "UNKNOWN"
+            )
+            active_wts_list.append(
+                {
+                    "worktree_id": ownership.worktree_id,
+                    "project_id": ownership.project_id,
+                    "job_id": ownership.job_id,
+                    "worktree_path": ownership.canonical_worktree_path,
+                    "state": state_label,
+                    "created_at": ownership.created_at.isoformat()
+                    if hasattr(ownership.created_at, "isoformat")
+                    else str(ownership.created_at),
+                }
+            )
 
         from minime.services.agent_confinement import AgentProcessConfinement
         from minime.services.workspace_guard import ManagedWorkspaceGuard
@@ -911,7 +954,151 @@ class OperationsDashboardService:
             active_executions=active_executions,
             recent_completions=recent_completions,
             changes=change_summaries,
+            cost=self.get_cost_projection(project_id),
         )
+
+    def get_cost_projection(self, project_id: str | None) -> DashboardCostDTO:
+        """Project verified, liquidated ledger spend for the Dashboard.
+
+        The ledger is the only financial authority here.  In particular, run
+        token counters, reservations, and unresolved usage are never inputs to
+        this projection.
+        """
+        if not project_id or not hasattr(self.uow, "budget_ledger"):
+            return DashboardCostDTO(status="no_data")
+
+        entries = self.uow.budget_ledger.list_by_project(project_id)
+        reviews_by_id = self._verified_direct_usage_reviews(project_id)
+        eligible = [
+            entry
+            for entry in entries
+            if self._is_liquidated_dashboard_entry(entry, reviews_by_id)
+        ]
+        if not eligible:
+            return DashboardCostDTO(status="no_data")
+
+        provider_totals: dict[str, Decimal] = defaultdict(lambda: Decimal("0"))
+        model_totals: dict[tuple[str, str], Decimal] = defaultdict(lambda: Decimal("0"))
+        series_totals: dict[tuple[str, str, str], Decimal] = defaultdict(lambda: Decimal("0"))
+        series_timestamps: dict[tuple[str, str, str], list[str]] = defaultdict(list)
+
+        for entry in eligible:
+            provider = self._dashboard_provider(entry)
+            model = self._dashboard_model(provider, getattr(entry, "canonical_model_identity", None))
+            amount = Decimal(str(entry.amount_usd))
+            timestamp = self._ledger_timestamp(entry)
+            day = timestamp.astimezone(UTC).date().isoformat()
+            provider_totals[provider] += amount
+            model_totals[(provider, model)] += amount
+            series_totals[(day, provider, model)] += amount
+            series_timestamps[(day, provider, model)].append(_format_dt(timestamp) or "")
+
+        providers = [
+            DashboardCostProviderDTO(
+                provider=provider,
+                label=self._provider_label(provider),
+                amount_usd=self._decimal_text(total),
+                models=[
+                    DashboardCostModelDTO(
+                        model=model,
+                        amount_usd=self._decimal_text(model_totals[(provider, model)]),
+                    )
+                    for (model_provider, model) in sorted(model_totals)
+                    if model_provider == provider
+                ],
+            )
+            for provider, total in sorted(provider_totals.items())
+        ]
+        series = [
+            DashboardCostSeriesPointDTO(
+                day=day,
+                provider=provider,
+                model=model,
+                amount_usd=self._decimal_text(amount),
+                source_timestamps=sorted(series_timestamps[(day, provider, model)]),
+            )
+            for (day, provider, model), amount in sorted(series_totals.items())
+        ]
+        return DashboardCostDTO(status="available", providers=providers, series=series)
+
+    def _verified_direct_usage_reviews(self, project_id: str) -> set[str]:
+        reviews_repo = getattr(self.uow, "reviews", None)
+        if reviews_repo is None or not hasattr(reviews_repo, "list_by_project"):
+            return set()
+        verified: set[str] = set()
+        for review in reviews_repo.list_by_project(project_id, limit=10000):
+            if (
+                review.project_id == project_id
+                and review.review_stage == "CODE_REVIEW"
+                and review.provider == "deepseek"
+                and review.reviewer_model
+            ):
+                verified.add(str(uuid5(NAMESPACE_URL, f"minime:review-usage:v1:{review.review_id}")))
+        return verified
+
+    def _is_liquidated_dashboard_entry(
+        self, entry: BudgetLedgerEntry, verified_direct_usage_ids: set[str]
+    ) -> bool:
+        if getattr(entry, "project_id", None) is None or not self._ledger_timestamp(entry):
+            return False
+        if self._dashboard_provider(entry) is None:
+            return False
+        entry_type = str(getattr(entry, "entry_type", "")).upper()
+        if entry_type in {"SETTLEMENT", "BREACH_SETTLEMENT"}:
+            liquidated = bool(getattr(entry, "reservation_id", None))
+        else:
+            liquidated = (
+                entry_type == "USAGE"
+                and getattr(entry, "reservation_id", None) is None
+                and str(getattr(entry, "provider", "")).lower() == "deepseek"
+                and getattr(entry, "entry_id", None) in verified_direct_usage_ids
+            )
+        if not liquidated:
+            return False
+        try:
+            amount = Decimal(str(entry.amount_usd))
+        except Exception:
+            return False
+        return amount.is_finite() and amount >= 0
+
+    @staticmethod
+    def _ledger_timestamp(entry: BudgetLedgerEntry) -> datetime | None:
+        timestamp = getattr(entry, "created_at", None)
+        if not isinstance(timestamp, datetime):
+            return None
+        return timestamp.replace(tzinfo=UTC) if timestamp.tzinfo is None else timestamp
+
+    @staticmethod
+    def _dashboard_provider(entry: BudgetLedgerEntry) -> str | None:
+        provider = str(getattr(entry, "provider", "")).strip().lower()
+        origin = str(getattr(entry, "billing_origin", "")).strip().lower()
+        if provider == "deepseek" and origin in {"", "deepseek", "deepseek_direct"}:
+            return "deepseek_direct"
+        if provider == "openrouter" and origin in {"", "openrouter"}:
+            return "openrouter"
+        return None
+
+    @staticmethod
+    def _dashboard_model(provider: str, raw_model: Any) -> str:
+        model = str(raw_model or "").strip()
+        lowered = model.lower()
+        if not model or lowered in {"unknown", "unrecognized", "null", "none"}:
+            return "Modelo no identificado"
+        if provider == "deepseek_direct":
+            recognized = lowered in OPENCODE_DEEPSEEK_MODELS or lowered in {
+                alias.lower() for alias in OPENCODE_DEEPSEEK_MODEL_ALIASES.values()
+            }
+        else:
+            recognized = lowered.startswith("openrouter/")
+        return model if recognized else "Modelo no identificado"
+
+    @staticmethod
+    def _provider_label(provider: str) -> str:
+        return {"deepseek_direct": "DeepSeek Direct", "openrouter": "OpenRouter"}[provider]
+
+    @staticmethod
+    def _decimal_text(value: Decimal) -> str:
+        return format(value, "f")
 
     def get_change_detail(
         self, project_id: str, change_name: str, run_id: str | None = None
