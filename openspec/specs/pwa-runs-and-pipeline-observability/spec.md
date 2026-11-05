@@ -21,7 +21,7 @@ The system SHALL expose Trabajo as the independent sequence Ãšltimo terminado â†
 - **THEN** the corresponding moment explains the absence or block without inventing a result, choosing an alternative or admitting a new Request.
 
 ### Requirement: Visual Pipeline Phase Stepper
-The system SHALL display Trabajo actual as an independent route with actual OpenSpec stages, applicable tasks and observed status. Completion SHALL require evidence; stage position SHALL NOT imply preceding completion. Selecting a stage SHALL show verified task/attempt outputs, actual agent/model assignments and observed timestamps, distinguishing active, waiting, failed and unknown states. The UI SHALL NOT narrate agent thoughts.
+The system SHALL display Trabajo actual as an independent route with actual OpenSpec stages, applicable tasks and observed status. Completion SHALL require evidence; stage position SHALL NOT imply preceding completion. Selecting a stage SHALL show verified task/attempt outputs, actual agent/model assignments and observed timestamps, distinguishing active, waiting, failed and unknown states. When no Run is explicitly selected, Trabajo actual SHALL select only an active Run and SHALL NOT fall back to an inactive historical Run. The UI SHALL NOT narrate agent thoughts.
 
 #### Scenario: Display active stage in pipeline stepper
 - **WHEN** the selected Run exposes its actual current stage and evidence for preceding stages
@@ -34,6 +34,11 @@ The system SHALL display Trabajo actual as an independent route with actual Open
 #### Scenario: Missing earlier evidence
 - **WHEN** a Run reports Apply but no completed Propose evidence is exposed
 - **THEN** the UI shows the reported stage and missing evidence separately, without marking Propose complete or fabricating a percentage.
+
+#### Scenario: No active run is available
+- **GIVEN** the run list contains only inactive historical Runs and none is explicitly selected
+- **WHEN** the operator opens Trabajo actual
+- **THEN** no inactive Run is selected as current work and no stale human gate is presented for it.
 
 ### Requirement: Prominent Attention Banner for Human Gates
 The system SHALL notify actual HUMAN_REQUIRED on Dashboard and link to the exact Trabajo actual Run and active stage for resolution. Trabajo actual SHALL render the question and options from the current unresolved gate's durable payload, and SHALL keep the existing authorized operator-response path available. When a later scoped gate replaces an earlier one, the later gate's question and options SHALL become visible after refresh or navigation; a resolved earlier gate's payload SHALL NOT be used as fallback or displayed as current. Original workflow wording and options SHALL be preserved, distinguished from labeled agent suggestions, with Spanish context, consequences and available authority. WAITING_CAPACITY, UNKNOWN and legacy status labels SHALL NOT independently create a human gate.
@@ -77,7 +82,7 @@ Trabajo actual SHALL provide immediate optimistic feedback when the operator sub
 - **THEN** the optimistic acknowledgement is reconciled with the authoritative current gate or run state, including any newly raised gate
 
 ### Requirement: Terminal run projections are not human-required
-The orchestration runs endpoint SHALL classify a run as non-human-required when its `stop_outcome` is `COMPLETED`, `FAILED`, or `CANCELLED`, or its `current_stage` is `COMPLETED`, regardless of stale human-gate or payload fields. Such a run SHALL retain the endpoint's existing non-human status projection. A non-terminal run SHALL retain the existing human-gate projection behavior.
+The orchestration runs endpoint SHALL classify a run as non-human-required when `is_active` is false, its `stop_outcome` is `COMPLETED`, `FAILED`, or `CANCELLED`, or its `current_stage` is `COMPLETED`, regardless of stale human-gate or payload fields. Such a run SHALL retain the endpoint's existing non-human status projection (`COMPLETED` when inactive). A non-terminal active run SHALL retain the existing human-gate projection behavior.
 
 #### Scenario: Completed run has a stale human gate
 - **GIVEN** a run has `current_stage=COMPLETED`, `stop_outcome=COMPLETED`, `is_active=false`, and `human_gate=NEEDS_HUMAN`
@@ -95,9 +100,14 @@ The orchestration runs endpoint SHALL classify a run as non-human-required when 
 - **THEN** the run is not projected as `HUMAN_REQUIRED`, even if another persisted gate field is stale
 
 #### Scenario: Non-terminal run still exposes its current human gate
-- **GIVEN** a non-terminal run has a current human gate
+- **GIVEN** an active non-terminal run has a current human gate
 - **WHEN** the operator requests `GET /api/v1/orchestration/runs`
 - **THEN** the run retains the existing `HUMAN_REQUIRED` projection
+
+#### Scenario: Inactive run has a residual human stop outcome
+- **GIVEN** a run has `is_active=false`, a non-terminal `current_stage`, and `human_gate=NEEDS_HUMAN` or `stop_outcome=NEEDS_HUMAN`
+- **WHEN** the operator requests `GET /api/v1/orchestration/runs`
+- **THEN** the run is projected as `COMPLETED` and not `HUMAN_REQUIRED`
 
 ### Requirement: Candidate Lineage, Checks, Review, and Audit Inspector
 The system SHALL expose actual results, artifacts, checks and reviews in optional stage detail, bound to project, Run, Change and immutable candidate SHA/generation where present. Reviewer/model identity SHALL come from evidence, without requiring a named provider or an audit that did not occur. Superseded evidence SHALL be visibly stale and SHALL NOT authorize current actions or validation.
