@@ -271,6 +271,27 @@ def test_run_projection_ignores_payload_from_resolved_earlier_checkpoint(in_memo
     assert projected["status"] == "RUNNING"
 
 
+def test_inactive_run_with_residual_human_gate_projects_completed(in_memory_uow):
+    run = _run(OrchestrationStage.VERIFYING)
+    run.is_active = False
+    run.human_gate = HumanGate.NEEDS_HUMAN
+    run.stop_outcome = OrchestrationStopOutcome.NEEDS_HUMAN
+    in_memory_uow.orchestration_runs.save(run)
+
+    try:
+        with _get_runs_client(in_memory_uow) as client:
+            response = client.get("/api/v1/orchestration/runs")
+        projected = response.json()[0]
+    finally:
+        app.dependency_overrides.clear()
+
+    assert response.status_code == 200
+    assert projected["is_active"] is False
+    assert projected["stage"] == OrchestrationStage.VERIFYING.value
+    assert projected["status"] == "COMPLETED"
+    assert projected["status"] != "HUMAN_REQUIRED"
+
+
 def test_run_projection_exposes_only_active_payload(in_memory_uow):
     run = _run(
         OrchestrationStage.PR1_PENDING,

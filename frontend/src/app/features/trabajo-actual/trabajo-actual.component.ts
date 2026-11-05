@@ -330,8 +330,8 @@ export class TrabajoActualComponent {
       const found = runs.find(r => r.run_id === queryRunId);
       if (found) return found;
     }
-    // Default to active run or first available
-    return runs.find(r => r.is_active) || runs.find(r => r.status === 'RUNNING' || r.status === 'IN_PROGRESS' || r.status === 'HUMAN_REQUIRED') || runs[0] || null;
+    // Default only to current work; historical runs require explicit selection.
+    return runs.find(r => r.is_active) || null;
   });
 
   constructor() {
