@@ -22,6 +22,19 @@ test('current gate question and options are rendered from the same payload', () 
   assert.match(component, /Opciones para responder a este gate/);
 });
 
+test('Trabajo actual fallback never selects an inactive historical run', () => {
+  const targetRun = component.match(/readonly targetRun = computed\(\(\) => \{([\s\S]*?)\n  \}\);/);
+  assert.ok(targetRun, 'targetRun computed selector should exist');
+  assert.match(targetRun[1], /const queryRunId = this\.route\.snapshot\.queryParamMap\.get\('run'\)/);
+  assert.match(targetRun[1], /if \(found\) return found/);
+
+  const fallback = targetRun[1].match(/return (runs\.find\(r => r\.is_active\) \|\| null);/);
+  assert.ok(fallback, 'fallback should select an active run or none');
+  const selectFallback = new Function('runs', `return ${fallback[1]};`);
+  assert.equal(selectFallback([{ is_active: false, status: 'HUMAN_REQUIRED' }]), null);
+  assert.equal(selectFallback([{ is_active: true, status: 'HUMAN_REQUIRED' }]).is_active, true);
+});
+
 test('operator response submits through the existing authorized request endpoint', () => {
   assert.match(component, /\/api\/v1\/projects\/\$\{encodeURIComponent\(run\.project_id\)\}\/requests\/run/);
   assert.match(component, /operator_clarification: answer/);

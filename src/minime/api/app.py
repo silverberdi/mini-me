@@ -2586,7 +2586,7 @@ def list_orchestration_runs(
         is_terminal = stop_outcome in {"COMPLETED", "FAILED", "CANCELLED"} or (
             current_stage == "COMPLETED"
         )
-        is_human_required = not is_terminal and (
+        is_human_required = r.is_active and not is_terminal and (
             bool(human_payload)
             or human_gate == "NEEDS_HUMAN"
             or stop_outcome == "NEEDS_HUMAN"
