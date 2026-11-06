@@ -21,7 +21,7 @@ Paneles redimensionables/colapsables, disposición persistente útil, modales/dr
 ## Errores
 Siempre: qué falló, qué trabajo se conservó, si se reintentará (y cuándo), si hace falta intervención. No depender solo de colores.
 
-No poner al usuario frente a IDs internos, logs y estados accidentales como reemplazo de información útil. UI F5 debe ser diseñada y desarrollada por mini me sobre su propio repositorio.
+No poner al usuario frente a IDs internos, logs y estados accidentales como reemplazo de información útil. La referencia a autoejecución de F5 describe una entrega histórica ya cerrada.
 
-## Criterios UX históricos que deben conciliarse en F5
-El [Issue #162](https://github.com/silverberdi/mini-me/issues/162), ahora cerrado como ticket independiente, contiene requisitos previamente aprobados de **cinco vistas independientes**: Dashboard, Trabajo, Trabajo actual, Proyectos y Backlog; navegación, métricas, atención humana y edición segura de documentos. Su contenido NO se descarta ni genera un séptimo Change: la Fase 5 [#173](https://github.com/silverberdi/mini-me/issues/173) debe leerlo y reconciliarlo con el contrato rector, incluido el conflicto explícito sobre equivalencia funcional móvil frente a observabilidad prioritaria. Si es material, solicitar decisión humana en Propose; no elegir en silencio ni reconstruir una UI obsoleta por inercia.
+## Criterios UX históricos
+El [Issue #162](https://github.com/silverberdi/mini-me/issues/162) conserva requisitos de cinco vistas independientes: Dashboard, Trabajo, Trabajo actual, Proyectos y Backlog; navegación, métricas, atención humana y edición segura de documentos. La entrega F5 [#173](https://github.com/silverberdi/mini-me/issues/173) y el refinamiento posterior registran cómo se trataron. Para trabajo nuevo, aplicar la sección de UI del contrato v2.0 y resolver cualquier conflicto material mediante la autorización del cambio vigente; no usar estos requisitos históricos como un backlog propio.

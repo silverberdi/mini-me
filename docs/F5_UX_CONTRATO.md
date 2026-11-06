@@ -1,6 +1,6 @@
 # F5 — Contrato funcional de la interfaz visual (refinamiento del operador)
 
-**Fecha de decisión:** 2026-10-26. **Autoridad:** decisión expresa del operador durante el refinamiento previo a F5; complemento del [Contrato rector](CONTRATO_RECTOR.md), [Issue F5 #173](https://github.com/silverberdi/mini-me/issues/173) y antecedente UX [#162](https://github.com/silverberdi/mini-me/issues/162). Este documento **no es un Change OpenSpec**, no crea ni ejecuta `gacela-05-ui-self-hosted` y no sustituye los workflows nativos.
+**Fecha de decisión:** 2026-10-26. **Naturaleza:** registro de decisiones UX tomadas durante el refinamiento previo a F5, no un plan operativo. El [Contrato rector v2.0](CONTRATO_RECTOR.md) prevalece. F5/F7/F8 y sus Issues son entregas históricas cerradas; este documento no crea Changes ni autoriza operaciones. Las referencias a trabajo “futuro”, “disabled” o F7/F8 describen el estado de esta decisión en su fecha y no el estado actual.
 
 ## 1. Alcance y fronteras
 
@@ -76,14 +76,13 @@ Lista + detalle. Mostrar nombre/ID, repositorio, tipo, onboarding y estado F2 re
 - **Móvil:** las mismas cinco vistas accesibles mediante rutas enfocadas, observabilidad rápida y resolución de decisiones sencillas; los controles sin backend se explican como no disponibles en **todos** los dispositivos. No afirmar paridad de mutaciones faltantes ni eliminar rutas.
 - Idioma español, lectura de pantalla, teclado, foco, contraste, objetivos táctiles, zoom/reflow, estados de error/carga/offline, contenido autenticado no cacheado. Conservar identidad visual aprobada de Stitch/#162 **donde no contradiga decisiones posteriores expresas**.
 
-## 9. Límite F5 / F6 / F7 / F8 y criterios observables
+## 9. Historial de entregas y criterios UX
 
-- **F5:** todo lo visual precedente; operaciones existentes reales, nuevas capacidades solo representadas y etiquetadas deshabilitadas; Tailwind + JS nativo + FastAPI PWA; E2E navegador y **autoejecución real por mini me**. Un solo Change F5 `gacela-05-ui-self-hosted`.
-- **F6:** depuración/retirada segura ya aprobada, ejecutada por mini me; no se amplía a F7.
-- **F7 [#189](https://github.com/silverberdi/mini-me/issues/189):** implementar las capacidades funcionales diferidas: pausa global/proyecto al fin del Change, proyecto ejecutor único, crear/editar/desactivar/reactivar/eliminar **lógicamente** Requests bajo reglas anteriores, conectar normalización F4 y métricas/instrumentación faltantes, edición documental segura si falta. Está **disabled**, sin Change ni autorización de ejecución.
-- **F8 [#190](https://github.com/silverberdi/mini-me/issues/190):** migración de la **capa visual** a Angular + TypeScript + Tailwind, sin reemplazar FastAPI ni orquestador, previa verificación de paridad; está **disabled**, sin Change ni autorización.
-- **Secuencia y seguridad:** F1–F6 preservan el ciclo original de reconstrucción con sus Changes; F7–F8 se añaden como fases posteriores, no reabren ni reescriben F1–F4. Sin split en micro-Changes, cambios de scope no autorizados, scheduler habilitado, nuevas llamadas a agentes, merge o deploy por esta documentación.
+- **F5 [#173]:** Change de UI y autoejecución, cerrado. Su tecnología inicial fue HTML, JavaScript nativo y Tailwind sobre FastAPI/PWA.
+- **F6 [#174]:** Change de depuración final, cerrado.
+- **F7 [#189]:** capacidades funcionales posteriores descritas en este documento; el Change consta archivado/cerrado en el historial de `main`.
+- **F8 [#190]:** migración del frontend a Angular + TypeScript + Tailwind; el Change consta archivado/cerrado y esa tecnología está en `main`.
+- Las referencias F1–F8 y sus Issues registran entregas pasadas. Los requisitos UX de navegación, legibilidad, datos observables, autenticación y estados honestos siguen siendo criterios de diseño donde sean compatibles con el contrato rector y la API actual.
+- La aceptación histórica de F5 incluyó cinco rutas, adaptación responsive, atención humana, datos reales, controles sin mutaciones ficticias, pruebas de navegador y evidencia de autoejecución. No usarla como autorización o checklist de un nuevo Change.
 
-**Aceptación mínima F5:** rutas reales para 5 vistas con 2 destinos primarios; medidores visibles con estados no medidos honestos; 3 dimensiones de efectividad con gráficas vacías justificadas si faltan datos; Trabajo en 3 momentos; navegación contextual por stage y HUMAN_REQUIRED real; lista/detalle de Proyectos y Backlog en 2 tabs; formularios/controles F7 visuales pero **deshabilitados sin fingir ejecución**; autenticación y seguridad; Tailwind local; E2E navegador responsive; evidencia de autonomía real con 2 PR y cierre OpenSpec según reglas.
-
-**Prevalencia:** este refinamiento del operador resuelve en el alcance de F5 las contradicciones de navegación, activación de funciones y framework con el antecedente #162 y documentos históricos. El contrato rector vigente mantiene autoridad; actualizarlo conjuntamente antes de admitir F5.
+**Prevalencia:** en cualquier contradicción, manda el contrato rector v2.0 y el Change autorizado vigente. Este archivo es contexto de decisiones UX, no una fuente de roadmap o estado remoto.

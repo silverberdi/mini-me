@@ -12,7 +12,7 @@
 - La autoridad de merge, secretos y gasto extraordinario sigue en manos del operador.
 - UX no es opcional: cuando el cambio toca experiencia de operador, esta debe ser utilizable, observable y verificable.
 
-**Desarrollos posteriores concretan** esas reglas mediante PostgreSQL/Alembic, GitHub App, claims, fencing, idempotencia, validación post-despliegue, guardrails E2E y uso de workflows OpenSpec nativos. La eliminación de código reemplazado y el inventario de acoplamientos se agregan expresamente como **controles correctivos de esta revisión**, sin afirmar que figuraban literalmente en el documento del primer día.
+**Desarrollos posteriores concretan** esas reglas mediante PostgreSQL/Alembic, GitHub App, claims, fencing, idempotencia, guardrails E2E y uso de workflows OpenSpec nativos. La eliminación de código reemplazado y el inventario de acoplamientos se agregan expresamente como **controles correctivos de esta revisión**, sin afirmar que figuraban literalmente en el documento del primer día. El despliegue productivo pertenece al CI/CD de cada proyecto; no es una etapa universal ejecutada o exigida por mini me.
 
 Léase con `BUSINESS_INTENT.md`, `CANONICAL_DECISIONS.md`, `ARCHITECTURE.md`, `AGENT_CONTRACTS.md`, `DOR_DOD.md`, `CHANGE_DELIVERY_CONTRACT.md` y el único Change OpenSpec autorizado. Una regla contradictoria no se ignora ni se resuelve con creatividad del agente: **BLOCKED → `update` de OpenSpec + decisión humana material**.
 
@@ -24,7 +24,7 @@ Para cualquier Change y para **cada spec** que lo integra:
 3. **Diseño mínimo coherente:** evaluar alternativas, justificar elegir servicios/proveedores existentes antes de crear nuevos. Principios de diseño: separación de responsabilidades, cohesión, acoplamiento controlado, interfaces explícitas, bajo duplicado, simplicidad apropiada; sin frameworks genéricos especulativos ni abstracciones que no justifican valor.
 4. **Fronteras e invariantes:** responsabilidades separadas mini me/agents/OpenSpec/Git/GitHub/PostgreSQL; identidad verificada repo/worktree; autenticación y autorización; idempotencia, concurrencia, claims/fencing, estado durable y side effects UNKNOWN, cuidado con rollback y migraciones.
 5. **Contrato del agente:** nombrar la skill/command real instalada, los hooks/guards permitidos, su orden y su evidencia de invocación; no reemplazar con prompt libre. El agente produce el software y las specs mediante OpenSpec.
-6. **Diseño de pruebas, no lista de aspiraciones:** fixtures, datos, endpoints, límites de cuota, secuencia, esperados, verificación negativa y rollback para E2E de cada etapa, Change y comportamiento ya desplegado.
+6. **Diseño de pruebas, no lista de aspiraciones:** fixtures, datos, endpoints, límites de cuota, secuencia, esperados y verificación negativa para E2E pertinentes al Change. Preview/postdeploy solo se incluyen cuando el alcance lo exige y el mecanismo está autorizado; producción sigue bajo el CI/CD del proyecto.
 7. **Impacto de retirada:** preparar **Removal Ledger** antes de comenzar `apply`, incluso si el valor del Change es funcional y no una migración. Marcar `NONE` con evidencia si realmente no se reemplaza nada.
 
 `proposal` y `design` no pasan si están incompletos estos puntos; un check superficial de existencia de archivos no es suficiente.
@@ -62,7 +62,7 @@ Para cualquier Change y para **cada spec** que lo integra:
 3. Migrar todos los **consumidores**, invocaciones de UI/CLI/API, jobs, configuración, permisos, guards/hooks/skills, documentación de operador, scripts y escenarios de prueba que apunten a la ruta vieja.
 4. Eliminar implementación anterior, flags transitorios, código de compatibilidad sin consumidores, adaptadores, tests exclusivos de comportamiento retirado, dependencias/imports huérfanos y documentación contradictoria **que sea seguro retirar**. Sustituir tests valiosos por tests del nuevo contrato, no borrar protección de regresión.
 5. Repetir tests unit/integration, E2E de etapa, E2E de valor y regresión **después** de eliminar código, no aceptar las pruebas tomadas con ambos caminos presentes.
-6. Verificar en el entorno desplegado que solo la ruta vigente es alcanzable; no dejar feature flag que vuelva al emulador; registrar evidencia de no referencias, no writers duplicados, diff y rollback.
+6. Verificar en el candidato y sus superficies autorizadas que solo la ruta vigente es alcanzable; no dejar feature flag que vuelva al emulador; registrar evidencia de no referencias, no writers duplicados, diff y estrategia de recuperación. Si el proyecto despliega por su CI/CD, cualquier comprobación del entorno productivo pertenece a ese proceso y solo se exige cuando el Change la incluya.
 7. Si la eliminación inmediata amenaza seguridad, histórico, datos o disponibilidad, **NO** borrarla a ciegas: marcar `RETAIN-WITH-REASON`, explicar el bloqueante, límite temporal y el Change específico que completa retiro; exigir **autorización humana explícita** para excepción. El Change no se presenta como “desmonte completo” ni `DONE` si quedaron rutas obsoletas activas.
 
 **NO eliminar:** specs OpenSpec históricos ni archivos archivados por mero refactor, migraciones ya aplicadas, audit trails, Run/Job/attempts/evidencias, compatibilidad que todavía tenga consumidores legítimos o worktrees ajenos/dirty. Los archivos históricos pueden conservarse como archivos de archivo, etiquetados como no ejecutables, sin alterar su verdad.
@@ -71,25 +71,27 @@ Para cualquier Change y para **cada spec** que lo integra:
 
 ## 5. Revisión y validación ANTES del PR (Engineering G4/G5)
 
-El revisor independiente no solo revisa si los tests pasan: compara `BUSINESS_INTENT`, las specs y criterios del Change, el diseño aprobado y el código/diff final **después del desmonte**.
+Cuando la complejidad sea alta, el revisor independiente no solo revisa si los tests pasan: compara `BUSINESS_INTENT`, las specs y criterios del Change, el diseño aprobado y el código/diff final **después del desmonte**. En cambios de complejidad baja o moderada no se exige revisión independiente.
 
 Bloquear si:
 - Hay funciones/servicios sin consumidores justificados, rutas duplicadas, código temporal de producción sin plan, flags muertos, imports/configuración obsoletos, o el Remove Ledger carece de evidencia.
 - El implementador hizo arquitectura nueva fuera de las specs, violó separación de capas, expuso secretos o permisos, reimplementó capacidades oficiales, eliminó guards, omitió migración, dejó API incompatibles o introdujo regressiones.
 - Tests no comprueban casos adversos/E2E reales, evidencias no coinciden con candidate SHA, hay skips ocultos o pruebas condicionadas a plataforma incorrecta.
-- El revisor no es independiente, falla la validación estática requerida, no hay E2E post-retiro o postdeploy, o no existe un rollback viable.
+- Cuando la complejidad es alta, el revisor requerido no es independiente/read-only; falla una validación definida por el Change; falta E2E real de una integración afirmada; o no hay recuperación viable para una migración/operación riesgosa.
 
 Un hallazgo se resuelve mediante `update/apply/verify` según workflow; no con prompts improvisados ni revisión cosmética. Admitir explícitamente incertidumbre donde una regla no pueda comprobarse automáticamente; no afirmar que un hook infalible detecta todo drift.
 
 ## 6. Resultado de cada entrega y control posterior
 
-**PASS técnico** = funciones/tests/checks; **PASS integración** = colaboración/resiliencia; **E2E_PASS** = agente y workflows reales + Git/PR/side effects; **DEPLOYED_VERIFIED** = valor usable en destino y regresiones verificadas **después del Removal Gate**.
+**PASS técnico** = funciones/tests/checks; **PASS integración** = colaboración/resiliencia; **E2E_PASS** = agente/workflows reales + Git/PR/side effects observados cuando aplican. La verificación de despliegue productivo corresponde al CI/CD del proyecto y solo se registra cuando el alcance lo exige; no es un estado universal requerido para cerrar un Change de mini me.
 
-El DoD exige matriz requisito→escenario→test→evidencia + ledger de retiro `NONE` justificado o cada acción finalizada + revisión independiente + seguridad/observabilidad + UX aplicable + despliegue funcional + cierre/human gates. Si falta cualquiera: `BLOCKED`, no un “PASS parcial” reconvertido en `DONE`.
+El DoD exige trazabilidad requisito→escenario→prueba→evidencia, ledger de retiro justificado cuando se sustituye comportamiento, revisión independiente solo para complejidad alta, seguridad/observabilidad, UX aplicable y gates humanos requeridos. Si falta un criterio aplicable: `BLOCKED`, no un “PASS parcial” reconvertido en `DONE`.
 
-**Atribución y trazabilidad:** el reporte de release enlaza Issue, OpenSpec change, candidate SHA, agent workflow/skill/harness/guard, suite, E2E, PR, diff de retiro, deployment digest, resultado postdeploy, métricas de costo y autorización humana. El servidor debe poder reanudar/explicar el trabajo sin que una conversación de ChatGPT actúe como autoridad.
+**Atribución y trazabilidad:** el reporte de entrega enlaza Issue, OpenSpec Change, candidate SHA, workflow/skill/harness, pruebas/E2E, PR, diff de retiro y autorizaciones. Referenciar digest y resultado de despliegue solo cuando el alcance autorizado lo incluya; esa evidencia pertenece al CI/CD del proyecto. El servidor debe poder reanudar/explicar el trabajo sin que una conversación de ChatGPT actúe como autoridad.
 
-## 7. Aplicación por etapas
+## 7. Referencia histórica supersedida: MM-R01–R10
+
+Los puntos siguientes documentan el programa MM-R01–R10 de una dirección anterior. Están preservados como historia técnica y **no son requisitos vigentes, plan de trabajo, ni autorización para crear Changes**. El contrato v2.0 y el Issue/Change OpenSpec autorizado determinan el trabajo actual; reutilizar estos antecedentes solo cuando un Change actual lo justifique.
 
 - **MM-R01:** reemplaza prompts de implementación ad hoc por invocación agent-side OpenSpec; retirar rutas de ejecución imitadas solo cuando paridad E2E esté probada.
 - **MM-R02:** retirar el writer determinístico de proposals/design/specs/tasks, las llamadas desde Intake y sus fixtures desactualizadas.

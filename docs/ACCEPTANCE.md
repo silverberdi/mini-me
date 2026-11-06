@@ -1,35 +1,32 @@
-# System Acceptance
+# Aceptación del sistema — mini me
 
-## Golden functional path
-Registered project → GitHub Issue/intake or existing native OpenSpec READY → agent-side OpenSpec propose/update as needed → verified durable binding → capacity/tool/workspace preflight → agent-side OpenSpec apply and real code diff → checks + agent-side verify → complementary independent real-agent review → bounded agent-led correction → end-to-end tests → UI preview/guided validation when required → draft PR with verified head SHA → human approval/merge → native OpenSpec sync/archive under Git authority + authorized deployment → **functional postdeployment E2E** → GitHub closure → DONE. DeepSeek/OR only when explicitly authorized after both primaries cannot cover the stage.
+**Autoridad:** [CONTRATO_RECTOR.md](CONTRATO_RECTOR.md) v2.0 y el Change OpenSpec del Issue autorizado.
 
-## Acceptance classification
-TECHNICAL_PASS (unit+integration) != E2E_PASS (real agents/tools/outcome) != DEPLOYED_VERIFIED (functional behavior on the deployed environment). A Change is not DONE until DEPLOYED_VERIFIED and all applicable human/closure gates are satisfied. No fake runners/mocks/200-OK smoke can replace a real agent OpenSpec execution proof.
+## Recorrido funcional
 
-## Required fault injection over MVP evolution
-- provider non-zero exit/hang/timeout/quota/auth/malformed output;
-- both primary capacities exhausted while active and READY work coexist;
-- drain fallback denied by budget;
-- attempted same-model fallback self-review;
-- daemon kill during execution and between external side effect/state commit;
-- existing/colliding worktree;
-- repository remote mismatch;
-- OpenSpec/Issue/project binding mismatch;
-- deterministic check fail/timeout;
-- preview references unsafe production config;
-- candidate changes after human validation;
-- production deployment failure;
-- GitHub synchronization outage.
+Proyecto configurado → admisión autorizada del Issue remoto elegible más antiguo → Explore/Propose nativos → revisión independiente de propuesta solo para complejidad alta → Apply con cambio real y pruebas → Verify por el ejecutor y correcciones acotadas → revisión independiente del código solo para complejidad alta → PR y política de autorización aplicable → rama documental nueva → Sync/Archive nativos → PR documental fusionado → cierre remoto del Issue.
 
-## Security acceptance
-- no real secrets committed;
-- DeepSeek credential never appears in OpenRouter configuration/request evidence;
-- no mandatory routine DeepSeek audit; no DeepSeek/OpenRouter inference without dual-primary exhaustion, explicit authorization, compatible tools and budget;
-- no own OpenSpec proposal generator, spec synchronizer or archive emulator as authoritative path;
-- project external-provider allowlists enforced server-side;
-- paid fallback deny/no-spend unless explicitly enabled;
-- no autonomous merge;
-- preview cannot silently use production DB/data endpoints.
+Cada criterio de integración real exige evidencia de invocación, resultado y efecto, ligada al repositorio/candidato/SHA correctos. El test unitario, mock, workflow exitoso sin efecto verificable o HTTP 200 no sustituyen esa evidencia.
 
-## UX acceptance
-Without opening raw logs, the human can understand what was requested, exact candidate identity, what changed, checks, reviewer, audit, preview status/scenarios, blocking findings and the effect of each available action.
+## Clasificación de evidencia
+
+- **Técnica:** pruebas unitarias e integración para lógica local y contratos.
+- **Integración:** proveedor/Git/OpenSpec invocados con resultado observable cuando el Change depende de ellos.
+- **E2E:** agente y workflow reales, efectos externos comprobados y candidato identificado.
+- **Validación de UI:** escenarios humanos explícitos para cambios de UI cuando aplique, sobre el candidato exacto.
+
+El despliegue productivo pertenece al CI/CD del proyecto. `DEPLOYED_VERIFIED` no es un gate universal de mini me; la aceptación de cada Change sigue los criterios del contrato y su Change autorizado.
+
+## Pruebas de fallos según riesgo
+
+Considerar autenticación, cuota/capacidad, timeout, salida malformada, interrupción, reentrada, duplicación de side effects, worktree existente, remote mismatch, candidato cambiado después de review/validación, fallo de proveedor y espera de decisión humana. La suite concreta se determina en el Change; esta lista no obliga a añadir todos los casos a cada cambio.
+
+## Seguridad y operación
+
+- No versionar secretos ni transmitir contenido del repositorio a proveedores no autorizados.
+- Revisión read-only solo para complejidad alta; nadie certifica su propia autoría.
+- No emular OpenSpec ni mantener una ruta de autoridad duplicada.
+- No consumir cuota, iniciar trabajo, desplegar ni modificar políticas sin autorización aplicable.
+- Mantener los datos operativos y transiciones necesarios de forma transaccional; las migraciones deben conservar datos y contemplar recuperación.
+
+La cantidad de tareas completas no equivale al resultado; la evidencia del comportamiento y sus efectos determina la aceptación.

@@ -1,22 +1,22 @@
-# Política de agentes, compatibilidad y costo (v1.2)
+# Política de agentes, compatibilidad y costo
 
-**Prevalece:** [CONTRATO_RECTOR.md](CONTRATO_RECTOR.md). Se retira la asignación fija histórica por producto que exigía Codex/Antigravity o DeepSeek para todas las etapas.
+**Prevalece:** [CONTRATO_RECTOR.md](CONTRATO_RECTOR.md) v2.0 y la configuración autorizada por proyecto.
 
-## Configuración por proyecto
-- **Pensamiento:** modelo y CLI compatibles con propose/update/verify/sync/archive.
-- **Ejecutor:** modelo y CLI compatibles con apply y correcciones.
-- **Revisor independiente:** proveedor/modelo de solo lectura distinto del autor; obligatorio para propuesta, condicional para código según política sencilla.
-- **Respaldo:** compatibilidad verificada con la etapa y autorización de gasto; no autoriza inicio de trabajo nuevo por sí solo.
+## Perfiles por proyecto
 
-Esfuerzo por defecto **medio** para propuesta/ejecución/verificación/revisión. **Mínimo compatible** para sync/archive. No router optimizador, clasificación inteligente, upgrade premium por defecto ni roles codificados en condiciones Python para proveedores concretos.
+- Pensamiento: CLI/workflow compatible con OpenSpec y tareas de razonamiento.
+- Ejecución: capacidad real para editar archivos, aplicar cambios y probarlos.
+- Revisión independiente: se usa solo para cambios de complejidad alta, tanto en propuesta como en código; debe ser distinta del autor y read-only.
+- Respaldo: solo con capacidad compatible y gasto/permisos autorizados. No habilita por sí solo trabajo nuevo.
 
-## Ejecución y cuotas
-Validar solo lo necesario: instalación/compatibilidad real de CLI o API, skill instalada, acceso/capacidad cuando comprobable, permiso para leer repo y política de costo; si no se puede operar de forma segura, preservar trabajo y esperar o pedir autorización. No son intercambiables capacidades de un CLI coding agent y una API chat-only.
+Esfuerzo y proveedor se resuelven según disponibilidad y configuración vigente; no mantener asignaciones globales inmutables en el núcleo. No convertir el contrato en un optimizador automático ni aumentar el gasto sin autorización.
 
-Guardar solo evidencia mínima indispensable de uso y gasto. Una autorización previa de presupuesto aplicable puede cubrir llamadas ordinarias; no volver a pedir permiso en cada llamada ni gastar por encima de un límite configurado.
+## Capacidad, gasto y evidencia
 
-## Independencia y autoridad
-Ningún autor revisa autoritativamente su propio candidato; review read-only. Decisiones de gasto extraordinario, modificación de política, seguridad y merge de código requieren humano. Una revisión de texto no puede afirmar que se ejecutó una skill OpenSpec real.
+Verificar el CLI, workflow/skill, permisos y política de gasto que requiere la operación. Una CLI coding agent y una API chat-only no son intercambiables. Ante capacidad insuficiente o identidad ambigua, preservar el candidato y esperar o solicitar decisión.
+
+Persistir evidencia mínima y autoritativa de consumo/uso cuando aplique. La autorización de presupuesto vigente puede cubrir uso ordinario dentro de sus límites; gastos excepcionales requieren autorización humana. Una revisión textual no prueba que se haya ejecutado OpenSpec.
 
 ## Legado
-Los expedientes de capacidad, fallback y políticas históricas quedan como material de inspección/migración; no extender mecanismos antiguos por inercia. Retener salvaguardas esenciales, no burocracia duplicada.
+
+Los dossiers y reglas de proveedores de versiones previas son historial. Reutilizar solo capacidades que sigan vigentes y demostrar compatibilidad para el workflow requerido; no prolongar mecanismos antiguos por inercia.

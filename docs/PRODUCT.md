@@ -1,24 +1,21 @@
 # Definición del producto — mini me
 
-**Fuente rectora:** [CONTRATO_RECTOR.md](CONTRATO_RECTOR.md) v1.3.
+**Fuente rectora:** [CONTRATO_RECTOR.md](CONTRATO_RECTOR.md) v2.0.
 
-mini me es un coordinador pequeño de desarrollos de software que convierte tickets remotos en resultados mediante agentes y workflows nativos de OpenSpec. **No programa ni emula OpenSpec.**
+mini me es un coordinador personal de cambios de software. Recibe tickets de una fuente remota, invoca agentes configurados para ejecutar workflows nativos de OpenSpec y conserva evidencias de un resultado implementado, verificado, revisado y cerrado documentalmente.
 
-## Usuario
-Un operador técnico supervisa proyectos desde una instalación personal, en escritorio/tablet/móvil, sin pasar mensajes manualmente entre agentes.
+## Usuario y resultado
 
-## Resultado obligatorio
-Proyecto activo → ticket abierto elegible más antiguo del proveedor remoto (GitHub inicialmente) → rama → Propose → revisión independiente de propuesta → Apply → Verify + correcciones → revisión independiente de código según política → PR → autorización humana de merge → rama fresca desde main → Sync/Archive nativos → PR documental con merge autorizado → cerrar issue → siguiente.
+Un operador técnico gestiona proyectos desde la UI web/tablet/móvil, autoriza cada cambio y atiende decisiones humanas con contexto. No actúa como mensajero de prompts.
 
-Preguntas de OpenSpec: opciones originales se muestran; sin opciones el agente de pensamiento consulta ticket/specs/contexto para resolver solo lo permitido, o solicita respuesta humana informada. Estado mínimo se conserva para continuar sin duplicar acciones.
+El flujo admitido es: seleccionar el Issue elegible conforme a FIFO → explore/propose nativos → revisión independiente de propuesta solo si la complejidad es alta → apply → verify por el ejecutor y correcciones acotadas → revisión independiente de código solo si la complejidad es alta → PR con la política de autorización aplicable → rama documental nueva → sync/archive nativos → PR documental → cierre remoto del Issue.
 
-## Configuración
-Cuatro roles independientes: pensamiento, ejecución, revisión y respaldo; proveedor/modelo/CLI compatibles configurables por proyecto; esfuerzo medio por defecto para razonamiento/ejecución/revisión y menor compatible para sync/archive. Skills preexistentes y AGENTS.md apuntan al contexto canónico. Origen de tickets extensible sin implementar ADO aún.
+## Configuración y límites
 
-## No objetivos
-Implementar OpenSpec en Python, generar plantillas de specs, emular sync/archive, motor propio de riesgo, scheduler con scoring, backlog DB duplicado, proveedores hardcodeados, plataforma universal de plugins, microservicios, despliegue productivo o ejecución sin autorización de merge humano.
+Los perfiles de pensamiento, ejecución, revisión independiente y respaldo son configurables por proyecto y deben tener capacidad real para el workflow asignado. PostgreSQL conserva configuración y continuidad indispensables; los tickets permanecen en su proveedor, las especificaciones en OpenSpec y el código en Git.
 
-## Reconstrucción
-Exactamente 6 Changes F1–F6 (issues #169–#174). F5 y F6 desarrolladas POR mini me. F3 debe demostrar un recorrido real completo. POO, SOLID, DRY, KISS, YAGNI; reducir código y DB, no ampliar complejidad.
+mini me no sustituye OpenSpec, no duplica el backlog remoto, no mantiene microservicios ni gestiona el despliegue productivo. Las decisiones de seguridad, cambio material, gasto excepcional y las autorizaciones humanas del contrato no se delegan al modelo.
 
-**No declarar valor por cantidad de tests o líneas; sí por E2E real y autonomía demostrada.**
+## Gobierno
+
+Un Issue corresponde a un Change OpenSpec cohesivo, autorizado por el operador. Las secuencias F1–F8 describen entregas históricas y no son un plan operativo vigente. Para el orden y las reglas actuales, consultar el contrato rector v2.0 y el Issue autorizado.

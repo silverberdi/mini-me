@@ -1,5 +1,7 @@
 # Releases y despliegue
 
+Este documento describe el workflow CI/CD propio de mini me como proyecto. Es independiente del coordinador mini me: no es una operación ejecutada por mini me ni un gate universal para cerrar Changes de proyectos gestionados.
+
 El workflow `.github/workflows/release-and-deploy.yml` se ejecuta únicamente al
 recibir un push a `main` (incluido un merge).
 

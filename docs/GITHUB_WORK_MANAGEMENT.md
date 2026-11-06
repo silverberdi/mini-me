@@ -1,18 +1,23 @@
-# Gestión de tickets y PR — GitHub inicial
+# Gestión de tickets y PR
 
-**Autoridad:** [CONTRATO_RECTOR.md](CONTRATO_RECTOR.md). GitHub Issues es la fuente remota de tickets inicial; Azure Boards podrá añadirse mediante adaptador mínimo cuando sea necesario. Integración de tickets separada de integración Git/PR.
+**Autoridad:** [CONTRATO_RECTOR.md](CONTRATO_RECTOR.md) v2.0. GitHub Issues es la fuente inicial de tickets; la integración de tickets y la de Git/PR son responsabilidades separadas.
 
 ## Fuente y selección
-No replicar tickets como cola propia en PostgreSQL. Consultar Issues abiertos elegibles, ordenar por created_at ascendente y resolver empates con ID estable. Procesar un cambio activo por proyecto; no saltar bloqueos silenciosamente ni usar score o prioridad sintética.
 
-## Contrato básico de tickets
-Listar, leer, crear, comentar hallazgos/avance/opciones y cerrar solo tras sync/archive y PR documental fusionado. El ticket nuevo debe incluir objetivo, comportamiento, alcance y criterios verificables; el agente usa skill seleccionada donde corresponda, la API determinista ejecuta escritura.
+Consultar Issues abiertos elegibles en la fuente remota y ordenar por fecha de creación ascendente, con desempate estable por ID. La admisión FIFO opera únicamente dentro de un flujo autorizado por el operador. Mantener un Change activo por proyecto; no saltar bloqueos silenciosamente ni duplicar la cola en PostgreSQL.
 
-## PR implementación
-Rama única del candidato → push y PR → evidencia de verify/review → humano autoriza merge para SHA exacto → mini me ejecuta por integración Git respetando protecciones. Los agentes no se autoautorizan.
+## Contrato de tickets
+
+El adaptador remoto lista, lee, crea, comenta y cierra Issues conforme a la política. El Issue contiene objetivo y criterios verificables. Cerrar solo después de confirmar el cierre documental y su PR fusionado.
+
+## PR de implementación
+
+Publicar el candidato con SHA identificable y evidencia de Verify/pruebas. Aplicar la política de complejidad del contrato: baja/moderada puede fusionarse automáticamente; alta requiere el acuse humano informativo previo. No autoautorizar excepciones de seguridad, gasto o alcance.
 
 ## PR documental
-Después del merge anterior: rama nueva desde main, pensamiento con OpenSpec sync/archive nativos → commit/push/PR documental → merge automatizable SOLO con política y protecciones Git permitiéndolo → cerrar Issue → siguiente.
 
-## Backlog de esta reconstrucción
-Únicamente Issues **abiertos** [#169](https://github.com/silverberdi/mini-me/issues/169)–[#174](https://github.com/silverberdi/mini-me/issues/174), uno por fase/Change OpenSpec. Los nueve Issues heredados que estaban abiertos (#15, #57, #133–#138, #162) se revisaron y cerraron con justificación. El detalle aprobado de #162 permanece vinculado a F5 #173 como insumo de diseño. Se conserva historial GitHub sin mantener trabajo descartado en el backlog abierto.
+Después de confirmar el merge de implementación, crear rama nueva desde `main` actualizado; ejecutar Sync/Archive mediante workflows nativos; abrir PR documental y fusionarlo bajo la política del contrato antes de cerrar el Issue.
+
+## Historia del backlog
+
+Los Issues #169–#174 (#F1–F6), #189/#190 (#F7/F8) y posteriores números de fase son referencias históricas de entregas, no una lista activa ni una secuencia obligatoria. Los Issues heredados y PR cerrados conservan su historial. Para conocer el backlog y estado actuales, consultar GitHub; este documento no mantiene una copia de la cartera.
