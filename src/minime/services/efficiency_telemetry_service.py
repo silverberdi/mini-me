@@ -128,6 +128,8 @@ class EfficiencyTelemetryService:
         stage_events = self.uow.orchestration_stage_events.list_by_run(run.run_id)
         start_time = getattr(run, "started_at", getattr(run, "created_at", utc_now()))
         for se in stage_events:
+            if se.event_type != "STAGE_TRANSITION":
+                continue
             if se.to_stage == OrchestrationStage.FREEZING_CANDIDATE and time_to_cand is None:
                 time_to_cand = int((se.created_at - start_time).total_seconds() * 1000)
             elif se.to_stage == OrchestrationStage.RUNNING_CHECKS and time_to_checks is None:

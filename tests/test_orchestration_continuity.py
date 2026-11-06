@@ -5,9 +5,12 @@ import pytest
 from tests.conftest import InMemoryPersistenceUnitOfWork, setup_managed_repository_fixture
 
 from minime.domain.enums import ExternalOutcome, ExternalReasonCode, OrchestrationStage, RetrySafety
-from minime.domain.models import ExternalActionResult, OrchestrationRun
+from minime.domain.models import ExternalActionResult
 from minime.services.agent_runner import CliAgentRunner
-from minime.services.orchestration_coordinator import NativeOrchestrationCoordinator
+from minime.services.orchestration_coordinator import (
+    GitCommandResult,
+    NativeOrchestrationCoordinator,
+)
 from minime.services.worktree_manager import WorktreeInfo, WorktreeManager
 
 
@@ -79,7 +82,11 @@ async def test_orchestration_continuity_worktree_preserved_on_failure(tmp_path: 
     )
     coordinator._push_branch = AsyncMock()
     coordinator._get_git_head_sha = AsyncMock(return_value="head_sha_401")
-    coordinator._git_run = AsyncMock(return_value="")
+    async def git_result(_cwd, args):
+        output = "candidate-sha\n" if args[:2] == ["rev-parse", "HEAD"] else "request-401-database-connection-pooling\n"
+        return GitCommandResult(tuple(args), 0, output, "")
+
+    coordinator._git_run = AsyncMock(side_effect=git_result)
 
     # Run should encounter PR1 merge failure due to branch protection
     result = await coordinator.execute_project_request(

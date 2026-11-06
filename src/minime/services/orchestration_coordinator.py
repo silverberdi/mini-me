@@ -7,8 +7,10 @@ import asyncio
 import hashlib
 import inspect
 import json
+import os
 import re
 import shlex
+import signal
 from dataclasses import dataclass
 from dataclasses import replace as dataclass_replace
 from pathlib import Path
@@ -34,10 +36,16 @@ from minime.domain.models import (
     OperatorActionRecord,
     OrchestrationExternalAction,
     OrchestrationRun,
+    OrchestrationStageEvent,
     RecoveryClaimContext,
     utc_now,
 )
 from minime.logging import get_logger, redact_secrets
+from minime.services.agent_confinement import (
+    process_group_state,
+    process_identity,
+    process_identity_state,
+)
 from minime.services.agent_runner import (
     CliAgentRunner,
     NativeOpenSpecWorkflowUnavailable,
@@ -167,6 +175,38 @@ class ApplyOutcome:
 
 
 @dataclass(frozen=True)
+class VerifyOutcome:
+    status: str
+    summary: str = ""
+    human_question: str | None = None
+    human_options: tuple[str, ...] = ()
+    findings: tuple[dict[str, Any], ...] = ()
+
+    def __bool__(self) -> bool:
+        return self.status == "COMPLETE"
+
+
+@dataclass(frozen=True)
+class StageInvocation:
+    attempt_id: str
+    claim: RecoveryClaimContext
+    claim_key: str
+    candidate: dict[str, Any]
+    recovery_count: int
+    started_monotonic: float
+
+
+class NativeStageHumanRequired(RuntimeError):
+    """Preserved native workflow handoff from a DOC_CLOSING invocation."""
+
+    def __init__(self, operation: str, question: str, options: tuple[str, ...]):
+        super().__init__(question)
+        self.operation = operation
+        self.question = question
+        self.options = options
+
+
+@dataclass(frozen=True)
 class ComplexityAssessment:
     """Typed, fail-closed result of the thinking-agent complexity stage."""
 
@@ -235,6 +275,33 @@ class NativeOrchestrationCoordinator:
         clean = redact_secrets(payload)
         return clean if isinstance(clean, dict) else {}
 
+    @staticmethod
+    def _stage_recovery_is_safe(
+        coordinator: Any,
+        workflow_process: Any,
+        current_process: Any,
+        *,
+        candidate_matches: bool,
+        recovery_count: int,
+    ) -> bool:
+        """Pure fail-closed gate for the only automatic stage retry."""
+        if (
+            not candidate_matches
+            or recovery_count >= 1
+            or not isinstance(coordinator, dict)
+            or not isinstance(workflow_process, dict)
+            or coordinator.get("status") != "AVAILABLE"
+            or workflow_process.get("status") != "AVAILABLE"
+            or coordinator.get("host") != current_process.get("host")
+            or coordinator.get("boot_id") != current_process.get("boot_id")
+        ):
+            return False
+        return (
+            process_identity_state(coordinator) == "GONE"
+            and process_identity_state(workflow_process) == "GONE"
+            and process_group_state(workflow_process.get("pgid")) == "GONE"
+        )
+
     def _record_current_human_gate(
         self,
         uow: Any,
@@ -249,6 +316,7 @@ class NativeOrchestrationCoordinator:
         choice_list = list(options) if isinstance(options, (list, tuple)) else []
         active_payload = {
             **(payload or {}),
+            "gate_id": str(uuid4()),
             "gate": gate,
             "stage": run.current_stage.value,
             "run_id": run.run_id,
@@ -292,6 +360,8 @@ class NativeOrchestrationCoordinator:
                 "apply_escalation",
                 "physical_validation",
                 "pr1_merge_acknowledgement",
+                "doc_closing_sync",
+                "doc_closing_archive",
             }
         ) and run.human_gate != HumanGate.NEEDS_HUMAN and run.stop_outcome != OrchestrationStopOutcome.NEEDS_HUMAN:
             return
@@ -338,6 +408,250 @@ class NativeOrchestrationCoordinator:
                 "prompt": question,
             },
         )
+
+    async def _stage_candidate_identity(
+        self, run: OrchestrationRun, worktree_path: Path, stage: str
+    ) -> dict[str, Any]:
+        head = await self._git_run(worktree_path, ["rev-parse", "HEAD"])
+        branch = await self._git_run(worktree_path, ["branch", "--show-current"])
+        diff = await self._git_run(worktree_path, ["diff", "--binary", "HEAD"])
+        status = await self._git_run(worktree_path, ["status", "--porcelain"])
+        untracked = await self._git_run(
+            worktree_path, ["ls-files", "--others", "--exclude-standard", "-z"]
+        )
+        untracked_hashes: list[tuple[str, str]] = []
+        for relative in sorted(path for path in untracked.stdout.split("\0") if path):
+            candidate_path = worktree_path / relative
+            if candidate_path.is_symlink():
+                content = os.readlink(candidate_path).encode()
+            elif candidate_path.is_file():
+                content = candidate_path.read_bytes()
+            else:
+                content = b""
+            untracked_hashes.append((relative, hashlib.sha256(content).hexdigest()))
+        candidate_fingerprint = hashlib.sha256(
+            diff.stdout.encode() + status.stdout.encode()
+            + json.dumps(untracked_hashes, sort_keys=True).encode()
+        ).hexdigest()
+        payload = {
+            "run_id": run.run_id,
+            "stage": stage,
+            "worktree": str(worktree_path.resolve()),
+            "branch": branch.stdout.strip(),
+            "generation": int(run.current_generation or 0),
+            "candidate_sha": head.stdout.strip(),
+            "candidate_fingerprint": candidate_fingerprint,
+        }
+        payload["fingerprint"] = hashlib.sha256(
+            json.dumps(payload, sort_keys=True).encode()
+        ).hexdigest()
+        return payload
+
+    def _save_stage_invocation_event(
+        self, uow: Any, run: OrchestrationRun, event_type: str, evidence: dict[str, Any]
+    ) -> None:
+        repository = getattr(uow, "orchestration_stage_events", None)
+        if repository is None or not callable(getattr(repository, "save", None)):
+            raise RuntimeError("Durable stage invocation journal is unavailable")
+        repository.save(
+            OrchestrationStageEvent(
+                run_id=run.run_id,
+                from_stage=run.current_stage,
+                to_stage=run.current_stage,
+                event_type=event_type,
+                evidence_references=redact_secrets(evidence),
+            )
+        )
+        uow.commit()
+
+    async def _begin_stage_invocation(
+        self, uow: Any, run: OrchestrationRun, worktree_path: Path, stage: str,
+        *, allow_human_resume: bool = False, authorized_retry: bool = False,
+    ) -> StageInvocation | None:
+        claims = getattr(uow, "claims", None)
+        if claims is None or not all(
+            callable(getattr(claims, method, None))
+            for method in ("get_by_key", "acquire_or_reacquire", "validate_cas", "release_claim")
+        ):
+            return None
+        candidate = await self._stage_candidate_identity(run, worktree_path, stage)
+        claim_prefix = f"stage-invocation:{run.run_id}:{stage}:"
+        claim_key = f"{claim_prefix}{candidate['fingerprint']}"
+        prior_claim = claims.get_by_key(claim_key)
+        events_repo = getattr(uow, "orchestration_stage_events", None)
+        if events_repo is None or not callable(getattr(events_repo, "list_by_run", None)):
+            return None
+        prior_events = events_repo.list_by_run(run.run_id)
+        all_stage_events = [
+            event for event in prior_events
+            if str((event.evidence_references or {}).get("claim_key") or "").startswith(claim_prefix)
+        ]
+        stage_events = [
+            event for event in all_stage_events
+            if (event.evidence_references or {}).get("claim_key") == claim_key
+        ]
+        starts: dict[str, dict[str, Any]] = {}
+        terminal: set[str] = set()
+        terminal_status: dict[str, str] = {}
+        for event in all_stage_events:
+            evidence = event.evidence_references or {}
+            attempt_id = str(evidence.get("attempt_id") or "")
+            if event.event_type == "STAGE_INVOCATION_STARTED":
+                starts[attempt_id] = evidence
+            elif event.event_type in {
+                "STAGE_INVOCATION_COMPLETED", "STAGE_INVOCATION_HUMAN_REQUIRED",
+                "STAGE_INVOCATION_FAILED", "STAGE_INVOCATION_ABANDONED",
+            }:
+                terminal.add(attempt_id)
+                terminal_status[attempt_id] = str(evidence.get("status") or "")
+        prior_finished = [
+            terminal_status.get(attempt_id, "") for attempt_id in starts
+            if attempt_id in terminal
+            and starts[attempt_id].get("candidate") == candidate
+        ]
+        if prior_finished:
+            last_status = prior_finished[-1]
+            if last_status == "COMPLETE":
+                return None
+            if last_status == "HUMAN_REQUIRED" and not allow_human_resume:
+                return None
+            if last_status in {"FAILED", "PARTIAL"} and not (
+                authorized_retry or (stage == "APPLY" and last_status == "PARTIAL")
+            ):
+                return None
+        incomplete = [item for key, item in starts.items() if key not in terminal]
+        recovery_count = 0
+        abandoned_attempt: dict[str, Any] | None = None
+        if prior_claim is not None and prior_claim.is_active:
+            return None
+        if prior_claim is not None and incomplete:
+            previous = incomplete[-1]
+            if previous.get("candidate") != candidate:
+                return None
+            previous_claim_key = str(previous.get("claim_key") or "")
+            if previous_claim_key != claim_key:
+                return None
+            prior_attempt_id = previous.get("attempt_id")
+            process_event = next(
+                (event.evidence_references or {} for event in reversed(stage_events)
+                 if event.event_type == "STAGE_INVOCATION_PROCESS_STARTED"
+                 and (event.evidence_references or {}).get("attempt_id") == prior_attempt_id),
+                None,
+            )
+            coordinator = previous.get("coordinator_process")
+            child = (process_event or {}).get("process_identity")
+            current = process_identity()
+            prior_recovery_count = int(previous.get("recovery_count", 0))
+            if not self._stage_recovery_is_safe(
+                coordinator,
+                child,
+                current,
+                candidate_matches=previous.get("candidate") == candidate,
+                recovery_count=prior_recovery_count,
+            ):
+                return None
+            recovery_count = prior_recovery_count + 1
+            abandoned_attempt = previous
+        elif incomplete:
+            # A different candidate cannot bypass an active or ambiguous
+            # run/stage attempt merely by producing a different fingerprint.
+            return None
+        owner = f"stage:{stage}:{uuid4()}"
+        claim = claims.acquire_or_reacquire(
+            claim_key=claim_key, owner_instance_id=owner, lease_seconds=120
+        )
+        if claim is None:
+            return None
+        context = RecoveryClaimContext(
+            claim_key=claim.claim_key,
+            owner_instance_id=claim.owner_instance_id,
+            fence_token=claim.fence_token,
+            lease_expires_at=claim.lease_expires_at,
+        )
+        invocation = StageInvocation(
+            attempt_id=str(uuid4()), claim=context, claim_key=claim_key,
+            candidate=candidate, recovery_count=recovery_count,
+            started_monotonic=asyncio.get_running_loop().time(),
+        )
+        try:
+            coordinator_identity = process_identity()
+            if abandoned_attempt is not None:
+                self._save_stage_invocation_event(
+                    uow, run, "STAGE_INVOCATION_ABANDONED", {
+                        "attempt_id": abandoned_attempt.get("attempt_id"),
+                        "claim_key": claim_key,
+                        "fence_token": context.fence_token,
+                        "candidate": candidate,
+                        "status": "ABANDONED",
+                        "finished_at": utc_now().isoformat(),
+                        "reason": "Expired lease; coordinator and workflow process group proven absent.",
+                        "recovery_count": recovery_count,
+                    },
+                )
+            self._save_stage_invocation_event(
+                uow, run, "STAGE_INVOCATION_STARTED", {
+                    "attempt_id": invocation.attempt_id, "claim_key": claim_key,
+                    "fence_token": context.fence_token, "candidate": candidate,
+                    "started_at": utc_now().isoformat(),
+                    "coordinator_process": coordinator_identity,
+                    "recovery_proof": (
+                        "UNAVAILABLE"
+                        if coordinator_identity.get("status") != "AVAILABLE"
+                        else "AWAITING_WORKFLOW_PROCESS_IDENTITY"
+                    ),
+                    "recovery_count": recovery_count,
+                    "recovered_from_attempt_id": (
+                        abandoned_attempt.get("attempt_id") if abandoned_attempt else None
+                    ),
+                },
+            )
+        except Exception:
+            claims.release_claim(context)
+            uow.commit()
+            raise
+        return invocation
+
+    def _observe_stage_process(
+        self, uow: Any, run: OrchestrationRun, invocation: StageInvocation
+    ) -> Any:
+        def observe(identity: dict[str, Any]) -> None:
+            self._save_stage_invocation_event(
+                uow, run, "STAGE_INVOCATION_PROCESS_STARTED", {
+                    "attempt_id": invocation.attempt_id,
+                    "claim_key": invocation.claim_key,
+                    "process_identity": identity,
+                    "recovery_proof": (
+                        "UNAVAILABLE" if identity.get("status") != "AVAILABLE" else "AVAILABLE"
+                    ),
+                    "observed_at": utc_now().isoformat(),
+                },
+            )
+        return observe
+
+    async def _finish_stage_invocation(
+        self, uow: Any, run: OrchestrationRun, invocation: StageInvocation,
+        status: str, result: dict[str, Any],
+    ) -> None:
+        claim = invocation.claim
+        if not uow.claims.validate_cas(
+            claim.claim_key, claim.owner_instance_id, claim.fence_token
+        ):
+            raise RuntimeError("Stage invocation result rejected by stale fence")
+        elapsed_ms = int((asyncio.get_running_loop().time() - invocation.started_monotonic) * 1000)
+        event_type = {
+            "COMPLETE": "STAGE_INVOCATION_COMPLETED",
+            "HUMAN_REQUIRED": "STAGE_INVOCATION_HUMAN_REQUIRED",
+        }.get(status, "STAGE_INVOCATION_FAILED")
+        self._save_stage_invocation_event(
+            uow, run, event_type, {
+                "attempt_id": invocation.attempt_id, "claim_key": invocation.claim_key,
+                "fence_token": claim.fence_token, "candidate": invocation.candidate,
+                "status": status, "finished_at": utc_now().isoformat(),
+                "duration_ms": elapsed_ms, "result": redact_secrets(result),
+            },
+        )
+        uow.claims.release_claim(claim)
+        uow.commit()
 
     async def _run_claimed(self, uow: Any, claim: RecoveryClaimContext, operation: Any) -> Any:
         """Keep the durable claim owned by this live worker, or fence the child."""
@@ -392,11 +706,27 @@ class NativeOrchestrationCoordinator:
         dispatch: tuple[str, str, RecoveryClaimContext],
         work: Any,
         complete: Any,
+        worktree_path: Path,
+        allow_human_resume: bool = False,
+        authorized_retry: bool = False,
     ) -> Any:
         """Run one native agent call under the shared claim and close its intent."""
         attempt_id, action_key, claim = dispatch
+        invocation = await self._begin_stage_invocation(
+            uow, run, worktree_path, operation.upper(),
+            allow_human_resume=allow_human_resume,
+            authorized_retry=authorized_retry,
+        )
+        if invocation is None:
+            raise RuntimeError(f"{operation.title()} stage invocation is already active or ambiguous")
         try:
-            result = await self._run_claimed(uow, claim, work)
+            result = await self._run_claimed(
+                uow, claim,
+                lambda: self._run_claimed(
+                    uow, invocation.claim,
+                    lambda: work(self._observe_stage_process(uow, run, invocation)),
+                ),
+            )
         except asyncio.CancelledError:
             self._finish_native_dispatch(
                 uow, run, operation, attempt_id, action_key, claim, "AMBIGUOUS", None
@@ -408,6 +738,22 @@ class NativeOrchestrationCoordinator:
             )
             raise
         status = "COMPLETE" if complete(result) else "FAILED"
+        native_status = (
+            result.get("status") if isinstance(result, dict) else None
+        )
+        if native_status == "HUMAN_REQUIRED":
+            invocation_status = "HUMAN_REQUIRED"
+        else:
+            invocation_status = status
+        await self._finish_stage_invocation(
+            uow, run, invocation, invocation_status,
+            {
+                "native_status": native_status,
+                "status": invocation_status,
+                "message": result.get("message") if isinstance(result, dict) else None,
+                "human_payload": result.get("human_payload") if isinstance(result, dict) else None,
+            },
+        )
         self._finish_native_dispatch(
             uow,
             run,
@@ -419,6 +765,36 @@ class NativeOrchestrationCoordinator:
             None if status == "COMPLETE" else result.get("message"),
         )
         return result
+
+    async def _run_native_boolean_stage(
+        self,
+        uow: Any,
+        run: OrchestrationRun,
+        worktree_path: Path,
+        stage: str,
+        dispatch: Any,
+    ) -> bool:
+        """Guard a native workflow whose existing caller consumes a boolean result."""
+        invocation = await self._begin_stage_invocation(
+            uow, run, worktree_path, stage,
+        )
+        if invocation is None:
+            return False
+        try:
+            result = await self._run_claimed(
+                uow, invocation.claim,
+                lambda: dispatch(self._observe_stage_process(uow, run, invocation)),
+            )
+            complete = bool(result)
+            await self._finish_stage_invocation(
+                uow, run, invocation, "COMPLETE" if complete else "FAILED",
+                {"observed_success": complete},
+            )
+            return complete
+        except Exception:
+            uow.claims.release_claim(invocation.claim)
+            uow.commit()
+            return False
 
     async def _normalize_request_before_explore(
         self,
@@ -1113,6 +1489,25 @@ class NativeOrchestrationCoordinator:
         # transition points: if a run enters already sitting on a review stage,
         # that is a resume and must fail closed on absent/ambiguous evidence.
         entry_stage = active_run.current_stage
+        pending_gate = (active_run.stop_details or {}).get("human_payload")
+        gate_pending = (
+            active_run.human_gate == HumanGate.NEEDS_HUMAN
+            or active_run.stop_outcome == OrchestrationStopOutcome.NEEDS_HUMAN
+        )
+        accepted_response = operator_clarification and operator_clarification.strip()
+        if gate_pending and not accepted_response and not operator_ack:
+            if isinstance(pending_gate, dict):
+                return OrchestrationCoordinationResult(
+                    status="HUMAN_REQUIRED", run_id=active_run.run_id,
+                    current_stage=active_run.current_stage,
+                    message=str(pending_gate.get("question") or "A human gate is still pending."),
+                    human_payload=self._safe_human_payload(pending_gate),
+                )
+            return OrchestrationCoordinationResult(
+                status="PAUSED", run_id=active_run.run_id,
+                current_stage=active_run.current_stage,
+                message="A human gate is pending but its durable payload is unavailable; no stage was dispatched.",
+            )
 
         # Step 3: Git Workspace Isolation
         base_branch = "main"
@@ -1288,7 +1683,7 @@ class NativeOrchestrationCoordinator:
                     active_run,
                     "explore",
                     dispatch,
-                    lambda: self._run_explore(
+                    lambda process_observer: self._run_explore(
                         worktree_path=worktree_path,
                         provider=thinker_provider,
                         issue_number=issue_number,
@@ -1296,11 +1691,15 @@ class NativeOrchestrationCoordinator:
                         issue_body=issue_body,
                         operator_clarification=operator_clarification,
                         project_id=project_id,
+                        process_start_observer=process_observer,
                     ),
                     lambda result: (
                         result.get("execution") is not None
                         and self._execution_is_successful(result["execution"])
                     ),
+                    worktree_path=worktree_path,
+                    allow_human_resume=bool(operator_clarification),
+                    authorized_retry=recovery_needed,
                 )
                 evidence = explore_result.get("execution")
                 if (
@@ -1450,7 +1849,7 @@ class NativeOrchestrationCoordinator:
                     active_run,
                     "propose",
                     dispatch,
-                    lambda: self._run_propose(
+                    lambda process_observer: self._run_propose(
                         worktree_path=worktree_path,
                         provider=thinker_provider,
                         change_name=change_name,
@@ -1464,8 +1863,12 @@ class NativeOrchestrationCoordinator:
                             if pending_revision
                             else (operator_clarification if verified_propose_human_gate else None)
                         ),
+                        process_start_observer=process_observer,
                     ),
                     lambda result: result.get("status") in {"READY_TO_VALIDATE", "HUMAN_REQUIRED"},
+                    worktree_path=worktree_path,
+                    allow_human_resume=bool(verified_propose_human_gate and operator_clarification),
+                    authorized_retry=propose_recovery_needed and not pending_revision,
                 )
                 propose_attempt_id = dispatch[0]
                 human_required = propose_result.get("status") == "HUMAN_REQUIRED"
@@ -1513,12 +1916,16 @@ class NativeOrchestrationCoordinator:
                 logger.info(
                     f"OpenSpec strict validation failed on attempt {attempt + 1}. Running correction pass..."
                 )
-                correction_ok = await self._run_propose_correction(
-                    worktree_path,
-                    thinker_provider,
-                    change_name,
-                    val_res.get("stderr", ""),
-                    project_id=project_id,
+                correction_ok = await self._run_native_boolean_stage(
+                    uow, active_run, worktree_path, "UPDATE",
+                    lambda observer: self._run_propose_correction(
+                        worktree_path,
+                        thinker_provider,
+                        change_name,
+                        val_res.get("stderr", ""),
+                        project_id=project_id,
+                        process_start_observer=observer,
+                    ),
                 )
                 if not correction_ok:
                     break
@@ -1727,6 +2134,16 @@ class NativeOrchestrationCoordinator:
 
                 # Record dispatch intent before executing I/O
                 attempt_id = str(uuid4())
+                review_invocation = await self._begin_stage_invocation(
+                    uow, active_run, worktree_path, "PROPOSAL_REVIEW",
+                    authorized_retry=needs_auth,
+                )
+                if review_invocation is None:
+                    return OrchestrationCoordinationResult(
+                        status="PAUSED", run_id=active_run.run_id,
+                        current_stage=OrchestrationStage.PROPOSAL_REVIEW,
+                        message="Proposal review invocation is already active or recovery evidence is ambiguous. Worktree preserved.",
+                    )
                 details = dict(active_run.stop_details or {})
                 prior_review = details.get("proposal_review")
                 prior_round = (
@@ -1748,9 +2165,37 @@ class NativeOrchestrationCoordinator:
                     if hasattr(uow, "commit"):
                         uow.commit()
 
-                review_res = await self._run_proposal_review(
-                    worktree_path, reviewer_provider, change_name, project_id=project_id, uow=uow
-                )
+                try:
+                    review_res = await self._run_claimed(
+                        uow, review_invocation.claim,
+                        lambda: self._run_proposal_review(
+                            worktree_path, reviewer_provider, change_name,
+                            project_id=project_id, uow=uow,
+                            process_start_observer=self._observe_stage_process(
+                                uow, active_run, review_invocation
+                            ),
+                        ),
+                    )
+                    review_status = (
+                        "COMPLETE"
+                        if review_res.get("status") in {"approved", "changes_required"}
+                        else "FAILED"
+                    )
+                    await self._finish_stage_invocation(
+                        uow, active_run, review_invocation, review_status,
+                        {"status": review_res.get("status"),
+                         "verdict": review_res.get("verdict"),
+                         "findings": review_res.get("findings"),
+                         "error": review_res.get("error")},
+                    )
+                except Exception:
+                    uow.claims.release_claim(review_invocation.claim)
+                    uow.commit()
+                    return OrchestrationCoordinationResult(
+                        status="PAUSED", run_id=active_run.run_id,
+                        current_stage=OrchestrationStage.PROPOSAL_REVIEW,
+                        message="Proposal review invocation failed or lost its durable claim. Worktree preserved.",
+                    )
                 details = dict(active_run.stop_details or {})
                 res_dict = (
                     dict(review_res)
@@ -1856,13 +2301,49 @@ class NativeOrchestrationCoordinator:
             details["apply_limits"] = {"max_attempts": hard_limit, "max_no_progress": no_progress_limit}
             self._persist_run_stop_details(active_run, details)
             while attempts < hard_limit:
-                outcome = await self._run_apply(
-                    worktree_path, implementer_provider, change_name,
-                    project_id=project_id, corrections=pending_corrections,
-                    recovery_context=self._apply_recovery_context(prior),
-                    run_id=active_run.run_id,
-                    base_branch=base_branch,
+                invocation = await self._begin_stage_invocation(
+                    uow, active_run, worktree_path, "APPLY",
+                    allow_human_resume=bool(operator_clarification),
                 )
+                if invocation is None:
+                    return OrchestrationCoordinationResult(
+                        status="PAUSED", run_id=active_run.run_id,
+                        current_stage=OrchestrationStage.IMPLEMENTING,
+                        message="Apply invocation is already active or recovery evidence is ambiguous. Worktree preserved.",
+                    )
+                try:
+                    outcome = await self._run_claimed(
+                        uow, invocation.claim,
+                        lambda: self._run_apply(
+                            worktree_path, implementer_provider, change_name,
+                            project_id=project_id, corrections=pending_corrections,
+                            recovery_context=self._apply_recovery_context(prior),
+                            run_id=active_run.run_id, base_branch=base_branch,
+                            operator_response=operator_clarification,
+                            process_start_observer=self._observe_stage_process(
+                                uow, active_run, invocation
+                            ),
+                        ),
+                    )
+                    await self._finish_stage_invocation(
+                        uow, active_run, invocation, outcome.status,
+                        {
+                            "candidate_sha": outcome.candidate_sha,
+                            "changed_files": list(outcome.changed_files),
+                            "completed_tasks": list(outcome.completed_tasks),
+                            "pending_tasks": list(outcome.pending_tasks),
+                            "error": outcome.error,
+                            "human_question": outcome.human_question,
+                            "human_options": list(outcome.human_options),
+                        },
+                    )
+                except Exception as exc:
+                    logger.warning("Apply invocation failed: %s", exc)
+                    return OrchestrationCoordinationResult(
+                        status="PAUSED", run_id=active_run.run_id,
+                        current_stage=OrchestrationStage.IMPLEMENTING,
+                        message="Apply invocation failed or lost its durable claim. Worktree preserved.",
+                    )
                 if isinstance(outcome, bool):
                     outcome = ApplyOutcome("COMPLETE" if outcome else "FAILED", (), (), None, (), None,
                                            None, "Legacy boolean Apply result; no structured evidence.")
@@ -1940,10 +2421,54 @@ class NativeOrchestrationCoordinator:
 
         if active_run.current_stage == OrchestrationStage.VERIFYING:
             # Step 8: Verify Stage (Executed by implementer)
-            verify_ok = await self._run_verify(
-                worktree_path, implementer_provider, change_name, project_id=project_id
+            invocation = await self._begin_stage_invocation(
+                uow, active_run, worktree_path, "VERIFY",
+                allow_human_resume=bool(operator_clarification),
             )
-            if not verify_ok:
+            if invocation is None:
+                return OrchestrationCoordinationResult(
+                    status="PAUSED", run_id=active_run.run_id,
+                    current_stage=OrchestrationStage.VERIFYING,
+                    message="Verify invocation is already active or recovery evidence is ambiguous. Worktree preserved.",
+                )
+            try:
+                verify_outcome = await self._run_claimed(
+                    uow, invocation.claim,
+                    lambda: self._run_verify(
+                        worktree_path, implementer_provider, change_name,
+                        project_id=project_id,
+                        operator_response=operator_clarification,
+                        process_start_observer=self._observe_stage_process(
+                            uow, active_run, invocation
+                        ),
+                    ),
+                )
+                await self._finish_stage_invocation(
+                    uow, active_run, invocation, verify_outcome.status,
+                    {"summary": verify_outcome.summary,
+                     "human_question": verify_outcome.human_question,
+                     "human_options": list(verify_outcome.human_options),
+                     "findings": list(verify_outcome.findings)},
+                )
+            except Exception as exc:
+                logger.warning("Verify invocation failed: %s", exc)
+                return OrchestrationCoordinationResult(
+                    status="PAUSED", run_id=active_run.run_id,
+                    current_stage=OrchestrationStage.VERIFYING,
+                    message="Verify invocation failed or lost its durable claim. Worktree preserved.",
+                )
+            if verify_outcome.status == "HUMAN_REQUIRED":
+                payload = self._record_current_human_gate(
+                    uow, active_run, gate="apply_escalation",
+                    question=verify_outcome.human_question or "OpenSpec Verify requires operator input.",
+                    options=verify_outcome.human_options,
+                )
+                return OrchestrationCoordinationResult(
+                    status="HUMAN_REQUIRED", run_id=active_run.run_id,
+                    current_stage=OrchestrationStage.VERIFYING,
+                    message=payload["question"], human_payload=payload,
+                )
+            if not verify_outcome:
                 return OrchestrationCoordinationResult(
                     status="PAUSED",
                     run_id=active_run.run_id,
@@ -2055,6 +2580,16 @@ class NativeOrchestrationCoordinator:
                         )
 
                 attempt_id = str(uuid4())
+                review_invocation = await self._begin_stage_invocation(
+                    uow, active_run, worktree_path, "CODE_REVIEW",
+                    authorized_retry=needs_auth,
+                )
+                if review_invocation is None:
+                    return OrchestrationCoordinationResult(
+                        status="PAUSED", run_id=active_run.run_id,
+                        current_stage=OrchestrationStage.CODE_REVIEW,
+                        message="Code review invocation is already active or recovery evidence is ambiguous. Worktree preserved.",
+                    )
                 details = dict(active_run.stop_details or {})
                 prior_review = details.get("code_review")
                 prior_round = (
@@ -2076,14 +2611,42 @@ class NativeOrchestrationCoordinator:
                     if hasattr(uow, "commit"):
                         uow.commit()
 
-                code_review_res = await self._run_code_review(
-                    worktree_path,
-                    reviewer_provider,
-                    change_name,
-                    project_id=project_id,
-                    candidate_sha=candidate_sha,
-                    uow=uow,
-                )
+                try:
+                    code_review_res = await self._run_claimed(
+                        uow, review_invocation.claim,
+                        lambda: self._run_code_review(
+                            worktree_path,
+                            reviewer_provider,
+                            change_name,
+                            project_id=project_id,
+                            candidate_sha=candidate_sha,
+                            uow=uow,
+                            process_start_observer=self._observe_stage_process(
+                                uow, active_run, review_invocation
+                            ),
+                        ),
+                    )
+                    review_status = (
+                        "COMPLETE"
+                        if code_review_res.get("status") in {"approved", "changes_required"}
+                        else "FAILED"
+                    )
+                    await self._finish_stage_invocation(
+                        uow, active_run, review_invocation, review_status,
+                        {"status": code_review_res.get("status"),
+                         "verdict": code_review_res.get("verdict"),
+                         "candidate_sha": candidate_sha,
+                         "findings": code_review_res.get("findings"),
+                         "error": code_review_res.get("error")},
+                    )
+                except Exception:
+                    uow.claims.release_claim(review_invocation.claim)
+                    uow.commit()
+                    return OrchestrationCoordinationResult(
+                        status="PAUSED", run_id=active_run.run_id,
+                        current_stage=OrchestrationStage.CODE_REVIEW,
+                        message="Code review invocation failed or lost its durable claim. Worktree preserved.",
+                    )
                 details = dict(active_run.stop_details or {})
                 c_dict = (
                     dict(code_review_res)
@@ -2352,7 +2915,9 @@ class NativeOrchestrationCoordinator:
 
             try:
                 sync_archive_ok, state_detail = await self._ensure_doc_closing_sync_archive(
-                    doc_path, thinker_provider, change_name, project_id=project_id
+                    doc_path, thinker_provider, change_name, project_id=project_id,
+                    uow=uow, run=active_run,
+                    operator_response=operator_clarification,
                 )
             except GitOperationError as exc:
                 return OrchestrationCoordinationResult(
@@ -2363,6 +2928,18 @@ class NativeOrchestrationCoordinator:
                     message=f"Documentation Git operation failed: {exc}. Worktree preserved.",
                 )
             if not sync_archive_ok:
+                current_gate = (active_run.stop_details or {}).get("human_payload")
+                if (
+                    active_run.human_gate == HumanGate.NEEDS_HUMAN
+                    and isinstance(current_gate, dict)
+                ):
+                    return OrchestrationCoordinationResult(
+                        status="HUMAN_REQUIRED", run_id=active_run.run_id,
+                        current_stage=OrchestrationStage.DOC_CLOSING,
+                        pr1_url=pr1_url,
+                        message=str(current_gate.get("question") or state_detail or "DOC_CLOSING requires operator input."),
+                        human_payload=self._safe_human_payload(current_gate),
+                    )
                 return OrchestrationCoordinationResult(
                     status="PAUSED",
                     run_id=active_run.run_id,
@@ -2373,6 +2950,7 @@ class NativeOrchestrationCoordinator:
                         "Documentation worktree preserved."
                     ),
                 )
+            self._clear_current_human_gate(uow, active_run)
             try:
                 doc_head_sha = await self._get_git_head_sha(doc_path)
             except GitOperationError as exc:
@@ -3598,6 +4176,7 @@ class NativeOrchestrationCoordinator:
         issue_body: str,
         operator_clarification: str | None = None,
         project_id: str | None = None,
+        process_start_observer: Any = None,
     ) -> dict[str, Any]:
         """Execute official OpenSpec Explore workflow with configured thinking agent."""
         wf = self.agent_runner.resolve_workflow(
@@ -3629,6 +4208,7 @@ class NativeOrchestrationCoordinator:
             role="thinker",
             provider=provider,
             workflow=wf,
+            process_start_observer=process_start_observer,
         )
 
         if not self._execution_is_successful(res):
@@ -3775,6 +4355,7 @@ class NativeOrchestrationCoordinator:
         project_id: str | None = None,
         continue_existing: bool = False,
         operator_clarification: str | None = None,
+        process_start_observer: Any = None,
     ) -> dict[str, Any]:
         """Dispatch native Propose or native Continue for an incomplete proposal."""
         operation = "continue" if continue_existing else "propose"
@@ -3805,6 +4386,7 @@ class NativeOrchestrationCoordinator:
             role="thinker",
             provider=provider,
             workflow=wf,
+            process_start_observer=process_start_observer,
         )
         report = getattr(res, "workflow_handoff", None)
         if (
@@ -3864,6 +4446,7 @@ class NativeOrchestrationCoordinator:
         change_name: str,
         error_output: str,
         project_id: str | None = None,
+        process_start_observer: Any = None,
     ) -> bool:
         """Run the native OpenSpec update workflow for review findings."""
         wf = self.agent_runner.resolve_workflow(
@@ -3886,6 +4469,7 @@ class NativeOrchestrationCoordinator:
             role="thinker",
             provider=provider,
             workflow=wf,
+            process_start_observer=process_start_observer,
         )
         return self._execution_is_successful(result)
 
@@ -3943,12 +4527,16 @@ class NativeOrchestrationCoordinator:
             if hasattr(uow, "commit"):
                 uow.commit()
 
-        correction_ok = await self._run_propose_correction(
-            worktree_path,
-            thinker_provider,
-            change_name,
-            json.dumps(findings, ensure_ascii=False),
-            project_id=project_id,
+        correction_ok = await self._run_native_boolean_stage(
+            uow, run, worktree_path, "UPDATE",
+            lambda observer: self._run_propose_correction(
+                worktree_path,
+                thinker_provider,
+                change_name,
+                json.dumps(findings, ensure_ascii=False),
+                project_id=project_id,
+                process_start_observer=observer,
+            ),
         )
         new_hashes = self._compute_proposal_artifacts_hashes(worktree_path, change_name)
         old_hashes = result.get("artifact_hashes") or {}
@@ -4086,6 +4674,7 @@ class NativeOrchestrationCoordinator:
         change_name: str,
         project_id: str | None = None,
         uow: Any = None,
+        process_start_observer: Any = None,
     ) -> ReviewResult:
         """Execute independent read-only proposal review for high complexity changes."""
         change_dir = worktree_path / "openspec" / "changes" / change_name
@@ -4130,6 +4719,7 @@ class NativeOrchestrationCoordinator:
             role="reviewer",
             provider=provider,
             reviewer_identity=reviewer_id,
+            process_start_observer=process_start_observer,
         )
         base_record = {
             "reviewer_provider": provider,
@@ -4191,6 +4781,8 @@ class NativeOrchestrationCoordinator:
         recovery_context: str = "",
         run_id: str | None = None,
         base_branch: str = "main",
+        process_start_observer: Any = None,
+        operator_response: str | None = None,
     ) -> ApplyOutcome:
         """Dispatch configured implementer agent to execute official OpenSpec Apply workflow."""
         wf = self.agent_runner.resolve_workflow(
@@ -4224,6 +4816,8 @@ class NativeOrchestrationCoordinator:
             f"{correction_instruction}"
             f"{recovery_context}"
         )
+        if operator_response and operator_response.strip():
+            prompt += "\n\nAccepted operator response for the current gate (context only):\n" + operator_response.strip()
         try:
             await self._git_run(worktree_path, ["rev-parse", "HEAD"])
             await self._git_run(worktree_path, ["status", "--porcelain"])
@@ -4236,6 +4830,7 @@ class NativeOrchestrationCoordinator:
             role="implementer",
             provider=provider,
             workflow=wf,
+            process_start_observer=process_start_observer,
         )
         tasks_path = worktree_path / "openspec" / "changes" / change_name / "tasks.md"
         if not tasks_path.is_file():
@@ -4259,7 +4854,9 @@ class NativeOrchestrationCoordinator:
         diff_ok = getattr(diff, "ok", getattr(diff, "returncode", 0) == 0)
         digest = hashlib.sha256(diff_text.encode()).hexdigest() if diff_ok and diff_text else None
         handoff = getattr(result, "workflow_handoff", None)
-        tests_passed, test_evidence = await self._run_automated_tests(worktree_path, base_branch)
+        tests_passed, test_evidence = await self._run_automated_tests(
+            worktree_path, base_branch, process_start_observer=process_start_observer
+        )
         if getattr(result, "workflow_handoff_required", False) and handoff and handoff.status == "HUMAN_REQUIRED":
             return ApplyOutcome("HUMAN_REQUIRED", completed_ids, tuple(pending), sha_text.strip() if getattr(sha, "ok", True) else None,
                                 changed_files, digest, tests_passed, test_evidence,
@@ -4380,7 +4977,8 @@ class NativeOrchestrationCoordinator:
         return sorted(selected)
 
     async def _run_automated_tests(
-        self, worktree_path: Path, base_branch: str = "main"
+        self, worktree_path: Path, base_branch: str = "main",
+        process_start_observer: Any = None,
     ) -> tuple[bool, str]:
         """Run only pytest files selected from Git-observed candidate changes."""
         import sys
@@ -4419,7 +5017,24 @@ class NativeOrchestrationCoordinator:
                 cwd=str(worktree_path),
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
+                start_new_session=True,
             )
+            if process_start_observer is not None:
+                identity = process_identity(proc.pid)
+                identity["pgid"] = proc.pid
+                try:
+                    process_start_observer(identity)
+                except Exception as exc:
+                    try:
+                        os.killpg(proc.pid, signal.SIGKILL)
+                    except OSError:
+                        proc.kill()
+                    await proc.communicate()
+                    return False, (
+                        f"selected_tests: {selected_text}\ncommand: {command_text}\n"
+                        "exit_code: NOT_STARTED\nstdout:\n\nstderr:\n"
+                        f"Unable to persist test process identity: {type(exc).__name__}"
+                    )
             stdout, stderr = await proc.communicate()
             stdout_text = stdout.decode(errors="replace")
             stderr_text = stderr.decode(errors="replace")
@@ -4455,7 +5070,9 @@ class NativeOrchestrationCoordinator:
         provider: str,
         change_name: str,
         project_id: str | None = None,
-    ) -> bool:
+        process_start_observer: Any = None,
+        operator_response: str | None = None,
+    ) -> VerifyOutcome:
         """Dispatch the SAME implementer agent to execute native OpenSpec Verify workflow."""
         wf = self.agent_runner.resolve_workflow(
             worktree_path=worktree_path,
@@ -4477,6 +5094,8 @@ class NativeOrchestrationCoordinator:
             '"expected_correction":"required only for a finding"}]}.'
             " Use READY_TO_MERGE only when the native Verify result is positive and findings is empty."
         )
+        if operator_response and operator_response.strip():
+            prompt += "\n\nAccepted operator response for the current gate (context only):\n" + operator_response.strip()
         attempt_dir = worktree_path / ".minime" / "verify-attempts" / str(uuid4())
         response_path = attempt_dir / "last-message.json"
         res = await self.agent_runner.run(
@@ -4486,6 +5105,7 @@ class NativeOrchestrationCoordinator:
             role="implementer",
             provider=provider,
             workflow=wf,
+            process_start_observer=process_start_observer,
             output_schema={
                 "type": "object",
                 "properties": {
@@ -4519,16 +5139,35 @@ class NativeOrchestrationCoordinator:
             },
             output_last_message_path=response_path,
         )
+        handoff = getattr(res, "workflow_handoff", None)
+        if (
+            getattr(res, "workflow_handoff_required", False)
+            and handoff is not None
+            and handoff.status == "HUMAN_REQUIRED"
+        ):
+            return VerifyOutcome(
+                "HUMAN_REQUIRED", handoff.summary,
+                human_question=handoff.summary,
+                human_options=tuple(handoff.pending),
+            )
         if not self._execution_is_successful(res):
-            return False
+            return VerifyOutcome("FAILED", "Native Verify execution failed.")
         if getattr(res, "structured_output_missing", False) or getattr(
             res, "structured_output_too_large", False
         ):
-            return False
+            return VerifyOutcome("FAILED", "Native Verify structured result is missing.")
         try:
-            return parse_review_verdict(res.response_output).verdict.value == "READY_TO_MERGE"
+            parsed = parse_review_verdict(res.response_output)
+            return VerifyOutcome(
+                "COMPLETE" if parsed.verdict.value == "READY_TO_MERGE" else "FAILED",
+                parsed.summary,
+                findings=tuple(
+                    item.model_dump() if hasattr(item, "model_dump") else dict(item)
+                    for item in parsed.findings
+                ),
+            )
         except MalformedReviewOutputError:
-            return False
+            return VerifyOutcome("FAILED", "Native Verify returned an invalid structured result.")
 
     async def _run_code_review(
         self,
@@ -4538,6 +5177,7 @@ class NativeOrchestrationCoordinator:
         project_id: str | None = None,
         candidate_sha: str | None = None,
         uow: Any = None,
+        process_start_observer: Any = None,
     ) -> ReviewResult:
         """Execute independent read-only code review for high-complexity changes."""
         diff_result = await self._git_run(worktree_path, ["diff", "HEAD~1..HEAD"])
@@ -4565,6 +5205,7 @@ class NativeOrchestrationCoordinator:
             role="reviewer",
             provider=provider,
             reviewer_identity=reviewer_id,
+            process_start_observer=process_start_observer,
         )
         base_record = {
             "reviewer_provider": provider,
@@ -4622,6 +5263,9 @@ class NativeOrchestrationCoordinator:
         provider: str,
         change_name: str,
         project_id: str | None = None,
+        uow: Any = None,
+        run: OrchestrationRun | None = None,
+        operator_response: str | None = None,
     ) -> bool:
         """Execute official OpenSpec Sync and Archive workflows with thinking agent."""
         sync_wf = self.agent_runner.resolve_workflow(
@@ -4637,34 +5281,90 @@ class NativeOrchestrationCoordinator:
             change_name=change_name,
         )
 
-        sync_result = await self.agent_runner.run(
-            worktree_path=doc_path,
-            prompt_context=(
-                f"Execute ONLY the official OpenSpec Sync workflow for '{change_name}'.\n"
-                f"Dispatch: {sync_wf.dispatch_command}\n"
-                "Return evidence of the resulting synced specs."
-            ),
-            project_id=project_id,
-            role="thinker",
-            provider=provider,
-            workflow=sync_wf,
-        )
-        if not self._execution_is_successful(sync_result):
-            return False
+        async def dispatch(operation: str, workflow: ResolvedWorkflow, prompt: str) -> Any:
+            if uow is None or run is None:
+                raise RuntimeError("Durable stage invocation context is required for DOC_CLOSING")
+            invocation = await self._begin_stage_invocation(
+                uow, run, doc_path, operation.upper(),
+                allow_human_resume=bool(operator_response),
+            )
+            if invocation is None:
+                raise RuntimeError(f"{operation.title()} invocation is already active or ambiguous")
+            dispatch_prompt = prompt
+            if operator_response and operator_response.strip():
+                dispatch_prompt += (
+                    "\n\nAccepted operator response for the current gate (context only):\n"
+                    + operator_response.strip()
+                )
+            try:
+                result = await self._run_claimed(
+                    uow, invocation.claim,
+                    lambda: self.agent_runner.run(
+                        worktree_path=doc_path,
+                        prompt_context=dispatch_prompt,
+                        project_id=project_id,
+                        role="thinker",
+                        provider=provider,
+                        workflow=workflow,
+                        process_start_observer=self._observe_stage_process(uow, run, invocation),
+                    ),
+                )
+                handoff = getattr(result, "workflow_handoff", None)
+                if (
+                    getattr(result, "workflow_handoff_required", False)
+                    and handoff is not None
+                    and handoff.status == "HUMAN_REQUIRED"
+                ):
+                    question = str(handoff.summary or "El workflow nativo requiere una decisión humana.")
+                    options = tuple(handoff.pending or ())
+                    await self._finish_stage_invocation(
+                        uow, run, invocation, "HUMAN_REQUIRED",
+                        {"operation": operation, "question": question, "options": options},
+                    )
+                    raise NativeStageHumanRequired(operation, question, options)
+                status = "COMPLETE" if self._execution_is_successful(result) else "FAILED"
+                await self._finish_stage_invocation(
+                    uow, run, invocation, status,
+                    {"exit_code": getattr(result, "exit_code", None),
+                     "timed_out": getattr(result, "timed_out", None),
+                     "final_response_status": getattr(result, "final_response_status", None)},
+                )
+                return result
+            except Exception:
+                # Leave the durable start open. Recovery must prove both processes gone.
+                uow.claims.release_claim(invocation.claim)
+                uow.commit()
+                raise
 
-        archive_result = await self.agent_runner.run(
-            worktree_path=doc_path,
-            prompt_context=(
-                f"Execute ONLY the official OpenSpec Archive workflow for '{change_name}'.\n"
-                f"Dispatch: {archive_wf.dispatch_command}\n"
-                "The delta specs have already been synced in the prior step. Archive the change "
-                "directly without requesting a sync decision.\n"
-                "Return evidence of the resulting archive."
-            ),
-            project_id=project_id,
-            role="thinker",
-            provider=provider,
-            workflow=archive_wf,
+        gate = (run.stop_details or {}).get("human_payload") if run else None
+        archive_resume = (
+            isinstance(gate, dict) and gate.get("gate") == "doc_closing_archive"
+            and bool(operator_response)
+        )
+        if not archive_resume:
+            sync_result = await dispatch(
+                "sync", sync_wf,
+                (
+                    f"Execute ONLY the official OpenSpec Sync workflow for '{change_name}'.\n"
+                    f"Dispatch: {sync_wf.dispatch_command}\n"
+                    "Return evidence of the resulting synced specs."
+                ),
+            )
+            if not self._execution_is_successful(sync_result):
+                return False
+
+        archive_prompt = (
+            f"Execute ONLY the official OpenSpec Archive workflow for '{change_name}'.\n"
+            f"Dispatch: {archive_wf.dispatch_command}\n"
+            "The delta specs have already been synced in the prior step. Archive the change "
+            "directly without requesting a sync decision.\n"
+            "Return evidence of the resulting archive."
+        )
+        if operator_response and operator_response.strip():
+            archive_prompt += "\n\nAccepted operator response for the current gate (context only):\n" + operator_response.strip()
+        archive_result = await dispatch(
+            "archive", archive_wf,
+            archive_prompt,
         )
         if not self._execution_is_successful(archive_result):
             return False
@@ -4697,6 +5397,9 @@ class NativeOrchestrationCoordinator:
         provider: str,
         change_name: str,
         project_id: str | None = None,
+        uow: Any = None,
+        run: OrchestrationRun | None = None,
+        operator_response: str | None = None,
     ) -> tuple[bool, str | None]:
         """Observe DOC_CLOSING before deciding whether native workflows are needed."""
         state, detail = self._observe_doc_closing_change(doc_path, change_name)
@@ -4704,9 +5407,19 @@ class NativeOrchestrationCoordinator:
             return True, None
         if state != "active":
             return False, f"Documentation Change state is {state}: {detail}."
-        if not await self._run_sync_and_archive(
-            doc_path, provider, change_name, project_id=project_id
-        ):
+        try:
+            completed = await self._run_sync_and_archive(
+                doc_path, provider, change_name, project_id=project_id, uow=uow, run=run,
+                operator_response=operator_response,
+            )
+        except NativeStageHumanRequired as handoff:
+            if uow is not None and run is not None:
+                self._record_current_human_gate(
+                    uow, run, gate=f"doc_closing_{handoff.operation}",
+                    question=handoff.question, options=handoff.options,
+                )
+            return False, handoff.question
+        if not completed:
             return False, "Native Sync or Archive failed."
         return True, None
 

@@ -17,7 +17,7 @@ import subprocess
 import tempfile
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Protocol
+from typing import Any, Callable, Protocol
 
 from minime.config import OpenCodeCapabilityConfig
 from minime.logging import redact_secrets
@@ -50,6 +50,7 @@ class OpenCodeRequest:
     candidate_author: str | None = None
     reviewer_identity: str | None = None
     prompt: str = ""
+    process_start_observer: Callable[[dict[str, Any]], None] | None = None
 
 
 @dataclass(frozen=True)
@@ -381,11 +382,15 @@ class OpenCodeAdapter:
                 "read_only_worktree": role == "independent_review",
                 "extra_env": extra_env,
             }
+            if request.process_start_observer is not None:
+                call_kwargs["process_start_observer"] = request.process_start_observer
             try:
                 process = await confinement.run_confined_async_subprocess(
                     [executable, *args], **call_kwargs
                 )
-            except TypeError:
+            except TypeError as exc:
+                if "extra_env" not in str(exc):
+                    raise
                 call_kwargs.pop("extra_env", None)
                 process = await confinement.run_confined_async_subprocess(
                     [executable, *args], **call_kwargs

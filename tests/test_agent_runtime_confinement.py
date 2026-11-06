@@ -810,6 +810,59 @@ def test_agent_workflow_without_total_timeout_remains_alive_until_normal_exit(tm
     assert b"complete" in result.stdout
 
 
+@pytest.mark.skipif(
+    not AgentProcessConfinement.is_host_confinement_available(),
+    reason="process identity callback proof requires host process confinement",
+)
+def test_confined_subprocess_persists_process_group_identity_immediately(tmp_path: Path):
+    confinement, worktree, _runtime = _confinement(tmp_path)
+    observed = []
+    result = asyncio.run(
+        confinement.run_confined_async_subprocess(
+            [sys.executable, "-c", "print('observed')"],
+            cwd=str(worktree),
+            input_bytes=None,
+            timeout_seconds=10,
+            env=os.environ.copy(),
+            process_start_observer=observed.append,
+        )
+    )
+    assert result.returncode == 0
+    assert len(observed) == 1
+    assert observed[0]["status"] == "AVAILABLE"
+    assert observed[0]["pid"] == observed[0]["pgid"]
+    assert observed[0]["start_marker"]
+    assert observed[0]["boot_id"]
+
+
+@pytest.mark.skipif(
+    not AgentProcessConfinement.is_host_confinement_available(),
+    reason="process termination proof requires host process confinement",
+)
+def test_confined_subprocess_is_killed_when_identity_persistence_fails(tmp_path: Path):
+    confinement, worktree, _runtime = _confinement(tmp_path)
+    observed = []
+
+    def fail_to_persist(identity):
+        observed.append(identity)
+        raise RuntimeError("simulated journal write failure")
+
+    with pytest.raises(AgentConfinementError, match="Unable to persist confined workflow process identity"):
+        asyncio.run(
+            confinement.run_confined_async_subprocess(
+                [sys.executable, "-c", "import time; time.sleep(10)"],
+                cwd=str(worktree),
+                input_bytes=None,
+                timeout_seconds=10,
+                env=os.environ.copy(),
+                process_start_observer=fail_to_persist,
+            )
+        )
+    assert len(observed) == 1
+    with pytest.raises(ProcessLookupError):
+        os.killpg(observed[0]["pgid"], 0)
+
+
 @pytest.mark.parametrize("runner_type", [CliImplementerRunner, CliReviewerRunner])
 def test_missing_kernel_confinement_is_environment_failure_before_cli_preflight(
     tmp_path: Path, monkeypatch, runner_type

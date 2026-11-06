@@ -285,7 +285,8 @@ class OpenSpecIntegrityService:
                 if stage_events is not None:
                     events = stage_events.list_by_run(run.run_id)
                     reached_implementing = any(
-                        e.to_stage == OrchestrationStage.IMPLEMENTING for e in events
+                        e.event_type == "STAGE_TRANSITION"
+                        and e.to_stage == OrchestrationStage.IMPLEMENTING for e in events
                     )
                 if not reached_implementing:
                     findings.append(

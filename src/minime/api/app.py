@@ -46,22 +46,17 @@ from minime.domain.enums import (
 )
 from minime.domain.interfaces import PersistenceUnitOfWork
 from minime.domain.models import (
-    ActionDescriptor,
     AuthorizedOperator,
     AuthStatusDTO,
     Change,
     ContextDiscoveryReport,
-    EfficiencyTelemetryView,
     Event,
     Job,
     JobLog,
     OperatorActionRecord,
-    OperatorActionRequest,
-    OperatorActionResult,
     OperatorIdentityDTO,
     ProjectConfigurationInput,
     ProjectConfigurationPatch,
-    ProviderEfficiencyMetrics,
     ProviderHealth,
     SchedulerStatus,
 )
@@ -1156,6 +1151,22 @@ async def _execute_request_in_fresh_session(
                 reviewer_provider=runner.provider_for_role("reviewer"),
                 target_run_id=target_run_id or getattr(body, "target_run_id", None),
             )
+            accepted_action = (
+                worker_uow.operator_actions.get_by_request_id(intent_key)
+                if intent_key and hasattr(worker_uow, "operator_actions")
+                else None
+            )
+            if accepted_action is not None and accepted_action.action_type == OperatorActionType.RESOLVE_GATE:
+                accepted_action.status = "COMPLETED"
+                accepted_action.summary = "Accepted gate response processed by the coordinator."
+                accepted_action.result_payload_json = {
+                    "status": result.status,
+                    "run_id": result.run_id,
+                    "current_stage": result.current_stage.value if result.current_stage else None,
+                    "message": result.message,
+                    "human_payload": result.human_payload,
+                }
+                worker_uow.operator_actions.save(accepted_action)
             session.commit()
             if _should_publish_run_notification(worker_uow, result):
                 await event_broker.publish(
@@ -1481,6 +1492,134 @@ async def run_project_request(
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Project not found")
 
     body = payload or ProjectRequestRunPayload()
+    active_runs = uow.orchestration_runs.list_runs(project_id=project_id, is_active=True)
+    accepted_action = None
+    response_text = body.operator_clarification or body.operator_response
+    client_idempotency_key = body.idempotency_key
+    if body.operator_ack:
+        response_text = response_text or "Estoy enterado"
+    if response_text and body.idempotency_key:
+        action_repo = getattr(uow, "operator_actions", None)
+        if action_repo is None:
+            raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail="Durable operator-action storage is unavailable")
+        token_action_id = hashlib.sha256(
+            f"gate-response-token:{body.idempotency_key}".encode()
+        ).hexdigest()
+        accepted_action = action_repo.get_by_request_id(body.idempotency_key)
+        if accepted_action is None:
+            accepted_action = action_repo.get_by_request_id(token_action_id)
+        action_request_id = (
+            accepted_action.action_request_id if accepted_action is not None else token_action_id
+        )
+        if accepted_action is not None:
+            response_fingerprint = hashlib.sha256(response_text.strip().encode()).hexdigest()
+            if (
+                accepted_action.action_type != OperatorActionType.RESOLVE_GATE
+                or accepted_action.project_id != project_id
+                or accepted_action.parameters_json.get("response_fingerprint") != response_fingerprint
+                or (body.target_run_id and accepted_action.run_id != body.target_run_id)
+            ):
+                raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="The idempotency key is bound to a different gate response")
+            body.target_run_id = body.target_run_id or accepted_action.run_id
+            if accepted_action.status == "COMPLETED":
+                return {
+                    **dict(accepted_action.result_payload_json or {}),
+                    "operation_id": accepted_action.action_request_id,
+                    "idempotency_key": client_idempotency_key,
+                }
+            current_run = next(
+                (item for item in active_runs if item.run_id == accepted_action.run_id), None
+            )
+            if current_run is None:
+                return {
+                    "status": "ACCEPTED",
+                    "operation_id": accepted_action.action_request_id,
+                    "idempotency_key": client_idempotency_key,
+                    "run_id": accepted_action.run_id,
+                    "message": "The gate response already has a durable accepted action.",
+                }
+            current_payload = (
+                (current_run.stop_details or {}).get("human_payload") if current_run else None
+            )
+            current_gate_fingerprint = None
+            if isinstance(current_payload, dict):
+                current_gate_fingerprint = hashlib.sha256(json.dumps({
+                    "run_id": current_run.run_id,
+                    "stage": current_run.current_stage.value,
+                    "gate_id": current_payload.get("gate_id"),
+                    "gate": current_payload.get("gate"),
+                    "question": current_payload.get("question"),
+                    "options": current_payload.get("options"),
+                }, sort_keys=True, ensure_ascii=False).encode()).hexdigest()
+            if current_gate_fingerprint != accepted_action.parameters_json.get("gate_fingerprint"):
+                # The prior worker may have resolved the gate before a restart.
+                # Re-enter the same run without replaying that response into a later stage.
+                body.operator_clarification = None
+                body.operator_response = None
+                body.operator_ack = False
+                body.idempotency_key = action_request_id
+                response_text = None
+    if response_text and active_runs:
+        if len(active_runs) != 1:
+            raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Active run identity is ambiguous")
+        run_repo = uow.orchestration_runs
+        active_run = run_repo.get_for_update(active_runs[0].run_id)
+        if active_run is None or not active_run.is_active:
+            raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="The active run changed before the gate response was accepted")
+        active_payload = (active_run.stop_details or {}).get("human_payload")
+        if not isinstance(active_payload, dict):
+            raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="There is no current human gate to answer")
+        gate_fingerprint = hashlib.sha256(json.dumps({
+            "run_id": active_run.run_id,
+            "stage": active_run.current_stage.value,
+            "gate_id": active_payload.get("gate_id"),
+            "gate": active_payload.get("gate"),
+            "question": active_payload.get("question"),
+            "options": active_payload.get("options"),
+        }, sort_keys=True, ensure_ascii=False).encode()).hexdigest()
+        response_fingerprint = hashlib.sha256(response_text.strip().encode()).hexdigest()
+        action_request_id = (
+            accepted_action.action_request_id
+            if accepted_action is not None
+            else hashlib.sha256(f"gate-response-token:{body.idempotency_key}".encode()).hexdigest()
+            if body.idempotency_key
+            else hashlib.sha256(
+                f"{active_run.run_id}:{gate_fingerprint}:{response_fingerprint}".encode()
+            ).hexdigest()
+        )
+        action_repo = getattr(uow, "operator_actions", None)
+        if action_repo is None:
+            raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail="Durable operator-action storage is unavailable")
+        accepted_action = action_repo.get_by_request_id(action_request_id)
+        if accepted_action is None:
+            accepted_action = OperatorActionRecord(
+                action_request_id=action_request_id,
+                project_id=project_id,
+                change_name=active_run.change_name,
+                run_id=active_run.run_id,
+                action_type=OperatorActionType.RESOLVE_GATE,
+                precondition_stage=active_run.current_stage.value,
+                precondition_gate=str(active_payload.get("gate") or "NEEDS_HUMAN"),
+                status="ACCEPTED",
+                summary="Accepted response for the current human gate.",
+                parameters_json={
+                    "gate_fingerprint": gate_fingerprint,
+                    "response_fingerprint": response_fingerprint,
+                    "accepted_response": redact_secrets(response_text.strip()),
+                },
+            )
+            action_repo.save(accepted_action)
+            uow.commit()
+        elif accepted_action.parameters_json.get("gate_fingerprint") != gate_fingerprint:
+            raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="The accepted response belongs to a stale gate")
+        if accepted_action.status == "COMPLETED":
+            return dict(accepted_action.result_payload_json or {})
+        response_text = str(accepted_action.parameters_json.get("accepted_response") or response_text)
+        body.operator_clarification = response_text
+        body.operator_response = response_text
+        body.operator_ack = body.operator_ack or response_text == "Estoy enterado"
+        body.idempotency_key = action_request_id
+        body.target_run_id = active_run.run_id
     binding = None
     if hasattr(uow, "project_managed_repository_bindings"):
         binding = uow.project_managed_repository_bindings.get_by_project_id(project_id)
@@ -1526,6 +1665,9 @@ async def run_project_request(
     return {
         "status": "ACCEPTED",
         "operation_id": operation_id,
+        "idempotency_key": client_idempotency_key or (
+            accepted_action.action_request_id if accepted_action is not None else None
+        ),
         "run_id": None,
         "message": "Run accepted for bounded background execution.",
     }
@@ -1935,18 +2077,9 @@ async def ack_project_request(
             detail="Verified managed repository binding is required",
         )
 
-    active_runs = uow.orchestration_runs.list_runs(project_id=project_id, is_active=True)
-    target_run_id = active_runs[0].id if active_runs else None
-
-    body = ProjectRequestRunPayload(operator_ack=True, target_run_id=target_run_id)
-    intent_key = f"{project_id}:ack:{target_run_id or 'active'}"
-    operation_id = _schedule_request_worker(project_id, body, intent_key)
-    return {
-        "status": "ACCEPTED",
-        "operation_id": operation_id,
-        "run_id": target_run_id,
-        "message": "Operator acknowledgment accepted for asynchronous execution.",
-    }
+    return await run_project_request(
+        project_id, _operator, uow, ProjectRequestRunPayload(operator_ack=True)
+    )
 
 
 class JobRunRequest(BaseModel):

@@ -376,6 +376,7 @@ def test_operator_response_endpoint_keeps_existing_run_response_path(
     run.stop_outcome = OrchestrationStopOutcome.NEEDS_HUMAN
     run.stop_details = {
         "human_payload": {
+            "gate_id": "gate-human-response",
             "gate": "proposal_review_escalation",
             "stage": OrchestrationStage.PROPOSAL_REVIEW.value,
             "question": "Provide current review direction",
@@ -392,12 +393,77 @@ def test_operator_response_endpoint_keeps_existing_run_response_path(
         with TestClient(app) as client:
             response = client.post(
                 "/api/v1/projects/project-human-gate/requests/run",
-                json={"operator_clarification": "Please address the current review finding."},
+                json={
+                    "operator_clarification": "Please address the current review finding.",
+                    "idempotency_key": "stable-review-gate-response",
+                },
+            )
+            duplicate = client.post(
+                "/api/v1/projects/project-human-gate/requests/run",
+                json={
+                    "operator_clarification": "Please address the current review finding.",
+                    "idempotency_key": "stable-review-gate-response",
+                },
+            )
+            action = in_memory_uow.operator_actions.list_by_run(run.run_id)[0]
+            action.status = "COMPLETED"
+            action.result_payload_json = {
+                "status": "HUMAN_REQUIRED", "run_id": run.run_id,
+                "current_stage": OrchestrationStage.PROPOSAL_REVIEW.value,
+                "message": "A later gate is waiting.",
+            }
+            in_memory_uow.operator_actions.save(action)
+            run.stop_details = {}
+            run.human_gate = None
+            run.stop_outcome = None
+            in_memory_uow.orchestration_runs.save(run)
+            in_memory_uow.commit()
+            completed_duplicate = client.post(
+                "/api/v1/projects/project-human-gate/requests/run",
+                json={
+                    "operator_clarification": "Please address the current review finding.",
+                    "idempotency_key": "stable-review-gate-response",
+                },
+            )
+            run.current_stage = OrchestrationStage.CODE_REVIEW
+            run.human_gate = HumanGate.NEEDS_HUMAN
+            run.stop_outcome = OrchestrationStopOutcome.NEEDS_HUMAN
+            run.stop_details = {
+                "human_payload": {
+                    "gate_id": "gate-code-review-response",
+                    "gate": "code_review_escalation",
+                    "stage": OrchestrationStage.CODE_REVIEW.value,
+                    "question": "Address the current code review finding",
+                    "options": [],
+                }
+            }
+            in_memory_uow.orchestration_runs.save(run)
+            in_memory_uow.commit()
+            later_gate_response = client.post(
+                "/api/v1/projects/project-human-gate/requests/run",
+                json={
+                    "operator_clarification": "Please address the current review finding.",
+                    "idempotency_key": "distinct-code-review-response",
+                },
             )
     finally:
         app.dependency_overrides.clear()
 
     assert response.status_code == 202
     assert response.json()["status"] == "ACCEPTED"
-    schedule.assert_called_once()
+    assert duplicate.status_code == 202
+    assert duplicate.json()["operation_id"] == response.json()["operation_id"]
+    assert response.json()["idempotency_key"] == "stable-review-gate-response"
+    assert completed_duplicate.status_code == 202
+    assert completed_duplicate.json()["message"] == "A later gate is waiting."
+    assert later_gate_response.status_code == 202
+    assert schedule.call_count == 2
+    assert schedule.call_count == 2
     assert schedule.call_args.args[1].operator_clarification == "Please address the current review finding."
+    action_records = in_memory_uow.operator_actions.list_by_run(run.run_id)
+    assert len(action_records) == 2
+    assert action_records[0].action_type.value == "RESOLVE_GATE"
+    assert action_records[0].parameters_json["accepted_response"] == "Please address the current review finding."
+    from minime.api.app import _accepted_operations
+
+    _accepted_operations.pop(("project-human-gate", schedule.call_args.args[2]), None)
