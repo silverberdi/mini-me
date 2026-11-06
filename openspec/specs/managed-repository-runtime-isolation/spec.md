@@ -1,6 +1,10 @@
 # Spec: Managed Repository Runtime Isolation
 
-## ADDED Requirements
+## Purpose
+
+Defines isolation, ownership, identity, and mutation boundaries for managed repositories and runtime checkouts.
+
+## Requirements
 
 ### Requirement: Strict physical and logical separation of runtime checkout and managed repositories
 

@@ -1,8 +1,12 @@
 # spec: Reviewer Independence and Telemetry
 
+## Purpose
+
+Defines reviewer independence, remediation routing for failed checks, and persisted provider-efficiency telemetry.
+
 ## Requirements
 
-### Requirement 1: Technical Reviewer Independence Enforcement (Rule G)
+### Requirement: Technical Reviewer Independence Enforcement (Rule G)
 The system SHALL track candidate material authors across all attempts leading to a frozen candidate (`material_candidate_authors`).
 Eligible reviewers SHALL be computed as `configured_reviewers - material_candidate_authors`.
 If an assigned reviewer has material authorship in the candidate, the system SHALL reject the review assignment with `REVIEWER_INDEPENDENCE_UNAVAILABLE` and SHALL NOT transition the candidate to `READY_TO_MERGE` or prepare a PR.
@@ -21,7 +25,7 @@ If an assigned reviewer has material authorship in the candidate, the system SHA
 
 ---
 
-### Requirement 2: Canonical `CHECKS_FAILED` Remediation Routing
+### Requirement: Canonical `CHECKS_FAILED` Remediation Routing
 When automated checks fail in stage `RUNNING_CHECKS`, the system SHALL NOT dead-end in `CHECKS_FAILED`.
 The system SHALL classify the check failure (code/test fix vs platform defect vs bookkeeping) and route the candidate into canonical remediation (`REVIEW_REMEDIATION` / `IMPLEMENTING`), creating a subsequent candidate generation for verification.
 
@@ -33,7 +37,7 @@ The system SHALL classify the check failure (code/test fix vs platform defect vs
 
 ---
 
-### Requirement 3: PostgreSQL Efficiency Telemetry & UI Integration
+### Requirement: PostgreSQL Efficiency Telemetry & UI Integration
 The system SHALL persist per-change and per-run efficiency telemetry in PostgreSQL table `provider_efficiency_metrics`.
 Recorded metrics SHALL include: attempts by provider, durations, productive attempt counts, no-progress counts, same-SHA retries, suppressed retries, reassignments, AG premium reason codes, provider exhaustion events, DRAIN transitions, and native self-hosting percentage.
 The system SHALL expose these metrics via `/api/v1/telemetry/efficiency/{project_id}/{change_name}`, Textual TUI Provider Efficiency view, and PWA Provider Efficiency telemetry panel.

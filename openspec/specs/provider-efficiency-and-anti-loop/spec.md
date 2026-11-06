@@ -1,8 +1,12 @@
 # spec: Provider Efficiency and Anti-Loop Governance
 
+## Purpose
+
+Defines task classification, provider selection, bounded retry policy, and lightweight reconciliation for execution efficiency.
+
 ## Requirements
 
-### Requirement 1: Deterministic Task Classification
+### Requirement: Deterministic Task Classification
 The system SHALL deterministically classify each task/attempt into one of: `ROUTINE_IMPLEMENTATION`, `ORDINARY_REMEDIATION`, `TEST_FIX`, `BOOKKEEPING_RECONCILIATION`, `EVIDENCE_RECONCILIATION`, `ARCHITECTURE`, `UX_VISUAL_QA`, `PLATFORM_RECOVERY`, `SPECIALIZED`.
 The classification SHALL be computed from observable signals (stage, failure reason, OpenSpec task status, diff, check results) and SHALL NOT depend on opaque LLM prompts.
 
@@ -19,7 +23,7 @@ The classification SHALL be computed from observable signals (stage, failure rea
 
 ---
 
-### Requirement 2: Canonical Provider Roles and Selection (Rules A, E, F, H)
+### Requirement: Canonical Provider Roles and Selection (Rules A, E, F, H)
 The system SHALL select Codex as the default workhorse for `ROUTINE_IMPLEMENTATION`, `ORDINARY_REMEDIATION`, and `TEST_FIX`.
 When Codex is available and the task class is routine, Antigravity SHALL NOT be eligible, and the decision reason MUST be recorded as `PREMIUM_PROVIDER_NOT_REQUIRED`.
 Antigravity SHALL ONLY be selected when an explicit premium reason code is valid (`ARCHITECTURE_REQUIRED`, `UX_VISUAL_QA`, `PLATFORM_RECOVERY`, `CODEX_NON_CONVERGENCE`, `SPECIALIZED_REASON`).
@@ -38,7 +42,7 @@ For `CODEX_NON_CONVERGENCE`, the system SHALL require evidence of 1 initial Code
 
 ---
 
-### Requirement 3: Retry Budget & Same-SHA Anti-Loop (Rules B & C)
+### Requirement: Retry Budget & Same-SHA Anti-Loop (Rules B & C)
 The system SHALL grant an implementation provider at most 1 normal attempt plus 1 corrective retry before enforcing root-cause classification.
 If an attempt produces an identical candidate SHA with the same failure reason and no new evidence, the system SHALL NOT invoke another full implementation provider.
 The system SHALL emit event `SAME_SHA_RETRY_SUPPRESSED` and divert to lightweight reconciliation, root cause classification, or platform repair.
@@ -52,7 +56,7 @@ The system SHALL emit event `SAME_SHA_RETRY_SUPPRESSED` and divert to lightweigh
 
 ---
 
-### Requirement 4: Lightweight Reconciliation (Rule D)
+### Requirement: Lightweight Reconciliation (Rule D)
 The system SHALL provide an in-process lightweight reconciliation service for bookkeeping and evidence synchronization.
 When code changes are present and checks pass, the reconciler SHALL synchronize `tasks.md` checkboxes, evidence diagnostics, and candidate manifest integrity in-process without invoking external LLM providers.
 

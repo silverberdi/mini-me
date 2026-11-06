@@ -1,9 +1,10 @@
 # Spec: Aggregate Provider Efficiency and Loop Telemetry Summary
 
-## Overview
+## Purpose
+
 Defines observable behavior for computing and retrieving project-level aggregated provider efficiency facts and self-operating loop statistics.
 
-## ADDED Requirements
+## Requirements
 
 ### Requirement: Project Efficiency Summary Aggregation
 `EfficiencyTelemetryService.get_project_efficiency_summary(project_id: str)` MUST query all recorded metrics for `project_id` and return a dictionary containing `total_runs`, `total_productive_attempts`, `total_no_progress_attempts`, `productive_attempt_ratio`, `total_same_sha_suppressed`, `total_corrective_retries`, `total_reassignments`, `average_self_hosting_percentage`, and `provider_breakdown`.
