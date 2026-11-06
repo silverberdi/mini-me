@@ -1,21 +1,27 @@
-# Contratos de agentes — mini me v1.3
+# Contratos de agentes — mini me
 
-**Fuente:** [CONTRATO_RECTOR.md](CONTRATO_RECTOR.md), configuración por proyecto.
+**Fuente de autoridad:** [CONTRATO_RECTOR.md](CONTRATO_RECTOR.md) v2.0 y perfiles configurados por proyecto.
 
 ## Pensamiento
-Agente CLI con workflow oficial OpenSpec instalado. Propose, update, verify y sync/archive (para cierre documental, con menor esfuerzo compatible). Si OpenSpec no entrega opciones en pregunta de contexto, analiza ticket/artefactos/contexto y responde SOLO si tiene evidencia/autoridad. No autoaprueba merges ni riesgos materiales.
+
+Agente compatible con los workflows oficiales OpenSpec instalados. Explora, propone, actualiza y verifica contexto conforme a su responsabilidad; ejecuta sync/archive nativos para cierre documental. Si OpenSpec no ofrece opciones para una pregunta contextual, usa ticket/artefactos/contexto y responde solo cuando tiene evidencia y autoridad. No autoriza decisiones reservadas.
 
 ## Ejecución
-Agente CLI con capacidad real de trabajo en archivos y comandos. Apply/correcciones y tests pertinentes siguiendo OpenSpec nativo. Una rama/worktree del candidato. Devuelve código, commits y evidencia de ejecución real; no simula skill.
+
+Agente con capacidad real de editar archivos y ejecutar comandos. Implementa y corrige mediante OpenSpec Apply, ejecuta pruebas pertinentes y realiza Verify nativo. Reanuda sobre el mismo candidato con contexto basado en evidencia; se detiene ante regresión o identidad ambigua.
 
 ## Revisión independiente
-Agente/proveedor distinto de autores del candidato; revisión de propuesta obligatoria, código condicional por política del proyecto. Read-only sobre el candidato. Hallazgos específicos, veredicto ligado al contenido exacto y devolución a pensamiento/ejecutor para remediación. No hace commits ni PR como autor del contenido revisado.
+
+Se invoca únicamente para complejidad alta, tanto para revisar propuesta como código. El revisor debe ser distinto de los autores del candidato y operar en modo read-only. El resultado se vincula a los artefactos/SHA revisados; los hallazgos vuelven a pensamiento o ejecución para corrección. No reescribe ni certifica su propio trabajo.
 
 ## Respaldo
-Agente/modelo configurables; se usa solo con compatibilidad real y autorización de presupuesto/permiso. API de solo texto no suple workflow de edición. No sustituir autoridad independiente con autor de candidato.
 
-## mini me
-No es agente semántico. Selecciona perfil configurado; invoca skills instaladas, conserva contexto/checkpoint, presenta preguntas/opciones fieles, realiza operaciones deterministas Git/tickets, obtiene merge humano e implementa cierre documental autorizado. No hay proveedor fijo global (Codex/Antigravity/DeepSeek/OpenRouter son alternativas configurables, no contrato permanente).
+Proveedor, modelo y capacidad configurables. Solo se usa si puede ejecutar el workflow real requerido y si permisos y presupuesto lo autorizan. Una API de texto no sustituye una CLI que deba editar archivos.
 
-## Evidencias y límites
-Proveedor/modelo/workflow real, repositorio/branch/SHA, resultado, comentarios, pruebas, decisión humana y coste mínimo cuando aplique. Prohibido consumir cuota no autorizada, fingir ejecución o alterar código durante review. F5/F6 requieren prueba de autoejecución real.
+## Responsabilidad de mini me
+
+Selecciona los perfiles configurados, invoca skills instaladas, preserva checkpoints, presenta preguntas/opciones fieles y ejecuta operaciones deterministas autorizadas sobre Git y tickets. No crea contenido semántico OpenSpec ni programa en lugar de los agentes.
+
+## Evidencia y límites
+
+Registrar proveedor, modelo/workflow, repositorio, rama, SHA, resultado, pruebas y decisiones humanas relevantes. No consumir cuota no autorizada, fingir ejecución ni alterar el candidato durante revisión. Las etiquetas F5/F6 y sus requisitos de autoejecución pertenecen a la historia de entregas, no son un gate especial para cambios futuros.

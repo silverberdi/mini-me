@@ -1,52 +1,25 @@
-# Deployment and Human Validation
+# Previews y validación humana
 
-## Container-first contract
-Current project deployments use containers and should continue to do so. A project owns its build/up/health/down mechanics; mini me invokes and records them.
+**Autoridad:** [CONTRATO_RECTOR.md](CONTRATO_RECTOR.md) v2.0. mini me no administra despliegues productivos; corresponden al CI/CD del proyecto.
 
-## Human validation scope
-Human validation is for **UI behavior**. Services/APIs are validated automatically except as dependencies required to make the integrated UI candidate functional.
+## Validación humana
 
-## Required OpenSpec metadata for UI changes
-Any change requiring human validation must define:
-- that human validation is required;
-- `surface: ui`;
-- scenario IDs/titles;
-- preconditions;
-- user-level steps;
-- expected visible outcomes.
-
-A UI change that requires human validation is not READY without those scenarios.
+La validación humana aplica al comportamiento de UI cuando el Change la requiera. Los artefactos OpenSpec deben definir la superficie, escenarios, precondiciones, pasos de usuario y resultados visibles. El resultado se liga al repositorio, base y SHA del candidato; si el candidato cambia, la validación anterior puede quedar obsoleta.
 
 ## Preview
-Project setup/config must define a stable preview UI endpoint/port and safe container strategy. Internally multiple services may run; the human-facing contract is the UI URL.
 
-Preview preflight must ensure production data stores are not used accidentally.
+Un Change de UI puede usar un preview temporal cuando aporte evidencia útil. El proyecto define su mecanismo seguro de build/ejecución; mini me solo lo coordina si está autorizado para ese proyecto. El preflight debe impedir el uso accidental de bases de producción o datos reales. La URL de preview no es evidencia suficiente: validar el comportamiento funcional del candidato.
 
-## Candidate identity
-Human validation is tied to:
-- repository/project binding;
-- base SHA;
-- candidate head SHA;
-- immutable container image digest when applicable.
+## Ciclo recomendado para cambios de UI
 
-If candidate head changes, or base drift materially alters the effective candidate, validation becomes stale and must be repeated as policy requires.
+1. Construir el candidato desde el SHA identificado.
+2. Ejecutar Verify nativo, checks pertinentes y E2E funcional aplicable.
+3. Publicar el candidato/PR bajo las reglas Git y obtener validación humana para los escenarios UX requeridos.
+4. Si se usa preview, comprobar identidad de candidato e imagen inmutable cuando aplique; repetir la validación si cambia la identidad.
+5. Registrar resultado, hallazgos y decisión humana junto al candidato.
 
-## Recommended lifecycle
-1. Build candidate.
-2. Agent-side OpenSpec verify, checks, independent agent review and real E2E pass. Extra audit only if a permitted policy/human gate authorizes it.
-3. Commit + push candidate.
-4. Create/update draft PR.
-5. Build immutable image from exact candidate.
-6. Deploy preview.
-7. Health/smoke verification **and actual candidate functional E2E**, not only HTTP 200.
-8. Present UI URL and guided scenarios.
-9. Human marks each required scenario PASS/FAIL/SKIPPED-with-reason and decides.
-10. On approval, PR becomes ready for human merge.
-11. After merge, promote the validated immutable artifact when compatible; otherwise rebuild only under explicit safe policy and re-establish identity.
-12. Production health/smoke checks plus **real end-user/operator functionality E2E** bound to deployed SHA/image digest.
-13. Native agent-side OpenSpec sync/archive with protected-Git authority; close only after successful operational finalization including Issue/Project and E2E evidence.
+La autorización y merge de implementación siguen la política del contrato según complejidad. Las operaciones OpenSpec sync/archive y cierre del Issue continúan por el flujo de entrega.
 
-## Production
-Production deployment may be automatic after human merge only when the project explicitly authorizes it. Failure blocks DONE and surfaces actionable evidence.
+## Producción
 
-Rollback is an explicit human action in MVP, executed by mini me using the project's rollback contract and followed by verification.
+El despliegue y rollback productivos pertenecen al CI/CD y a las políticas operativas del proyecto. No son gates universales de Done de mini me. Si el Issue requiere verificar un comportamiento productivo, esa evidencia se define dentro del alcance y se obtiene por el mecanismo autorizado del proyecto; no se presume que mini me despliegue ni ejecute postdeploy.

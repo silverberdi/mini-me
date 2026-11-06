@@ -1,11 +1,11 @@
-# Estado operativo mínimo — dirección v1.2
+# Estado operativo — mini me
 
-**Fuente:** [CONTRATO_RECTOR.md](CONTRATO_RECTOR.md). La máquina de estados heredada describe código histórico; NO es especificación obligatoria del nuevo flujo.
+**Autoridad:** [CONTRATO_RECTOR.md](CONTRATO_RECTOR.md) v2.0. Este documento resume los estados visibles; no define una máquina paralela ni sustituye el modelo implementado.
 
-El flujo visible requerido es: **ticket seleccionado → Propose → revisión propuesta → Apply → Verify → revisión código condicional → PR pendiente merge humano → sync/archive en rama documental → PR documental → ticket cerrado**.
+El ciclo visible es: Issue seleccionado en una admisión autorizada → Explore/Propose → Apply → Verify/correcciones → revisión independiente solo para complejidad alta → PR y autorización aplicable → Sync/Archive nativos → PR documental → cierre remoto.
 
-Correcciones regresan al responsable del trabajo y vuelven a la revisión pertinente, con límite de intentos. Preguntas humanas conservan el contexto y esperan respuesta sin consumir cuota. Un fallo conserva Git/worktree y reintenta solo si la operación externa no ocurrió ya.
+Preguntas humanas preservan la pregunta vigente, contexto y opciones disponibles; una respuesta autorizada reanuda el mismo trabajo. Fallos y esperas preservan los artefactos y el checkpoint necesario. Antes de repetir una operación externa, mini me observa su estado para evitar efectos duplicados.
 
-**No introducir una máquina adicional** de subestados de capacidad, recovery, scoring o saga sin una necesidad explícita y demostrada en la fase actual. DB guarda solo etapa/checkpoint mínimo y referencias a artefactos autoritativos externos.
+Las representaciones de UI deben distinguir progreso, bloqueo, espera, fallo, estado terminal y estado desconocido a partir de evidencia real. No inferir trabajo en curso ni cerrar un Run solo porque la interfaz o el Issue haya cambiado.
 
-La eliminación de estados/tablas históricos deberá planificarse en F1 y completarse en F6, con datos y rollback preservados.
+La implementación puede mantener estados internos de recuperación que el contrato permita y el caso real justifique. Su necesidad, atomicidad y consumidores se evalúan en cambios autorizados; este resumen no autoriza eliminarlos ni agregarlos.

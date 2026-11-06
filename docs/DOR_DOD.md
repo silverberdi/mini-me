@@ -1,21 +1,21 @@
-# Definition of Ready / Done — mini me v1.2
+# Definition of Ready / Done — mini me
 
-**Autoridad:** [CONTRATO_RECTOR.md](CONTRATO_RECTOR.md). DoR/DoD deben aportar evidencia, no multiplicar gates propios.
+**Autoridad:** [CONTRATO_RECTOR.md](CONTRATO_RECTOR.md) v2.0. Estos criterios orientan la evidencia y no crean una ruta paralela de autorización.
 
-## Ready para ejecutar un Change
-- Es UNA de las seis fases en el orden acordado, con issue asociado y Change OpenSpec oficial correspondiente, sin microchanges.
-- Requerimiento observable, propuesta/artefactos del esquema por agente cuando aplique, scope no ambiguo.
-- Repositorio y rama confiables, credenciales seguras, agente/skill real compatible y presupuesto autorizado.
-- No existe otro Change activo del mismo proyecto; el operador ha autorizado iniciar la fase bajo condiciones de cuota seguras.
-- Definir pruebas pertinentes, código/DB a reutilizar o eliminar y preservación de datos si corresponde.
+## Ready
 
-## Done de un Change
-- Comportamiento solicitado demostrado; pruebas enfocadas/integración/E2E reales conforme a la capacidad afirmada.
-- Sin implementación propia que emule OpenSpec, sin nuevos estados/servicios superfluos; código muerto retirado dentro del alcance.
-- Agentes verdaderamente invocados; propuesta revisada independientemente y código revisado si la política lo exige; preguntas humanas resueltas.
-- PR implementación en Git con merge humano para SHA revisado; sync/archive nativos en rama nueva, PR documental autorizado y merge confirmado; ticket remoto cerrado.
-- F5 y F6: **evidencia verificable de ejecución por mini me** (no mensajes manuales).
-- No exigir despliegue productivo por mini me; pertenece a CI/CD externo.
-- Para migraciones de DB: Alembic seguro, conservación/backup/rollback y verificación de lo retenido.
+- Hay un Issue abierto con alcance observable y el operador autorizó el Change OpenSpec correspondiente.
+- Repositorio, rama, identidad y permisos son confiables; el agente y workflow real están disponibles y el gasto está dentro de política.
+- No hay otro Change activo para el mismo proyecto; el alcance, riesgos, persistencia afectada y pruebas pertinentes están identificados.
+- Los criterios de integración especifican qué invocación y efectos reales deben observarse.
 
-Ni tests mock PASS, ni health 200, ni un PR solamente creado prueban DONE.
+## Done
+
+- El comportamiento solicitado está demostrado con pruebas proporcionales al riesgo y E2E reales cuando la aceptación lo requiere.
+- La propuesta y el candidato coinciden con el Issue y Change autorizados; la revisión independiente de propuesta/código se hizo cuando la complejidad es alta.
+- El revisor es independiente, de solo lectura y revisó el SHA exacto; las decisiones humanas requeridas están registradas.
+- La política de PR, merge de implementación, sync/archive nativos, PR documental y cierre remoto se completó con evidencia observable.
+- No quedan rutas obsoletas duplicadas dentro del alcance; migraciones Alembic preservan datos e historial y tienen recuperación documentada.
+- Los cambios de UI tienen validación de usuario y evidencia del candidato exacto cuando el contrato lo requiere.
+
+Ni tests simulados, ni health 200, ni tareas marcadas ni un PR creado prueban por sí solos que el cambio esté completo. mini me no exige ni ejecuta despliegue productivo como condición de cierre.

@@ -1,30 +1,29 @@
 # Contrato de entrega por Change — mini me
 
-**Prevalece:** [CONTRATO_RECTOR.md](CONTRATO_RECTOR.md) v1.3. Seis Changes del programa original de reconstrucción F1–F6, uno por fase; F7/F8 son evolución **disabled** que requieren autorización y Change propio solo cuando corresponda. Varias specs pueden existir en un Change. No subdividir para entregar microcorrecciones.
+**Prevalece:** [CONTRATO_RECTOR.md](CONTRATO_RECTOR.md) v2.0. Un Issue corresponde a un Change OpenSpec de alcance cohesivo. No se subdivide en micro-Changes ni se agrupan cambios independientes. El operador autoriza cada cambio.
 
 ## Antes de proponer
-- Leer contrato, Issue de fase autorizado (F1–F6 #169–#174; futuros F7 #189/F8 #190 **solo cuando se habiliten expresamente**), [F5_UX_CONTRATO.md](F5_UX_CONTRATO.md) si se trabaja F5, contexto openspec/config.yaml, AGENTS.md y código/DB real.
-- Hacer censo de componentes/consumidores ya existentes antes de decidir REUSE / REPLACE / REMOVE; evitar reconstruir herramientas o introducir infraestructura no necesaria.
-- Proposal: necesidad, actor, resultado verificable, alcance, no-objetivos, riesgos y fase; design: responsables/contratos concretos, riesgos de migración, limitación de gasto, plan de pruebas; specs: comportamientos observables; tasks: trabajo ordenado incluyendo eliminación de código/DB muerto.
-- No inventar decisiones de producto ni ampliar fases. F5 solo desarrolla interfaz y capacidades backend existentes; controles de operaciones F7 sin autoridad quedan visibles pero deshabilitados. F8 migra frontend a Angular, no se anticipa en F5.
 
-## Durante Apply y Verify
-- ÚNICAMENTE workflow nativo OpenSpec del agente. Propuesta/revisión/apply/verify/sync/archive no tienen versión propia en mini me.
-- Pruebas pertinentes unitarias + integración y E2E con agentes reales cuando se afirme capacidad de agentes. No convertir health 200/mocks en entrega.
-- Reviewer independiente no edita el candidato que revisa; hallazgos devuelven a autor. Límite de correcciones para evitar loop pagado infinito.
-- No duplicar verificadores o mantener implementación vieja por compatibilidad vacía.
-- Preguntas OpenSpec: capturar opción original, resolución contextual autorizada cuando no haya opciones, intervención humana real cuando sea precisa.
+- Leer el contrato rector, el Issue autorizado, `AGENTS.md`, `openspec/config.yaml` y el código/documentación/DB pertinentes.
+- Censar componentes, consumidores, escritores, capacidades instaladas y evidencia existente; elegir qué reutilizar, cambiar o retirar.
+- Mantener alcance y criterios verificables ligados al Issue. No inventar decisiones ni extender el trabajo a mejoras colaterales.
+- Usar OpenSpec nativo para proposal, update, continue, apply, verify, sync y archive.
+- La revisión independiente de propuesta y código corresponde únicamente a cambios de complejidad alta; debe ser read-only, distinta del autor y ligada al SHA revisado.
 
-## Publicación
-- Un PR de implementación, autorización humana vinculada a SHA, merge por Git permitido.
-- Tras merge, nuevo branch desde main, agente ejecuta sync/archive nativos, PR documental de merge únicamente autorizado por reglas Git; luego cierre ticket.
-- No desplegar aplicaciones por mini me. Pruebas antes del merge y previews de UI si aplican.
-- No anunciar fase concluida hasta aceptación funcional y cierre documental; F5/F6 incluyen evidencia de ejecución POR mini me.
+## Apply, verify y entrega
 
-## Migraciones y retiro
-- Retirar writers, callers, configuración, pruebas exclusivamente muertas y tablas dentro de la fase asignada.
-- Migraciones Alembic de DB con evaluación de datos, reversión y pruebas; NO eliminar datos a ciegas.
-- Seguridad, aislamiento repo, identidad del candidato, presupuesto y decisiones humanas siguen vigentes sin construir un motor de gates superpuestos.
+- El ejecutor debe tener Verify nativo disponible; si no, detenerse fail-closed.
+- Ejecutar pruebas proporcionadas al riesgo y E2E auténticos cuando se afirme una integración real. Los mocks y health checks no prueban por sí solos el resultado.
+- Recuperar Apply sobre el mismo candidato con contexto correctivo basado en Git/pruebas observados; detenerse ante regresión o identidad ambigua.
+- Vincular diff, pruebas, workflow, revisión y autorización al SHA exacto. No afirmar cierre si falta evidencia observable.
+- Tras el merge de implementación, usar rama fresca desde `main` para sync/archive nativos; crear el PR documental y cerrar el Issue solo tras comprobar el merge documental.
 
-## Secuencia
-Ver Issues F1–F6 #169–#174, futuras fases F7 [#189](https://github.com/silverberdi/mini-me/issues/189) y F8 [#190](https://github.com/silverberdi/mini-me/issues/190) **disabled**, [F5_UX_CONTRATO.md](F5_UX_CONTRATO.md). Un Issue planificado/deshabilitado no es autorización de crear Change, consumir modelos, activar scheduler ni desplegar. R01–R10 son historia, no Changes autorizados por esta dirección.
+## Persistencia y retiro
+
+- PostgreSQL es para configuración y estado indispensable de continuidad, idempotencia, decisiones y gasto; no replica la cartera de tickets.
+- Para cambios de persistencia, usar Alembic y preservar datos/historial; no retirar tablas ni escritores sin censo de consumidores y evidencia.
+- No agregar estados, servicios, tablas, motores o dependencias sin necesidad vigente demostrable.
+
+## Operación
+
+Activar administrativamente un proyecto no autoriza por sí mismo la admisión de trabajo, el uso de agentes, el scheduler ni despliegues. mini me no administra despliegues productivos; pertenecen al CI/CD del proyecto. Los nombres F1–F8 se mantienen como historia de entrega y no definen el flujo operativo actual.
