@@ -36,7 +36,7 @@ The system SHALL provide a valid W3C Web App Manifest (`manifest.webmanifest`) s
 - **THEN** the manifest SHALL validate successfully and provide standalone display mode metadata.
 
 ### Requirement: Service Worker Static Shell Caching and Offline Resilience
-The system SHALL cache only public static shell resources and SHALL NOT cache authenticated operational responses, decisions, credentials or Request bodies in service-worker storage or persistent browser stores. Network failure SHALL preserve a usable shell with explicit offline/stale status and observed timestamps; mutations SHALL be unavailable offline and SHALL NOT be queued for later replay. Reconnection SHALL refresh reads before permitting authority-dependent actions. A future Angular frontend and its service worker SHALL preserve these cache boundaries and SHALL not expose secrets or authenticated responses through offline behavior.
+The system SHALL cache only public static shell resources and SHALL NOT cache authenticated operational responses, decisions, credentials or Request bodies in service-worker storage or persistent browser stores. Network failure SHALL preserve a usable shell with explicit offline/stale status and observed timestamps; mutations SHALL be unavailable offline and SHALL NOT be queued for later replay. Reconnection SHALL refresh reads before permitting authority-dependent actions. A future Angular frontend and its service worker SHALL preserve these cache boundaries and SHALL not expose secrets or authenticated responses through offline behavior. When a new static shell version is ready, the PWA SHALL present a clear Spanish update notice with an operator action to load it; it SHALL NOT silently reload an active session.
 
 #### Scenario: Backend disconnection handling
 - **WHEN** the loaded application cannot reach the backend during the next polling cycle
@@ -53,3 +53,13 @@ The system SHALL cache only public static shell resources and SHALL NOT cache au
 #### Scenario: Logout and service-worker update
 - **WHEN** the operator logs out or the static shell version changes
 - **THEN** authenticated in-memory content is cleared on logout, obsolete shell caches are retired on update, and cache inspection contains no operational API response or authenticated document.
+
+#### Scenario: New shell version is ready
+- **WHEN** the service worker confirms that a newer static shell version is ready
+- **THEN** the PWA displays an accessible Spanish notice that a new version is available and an action to load it
+- **AND** the active session remains on its current version until the operator chooses that action
+- **AND** loading the update activates the ready shell and reloads the application.
+
+#### Scenario: No usable service-worker update
+- **WHEN** service-worker updates are unavailable or no newer shell version is ready
+- **THEN** the PWA does not display a false update notice and the existing shell remains usable.
