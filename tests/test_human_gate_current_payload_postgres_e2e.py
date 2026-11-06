@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 
+import asyncio
 import os
+from pathlib import Path
+from unittest.mock import MagicMock
 from uuid import uuid4
 
 import pytest
@@ -19,6 +22,7 @@ from minime.domain.models import (
     Project,
     ProjectManagedRepositoryBinding,
 )
+from minime.services.orchestration_coordinator import NativeOrchestrationCoordinator
 
 DATABASE_URL = os.environ.get("MINIME_TEST_DATABASE_URL")
 pytestmark = pytest.mark.skipif(
@@ -44,6 +48,7 @@ def test_persisted_current_gate_reaches_operator_response_api(monkeypatch, tmp_p
             project_id=project_id,
             display_name="Human gate persisted integration",
             repository="org/human-gate-persisted-test",
+            execution_policy={"max_review_rounds": 1},
         )
         binding = ProjectManagedRepositoryBinding(
             project_id=project_id,
@@ -51,38 +56,51 @@ def test_persisted_current_gate_reaches_operator_response_api(monkeypatch, tmp_p
             managed_repository_root=str(tmp_path / "managed-repo"),
             worktree_parent_dir=str(tmp_path / "worktrees"),
         )
-        current_payload = {
-            "gate_id": f"gate-{run_id}",
-            "gate": "pr1_merge_acknowledgement",
-            "stage": OrchestrationStage.PR1_PENDING.value,
-            "run_id": run_id,
-            "question": "Acknowledge the current PR1 merge gate",
-            "options": ["Estoy enterado"],
-        }
         run = OrchestrationRun(
             run_id=run_id,
             project_id=project_id,
-            change_name="issue-262-human-gate",
+            change_name="issue-300-proposal-review-gate",
             base_sha="base-sha",
-            current_stage=OrchestrationStage.PR1_PENDING,
-            resumable_stage=OrchestrationStage.PR1_PENDING,
-            stop_outcome=OrchestrationStopOutcome.NEEDS_HUMAN,
-            human_gate=HumanGate.NEEDS_HUMAN,
-            stop_details={
-                "human_payload": current_payload,
-                "proposal_review": {
-                    "status": "resolved",
-                    "human_payload": {
-                        "question": "Resolved proposal review question",
-                        "options": ["stale option"],
-                    },
-                },
-            },
+            current_stage=OrchestrationStage.PROPOSAL_REVIEW,
+            resumable_stage=OrchestrationStage.PROPOSAL_REVIEW,
+            is_active=True,
         )
         run_uow.projects.save(project)
         run_uow.project_managed_repository_bindings.save(binding)
         run_uow.orchestration_runs.save(run)
         run_uow.commit()
+
+        coordinator = NativeOrchestrationCoordinator(
+            uow_factory=lambda: run_uow,
+            github_adapter=MagicMock(),
+            worktree_manager=MagicMock(),
+            agent_runner=MagicMock(),
+        )
+        escalation = asyncio.run(
+            coordinator._route_proposal_changes_required(
+                uow=run_uow,
+                project_id=project_id,
+                run=run,
+                result={
+                    "status": "changes_required",
+                    "summary": "Material gap in data filtering creates a reporting risk.",
+                    "findings": [
+                        {
+                            "severity": "MAJOR",
+                            "location": "Design Decision #2",
+                            "violated_requirement": "preserve traceability and the ledger as financial authority",
+                            "expected_correction": "include verified provider aggregates for unrecognized model entries",
+                        }
+                    ],
+                },
+                worktree_path=Path(tmp_path),
+                thinker_provider="codex",
+                change_name=run.change_name,
+            )
+        )
+        assert escalation.status == "HUMAN_REQUIRED"
+        current_payload = escalation.human_payload
+        assert current_payload["review_findings"][0]["location"] == "Design Decision #2"
 
         operator = AuthorizedOperator(email="operator@example.com", name="Operator", roles=["admin"])
         app.dependency_overrides[get_uow] = lambda: run_uow
@@ -105,12 +123,12 @@ def test_persisted_current_gate_reaches_operator_response_api(monkeypatch, tmp_p
                 )
                 response = client.post(
                     f"/api/v1/projects/{project_id}/requests/run",
-                    json={"operator_clarification": "Estoy enterado"},
+                    json={"operator_clarification": "Pedir corrección y nueva revisión"},
                 )
                 duplicate_response = client.post(
                     f"/api/v1/projects/{project_id}/requests/run",
                     json={
-                        "operator_clarification": "Estoy enterado",
+                        "operator_clarification": "Pedir corrección y nueva revisión",
                         "idempotency_key": response.json().get("idempotency_key"),
                     },
                 )
@@ -120,6 +138,8 @@ def test_persisted_current_gate_reaches_operator_response_api(monkeypatch, tmp_p
         assert projected_response.status_code == 200
         assert projected["status"] == "HUMAN_REQUIRED"
         assert projected["stop_details"]["human_payload"] == current_payload
+        assert projected["stop_details"]["human_payload"]["reviewer_summary"].startswith("Material gap")
+        assert projected["stop_details"]["human_payload"]["review_findings"][0]["severity"] == "MAJOR"
         assert response.status_code == 202
         assert response.json()["status"] == "ACCEPTED"
         assert duplicate_response.status_code == 202
@@ -127,17 +147,22 @@ def test_persisted_current_gate_reaches_operator_response_api(monkeypatch, tmp_p
         assert response.json()["idempotency_key"]
         assert len(scheduled) == 1
         assert scheduled[0][0] == project_id
-        assert scheduled[0][1].operator_clarification == "Estoy enterado"
+        assert scheduled[0][1].operator_clarification == "Pedir corrección y nueva revisión"
         assert scheduled[0][1].idempotency_key
         accepted_actions = run_uow.operator_actions.list_by_run(run_id)
         assert len(accepted_actions) == 1
         assert accepted_actions[0].action_type.value == "RESOLVE_GATE"
-        assert accepted_actions[0].parameters_json["accepted_response"] == "Estoy enterado"
+        assert accepted_actions[0].parameters_json["accepted_response"] == "Pedir corrección y nueva revisión"
+        still_gated = run_uow.orchestration_runs.get_by_id(run_id)
+        assert still_gated.human_gate == HumanGate.NEEDS_HUMAN
+        assert still_gated.stop_outcome == OrchestrationStopOutcome.NEEDS_HUMAN
+        assert still_gated.current_stage == OrchestrationStage.PROPOSAL_REVIEW
+        assert still_gated.stop_details.get("proposal_review", {}).get("status") != "approved"
 
         accepted_actions[0].status = "COMPLETED"
         accepted_actions[0].result_payload_json = {
             "status": "RUNNING", "run_id": run_id,
-            "current_stage": OrchestrationStage.PR1_PENDING.value,
+            "current_stage": OrchestrationStage.PROPOSAL_REVIEW.value,
             "message": "Gate response was already processed.",
         }
         run_uow.operator_actions.save(accepted_actions[0])
@@ -153,7 +178,7 @@ def test_persisted_current_gate_reaches_operator_response_api(monkeypatch, tmp_p
             completed_duplicate = client.post(
                 f"/api/v1/projects/{project_id}/requests/run",
                 json={
-                    "operator_clarification": "Estoy enterado",
+                    "operator_clarification": "Pedir corrección y nueva revisión",
                     "idempotency_key": response.json()["idempotency_key"],
                 },
             )

@@ -134,9 +134,23 @@ interface PipelineStage {
             <p class="text-sm text-slate-100 font-medium whitespace-pre-wrap">{{ humanGateQuestion() }}</p>
           </div>
 
+          <div *ngIf="humanGateFindings().length > 0" class="space-y-3" aria-label="Hallazgos de la revisión independiente">
+            <section *ngFor="let finding of humanGateFindings(); let i = index" class="p-4 rounded-xl bg-slate-900/70 border border-amber-500/20 space-y-2">
+              <h4 class="text-xs font-bold uppercase tracking-wider text-amber-300">Hallazgo {{ i + 1 }}</h4>
+              <p class="text-sm text-slate-200">La revisión marcó un hallazgo {{ humanGateSeverityLabel(finding.severity) }} en {{ finding.location || 'una ubicación no indicada' }}.</p>
+              <p *ngIf="finding.violated_requirement" class="text-sm text-slate-200"><strong>Requisito en riesgo:</strong> {{ finding.violated_requirement }}. Si no se corrige, la propuesta seguirá sin cumplirlo.</p>
+              <p *ngIf="finding.expected_correction" class="text-sm text-slate-200"><strong>Corrección que pide el reviewer:</strong> {{ finding.expected_correction }}</p>
+            </section>
+            <div *ngIf="humanGateReviewerSummary()" class="text-xs text-slate-400 whitespace-pre-wrap">
+              <strong>Resumen original del reviewer:</strong> {{ humanGateReviewerSummary() }}
+            </div>
+          </div>
+
           <!-- Options (if available) -->
           <div *ngIf="humanGateOptions().length > 0" class="space-y-2">
-            <span class="text-xs font-semibold text-slate-300 font-mono">Opciones para responder a este gate:</span>
+            <span class="text-xs font-semibold text-slate-300 font-mono">
+              {{ humanGateOptionsSource() === 'system_generated' ? 'Sugerencia del sistema; puedes responder con otro texto:' : humanGateOptionsSource() === 'native' ? 'Opciones originales del workflow:' : 'Opciones para responder a este gate:' }}
+            </span>
             <div class="grid grid-cols-1 sm:grid-cols-2 gap-2">
               <button *ngFor="let opt of humanGateOptions()"
                       type="button"
@@ -518,6 +532,36 @@ export class TrabajoActualComponent {
     if (!run) return [];
     const payload = run.stop_details?.['human_payload'];
     return Array.isArray(payload?.options) ? payload.options : [];
+  }
+
+  humanGateFindings(): any[] {
+    const run = this.targetRun();
+    if (!run) return [];
+    const payload = run.stop_details?.['human_payload'];
+    return Array.isArray(payload?.review_findings) ? payload.review_findings : [];
+  }
+
+  humanGateReviewerSummary(): string {
+    const run = this.targetRun();
+    if (!run) return '';
+    const payload = run.stop_details?.['human_payload'];
+    return typeof payload?.reviewer_summary === 'string' ? payload.reviewer_summary : '';
+  }
+
+  humanGateOptionsSource(): string {
+    const run = this.targetRun();
+    if (!run) return '';
+    const payload = run.stop_details?.['human_payload'];
+    return typeof payload?.options_source === 'string' ? payload.options_source : '';
+  }
+
+  humanGateSeverityLabel(severity: unknown): string {
+    switch (String(severity || '').toUpperCase()) {
+      case 'BLOCKER': return 'bloqueante';
+      case 'MAJOR': return 'importante';
+      case 'MINOR': return 'menor';
+      default: return 'sin severidad indicada';
+    }
   }
 
   getStageClass(stageKey: string, idx: number): string {

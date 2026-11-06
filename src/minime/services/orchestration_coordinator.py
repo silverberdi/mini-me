@@ -4488,11 +4488,32 @@ class NativeOrchestrationCoordinator:
         findings = result.get("findings") or []
         round_num, max_rounds = self._review_round(uow, project_id, run, "proposal_review")
         if not findings or round_num + 1 >= max_rounds:
-            reason = self._review_pause_message("proposal", result) + (
-                " Maximum independent proposal-review attempts reached; human decision required."
-                if findings
-                else " No actionable findings were returned."
-            )
+            if findings:
+                reason = (
+                    "La revisión independiente sigue bloqueando la propuesta y se agotaron los "
+                    "intentos. Revisa el hallazgo y elige la sugerencia o escribe otra instrucción. "
+                    "El mismo Run reanudará Propose y la propuesta deberá pasar otra revisión "
+                    "independiente; tu respuesta no la aprueba."
+                )
+                review_options = result.get("options") or [
+                    {
+                        "id": "request_correction_and_rereview",
+                        "label": "Pedir corrección y nueva revisión",
+                        "description": (
+                            "El mismo Run reanudará Propose con este hallazgo; después, el "
+                            "revisor independiente deberá evaluar de nuevo la propuesta."
+                        ),
+                        "source": "system_generated",
+                    }
+                ]
+                options_source = "native" if result.get("options") else "system_generated"
+            else:
+                reason = (
+                    self._review_pause_message("proposal", result)
+                    + " No se recibieron hallazgos accionables."
+                )
+                review_options = result.get("options") or ()
+                options_source = "native" if result.get("options") else "free_text"
             details = dict(run.stop_details or {})
             details["proposal_review_escalated"] = True
             run.stop_details = details
@@ -4501,7 +4522,12 @@ class NativeOrchestrationCoordinator:
                 run,
                 gate="proposal_review_escalation",
                 question=reason,
-                options=result.get("options") or (),
+                options=review_options,
+                payload={
+                    "review_findings": findings,
+                    "reviewer_summary": result.get("summary") or "",
+                    "options_source": options_source,
+                },
             )
             return OrchestrationCoordinationResult(
                 status="HUMAN_REQUIRED",
