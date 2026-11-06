@@ -84,3 +84,13 @@ La segunda corrida de `openspec validate --archived` examinó 65 changes: **56 v
 | `req-211-f12-depuracion-real-y-erradicacion-defin` | 17 (6/23) |
 
 Las tareas con respaldo se marcaron en los `tasks.md` archivados. Todas las casillas restantes conservan `[ ]`; sus IDs y brechas están anotados tanto aquí como al pie del `tasks.md` correspondiente. Cada falla restante refleja evidencia ausente, no una casilla mantenida abierta por error ni una casilla marcada para silenciar el validador.
+
+## Actualización de conciliación — 2026-11-06
+
+Sobre `origin/main` en `6ec427b2d07b1795b1cf81664dd0e15eb5c4c94b`, `openspec validate --archived` examinó 76 Changes: **66 válidos y 10 inválidos**. Las nueve entradas ya reconciliadas por PR #278 conservan los mismos conteos y justificaciones. La entrada adicional es el archivo posterior de #269:
+
+| Change archivado | Evidencia y disposición |
+| --- | --- |
+| `2026-11-04-backlog-request-deactivation-controls` | 1 tarea incompleta (4/5): 2.2. El PR de implementación #279 difirió explícitamente el E2E autenticado con GitHub desechable; el PR documental #280 archivó el Change y mantuvo la tarea sin completar. No hay evidencia de observación del label remoto, refresco de UI, exclusión FIFO y reactivación en un E2E real. Se conserva `[ ]` hasta que esa evidencia exista. |
+
+Las 10 entradas inválidas son fallas de `tasks.md`; el validador no reporta artefactos faltantes. Se preservan las brechas en vez de marcar tareas sin prueba. El PR #278 documenta las nueve brechas de su snapshot del 4 de noviembre; #269 añadió la décima al archivarse después. La corrida previa desde la rama documental aún abierta de #295 informó 77 Changes (67 válidos, 10 inválidos) porque incluía allí el archivo local de #295; ese archivo todavía no forma parte de `origin/main` en el SHA auditado arriba.
