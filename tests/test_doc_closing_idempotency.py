@@ -79,7 +79,8 @@ async def test_doc_closing_dispatches_native_workflows_only_for_active_change(
 
     assert active_result == (True, None)
     coordinator._run_sync_and_archive.assert_awaited_once_with(
-        active, "codex", change_name, project_id=None
+        active, "codex", change_name, project_id=None, uow=None, run=None,
+        operator_response=None,
     )
 
     archived = tmp_path / "archived"

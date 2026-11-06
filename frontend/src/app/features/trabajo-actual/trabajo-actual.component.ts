@@ -367,6 +367,13 @@ export class TrabajoActualComponent {
     });
   }
 
+  private async humanResponseIdempotencyKey(run: any, answer: string): Promise<string> {
+    const source = `${run.run_id}:${this.humanGateIdentity(run)}:${answer.trim()}`;
+    const digest = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(source));
+    const hex = Array.from(new Uint8Array(digest), value => value.toString(16).padStart(2, '0')).join('');
+    return `gate-response-${hex}`;
+  }
+
   isGateResponsePending(): boolean {
     const pending = this.pendingGateAcknowledgement();
     const run = this.targetRun();
@@ -552,9 +559,10 @@ export class TrabajoActualComponent {
     this.submissionMessage.set('Enviando respuesta…');
 
     try {
+      const idempotencyKey = await this.humanResponseIdempotencyKey(run, answer);
       const response = await this.api.post(
         `/api/v1/projects/${encodeURIComponent(run.project_id)}/requests/run`,
-        { operator_clarification: answer }
+        { operator_clarification: answer, idempotency_key: idempotencyKey }
       );
 
       if (response.ok) {

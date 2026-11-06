@@ -10,6 +10,7 @@ import os
 import platform
 import shutil
 import signal
+import socket
 import stat
 import subprocess
 import tempfile
@@ -17,12 +18,83 @@ import time
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Iterator, Sequence
+from typing import Any, Callable, Iterator, Sequence
 
 from minime.domain.enums import ExternalOutcome, ExternalReasonCode
 from minime.domain.models import ExternalActionResult
 
 logger = logging.getLogger(__name__)
+
+
+def process_identity(pid: int | None = None) -> dict[str, Any]:
+    """Return a conservative OS identity for a process and its process group."""
+    target = os.getpid() if pid is None else pid
+    system = platform.system().lower()
+    try:
+        if system == "linux":
+            raw = Path(f"/proc/{target}/stat").read_text()
+            fields = raw[raw.rfind(")") + 2 :].split()
+            start_marker = fields[19]  # proc stat field 22 (starttime), split begins at field 3.
+            boot_marker = Path("/proc/sys/kernel/random/boot_id").read_text().strip()
+        elif system == "darwin":
+            started = subprocess.run(
+                ["ps", "-o", "lstart=", "-p", str(target)],
+                check=True, capture_output=True, text=True, timeout=2,
+            ).stdout.strip()
+            boot = subprocess.run(
+                ["sysctl", "-n", "kern.boottime"],
+                check=True, capture_output=True, text=True, timeout=2,
+            ).stdout.strip()
+            if not started or not boot:
+                raise OSError("process or boot start marker unavailable")
+            start_marker, boot_marker = started, boot
+        else:
+            return {"status": "UNAVAILABLE", "host": socket.gethostname(), "pid": target}
+        return {
+            "status": "AVAILABLE",
+            "host": socket.gethostname(),
+            "boot_id": boot_marker,
+            "pid": target,
+            "pgid": os.getpgid(target),
+            "start_marker": start_marker,
+        }
+    except (OSError, subprocess.SubprocessError, IndexError):
+        return {"status": "UNAVAILABLE", "host": socket.gethostname(), "pid": target}
+
+
+def process_identity_state(identity: dict[str, Any]) -> str:
+    """Classify a process as LIVE, GONE, or UNKNOWN without trusting a reused PID."""
+    if identity.get("status") != "AVAILABLE" or identity.get("host") != socket.gethostname():
+        return "UNKNOWN"
+    current = process_identity(int(identity["pid"]))
+    if current.get("status") != "AVAILABLE":
+        try:
+            os.kill(int(identity["pid"]), 0)
+        except ProcessLookupError:
+            return "GONE"
+        except PermissionError:
+            return "LIVE"
+        return "UNKNOWN"
+    if current.get("boot_id") != identity.get("boot_id"):
+        return "GONE"
+    if current.get("start_marker") != identity.get("start_marker"):
+        return "GONE"
+    return "LIVE"
+
+
+def process_group_state(pgid: int | None) -> str:
+    """Classify a process group conservatively."""
+    if not isinstance(pgid, int) or pgid <= 0:
+        return "UNKNOWN"
+    try:
+        os.killpg(pgid, 0)
+        return "LIVE"
+    except ProcessLookupError:
+        return "GONE"
+    except PermissionError:
+        return "LIVE"
+    except OSError:
+        return "UNKNOWN"
 
 
 class AgentConfinementError(RuntimeError):
@@ -1237,6 +1309,7 @@ class AgentProcessConfinement:
         unshare_network: bool = False,
         read_only_worktree: bool = False,
         extra_env: dict[str, str] | None = None,
+        process_start_observer: Callable[[dict[str, Any]], None] | None = None,
     ) -> AgentProcessResult:
         """Run an async subprocess, guaranteeing process and private-state cleanup."""
         preflight = self.validate_command_preflight(cwd=cwd)
@@ -1267,6 +1340,21 @@ class AgentProcessConfinement:
                         else None
                     ),
                 )
+                if process_start_observer is not None:
+                    identity = process_identity(process.pid)
+                    identity["pgid"] = process.pid
+                    try:
+                        process_start_observer(identity)
+                    except Exception:
+                        try:
+                            os.killpg(process.pid, signal.SIGKILL)
+                        except OSError:
+                            process.kill()
+                        await process.wait()
+                        raise AgentConfinementError(
+                            "Unable to persist confined workflow process identity; dispatch stopped.",
+                            environment_unavailable=False,
+                        )
                 from minime.services.progress_watchdog import (
                     ProgressWatchdog,
                     WatchdogSignal,

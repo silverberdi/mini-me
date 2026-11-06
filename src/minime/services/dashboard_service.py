@@ -13,6 +13,7 @@ from uuid import NAMESPACE_URL, uuid5
 
 from pydantic import BaseModel, Field
 
+from minime.config import OPENCODE_DEEPSEEK_MODEL_ALIASES, OPENCODE_DEEPSEEK_MODELS
 from minime.domain.enums import (
     AuditRiskLevel,
     AuditStatus,
@@ -28,6 +29,7 @@ from minime.domain.enums import (
 )
 from minime.domain.interfaces import PersistenceUnitOfWork
 from minime.domain.models import (
+    BudgetLedgerEntry,
     Change,
     CheckResult,
     EfficiencyTelemetryView,
@@ -35,10 +37,8 @@ from minime.domain.models import (
     OrchestrationRun,
     Project,
     ProviderEfficiencyMetrics,
-    BudgetLedgerEntry,
     utc_now,
 )
-from minime.config import OPENCODE_DEEPSEEK_MODEL_ALIASES, OPENCODE_DEEPSEEK_MODELS
 from minime.logging import redact_secrets
 from minime.services.capacity_lifecycle_service import CapacityLifecycleService
 from minime.services.efficiency_telemetry_service import EfficiencyTelemetryService
@@ -2020,6 +2020,8 @@ class OperationsDashboardService:
         for rid in target_runs:
             stage_events = self.uow.orchestration_stage_events.list_by_run(rid)
             for se in stage_events:
+                if se.event_type != "STAGE_TRANSITION":
+                    continue
                 summary = f"Transitioned from {se.from_stage.value if se.from_stage else 'INITIAL'} to {se.to_stage.value}"
                 details = se.evidence_references or {}
                 if "reason" in details:

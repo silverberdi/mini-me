@@ -52,6 +52,7 @@ def test_persisted_current_gate_reaches_operator_response_api(monkeypatch, tmp_p
             worktree_parent_dir=str(tmp_path / "worktrees"),
         )
         current_payload = {
+            "gate_id": f"gate-{run_id}",
             "gate": "pr1_merge_acknowledgement",
             "stage": OrchestrationStage.PR1_PENDING.value,
             "run_id": run_id,
@@ -106,6 +107,13 @@ def test_persisted_current_gate_reaches_operator_response_api(monkeypatch, tmp_p
                     f"/api/v1/projects/{project_id}/requests/run",
                     json={"operator_clarification": "Estoy enterado"},
                 )
+                duplicate_response = client.post(
+                    f"/api/v1/projects/{project_id}/requests/run",
+                    json={
+                        "operator_clarification": "Estoy enterado",
+                        "idempotency_key": response.json().get("idempotency_key"),
+                    },
+                )
         finally:
             app.dependency_overrides.clear()
 
@@ -114,12 +122,48 @@ def test_persisted_current_gate_reaches_operator_response_api(monkeypatch, tmp_p
         assert projected["stop_details"]["human_payload"] == current_payload
         assert response.status_code == 202
         assert response.json()["status"] == "ACCEPTED"
+        assert duplicate_response.status_code == 202
+        assert duplicate_response.json()["operation_id"] == response.json()["operation_id"]
+        assert response.json()["idempotency_key"]
         assert len(scheduled) == 1
         assert scheduled[0][0] == project_id
         assert scheduled[0][1].operator_clarification == "Estoy enterado"
+        assert scheduled[0][1].idempotency_key
+        accepted_actions = run_uow.operator_actions.list_by_run(run_id)
+        assert len(accepted_actions) == 1
+        assert accepted_actions[0].action_type.value == "RESOLVE_GATE"
+        assert accepted_actions[0].parameters_json["accepted_response"] == "Estoy enterado"
+
+        accepted_actions[0].status = "COMPLETED"
+        accepted_actions[0].result_payload_json = {
+            "status": "RUNNING", "run_id": run_id,
+            "current_stage": OrchestrationStage.PR1_PENDING.value,
+            "message": "Gate response was already processed.",
+        }
+        run_uow.operator_actions.save(accepted_actions[0])
+        persisted_run = run_uow.orchestration_runs.get_by_id(run_id)
+        persisted_run.stop_details = {}
+        persisted_run.human_gate = None
+        persisted_run.stop_outcome = None
+        run_uow.orchestration_runs.save(persisted_run)
+        run_uow.commit()
+        app.dependency_overrides[get_uow] = lambda: run_uow
+        app.dependency_overrides[get_current_operator] = lambda: operator
+        with TestClient(app) as client:
+            completed_duplicate = client.post(
+                f"/api/v1/projects/{project_id}/requests/run",
+                json={
+                    "operator_clarification": "Estoy enterado",
+                    "idempotency_key": response.json()["idempotency_key"],
+                },
+            )
+        assert completed_duplicate.status_code == 202
+        assert completed_duplicate.json()["message"] == "Gate response was already processed."
+        assert len(scheduled) == 1
+        app.dependency_overrides.clear()
 
         persisted = run_uow.orchestration_runs.get_by_id(run_id)
-        assert persisted.stop_details["human_payload"] == current_payload
+        assert "human_payload" not in persisted.stop_details
     finally:
         app.dependency_overrides.clear()
         if run_uow is not None:

@@ -38,5 +38,7 @@ test('Trabajo actual fallback never selects an inactive historical run', () => {
 test('operator response submits through the existing authorized request endpoint', () => {
   assert.match(component, /\/api\/v1\/projects\/\$\{encodeURIComponent\(run\.project_id\)\}\/requests\/run/);
   assert.match(component, /operator_clarification: answer/);
+  assert.match(component, /idempotency_key: idempotencyKey/);
+  assert.match(component, /humanResponseIdempotencyKey\(run, answer\)/);
   assert.match(component, /await this\.refresh\.read\(\)/);
 });

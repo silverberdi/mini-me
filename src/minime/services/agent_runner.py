@@ -590,6 +590,7 @@ class CliAgentRunner:
         output_last_message_path: Path | None = None,
         candidate_author: str | None = None,
         reviewer_identity: str | None = None,
+        process_start_observer: Any = None,
     ) -> AgentExecutionResult:
         """Execute agent under confinement with capacity preflight."""
         # 1. Capacity preflight
@@ -722,6 +723,7 @@ class CliAgentRunner:
                 candidate_author=verified_candidate_author,
                 reviewer_identity=verified_reviewer_identity,
                 prompt=prompt_context,
+                process_start_observer=process_start_observer,
             )
             outcome = await adapter.dispatch(request)
 
@@ -879,6 +881,7 @@ class CliAgentRunner:
                 timeout_seconds=timeout_seconds,
                 env=env,
                 **auth_kwargs,
+                process_start_observer=process_start_observer,
             )
         except AgentConfinementError as exc:
             cleanup_structured_output()
