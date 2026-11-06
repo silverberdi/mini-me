@@ -1,6 +1,7 @@
 import { Component, OnInit } from '@angular/core';
 import { CommonModule } from '@angular/common';
 import { RouterModule, Router } from '@angular/router';
+import { SwUpdate } from '@angular/service-worker';
 import { AuthService } from './core/auth.service';
 import { PushNotificationService } from './core/push-notification.service';
 import { RefreshService } from './core/refresh.service';
@@ -11,6 +12,13 @@ import { VersionService } from './core/version.service';
   standalone: true,
   imports: [CommonModule, RouterModule],
   template: `
+    <div *ngIf="updateAvailable" class="flex flex-col gap-3 border-b border-sky-400/30 bg-sky-500/10 px-4 py-3 text-sky-100 sm:flex-row sm:items-center sm:justify-center" role="status" aria-live="polite">
+      <span class="text-sm">Hay una nueva versión de mini me disponible.</span>
+      <button type="button" (click)="loadAvailableUpdate()" class="inline-flex min-h-10 items-center justify-center rounded-lg bg-sky-500 px-4 py-2 text-sm font-semibold text-slate-950 hover:bg-sky-400 focus:outline-none focus:ring-2 focus:ring-sky-200">
+        Recargar
+      </button>
+    </div>
+
     <ng-container *ngIf="!auth.isLoaded()">
       <main class="min-h-screen bg-slate-900 text-slate-100 flex items-center justify-center p-6">
         <p class="text-sm text-slate-400" role="status" aria-live="polite">Comprobando sesión…</p>
@@ -252,16 +260,26 @@ import { VersionService } from './core/version.service';
 })
 export class AppComponent implements OnInit {
   showPushModal = false;
+  updateAvailable = false;
 
   constructor(
     public auth: AuthService,
     public refresh: RefreshService,
     public pushService: PushNotificationService,
     public version: VersionService,
+    private swUpdate: SwUpdate,
     private router: Router
   ) {}
 
   async ngOnInit(): Promise<void> {
+    if (this.swUpdate.isEnabled) {
+      this.swUpdate.versionUpdates.subscribe((event) => {
+        if (event.type === 'VERSION_READY') {
+          this.updateAvailable = true;
+        }
+      });
+    }
+
     this.version.load();
     const isAuthed = await this.auth.checkSession();
     if (isAuthed) {
@@ -272,6 +290,17 @@ export class AppComponent implements OnInit {
 
   beginLogin(): void {
     window.location.assign('/api/v1/auth/google/login');
+  }
+
+  async loadAvailableUpdate(): Promise<void> {
+    if (!this.updateAvailable || !this.swUpdate.isEnabled) {
+      return;
+    }
+
+    const activated = await this.swUpdate.activateUpdate();
+    if (activated) {
+      window.location.reload();
+    }
   }
 
   togglePushModal(): void {
