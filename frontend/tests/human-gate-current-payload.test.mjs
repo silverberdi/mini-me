@@ -22,6 +22,32 @@ test('current gate question and options are rendered from the same payload', () 
   assert.match(component, /Opciones para responder a este gate/);
 });
 
+test('proposal-review gate renders structured findings and original reviewer evidence', () => {
+  assert.match(component, /humanGateFindings\(\)/);
+  assert.match(component, /finding\.severity/);
+  assert.match(component, /humanGateSeverityLabel\(finding\.severity\)/);
+  assert.match(component, /La revisión marcó un hallazgo/);
+  assert.match(component, /Requisito en riesgo/);
+  assert.match(component, /la propuesta seguirá sin cumplirlo/);
+  assert.match(component, /Corrección que pide el reviewer/);
+  assert.match(component, /finding\.location/);
+  assert.match(component, /finding\.violated_requirement/);
+  assert.match(component, /finding\.expected_correction/);
+  assert.match(component, /humanGateReviewerSummary\(\)/);
+  assert.match(component, /Resumen original del reviewer/);
+  assert.match(component, /Requisito en riesgo/);
+  assert.match(component, /Corrección que pide el reviewer/);
+});
+
+test('proposal-review options identify system suggestions and retain free-text response', () => {
+  assert.match(component, /humanGateOptionsSource\(\)/);
+  assert.match(component, /Sugerencia del sistema; puedes responder con otro texto/);
+  assert.match(component, /Opciones originales del workflow/);
+  assert.match(component, /name="operatorResponse"/);
+  assert.match(component, /submitHumanResponse\(\$event\)/);
+  assert.match(component, /Respuesta explícita del operador/);
+});
+
 test('Trabajo actual fallback never selects an inactive historical run', () => {
   const targetRun = component.match(/readonly targetRun = computed\(\(\) => \{([\s\S]*?)\n  \}\);/);
   assert.ok(targetRun, 'targetRun computed selector should exist');
