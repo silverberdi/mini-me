@@ -1,9 +1,13 @@
 # Spec: Orchestration Driver and States
 
-## Requirement: Complete Deterministic State Transitions
-The orchestration driver SHALL support all canonical states and handle remediation transitions without entering undefined or dead-end states.
+## Purpose
 
-### Scenarios
+Defines deterministic orchestration state transitions and remediation routes for check, review, and audit outcomes.
+
+## Requirements
+
+### Requirement: Complete Deterministic State Transitions
+The orchestration driver SHALL support all canonical states and handle remediation transitions without entering undefined or dead-end states.
 
 #### Scenario: Checks Failure Remediation Route
 - GIVEN a candidate execution whose deterministic checks fail,

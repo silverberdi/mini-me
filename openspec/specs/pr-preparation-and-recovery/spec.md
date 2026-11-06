@@ -1,9 +1,13 @@
 # Spec: PR Preparation and Recovery
 
-## Requirement: Native PR Creation and Recovery
-The orchestration service SHALL natively prepare and adopt GitHub Pull Requests for audited candidate SHAs, linking the canonical GitHub Issue and preventing duplicate or contradictory branch pushes.
+## Purpose
 
-### Scenarios
+Defines safe, idempotent preparation and recovery of GitHub pull requests for audited candidate SHAs.
+
+## Requirements
+
+### Requirement: Native PR Creation and Recovery
+The orchestration service SHALL natively prepare and adopt GitHub Pull Requests for audited candidate SHAs, linking the canonical GitHub Issue and preventing duplicate or contradictory branch pushes.
 
 #### Scenario: Idempotent Remote Branch Push
 - GIVEN an audited candidate SHA,

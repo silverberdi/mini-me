@@ -1,9 +1,13 @@
 # Spec: Pipeline Execution Diagnostic Summary
 
-## Requirement: Pipeline Diagnostic Snapshot
-`StatusService` SHALL provide a method `get_pipeline_diagnostic(run_id: str | None = None)` that returns a dictionary snapshot of an orchestration run's execution status.
+## Purpose
 
-### Scenarios
+Defines the diagnostic snapshot returned for an orchestration run by `StatusService`.
+
+## Requirements
+
+### Requirement: Pipeline Diagnostic Snapshot
+`StatusService` SHALL provide a method `get_pipeline_diagnostic(run_id: str | None = None)` that returns a dictionary snapshot of an orchestration run's execution status.
 
 #### Scenario: Active Run Diagnostic Retrieval
 - GIVEN an existing orchestration run in the database,

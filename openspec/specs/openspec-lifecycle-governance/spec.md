@@ -2,7 +2,7 @@
 
 Enforces deterministic OpenSpec lifecycle governance across all mini me change workflows, provides an integrity auditor that evaluates the repository's OpenSpec state, defines strong CLOSED semantics integrating lifecycle and delivery completion, classifies legacy/non-canonical changes truthfully, and ensures all lifecycle gates fail closed with exact diagnostic reasons rather than silently repairing or fabricating state.
 
-## ADDED Requirements
+## Requirements
 
 ### Requirement: OpenSpec integrity audit
 

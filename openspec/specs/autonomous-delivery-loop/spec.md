@@ -1,9 +1,13 @@
 # Spec: Autonomous Delivery Loop
 
-## Requirement: 15-Phase Autonomous Pipeline Execution
-The orchestrator SHALL natively progress an admitted READY work item through all 15 canonical SDLC stages without requiring manual supervisor intervention between stages.
+## Purpose
 
-### Scenarios
+Defines the autonomous delivery loop that progresses a READY work item through the documented SDLC stages to the human merge gate.
+
+## Requirements
+
+### Requirement: 15-Phase Autonomous Pipeline Execution
+The orchestrator SHALL natively progress an admitted READY work item through all 15 canonical SDLC stages without requiring manual supervisor intervention between stages.
 
 #### Scenario: Autonomous End-to-End Progression to READY_FOR_HUMAN_MERGE
 - GIVEN a registered project with a bound GitHub Issue and an OpenSpec change satisfying Definition of Ready (DoR),
