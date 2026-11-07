@@ -16,7 +16,10 @@ def test_models_metadata_tables():
     assert "project_bindings" in tables
     assert "changes" in tables
     assert "events" in tables
-    assert "metric_facts" in tables
+    assert "metric_facts" not in tables
+    assert "integrity_findings" not in tables
+    assert "preview_sessions" not in tables
+    assert "validation_runs" not in tables
     assert "jobs" in tables
     assert "job_logs" in tables
     assert "check_results" in tables
@@ -85,6 +88,10 @@ def test_alembic_offline_postgres_migration():
     assert "DROP COLUMN auto_prepare" in sql
     assert "DROP COLUMN auto_admit" in sql
     assert "DROP COLUMN max_concurrent_jobs" in sql
+    assert "DROP TABLE validation_runs" in sql
+    assert "DROP TABLE preview_sessions" in sql
+    assert "DROP TABLE integrity_findings" in sql
+    assert "DROP TABLE metric_facts" in sql
 
 
 def test_restart_persistence_simulation(in_memory_uow):

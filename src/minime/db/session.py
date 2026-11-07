@@ -24,7 +24,7 @@ class SchemaInvariantResult:
     reason: str | None = None
 
 
-EXPECTED_ALEMBIC_HEAD = "f14_provider_model_enablement"
+EXPECTED_ALEMBIC_HEAD = "poda01_retire_orphaned_persistence"
 
 
 def verify_physical_schema_invariants(engine: Engine) -> SchemaInvariantResult:
