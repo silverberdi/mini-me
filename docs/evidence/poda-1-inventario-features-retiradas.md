@@ -117,15 +117,24 @@ Las siguientes superficies fueron auditadas y confirmadas con **0 consumidores**
 Si en el futuro se requiriera reactivar o consultar el código original de alguna de estas características podadas, puede ser extraído directamente del historial inmutable de Git:
 
 * **Commit de referencia:** `6b7a405` (HEAD de `main` pre-poda)
-* **Comando para inspeccionar un archivo retirado:**
+* **Comandos para inspeccionar servicios retirados:**
   ```bash
+  git show 6b7a405:src/minime/services/container_preview_service.py
+  git show 6b7a405:src/minime/services/openspec_integrity.py
   git show 6b7a405:src/minime/services/validation_authority_service.py
   ```
-* **Comando para restaurar un módulo o prueba específica:**
+* **Comandos para inspeccionar pruebas retiradas:**
   ```bash
-  git checkout 6b7a405 -- src/minime/api/preview_routes.py tests/test_preview_api.py
+  git show 6b7a405:tests/test_candidate_validation_authority.py
+  git show 6b7a405:tests/test_container_preview_acceptance.py
+  git show 6b7a405:tests/test_container_preview_service.py
+  git show 6b7a405:tests/test_openspec_integrity.py
   ```
-* **Comando para consultar la definición original de modelos:**
+* **Comando para inspeccionar las rutas eliminadas del router:**
+  ```bash
+  git show 6b7a405:src/minime/api/app.py
+  ```
+* **Comando para consultar la definición original de modelos SQLAlchemy:**
   ```bash
   git show 6b7a405:src/minime/db/models.py
   ```
@@ -135,16 +144,17 @@ Si en el futuro se requiriera reactivar o consultar el código original de algun
 ## 5. Resultados de verificación y no regresión
 
 - **Línea base pre-poda (SHA `6b7a405`):** 1057 passed, 26 failed (mock errors preexistentes en `_stage_candidate_identity`), 12 skipped (total: 1095).
-- **Línea post-poda (Change actual):** 1033 passed, 26 failed (mismos mock errors preexistentes en `_stage_candidate_identity`), 11 skipped (total: 1070).
-- **Diferencial de tests:** 24 tests retirados correspondían exclusivamente a `test_candidate_validation_authority.py`, `test_container_preview_acceptance.py`, `test_container_preview_service.py` y `test_openspec_integrity.py`.
+- **Línea post-poda (Change actual):** 1034 passed, 26 failed (mismos mock errors preexistentes en `_stage_candidate_identity`), 11 skipped (total: 1071).
+- **Diferencial de tests:** 24 tests retirados correspondían exclusivamente a los 4 archivos de prueba podados (`test_candidate_validation_authority.py`, `test_container_preview_acceptance.py`, `test_container_preview_service.py` y `test_openspec_integrity.py`). Se retiró además 1 paso de prueba del endpoint huérfano `/metrics` en `tests/test_f7_functional_operations.py`, y se incorporaron 2 nuevos tests de verificación de invariantes en `tests/test_postgres_state.py`.
 - **Regresiones en flujos vigentes:** **0**. Todas las pruebas de Dashboard, Proyectos, Backlog, Model Admin, Proveedores, PWA y Autenticación se ejecutaron con éxito.
 - **Validación OpenSpec:** `openspec validate req-316-poda-1-retirar-codigo-persistencia` aprobado sin errores.
-- **Validación Alembic:** Generación DDL offline (`alembic upgrade head --sql`) exitosa demostrando `DROP TABLE` limpio con downgrade simétrico disponible.
+- **Validación Alembic:** Generación DDL offline (`alembic upgrade head --sql` y `alembic downgrade poda01_retire_orphaned_persistence:f14_provider_model_enablement --sql`) exitosa demostrando `DROP TABLE` limpio con downgrade simétrico disponible.
+- **Validación de preflight de invariantes:** Verificado mediante `test_verify_physical_schema_invariants_valid` y `test_verify_physical_schema_invariants_mismatch`.
 
 ---
 
 ## 6. Métricas cuantitativas del cambio
 
-- **Archivos modificados/retirados:** 15 archivos.
-- **Líneas de código y pruebas retiradas:** -2,706 líneas.
-- **Líneas netas agregadas:** +39 líneas (migración Alembic simétrica y adaptadores no-op de seguridad).
+- **Archivos modificados/retirados:** 15 archivos de código y pruebas (+ 2 archivos de inventario y migración).
+- **Líneas de código y pruebas retiradas:** -2,706 líneas en el código base.
+- **Líneas netas agregadas:** +39 líneas (migración Alembic simétrica y adaptadores no-op de compatibilidad).

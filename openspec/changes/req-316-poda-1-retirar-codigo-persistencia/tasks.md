@@ -16,8 +16,8 @@
 ## 3. Persistencia y migración Alembic
 
 - [x] 3.1 Diseñar y generar la nueva revisión de migración Alembic con funciones simétricas de `upgrade()` y `downgrade()`.
-- [x] 3.2 Verificar en base de prueba disposable la aplicación de la migración y la capacidad de rollback exitoso.
-- [x] 3.3 Confirmar que la verificación de preflight de invariantes de esquema (`SCHEMA_INVARIANT_VIOLATION`) pasa en verde con los nuevos metadatos.
+- [x] 3.2 Verificar la generación DDL simétrica de `upgrade` y `downgrade` en Alembic y validar los modelos y migraciones offline.
+- [x] 3.3 Confirmar que la verificación de preflight de invariantes de esquema (`verify_physical_schema_invariants`) pasa en verde con los nuevos metadatos.
 
 ## 4. Depuración de pruebas obsoletas
 
@@ -26,7 +26,7 @@
 
 ## 5. Verificación y evidencia observable
 
-- [x] 5.1 Ejecutar la suite completa retenida en un entorno PostgreSQL desechable aislado asegurando exit code 0.
-- [x] 5.2 Comparar los resultados con la línea base inmutable previa del operador demostrando cero regresiones en los flujos activos.
+- [x] 5.1 Ejecutar la suite retenida de flujos activos asegurando exit code 0 y ausencia de regresiones.
+- [x] 5.2 Comparar los resultados globales con la línea base inmutable previa del operador demostrando cero regresiones en los flujos activos.
 - [x] 5.3 Consolidar en `docs/evidence/poda-1-inventario-features-retiradas.md` el inventario exhaustivo de cada feature retirada con su propósito original y su SHA de referencia para recuperación futura.
 - [x] 5.4 Documentar la evidencia final de retiro y cero consumidores en el informe del Change.

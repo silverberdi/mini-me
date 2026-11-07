@@ -139,3 +139,40 @@ def test_restart_persistence_simulation(in_memory_uow):
     events = in_memory_uow.events.list_events(project_id="mini-me")
     assert len(events) == 1
     assert events[0].event_type == EventType.PROJECT_REGISTERED
+
+
+def test_verify_physical_schema_invariants_valid():
+    """Verify that physical schema matches canonical metadata and expected Alembic head."""
+    from minime.db.session import verify_physical_schema_invariants, EXPECTED_ALEMBIC_HEAD
+    from sqlalchemy import create_engine, text
+
+    engine = create_engine("sqlite:///:memory:")
+    Base.metadata.create_all(engine)
+    with engine.connect() as conn:
+        conn.execute(text("CREATE TABLE alembic_version (version_num VARCHAR(64) NOT NULL)"))
+        conn.execute(text(f"INSERT INTO alembic_version (version_num) VALUES ('{EXPECTED_ALEMBIC_HEAD}')"))
+        conn.commit()
+
+    result = verify_physical_schema_invariants(engine)
+    assert result.valid is True
+    assert result.revision == EXPECTED_ALEMBIC_HEAD
+    assert result.missing_tables == ()
+    assert result.missing_columns == {}
+    assert result.reason is None
+
+
+def test_verify_physical_schema_invariants_mismatch():
+    """Verify schema preflight failure when revision is behind expected head."""
+    from minime.db.session import verify_physical_schema_invariants, EXPECTED_ALEMBIC_HEAD
+    from sqlalchemy import create_engine, text
+
+    engine = create_engine("sqlite:///:memory:")
+    Base.metadata.create_all(engine)
+    with engine.connect() as conn:
+        conn.execute(text("CREATE TABLE alembic_version (version_num VARCHAR(64) NOT NULL)"))
+        conn.execute(text("INSERT INTO alembic_version (version_num) VALUES ('f14_provider_model_enablement')"))
+        conn.commit()
+
+    result = verify_physical_schema_invariants(engine)
+    assert result.valid is False
+    assert f"Expected Alembic head {EXPECTED_ALEMBIC_HEAD}" in result.reason
