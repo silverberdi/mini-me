@@ -51,7 +51,7 @@ The adapted `minime-real-e2e-proof` skill in both Codex and Antigravity installa
 
 ### Requirement: Superseded code is retired safely
 
-The adapted `minime-safe-retirement` skill in both Codex and Antigravity installations SHALL retire only routes, tests, dependencies, configuration, or data structures demonstrated to be obsolete within the Change after migrating real consumers and running pertinent tests. It SHALL use proportional evidence and SHALL NOT impose a universal Removal Ledger, postdeploy verification, or R01–R10 procedure.
+The system SHALL retire only routes, controllers, services, models, tables, tests, dependencies, or configuration demonstrated to have no legitimate consumers within the active UI and authorized runtime. The active UI surface (Dashboard, Trabajo, Trabajo actual, Proyectos, Backlog y Administración de modelos) SHALL define the functional perimeter of mini me. Code and data structures not reachable from this perimeter SHALL be retired within the same Change. Candidate test validation SHALL be compared against the immutable baseline execution established by the operator prior to the pruning.
 
 #### Scenario: Obsolete route has no consumers
 
@@ -65,3 +65,24 @@ The adapted `minime-safe-retirement` skill in both Codex and Antigravity install
 - **THEN** the Change SHALL preserve it and record the reason briefly
 - **AND** it SHALL not remove it solely because it is old or textually unmatched
 - **AND** historical R01–R10 references SHALL not justify removal without current consumer evidence
+
+#### Scenario: Route or service has no active UI consumer
+
+- **GIVEN** an API route, controller, or backend service in mini me
+- **WHEN** static, dynamic, and configuration auditing proves zero active consumers from the current UI views or authorized OpenSpec coordination
+- **THEN** the Change SHALL remove the orphaned route, service, and unused dependencies
+- **AND** it SHALL remove the obsolete tests that specifically covered the retired code without deleting tests of active flows
+- **AND** it SHALL record verified zero-consumer evidence.
+
+#### Scenario: Candidate validation against immutable baseline
+
+- **GIVEN** an operator-established test execution baseline on an identified pre-pruning SHA
+- **WHEN** the pruned candidate change is evaluated
+- **THEN** all retained unit, integration, and E2E tests for active flows SHALL pass (exit code 0)
+- **AND** the candidate test result SHALL match or improve upon the baseline without regressions in active functionality.
+
+#### Scenario: Archival inventory of retired features
+
+- **WHEN** features, routes, services, or persistence structures are retired in the Change
+- **THEN** the Change SHALL record an archival inventory document (`docs/evidence/poda-1-inventario-features-retiradas.md`)
+- **AND** it SHALL record for each retired feature its historical purpose, removed files/routes/tables, and reference commit/SHA for future recovery.
