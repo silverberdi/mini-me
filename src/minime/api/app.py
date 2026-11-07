@@ -444,6 +444,19 @@ def get_current_operator(
 
     token = extract_token_from_request(request)
     if not token:
+        config = load_config()
+        auth_enabled_env = os.environ.get("MINIME_AUTH_ENABLED")
+        auth_enabled = (
+            auth_enabled_env.lower() in ("true", "1")
+            if auth_enabled_env is not None
+            else config.auth.enabled
+        )
+        if not auth_enabled:
+            return AuthorizedOperator(
+                email="operator@local.dev",
+                display_name="Local Operator",
+                is_active=True,
+            )
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Authentication required",
@@ -2474,6 +2487,22 @@ def get_auth_me_endpoint(request: Request, uow: UowDep) -> AuthStatusDTO:
     """Retrieve current operator authentication and authorization status."""
     token = extract_token_from_request(request)
     if not token:
+        config = load_config()
+        auth_enabled_env = os.environ.get("MINIME_AUTH_ENABLED")
+        auth_enabled = (
+            auth_enabled_env.lower() in ("true", "1")
+            if auth_enabled_env is not None
+            else config.auth.enabled
+        )
+        if not auth_enabled:
+            return AuthStatusDTO(
+                authenticated=True,
+                operator=OperatorIdentityDTO(
+                    email="operator@local.dev",
+                    display_name="Local Operator",
+                    provider="local",
+                ),
+            )
         return AuthStatusDTO(authenticated=False)
 
     session_mgr = SessionManager(uow)
