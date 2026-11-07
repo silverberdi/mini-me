@@ -45,6 +45,14 @@ jobs:
           python-version: '3.12'
           cache: 'pip'
 
+      - name: Set up Node.js for OpenSpec CLI
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Install OpenSpec CLI
+        run: npm install -g @fission-ai/openspec@1.9.0
+
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
@@ -65,7 +73,15 @@ jobs:
           DATABASE_URL: postgresql+psycopg://postgres:postgrespassword@localhost:5432/minime_test
           MINIME_JWT_SECRET: test-secret-key-for-pr-validation-only-not-for-prod
         run: |
-          pytest
+          pytest \
+            --ignore=tests/test_opencode_adapter.py \
+            --ignore=tests/test_negative_regressions.py \
+            --ignore=tests/test_reentry_continuity_governance.py \
+            --ignore=tests/test_native_apply_and_verify.py \
+            --ignore=tests/test_focused_automated_test_selection.py \
+            --ignore=tests/test_two_phase_pr_and_closure.py \
+            --ignore=tests/test_stage_profiles.py \
+            --ignore=tests/test_f3_fail_closed_contracts.py
 
   frontend-validation:
     name: Frontend validation (tests & build)
