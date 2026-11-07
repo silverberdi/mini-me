@@ -140,9 +140,9 @@ Si en el futuro se requiriera reactivar o consultar el código original de algun
 ## 5. Resultados de verificación y no regresión
 
 - **Línea base pre-poda (SHA `6b7a405`):** 1057 passed, 26 failed, 12 skipped (total: 1095).
-- **Línea post-poda (Change actual):** 1034 passed, 26 failed, 11 skipped (total: 1071).
+- **Línea post-poda (Change actual):** 1036 passed, 26 failed, 11 skipped (total: 1073).
 - **Diferencial de tests:** 
-  - 24 tests retirados pertenecían exclusivamente a los 4 archivos de prueba eliminados (`test_candidate_validation_authority.py`, `test_container_preview_acceptance.py`, `test_container_preview_service.py` y `test_openspec_integrity.py`).
+  - 23 tests retirados pertenecían exclusivamente a los 4 archivos de prueba eliminados (`test_candidate_validation_authority.py`, `test_container_preview_acceptance.py`, `test_container_preview_service.py` y `test_openspec_integrity.py`).
   - 1 paso de prueba retirado en `tests/test_f7_functional_operations.py` correspondiente al endpoint huérfano `/requests/{num}/metrics`.
   - 2 nuevos tests de verificación de invariantes incorporados en `tests/test_postgres_state.py` (`test_verify_physical_schema_invariants_valid` y `test_verify_physical_schema_invariants_mismatch`).
 - **Desglose de los 26 fallos preexistentes conocidos (idénticos antes y después de la poda):**
@@ -162,4 +162,4 @@ Si en el futuro se requiriera reactivar o consultar el código original de algun
 Según `git diff --stat 6b7a405..HEAD`:
 - **Archivos intervenidos en total:** 22 archivos (15 de código/tests + 6 de OpenSpec + 1 migración Alembic).
 - **Líneas eliminadas:** 2.701 líneas.
-- **Líneas agregadas:** 590 líneas (documentación de Change, migración simétrica y tests de invariantes).
+- **Líneas agregadas:** 595 líneas (documentación de Change, migración simétrica y tests de invariantes).
