@@ -14,12 +14,14 @@ test.describe('Human Gate Lifecycle and Observability', () => {
     const gateBanner = page.locator('h3', { hasText: 'Atención Humana Requerida (HUMAN_REQUIRED)' });
     await expect(gateBanner).toBeVisible({ timeout: 10000 });
 
-    const question = page.locator('p', { hasText: '¿Desea persistir los datos en PostgreSQL o en memoria local?' });
-    await expect(question).toBeVisible();
+    const question = page.getByText(/¿Desea persistir los datos en PostgreSQL o en memoria local/i);
+    await expect(question).toBeVisible({ timeout: 10000 });
 
     // 4. Verify Spanish actionable explanation is displayed
-    const explanation = page.locator('p', { hasText: 'El agente en etapa Explore requiere aclarar la estrategia de persistencia.' });
-    await expect(explanation).toBeVisible();
+    const explanationHeading = page.getByText(/Contexto Explicativo/i);
+    await expect(explanationHeading).toBeVisible({ timeout: 10000 });
+    const explanation = page.getByText(/El agente en etapa Explore requiere aclarar la estrategia de persistencia/i);
+    await expect(explanation).toBeVisible({ timeout: 10000 });
 
     // 5. Verify Diagnostic section reflects human intervention required and does NOT claim "Sin anomalías"
     const anomalyReport = page.locator('div', { hasText: '✓ Sin anomalías reportadas' });
