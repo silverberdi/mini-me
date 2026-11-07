@@ -553,11 +553,6 @@ def test_f7_api_and_ui_integration(monkeypatch):
         resp_del = client.delete("/api/v1/projects/proj-a/requests/195")
         assert resp_del.status_code == 200
 
-        # 6. API: Metrics
-        resp_metrics = client.get("/api/v1/projects/proj-a/requests/195/metrics")
-        assert resp_metrics.status_code == 200
-        assert resp_metrics.json()["progress"]["status"] == "unavailable"
-
         # 7. API: Project & System Pause/Resume
         resp_pause = client.post("/api/v1/projects/proj-a/pause")
         assert resp_pause.status_code == 200

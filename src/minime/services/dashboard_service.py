@@ -46,7 +46,6 @@ from minime.services.provider_health_service import ProviderHealthService
 from minime.services.systemd_scheduler_observer import (
     SystemdSchedulerObserver,
 )
-from minime.services.validation_authority_service import ValidationAuthorityService
 
 logger = logging.getLogger(__name__)
 
@@ -2141,125 +2140,7 @@ class OperationsDashboardService:
         candidate_authority: CandidateAuthorityDTO | None,
     ) -> PreviewValidationSummaryDTO:
         """Project container preview session and guided validation state for change."""
-        if not project:
-            return PreviewValidationSummaryDTO()
-
-        validation_svc = ValidationAuthorityService(self.uow)
-        is_required = validation_svc.is_preview_required(project, change_name)
-        scenarios_models = validation_svc.get_validation_scenarios(project, change_name)
-        scenarios = [
-            ValidationScenarioDTO(
-                scenario_id=s.scenario_id,
-                title=s.title,
-                description=s.description,
-                ordered_steps=s.ordered_steps,
-                expected_result=s.expected_result,
-                viewport=s.viewport,
-                required=s.required,
-            )
-            for s in scenarios_models
-        ]
-
-        cand_sha = (
-            candidate_authority.candidate_sha
-            if candidate_authority
-            else (run.current_candidate_sha if run else "")
-        )
-        base_sha = (
-            candidate_authority.base_sha if candidate_authority else (run.base_sha if run else "")
-        )
-
-        preview_dto: PreviewSessionDTO | None = None
-        if cand_sha:
-            preview_session = self.uow.preview_sessions.get_latest_for_candidate(
-                project.project_id, change_name, cand_sha
-            )
-            if not preview_session and run:
-                preview_session = self.uow.preview_sessions.get_latest_for_run(run.run_id)
-
-            if preview_session:
-                preview_dto = PreviewSessionDTO(
-                    preview_id=preview_session.preview_id,
-                    candidate_generation=preview_session.candidate_generation,
-                    status=preview_session.status.value,
-                    head_sha=preview_session.head_sha,
-                    head_sha_short=_short_sha(preview_session.head_sha) or "",
-                    base_sha=preview_session.base_sha,
-                    base_sha_short=_short_sha(preview_session.base_sha) or "",
-                    image_digest=preview_session.image_digest,
-                    preview_url=preview_session.preview_url,
-                    allocated_port=preview_session.allocated_port,
-                    container_name=preview_session.container_name,
-                    failure_reason=preview_session.failure_reason,
-                    failure_code=preview_session.failure_code,
-                    created_at=_format_dt(preview_session.created_at),
-                    ready_at=_format_dt(preview_session.ready_at),
-                )
-
-        image_digest = preview_dto.image_digest if preview_dto else ""
-        is_authorized = False
-        is_stale = False
-        latest_val_dto: ValidationRunDTO | None = None
-
-        if cand_sha:
-            is_authorized, latest_val, is_stale = (
-                validation_svc.evaluate_candidate_validation_authority(
-                    project_id=project.project_id,
-                    change_name=change_name,
-                    head_sha=cand_sha,
-                    base_sha=base_sha,
-                    image_digest=image_digest,
-                )
-            )
-            if latest_val:
-                latest_val_dto = ValidationRunDTO(
-                    validation_id=latest_val.validation_id,
-                    verdict=latest_val.verdict.value,
-                    head_sha=latest_val.head_sha,
-                    head_sha_short=_short_sha(latest_val.head_sha) or "",
-                    base_sha=latest_val.base_sha,
-                    base_sha_short=_short_sha(latest_val.base_sha) or "",
-                    image_digest=latest_val.image_digest,
-                    is_stale=is_stale,
-                    scenario_results=latest_val.scenario_results,
-                    notes=latest_val.notes,
-                    operator=latest_val.operator,
-                    created_at=_format_dt(latest_val.created_at),
-                )
-
-        # Validation history
-        all_vals = self.uow.validation_runs.list_by_change(project.project_id, change_name)
-        val_history = [
-            ValidationRunDTO(
-                validation_id=v.validation_id,
-                verdict=v.verdict.value,
-                head_sha=v.head_sha,
-                head_sha_short=_short_sha(v.head_sha) or "",
-                base_sha=v.base_sha,
-                base_sha_short=_short_sha(v.base_sha) or "",
-                image_digest=v.image_digest,
-                is_stale=(
-                    v.head_sha != cand_sha
-                    or v.base_sha != base_sha
-                    or v.image_digest != image_digest
-                ),
-                scenario_results=v.scenario_results,
-                notes=v.notes,
-                operator=v.operator,
-                created_at=_format_dt(v.created_at),
-            )
-            for v in all_vals
-        ]
-
-        return PreviewValidationSummaryDTO(
-            is_preview_required=is_required,
-            is_authorized=is_authorized,
-            is_stale=is_stale,
-            preview_session=preview_dto,
-            latest_validation=latest_val_dto,
-            validation_history=val_history,
-            scenarios=scenarios,
-        )
+        return PreviewValidationSummaryDTO()
 
     def get_efficiency_telemetry(
         self, project_id: str, change_name: str

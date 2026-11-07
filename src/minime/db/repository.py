@@ -34,12 +34,10 @@ from minime.db.models import (
     ExternalActionAttemptModel,
     GitOperationModel,
     IntakeWorkspaceOwnershipModel,
-    IntegrityFindingModel,
     JobAttemptModel,
     JobHandoffModel,
     JobLogModel,
     JobModel,
-    MetricFactModel,
     OpenRouterBudgetPolicyModel,
     OpenRouterPricingSnapshotModel,
     OperatorActionRecordModel,
@@ -48,7 +46,6 @@ from minime.db.models import (
     OrchestrationRunModel,
     OrchestrationStageEventModel,
     OrchestrationWorktreeOwnershipModel,
-    PreviewSessionModel,
     ProjectBindingModel,
     ProjectManagedRepositoryBindingModel,
     ProjectModel,
@@ -61,7 +58,6 @@ from minime.db.models import (
     ReviewFindingModel,
     ReviewModel,
     TaskClassificationSnapshotModel,
-    ValidationRunModel,
 )
 from minime.domain.enums import (
     PRIMARY_PROVIDERS,
@@ -315,29 +311,6 @@ def event_model_to_domain(model: EventModel) -> Event:
     )
 
 
-def fact_model_to_domain(model: MetricFactModel) -> MetricFact:
-    return MetricFact(
-        fact_id=model.id,
-        metric_name=model.metric_name,
-        project_id=model.project_id,
-        change_id=model.change_id,
-        stage=model.stage,
-        duration_ms=model.duration_ms,
-        fact_value=model.fact_value,
-        details=model.details or {},
-        recorded_at=model.recorded_at,
-    )
-
-
-def integrity_finding_model_to_domain(model: IntegrityFindingModel) -> IntegrityAudit:
-    return IntegrityAudit(
-        audit_id=model.id,
-        project_id=model.project_id,
-        executed_at=model.executed_at,
-        overall_status=model.overall_status,
-        findings=model.findings or [],
-        evidence_gaps=model.evidence_gaps or [],
-    )
 
 
 def job_model_to_domain(model: JobModel) -> Job:
@@ -1195,48 +1168,26 @@ class PostgresEventRepository(EventRepositoryInterface):
 
 
 class PostgresIntegrityFindingRepository(IntegrityFindingRepositoryInterface):
+    """Retired repository for integrity_findings (PODA 1)."""
+
     def __init__(self, session: Session):
         self.session = session
 
     def save(self, audit: IntegrityAudit) -> None:
-        model = IntegrityFindingModel(
-            id=audit.audit_id,
-            project_id=audit.project_id,
-            executed_at=audit.executed_at,
-            overall_status=audit.overall_status,
-            findings=audit.findings,
-            evidence_gaps=audit.evidence_gaps,
-        )
-        self.session.add(model)
+        pass
 
     def get_latest(self, project_id: str) -> IntegrityAudit | None:
-        stmt = (
-            select(IntegrityFindingModel)
-            .where(IntegrityFindingModel.project_id == project_id)
-            .order_by(desc(IntegrityFindingModel.executed_at))
-            .limit(1)
-        )
-        model = self.session.scalars(stmt).first()
-        return integrity_finding_model_to_domain(model) if model else None
+        return None
 
 
 class PostgresMetricFactRepository(MetricFactRepositoryInterface):
+    """Retired repository for metric_facts (PODA 1)."""
+
     def __init__(self, session: Session):
         self.session = session
 
     def save(self, fact: MetricFact) -> None:
-        model = MetricFactModel(
-            id=fact.fact_id,
-            metric_name=fact.metric_name,
-            project_id=fact.project_id,
-            change_id=fact.change_id,
-            stage=fact.stage,
-            duration_ms=fact.duration_ms,
-            fact_value=fact.fact_value,
-            details=fact.details,
-            recorded_at=fact.recorded_at,
-        )
-        self.session.add(model)
+        pass
 
     def list_facts(
         self,
@@ -1245,16 +1196,7 @@ class PostgresMetricFactRepository(MetricFactRepositoryInterface):
         metric_name: str | None = None,
         limit: int = 100,
     ) -> list[MetricFact]:
-        stmt = select(MetricFactModel)
-        if project_id:
-            stmt = stmt.where(MetricFactModel.project_id == project_id)
-        if change_id:
-            stmt = stmt.where(MetricFactModel.change_id == change_id)
-        if metric_name:
-            stmt = stmt.where(MetricFactModel.metric_name == metric_name)
-        stmt = stmt.order_by(desc(MetricFactModel.recorded_at)).limit(limit)
-        models = self.session.scalars(stmt).all()
-        return [fact_model_to_domain(m) for m in models]
+        return []
 
 
 class PostgresJobRepository(JobRepositoryInterface):
@@ -3748,211 +3690,47 @@ class PostgresOrchestrationExternalActionRepository(OrchestrationExternalActionR
         return orchestration_external_action_model_to_domain(model)
 
 
-def preview_session_domain_to_model(session: PreviewSession) -> PreviewSessionModel:
-    return PreviewSessionModel(
-        id=session.preview_id,
-        project_id=session.project_id,
-        change_name=session.change_name,
-        run_id=session.run_id,
-        job_id=session.job_id,
-        candidate_generation=session.candidate_generation,
-        head_sha=session.head_sha,
-        base_sha=session.base_sha,
-        image_digest=session.image_digest,
-        status=session.status.value,
-        container_id=session.container_id,
-        container_name=session.container_name,
-        allocated_port=session.allocated_port,
-        preview_url=session.preview_url,
-        failure_reason=session.failure_reason,
-        failure_code=session.failure_code,
-        created_at=session.created_at,
-        ready_at=session.ready_at,
-        terminated_at=session.terminated_at,
-    )
-
-
-def preview_session_model_to_domain(model: PreviewSessionModel) -> PreviewSession:
-    return PreviewSession(
-        preview_id=model.id,
-        project_id=model.project_id,
-        change_name=model.change_name,
-        run_id=model.run_id,
-        job_id=model.job_id,
-        candidate_generation=model.candidate_generation,
-        head_sha=model.head_sha,
-        base_sha=model.base_sha,
-        image_digest=model.image_digest or "",
-        status=PreviewStatus(model.status),
-        container_id=model.container_id,
-        container_name=model.container_name,
-        allocated_port=model.allocated_port,
-        preview_url=model.preview_url,
-        failure_reason=model.failure_reason,
-        failure_code=model.failure_code,
-        created_at=model.created_at,
-        ready_at=model.ready_at,
-        terminated_at=model.terminated_at,
-    )
-
-
-def validation_run_domain_to_model(run: ValidationRun) -> ValidationRunModel:
-    return ValidationRunModel(
-        id=run.validation_id,
-        preview_id=run.preview_id,
-        project_id=run.project_id,
-        change_name=run.change_name,
-        run_id=run.run_id,
-        candidate_generation=run.candidate_generation,
-        head_sha=run.head_sha,
-        base_sha=run.base_sha,
-        image_digest=run.image_digest,
-        verdict=run.verdict.value,
-        scenario_results=run.scenario_results,
-        notes=run.notes,
-        operator=run.operator,
-        created_at=run.created_at,
-    )
-
-
-def validation_run_model_to_domain(model: ValidationRunModel) -> ValidationRun:
-    return ValidationRun(
-        validation_id=model.id,
-        preview_id=model.preview_id,
-        project_id=model.project_id,
-        change_name=model.change_name,
-        run_id=model.run_id,
-        candidate_generation=model.candidate_generation,
-        head_sha=model.head_sha,
-        base_sha=model.base_sha,
-        image_digest=model.image_digest,
-        verdict=ValidationVerdict(model.verdict),
-        scenario_results=model.scenario_results or [],
-        notes=model.notes,
-        operator=model.operator,
-        created_at=model.created_at,
-    )
-
-
 class PostgresPreviewSessionRepository(PreviewSessionRepositoryInterface):
+    """Retired repository for preview_sessions (PODA 1)."""
+
     def __init__(self, session: Session):
         self.session = session
 
     def save(self, session: PreviewSession) -> None:
-        existing = self.session.get(PreviewSessionModel, session.preview_id)
-        if existing:
-            existing.status = session.status.value
-            existing.image_digest = session.image_digest
-            existing.container_id = session.container_id
-            existing.container_name = session.container_name
-            existing.allocated_port = session.allocated_port
-            existing.preview_url = session.preview_url
-            existing.failure_reason = session.failure_reason
-            existing.failure_code = session.failure_code
-            existing.ready_at = session.ready_at
-            existing.terminated_at = session.terminated_at
-        else:
-            model = preview_session_domain_to_model(session)
-            self.session.add(model)
+        pass
 
     def get_by_id(self, preview_id: str) -> PreviewSession | None:
-        model = self.session.get(PreviewSessionModel, preview_id)
-        return preview_session_model_to_domain(model) if model else None
+        return None
 
     def get_latest_for_run(self, run_id: str) -> PreviewSession | None:
-        stmt = (
-            select(PreviewSessionModel)
-            .where(PreviewSessionModel.run_id == run_id)
-            .order_by(desc(PreviewSessionModel.created_at))
-            .limit(1)
-        )
-        model = self.session.scalars(stmt).first()
-        return preview_session_model_to_domain(model) if model else None
+        return None
 
     def get_latest_for_candidate(
         self, project_id: str, change_name: str, head_sha: str
     ) -> PreviewSession | None:
-        stmt = (
-            select(PreviewSessionModel)
-            .where(
-                PreviewSessionModel.project_id == project_id,
-                PreviewSessionModel.change_name == change_name,
-                PreviewSessionModel.head_sha == head_sha,
-            )
-            .order_by(desc(PreviewSessionModel.created_at))
-            .limit(1)
-        )
-        model = self.session.scalars(stmt).first()
-        return preview_session_model_to_domain(model) if model else None
+        return None
 
     def list_by_change(self, project_id: str, change_name: str) -> list[PreviewSession]:
-        stmt = (
-            select(PreviewSessionModel)
-            .where(
-                PreviewSessionModel.project_id == project_id,
-                PreviewSessionModel.change_name == change_name,
-            )
-            .order_by(desc(PreviewSessionModel.created_at))
-        )
-        models = self.session.scalars(stmt).all()
-        return [preview_session_model_to_domain(m) for m in models]
+        return []
 
     def list_active(self) -> list[PreviewSession]:
-        active_statuses = [
-            PreviewStatus.REQUESTED.value,
-            PreviewStatus.BUILDING.value,
-            PreviewStatus.STARTING.value,
-            PreviewStatus.PROBING.value,
-            PreviewStatus.READY.value,
-        ]
-        stmt = (
-            select(PreviewSessionModel)
-            .where(PreviewSessionModel.status.in_(active_statuses))
-            .order_by(desc(PreviewSessionModel.created_at))
-        )
-        models = self.session.scalars(stmt).all()
-        return [preview_session_model_to_domain(m) for m in models]
+        return []
 
     def get_active_for_change(self, project_id: str, change_name: str) -> PreviewSession | None:
-        active_statuses = [
-            PreviewStatus.REQUESTED.value,
-            PreviewStatus.BUILDING.value,
-            PreviewStatus.STARTING.value,
-            PreviewStatus.PROBING.value,
-            PreviewStatus.READY.value,
-        ]
-        stmt = (
-            select(PreviewSessionModel)
-            .where(
-                PreviewSessionModel.project_id == project_id,
-                PreviewSessionModel.change_name == change_name,
-                PreviewSessionModel.status.in_(active_statuses),
-            )
-            .order_by(desc(PreviewSessionModel.created_at))
-            .limit(1)
-        )
-        model = self.session.scalars(stmt).first()
-        return preview_session_model_to_domain(model) if model else None
+        return None
 
 
 class PostgresValidationRunRepository(ValidationRunRepositoryInterface):
+    """Retired repository for validation_runs (PODA 1)."""
+
     def __init__(self, session: Session):
         self.session = session
 
     def save(self, validation: ValidationRun) -> None:
-        existing = self.session.get(ValidationRunModel, validation.validation_id)
-        if existing:
-            existing.verdict = validation.verdict.value
-            existing.scenario_results = validation.scenario_results
-            existing.notes = validation.notes
-            existing.operator = validation.operator
-        else:
-            model = validation_run_domain_to_model(validation)
-            self.session.add(model)
+        pass
 
     def get_by_id(self, validation_id: str) -> ValidationRun | None:
-        model = self.session.get(ValidationRunModel, validation_id)
-        return validation_run_model_to_domain(model) if model else None
+        return None
 
     def get_latest_for_candidate(
         self,
@@ -3962,41 +3740,13 @@ class PostgresValidationRunRepository(ValidationRunRepositoryInterface):
         base_sha: str,
         image_digest: str,
     ) -> ValidationRun | None:
-        stmt = (
-            select(ValidationRunModel)
-            .where(
-                ValidationRunModel.project_id == project_id,
-                ValidationRunModel.change_name == change_name,
-                ValidationRunModel.head_sha == head_sha,
-                ValidationRunModel.base_sha == base_sha,
-                ValidationRunModel.image_digest == image_digest,
-            )
-            .order_by(desc(ValidationRunModel.created_at))
-            .limit(1)
-        )
-        model = self.session.scalars(stmt).first()
-        return validation_run_model_to_domain(model) if model else None
+        return None
 
     def list_by_change(self, project_id: str, change_name: str) -> list[ValidationRun]:
-        stmt = (
-            select(ValidationRunModel)
-            .where(
-                ValidationRunModel.project_id == project_id,
-                ValidationRunModel.change_name == change_name,
-            )
-            .order_by(desc(ValidationRunModel.created_at))
-        )
-        models = self.session.scalars(stmt).all()
-        return [validation_run_model_to_domain(m) for m in models]
+        return []
 
     def list_by_run(self, run_id: str) -> list[ValidationRun]:
-        stmt = (
-            select(ValidationRunModel)
-            .where(ValidationRunModel.run_id == run_id)
-            .order_by(desc(ValidationRunModel.created_at))
-        )
-        models = self.session.scalars(stmt).all()
-        return [validation_run_model_to_domain(m) for m in models]
+        return []
 
 
 def operator_action_record_model_to_domain(

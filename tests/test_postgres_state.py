@@ -16,7 +16,10 @@ def test_models_metadata_tables():
     assert "project_bindings" in tables
     assert "changes" in tables
     assert "events" in tables
-    assert "metric_facts" in tables
+    assert "metric_facts" not in tables
+    assert "integrity_findings" not in tables
+    assert "preview_sessions" not in tables
+    assert "validation_runs" not in tables
     assert "jobs" in tables
     assert "job_logs" in tables
     assert "check_results" in tables
@@ -85,6 +88,10 @@ def test_alembic_offline_postgres_migration():
     assert "DROP COLUMN auto_prepare" in sql
     assert "DROP COLUMN auto_admit" in sql
     assert "DROP COLUMN max_concurrent_jobs" in sql
+    assert "DROP TABLE validation_runs" in sql
+    assert "DROP TABLE preview_sessions" in sql
+    assert "DROP TABLE integrity_findings" in sql
+    assert "DROP TABLE metric_facts" in sql
 
 
 def test_restart_persistence_simulation(in_memory_uow):
@@ -132,3 +139,40 @@ def test_restart_persistence_simulation(in_memory_uow):
     events = in_memory_uow.events.list_events(project_id="mini-me")
     assert len(events) == 1
     assert events[0].event_type == EventType.PROJECT_REGISTERED
+
+
+def test_verify_physical_schema_invariants_valid():
+    """Verify that physical schema matches canonical metadata and expected Alembic head."""
+    from minime.db.session import verify_physical_schema_invariants, EXPECTED_ALEMBIC_HEAD
+    from sqlalchemy import create_engine, text
+
+    engine = create_engine("sqlite:///:memory:")
+    Base.metadata.create_all(engine)
+    with engine.connect() as conn:
+        conn.execute(text("CREATE TABLE alembic_version (version_num VARCHAR(64) NOT NULL)"))
+        conn.execute(text(f"INSERT INTO alembic_version (version_num) VALUES ('{EXPECTED_ALEMBIC_HEAD}')"))
+        conn.commit()
+
+    result = verify_physical_schema_invariants(engine)
+    assert result.valid is True
+    assert result.revision == EXPECTED_ALEMBIC_HEAD
+    assert result.missing_tables == ()
+    assert result.missing_columns == {}
+    assert result.reason is None
+
+
+def test_verify_physical_schema_invariants_mismatch():
+    """Verify schema preflight failure when revision is behind expected head."""
+    from minime.db.session import verify_physical_schema_invariants, EXPECTED_ALEMBIC_HEAD
+    from sqlalchemy import create_engine, text
+
+    engine = create_engine("sqlite:///:memory:")
+    Base.metadata.create_all(engine)
+    with engine.connect() as conn:
+        conn.execute(text("CREATE TABLE alembic_version (version_num VARCHAR(64) NOT NULL)"))
+        conn.execute(text("INSERT INTO alembic_version (version_num) VALUES ('f14_provider_model_enablement')"))
+        conn.commit()
+
+    result = verify_physical_schema_invariants(engine)
+    assert result.valid is False
+    assert f"Expected Alembic head {EXPECTED_ALEMBIC_HEAD}" in result.reason
