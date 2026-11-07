@@ -1,0 +1,4 @@
+schema: spec-driven
+created: 2026-11-06
+goal: Visualizar la complejidad y su evidencia en el stepper frontend usando los
+  datos existentes de stop_details
