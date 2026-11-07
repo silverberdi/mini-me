@@ -4,6 +4,7 @@
 - [ ] 1.2 Auditar rutas, controladores y servicios en `src/minime/` para identificar candidatos con cero consumidores en la UI y flujos autorizados.
 - [ ] 1.3 Auditar modelos SQLAlchemy y tablas PostgreSQL para identificar tablas huérfanas (logs de Jobs, hechos métricos no consumidos, restos de previews).
 - [ ] 1.4 Vincular la evidencia del resultado de la suite de pruebas base previa ejecutada por el operador sobre el SHA de partida.
+- [ ] 1.5 Crear la estructura del documento de inventario histórico `docs/evidence/poda-1-inventario-features-retiradas.md`.
 
 ## 2. Poda de backend y modelos huérfanos
 
@@ -27,4 +28,5 @@
 
 - [ ] 5.1 Ejecutar la suite completa retenida en un entorno PostgreSQL desechable aislado asegurando exit code 0.
 - [ ] 5.2 Comparar los resultados con la línea base inmutable previa del operador demostrando cero regresiones en los flujos activos.
-- [ ] 5.3 Documentar la evidencia final de retiro y cero consumidores en el informe del Change.
+- [ ] 5.3 Consolidar en `docs/evidence/poda-1-inventario-features-retiradas.md` el inventario exhaustivo de cada feature retirada con su propósito original y su SHA de referencia para recuperación futura.
+- [ ] 5.4 Documentar la evidencia final de retiro y cero consumidores en el informe del Change.

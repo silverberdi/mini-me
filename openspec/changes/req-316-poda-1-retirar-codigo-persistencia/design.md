@@ -38,6 +38,10 @@ A lo largo de iteraciones previas, se acumularon modelos, rutas API, servicios, 
 ### 4. Validación de no-regresión contra línea base del operador
 - **Decisión:** La suite de pruebas conservada se ejecuta sobre el candidato en una base de datos desechable y su resultado se compara con el reporte previo del operador sobre el SHA base, asegurando exit code 0 y cero fallos en flujos activos.
 
+### 5. Documento de inventario histórico de superficies podadas
+- **Decisión:** Registrar formalmente en `docs/evidence/poda-1-inventario-features-retiradas.md` el censo detallado de capacidades desincorporadas, especificando el nombre de la feature/capacidad, archivos eliminados, tablas desincorporadas, propósito histórico y el último commit/SHA donde existieron de forma funcional para permitir su fácil consulta o rescate.
+- **Alternativas consideradas:** Confiar únicamente en `git log` sin un documento dedicado. Se descartó porque un índice estructurado simplifica la auditoría futura y permite al operador recuperar cualquier funcionalidad sin bucear a ciegas en el historial.
+
 ## Risks / Trade-offs
 
 - **[Riesgo] Retirar accidentalmente una ruta o dato utilizado por una acción poco frecuente de la UI**

@@ -11,6 +11,7 @@ mini me acumuló rutas, controladores, servicios, modelos, pruebas y tablas de e
 - Retirar modelos y tablas huérfanas en desuso (incluyendo logs de Jobs obsoletos, hechos métricos no leídos, restos de validaciones o previews heredadas y configuraciones sin efecto).
 - Generar migraciones conservadoras con Alembic para desincorporar tablas o columnas sin uso, garantizando capacidad de rollback y preservación/exportación de históricos donde corresponda, sin alterar la base de datos de producción.
 - Eliminar concurrentemente las pruebas obsoletas que cubrían exclusivamente las superficies retiradas, sin suprimir pruebas de flujos vigentes.
+- Generar un documento de inventario histórico (`docs/evidence/poda-1-inventario-features-retiradas.md`) que registre detalladamente cada feature, ruta, servicio, modelo y tabla desincorporada, su propósito original y los SHAs/commits de referencia en Git para facilitar su consulta o recuperación futura si se requiere.
 - Validar la ausencia de regresiones comparando el resultado de la suite de pruebas del candidato contra la ejecución de línea base realizada por el operador sobre el SHA previo.
 
 ## Capabilities

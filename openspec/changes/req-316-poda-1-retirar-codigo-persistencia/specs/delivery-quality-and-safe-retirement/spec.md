@@ -33,3 +33,9 @@ The system SHALL retire only routes, controllers, services, models, tables, test
 - **WHEN** the pruned candidate change is evaluated
 - **THEN** all retained unit, integration, and E2E tests for active flows SHALL pass (exit code 0)
 - **AND** the candidate test result SHALL match or improve upon the baseline without regressions in active functionality.
+
+#### Scenario: Archival inventory of retired features
+
+- **WHEN** features, routes, services, or persistence structures are retired in the Change
+- **THEN** the Change SHALL record an archival inventory document (`docs/evidence/poda-1-inventario-features-retiradas.md`)
+- **AND** it SHALL record for each retired feature its historical purpose, removed files/routes/tables, and reference commit/SHA for future recovery.
