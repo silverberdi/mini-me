@@ -51,7 +51,7 @@ test.describe('Human Gate Lifecycle and Observability', () => {
     await submitBtn.click();
 
     // 9. Verify submission feedback
-    const feedbackNotice = page.locator('div', { hasText: /Respuesta enviada, procesando…/i });
+    const feedbackNotice = page.getByText(/Respuesta enviada, procesando…/i);
     await expect(feedbackNotice).toBeVisible({ timeout: 10000 });
 
     // 10. Reload the page (F5) to verify PostgreSQL persistence and ensure no zombie gate resurfaces
