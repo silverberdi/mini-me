@@ -149,6 +149,30 @@ interface PipelineStage {
             <p class="text-sm text-slate-100 font-medium whitespace-pre-wrap">{{ humanGateQuestion() }}</p>
           </div>
 
+          <!-- Spanish Actionable Explanation (if available) -->
+          <div *ngIf="humanGateExplanationEs()" class="p-4 rounded-xl bg-slate-900/90 border border-sky-500/30 space-y-2">
+            <span class="text-xs font-semibold uppercase tracking-wider text-sky-400 font-mono">Contexto Explicativo (Español):</span>
+            <p class="text-sm text-slate-100 font-medium whitespace-pre-wrap">{{ humanGateExplanationEs() }}</p>
+          </div>
+
+          <!-- Apply Diagnostic Context (if available) -->
+          <div *ngIf="humanGateAttempts() !== null" class="p-4 rounded-xl bg-slate-900/80 border border-slate-700/60 space-y-2 text-xs font-mono">
+            <span class="text-xs font-semibold uppercase tracking-wider text-slate-300">Diagnóstico de Implementación (Apply):</span>
+            <div class="grid grid-cols-2 sm:grid-cols-4 gap-2 pt-1 text-slate-300">
+              <div>Intentos: <strong class="text-white">{{ humanGateAttempts() }}/{{ humanGateHardLimit() || 3 }}</strong></div>
+              <div>Sin progreso: <strong class="text-white">{{ humanGateNoProgress() || 0 }}</strong></div>
+              <div>Pruebas: <strong [ngClass]="humanGateTestsPassed() ? 'text-emerald-400' : humanGateTestsPassed() === false ? 'text-rose-400' : 'text-slate-400'">{{ humanGateTestsPassed() ? 'Aprobadas' : humanGateTestsPassed() === false ? 'Fallidas' : 'Sin ejecutar' }}</strong></div>
+              <div>Candidate: <strong class="text-slate-200 truncate max-w-[120px]">{{ humanGateCandidateSha() || 'N/A' }}</strong></div>
+            </div>
+            <div *ngIf="humanGatePendingTasks().length > 0" class="pt-2 text-slate-400">
+              <span>Tareas pendientes: </span>
+              <span class="text-amber-300 font-semibold">{{ humanGatePendingTasks().join(', ') }}</span>
+            </div>
+            <div *ngIf="!humanGateLogsAvailable()" class="text-slate-500 italic pt-1">
+              * Los registros detallados de ejecución no están disponibles en el resumen durable.
+            </div>
+          </div>
+
           <div *ngIf="humanGateFindings().length > 0" class="space-y-3" aria-label="Hallazgos de la revisión independiente">
             <section *ngFor="let finding of humanGateFindings(); let i = index" class="p-4 rounded-xl bg-slate-900/70 border border-amber-500/20 space-y-2">
               <h4 class="text-xs font-bold uppercase tracking-wider text-amber-300">Hallazgo {{ i + 1 }}</h4>
@@ -309,7 +333,11 @@ interface PipelineStage {
             <div *ngIf="targetRun()?.error_detail" class="p-4 rounded-xl bg-rose-500/10 border border-rose-500/20 text-rose-300 text-xs font-mono whitespace-pre-wrap">
               {{ targetRun()?.error_detail }}
             </div>
-            <div *ngIf="!targetRun()?.error_detail" class="p-4 rounded-xl bg-slate-900/60 border border-slate-700/40 text-slate-400 text-xs space-y-1.5">
+            <div *ngIf="isHumanRequired()" class="p-4 rounded-xl bg-amber-500/10 border border-amber-500/30 text-amber-300 text-xs space-y-1.5">
+              <div class="text-amber-400 font-semibold">⚠️ Intervención humana requerida</div>
+              <p>El orquestador está en espera de la respuesta del operador para continuar la ejecución.</p>
+            </div>
+            <div *ngIf="!targetRun()?.error_detail && !isHumanRequired()" class="p-4 rounded-xl bg-slate-900/60 border border-slate-700/40 text-slate-400 text-xs space-y-1.5">
               <div class="text-emerald-400 font-semibold">✓ Sin anomalías reportadas</div>
               <p>El orquestador no ha emitido errores fatales de ejecución para este run.</p>
             </div>
@@ -590,6 +618,62 @@ export class TrabajoActualComponent {
     if (!run) return '';
     const payload = run.stop_details?.['human_payload'];
     return typeof payload?.options_source === 'string' ? payload.options_source : '';
+  }
+
+  humanGateExplanationEs(): string {
+    const run = this.targetRun();
+    if (!run) return '';
+    const payload = run.stop_details?.['human_payload'];
+    return typeof payload?.explanation_es === 'string' ? payload.explanation_es : '';
+  }
+
+  humanGateAttempts(): number | null {
+    const run = this.targetRun();
+    if (!run) return null;
+    const payload = run.stop_details?.['human_payload'];
+    return typeof payload?.attempts === 'number' ? payload.attempts : null;
+  }
+
+  humanGateHardLimit(): number | null {
+    const run = this.targetRun();
+    if (!run) return null;
+    const payload = run.stop_details?.['human_payload'];
+    return typeof payload?.hard_limit === 'number' ? payload.hard_limit : null;
+  }
+
+  humanGateNoProgress(): number | null {
+    const run = this.targetRun();
+    if (!run) return null;
+    const payload = run.stop_details?.['human_payload'];
+    return typeof payload?.no_progress === 'number' ? payload.no_progress : null;
+  }
+
+  humanGatePendingTasks(): string[] {
+    const run = this.targetRun();
+    if (!run) return [];
+    const payload = run.stop_details?.['human_payload'];
+    return Array.isArray(payload?.pending_tasks) ? payload.pending_tasks : [];
+  }
+
+  humanGateCandidateSha(): string {
+    const run = this.targetRun();
+    if (!run) return '';
+    const payload = run.stop_details?.['human_payload'];
+    return typeof payload?.candidate_sha === 'string' ? payload.candidate_sha : '';
+  }
+
+  humanGateTestsPassed(): boolean | null {
+    const run = this.targetRun();
+    if (!run) return null;
+    const payload = run.stop_details?.['human_payload'];
+    return typeof payload?.tests_passed === 'boolean' ? payload.tests_passed : null;
+  }
+
+  humanGateLogsAvailable(): boolean {
+    const run = this.targetRun();
+    if (!run) return true;
+    const payload = run.stop_details?.['human_payload'];
+    return payload?.logs_available !== false;
   }
 
   humanGateSeverityLabel(severity: unknown): string {

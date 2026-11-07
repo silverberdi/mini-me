@@ -33,6 +33,7 @@ from minime.domain.interfaces import PersistenceUnitOfWork
 from minime.domain.models import (
     DispatchAuthorization,
     ExternalActionResult,
+    get_active_human_payload,
     OperatorActionRecord,
     OrchestrationExternalAction,
     OrchestrationRun,
@@ -348,23 +349,43 @@ class NativeOrchestrationCoordinator:
             uow.commit()
         return active_payload
 
-    def _clear_current_human_gate(self, uow: Any, run: OrchestrationRun) -> None:
+    def _clear_current_human_gate(
+        self, uow: Any, run: OrchestrationRun, *, response_text: str | None = None
+    ) -> None:
         """Clear an active gate only after its existing flow confirms resolution."""
         details = dict(run.stop_details or {})
-        payload = details.get("human_payload")
-        if not (
-            isinstance(payload, dict)
-            and payload.get("gate") in {
-                "proposal_review_escalation",
-                "code_review_escalation",
-                "apply_escalation",
-                "physical_validation",
-                "pr1_merge_acknowledgement",
-                "doc_closing_sync",
-                "doc_closing_archive",
-            }
-        ) and run.human_gate != HumanGate.NEEDS_HUMAN and run.stop_outcome != OrchestrationStopOutcome.NEEDS_HUMAN:
+        payload = get_active_human_payload(run)
+        has_active_gate = (
+            (isinstance(payload, dict) and bool(payload))
+            or run.human_gate == HumanGate.NEEDS_HUMAN
+            or run.stop_outcome == OrchestrationStopOutcome.NEEDS_HUMAN
+            or (isinstance(details.get("explore_checkpoint"), dict) and details["explore_checkpoint"].get("status") == "HUMAN_REQUIRED")
+            or (isinstance(details.get("propose_human_required"), dict) and details["propose_human_required"].get("status") == "HUMAN_REQUIRED")
+        )
+        if not has_active_gate:
             return
+
+        # Atomically record gate resolution into resolved_human_gates audit log
+        if isinstance(payload, dict) and payload:
+            resolved_entry = {
+                "gate_id": payload.get("gate_id"),
+                "gate": payload.get("gate"),
+                "stage": run.current_stage.value if hasattr(run.current_stage, "value") else str(run.current_stage),
+                "question": payload.get("question"),
+                "response": redact_secrets(response_text) if response_text else None,
+                "resolved_at": utc_now().isoformat(),
+            }
+            resolved_list = list(details.get("resolved_human_gates") or [])
+            resolved_list.append(resolved_entry)
+            details["resolved_human_gates"] = resolved_list
+
+        # Mark explore/propose checkpoints resolved so they cannot resurface as zombies
+        if isinstance(details.get("explore_checkpoint"), dict):
+            if details["explore_checkpoint"].get("status") == "HUMAN_REQUIRED":
+                details["explore_checkpoint"]["status"] = "RESOLVED"
+        if isinstance(details.get("propose_human_required"), dict):
+            details["propose_human_required"]["status"] = "RESOLVED"
+
         details.pop("human_payload", None)
         run.stop_details = details
         run.human_gate = None
@@ -1736,12 +1757,21 @@ class NativeOrchestrationCoordinator:
                     }
                     self._persist_run_stop_details(active_run, details)
             if explore_result.get("status") == "HUMAN_REQUIRED":
+                raw_payload = explore_result.get("human_payload") or {}
+                recorded_payload = self._record_current_human_gate(
+                    uow,
+                    active_run,
+                    gate="explore_clarification",
+                    question=str(raw_payload.get("question") or "Explore stage requires operator clarification."),
+                    options=raw_payload.get("options", []),
+                    payload=raw_payload,
+                )
                 return OrchestrationCoordinationResult(
                     status="HUMAN_REQUIRED",
                     run_id=active_run.run_id,
                     current_stage=OrchestrationStage.EXPLORING,
                     message="Explore stage requires operator clarification.",
-                    human_payload=self._safe_human_payload(explore_result.get("human_payload")),
+                    human_payload=recorded_payload,
                 )
             if explore_result.get("status") != "READY_TO_PROPOSE":
                 return OrchestrationCoordinationResult(
@@ -1750,6 +1780,7 @@ class NativeOrchestrationCoordinator:
                     current_stage=OrchestrationStage.EXPLORING,
                     message=explore_result.get("message", "Explore failed; proposal cannot start."),
                 )
+            self._clear_current_human_gate(uow, active_run, response_text=operator_clarification)
 
         # Step 6: Propose and Strict Validation Loop
         if active_run.current_stage in (
@@ -2366,7 +2397,15 @@ class NativeOrchestrationCoordinator:
                     break
                 if prior and self._apply_regressed(prior, outcome):
                     return self._escalate_apply_to_human(
-                        uow, active_run, "Apply recovery detected candidate regression; automatic retries stopped. Candidate preserved."
+                        uow,
+                        active_run,
+                        "Apply recovery detected candidate regression; automatic retries stopped. Candidate preserved.",
+                        attempts=attempts,
+                        hard_limit=hard_limit,
+                        no_progress=no_progress,
+                        outcome=outcome,
+                        worktree_path=worktree_path,
+                        change_name=change_name,
                     )
                 progressed = prior is None or self._apply_made_progress(prior, outcome)
                 if not progressed:
@@ -2383,10 +2422,17 @@ class NativeOrchestrationCoordinator:
                     break
             if outcome is None or outcome.status != "COMPLETE":
                 return self._escalate_apply_to_human(
-                    uow, active_run,
+                    uow,
+                    active_run,
                     f"Native Apply failed or recovery stopped ({outcome.status if outcome is not None else 'NO_RESULT'}); "
                     f"hard attempt ceiling {hard_limit} reached or recovery halted; "
                     f"attempts={attempts}/{hard_limit}, no_progress={no_progress}. Candidate preserved.",
+                    attempts=attempts,
+                    hard_limit=hard_limit,
+                    no_progress=no_progress,
+                    outcome=outcome,
+                    worktree_path=worktree_path,
+                    change_name=change_name,
                 )
             self._clear_current_human_gate(uow, active_run)
             if pending_corrections or self._apply_attempts(active_run):
@@ -3495,23 +3541,88 @@ class NativeOrchestrationCoordinator:
         reason: str,
         *,
         gate: str = "apply_escalation",
+        options: list[Any] | tuple[Any, ...] | None = None,
+        attempts: int | None = None,
+        hard_limit: int | None = None,
+        no_progress: int | None = None,
+        outcome: Any = None,
+        worktree_path: Path | None = None,
+        change_name: str | None = None,
     ) -> OrchestrationCoordinationResult:
         """Mark the run for human attention so the scheduler stops re-dispatching."""
         details = dict(run.stop_details or {})
         details["apply_escalated"] = True
+
+        att_count = attempts if attempts is not None else details.get("apply_total_attempts", 0)
+        ceiling = hard_limit if hard_limit is not None else 3
+        no_prog = no_progress if no_progress is not None else details.get("apply_no_progress", 0)
+
+        pending_tasks: list[str] = []
+        if outcome and getattr(outcome, "pending_tasks", None):
+            pending_tasks = list(outcome.pending_tasks)
+        elif worktree_path and change_name:
+            tasks_path = Path(worktree_path) / "openspec" / "changes" / change_name / "tasks.md"
+            if tasks_path.exists():
+                automated, not_ver = self._classify_pending_tasks(tasks_path.read_text(errors="ignore"))
+                pending_tasks = automated + not_ver
+
+        candidate_sha = (
+            getattr(outcome, "candidate_sha", None)
+            or run.current_candidate_sha
+            or "No generado"
+        )
+        tests_passed = getattr(outcome, "tests_passed", None) if outcome else None
+        test_evidence = getattr(outcome, "test_evidence", "") if outcome else ""
+
+        pending_str = ", ".join(pending_tasks) if pending_tasks else "Ver tasks.md"
+        test_str = "Aprobadas" if tests_passed else "No aprobadas" if tests_passed is False else "Sin ejecutar"
+
+        explanation_es = (
+            f"La implementación automática (Apply) se detuvo tras alcanzar el límite de recuperación "
+            f"({att_count}/{ceiling} intentos, {no_prog} sin progreso). "
+            f"Tareas pendientes: {pending_str}. "
+            f"Estado de pruebas: {test_str}. "
+            f"Candidate SHA: {candidate_sha}. "
+            f"Se requiere la intervención del operador para revisar el estado del candidato y decidir cómo proceder."
+        )
+
+        question = reason
+        if options is not None:
+            opts = list(options)
+        elif gate == "apply_escalation" and (attempts is not None or hard_limit is not None):
+            opts = [
+                {"id": "retry", "label": "Reintentar implementación (Apply)"},
+                {"id": "cancel", "label": "Cancelar run y preservar worktree"},
+            ]
+        else:
+            opts = []
+
+        diagnostic_payload = {
+            "attempts": att_count,
+            "hard_limit": ceiling,
+            "no_progress": no_prog,
+            "pending_tasks": pending_tasks,
+            "candidate_sha": candidate_sha,
+            "tests_passed": tests_passed,
+            "logs_available": bool(test_evidence),
+            "explanation_es": explanation_es,
+            "raw_reason": reason,
+        }
+
         run.stop_details = details
         payload = self._record_current_human_gate(
             uow,
             run,
             gate=gate,
-            question=reason,
-            options=(),
+            question=question,
+            options=opts,
+            payload=diagnostic_payload,
         )
         return OrchestrationCoordinationResult(
-            status="PAUSED",
+            status="HUMAN_REQUIRED",
             run_id=run.run_id,
             current_stage=OrchestrationStage.IMPLEMENTING,
-            message=reason,
+            message=question,
             human_payload=payload,
         )
 
