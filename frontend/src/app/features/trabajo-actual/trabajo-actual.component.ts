@@ -624,7 +624,8 @@ export class TrabajoActualComponent {
     const run = this.targetRun();
     if (!run) return '';
     const payload = run.stop_details?.['human_payload'];
-    return typeof payload?.explanation_es === 'string' ? payload.explanation_es : '';
+    const expl = payload?.explanation_es || payload?.explanation || run.stop_details?.['explanation_es'];
+    return typeof expl === 'string' ? expl : '';
   }
 
   humanGateAttempts(): number | null {
