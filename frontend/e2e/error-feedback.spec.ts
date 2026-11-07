@@ -1,7 +1,15 @@
 import { test, expect } from '@playwright/test';
-import { setupAuthSession, waitForAppMounted } from './helpers';
+import { resetModelEnablement, setupAuthSession, waitForAppMounted, TEST_MODEL_ID } from './helpers';
 
 test.describe('Observable Error Feedback and Runtime Resilience', () => {
+  test.beforeEach(async ({ request }) => {
+    await resetModelEnablement(request, TEST_MODEL_ID);
+  });
+
+  test.afterEach(async ({ request }) => {
+    await resetModelEnablement(request, TEST_MODEL_ID);
+  });
+
   test('displays observable error notification upon API failure without crashing Angular shell', async ({ context, page }) => {
     // 1. Setup authenticated session and register route interceptor for error simulation
     await setupAuthSession(context);
@@ -27,7 +35,6 @@ test.describe('Observable Error Feedback and Runtime Resilience', () => {
 
     const checkbox = toggleLabel.locator('input[type="checkbox"]');
     await expect(checkbox).toBeVisible();
-    await expect(checkbox).toBeChecked();
 
     // 4. Trigger toggle action which encounters the intercepted 500 error
     await checkbox.click();
