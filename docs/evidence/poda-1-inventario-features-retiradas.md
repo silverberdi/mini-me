@@ -97,18 +97,14 @@ Las siguientes superficies fueron auditadas y confirmadas con **0 consumidores**
 
 ### 3.2. Tablas y Modelos SQLAlchemy desincorporados (`src/minime/db/models.py`)
 
-1. `metric_facts`: Tabla de hechos métricos acumulados sin lectura en la UI.
-2. `integrity_findings`: Hallazgos de integridad estructural sin consulta activa.
-3. `jobs`: Entidad de ejecución previa al modelo canónico `orchestration_runs`.
-4. `job_attempts`: Intentos de jobs del modelo anterior.
-5. `blocker_claims`: Reclamos de bloqueos asociados al scheduler antiguo.
-6. `job_handoffs`: Handoffs de jobs reemplazados por el ciclo de etapas de OrchestrationRun.
-7. `candidate_manifests`: Manifiestos de candidatos heredados.
-8. `candidate_authorships`: Autorías heredadas sustituidas por `reviews.is_mixed_authorship`.
-9. `evidence_diagnostics`: Diagnósticos no vinculados a runs actuales.
-10. `job_logs`: Registros de consola de jobs históricos.
-11. `preview_sessions`: Sesiones de preview de contenedores sin consumidor.
-12. `validation_runs`: Runs de validación sintética descontinuados.
+En esta primera etapa (PODA 1), se desincorporaron exclusivamente las siguientes 4 tablas huérfanas mediante la migración `poda01_retire_orphaned_persistence`:
+
+1. `validation_runs`: Runs de validación sintética descontinuados (cero consumidores en UI y runtime).
+2. `preview_sessions`: Sesiones de preview de contenedores sin consumidor.
+3. `integrity_findings`: Hallazgos de integridad estructural sin consulta activa.
+4. `metric_facts`: Hechos métricos acumulados cuyo endpoint fue retirado.
+
+*(Nota: Las tablas `jobs`, `job_logs`, `job_attempts`, etc., forman parte de la tubería histórica de jobs y se preservan en esta etapa sin cambios de persistencia; su desincorporación está reservada a fases posteriores de poda).*
 
 ---
 
@@ -143,18 +139,27 @@ Si en el futuro se requiriera reactivar o consultar el código original de algun
 
 ## 5. Resultados de verificación y no regresión
 
-- **Línea base pre-poda (SHA `6b7a405`):** 1057 passed, 26 failed (mock errors preexistentes en `_stage_candidate_identity`), 12 skipped (total: 1095).
-- **Línea post-poda (Change actual):** 1034 passed, 26 failed (mismos mock errors preexistentes en `_stage_candidate_identity`), 11 skipped (total: 1071).
-- **Diferencial de tests:** 24 tests retirados correspondían exclusivamente a los 4 archivos de prueba podados (`test_candidate_validation_authority.py`, `test_container_preview_acceptance.py`, `test_container_preview_service.py` y `test_openspec_integrity.py`). Se retiró además 1 paso de prueba del endpoint huérfano `/metrics` en `tests/test_f7_functional_operations.py`, y se incorporaron 2 nuevos tests de verificación de invariantes en `tests/test_postgres_state.py`.
-- **Regresiones en flujos vigentes:** **0**. Todas las pruebas de Dashboard, Proyectos, Backlog, Model Admin, Proveedores, PWA y Autenticación se ejecutaron con éxito.
-- **Validación OpenSpec:** `openspec validate req-316-poda-1-retirar-codigo-persistencia` aprobado sin errores.
-- **Validación Alembic:** Generación DDL offline (`alembic upgrade head --sql` y `alembic downgrade poda01_retire_orphaned_persistence:f14_provider_model_enablement --sql`) exitosa demostrando `DROP TABLE` limpio con downgrade simétrico disponible.
-- **Validación de preflight de invariantes:** Verificado mediante `test_verify_physical_schema_invariants_valid` y `test_verify_physical_schema_invariants_mismatch`.
+- **Línea base pre-poda (SHA `6b7a405`):** 1057 passed, 26 failed, 12 skipped (total: 1095).
+- **Línea post-poda (Change actual):** 1034 passed, 26 failed, 11 skipped (total: 1071).
+- **Diferencial de tests:** 
+  - 24 tests retirados pertenecían exclusivamente a los 4 archivos de prueba eliminados (`test_candidate_validation_authority.py`, `test_container_preview_acceptance.py`, `test_container_preview_service.py` y `test_openspec_integrity.py`).
+  - 1 paso de prueba retirado en `tests/test_f7_functional_operations.py` correspondiente al endpoint huérfano `/requests/{num}/metrics`.
+  - 2 nuevos tests de verificación de invariantes incorporados en `tests/test_postgres_state.py` (`test_verify_physical_schema_invariants_valid` y `test_verify_physical_schema_invariants_mismatch`).
+- **Desglose de los 26 fallos preexistentes conocidos (idénticos antes y después de la poda):**
+  1. *Mocks de `_git_run` / `stdout` en orquestación (23 tests):* 10 en `test_opencode_adapter.py`, 5 en `test_negative_regressions.py`, 4 en `test_reentry_continuity_governance.py`, 2 en `test_native_apply_and_verify.py`, 1 en `test_focused_automated_test_selection.py` y 1 en `test_two_phase_pr_and_closure.py`.
+  2. *Canal de respuesta de Verify (1 test):* `tests/test_f3_fail_closed_contracts.py::test_verify_requires_native_final_response_channel`.
+  3. *Contexto durable de DOC_CLOSING (1 test):* `tests/test_f3_fail_closed_contracts.py::test_apply_and_sync_fail_closed_on_agent_error`.
+  4. *Ambigüedad de invocación en reingreso de Explore/Propose (1 test):* `tests/test_native_propose_lifecycle.py::test_explore_checkpoint_survives_reentry_without_paid_repeat`.
+- **Regresiones en flujos vigentes:** **0**. Todas las pruebas retenidas de flujos activos (Dashboard, Proyectos, Backlog, Model Admin, Proveedores, PWA y Autenticación) ejecutaron exitosamente.
+- **Validación OpenSpec:** `openspec validate req-316-poda-1-retirar-codigo-persistencia --strict` aprobado con exit code 0.
+- **Validación Alembic:** Generación DDL offline (`alembic upgrade head --sql` y `alembic downgrade poda01_retire_orphaned_persistence:f14_provider_model_enablement --sql`) validada con código 0 demostrando `DROP TABLE` limpio y recreación simétrica.
+- **Validación de preflight de invariantes:** `verify_physical_schema_invariants` comprobado contra metadatos y revisión head.
 
 ---
 
 ## 6. Métricas cuantitativas del cambio
 
-- **Archivos modificados/retirados:** 15 archivos de código y pruebas (+ 2 archivos de inventario y migración).
-- **Líneas de código y pruebas retiradas:** -2,706 líneas en el código base.
-- **Líneas netas agregadas:** +39 líneas (migración Alembic simétrica y adaptadores no-op de compatibilidad).
+Según `git diff --stat 6b7a405..HEAD`:
+- **Archivos intervenidos en total:** 22 archivos (15 de código/tests + 6 de OpenSpec + 1 migración Alembic).
+- **Líneas eliminadas:** 2.701 líneas.
+- **Líneas agregadas:** 590 líneas (documentación de Change, migración simétrica y tests de invariantes).
