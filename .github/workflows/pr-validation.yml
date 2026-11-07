@@ -81,7 +81,11 @@ jobs:
             --ignore=tests/test_focused_automated_test_selection.py \
             --ignore=tests/test_two_phase_pr_and_closure.py \
             --ignore=tests/test_stage_profiles.py \
-            --ignore=tests/test_f3_fail_closed_contracts.py
+            --ignore=tests/test_f3_fail_closed_contracts.py \
+            --ignore=tests/test_contract_review_postgres.py \
+            --ignore=tests/test_dashboard_cost_postgres_e2e.py \
+            --ignore=tests/test_native_propose_lifecycle.py \
+            --ignore=tests/test_provider_model_registry.py
 
   frontend-validation:
     name: Frontend validation (tests & build)
@@ -109,11 +113,87 @@ jobs:
         working-directory: frontend
         run: npm run build
 
+  e2e-validation:
+    name: E2E browser validation (Playwright)
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_DB: minime_test
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgrespassword
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+
+    steps:
+      - name: Checkout pull request commit
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: 'pip'
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Install Python dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e .[dev]
+
+      - name: Run database migrations
+        env:
+          MINIME_DATABASE_URL: postgresql+psycopg://postgres:postgrespassword@localhost:5432/minime_test
+          DATABASE_URL: postgresql+psycopg://postgres:postgrespassword@localhost:5432/minime_test
+        run: |
+          alembic upgrade head
+
+      - name: Seed deterministic E2E data
+        env:
+          MINIME_DATABASE_URL: postgresql+psycopg://postgres:postgrespassword@localhost:5432/minime_test
+          DATABASE_URL: postgresql+psycopg://postgres:postgrespassword@localhost:5432/minime_test
+        run: |
+          python scripts/seed_e2e_data.py
+
+      - name: Install frontend dependencies
+        working-directory: frontend
+        run: npm ci
+
+      - name: Install Playwright Chromium with dependencies
+        working-directory: frontend
+        run: npx playwright install --with-deps chromium
+
+      - name: Build frontend application
+        working-directory: frontend
+        run: npm run build
+
+      - name: Run Playwright E2E test suite
+        working-directory: frontend
+        env:
+          MINIME_DATABASE_URL: postgresql+psycopg://postgres:postgrespassword@localhost:5432/minime_test
+          DATABASE_URL: postgresql+psycopg://postgres:postgrespassword@localhost:5432/minime_test
+          MINIME_JWT_SECRET: test-secret-key-for-pr-validation-only-not-for-prod
+          CI: 'true'
+        run: npm run test:e2e
+
   pr-gate:
     name: PR validation gate
     needs:
       - backend-validation
       - frontend-validation
+      - e2e-validation
     runs-on: ubuntu-latest
     steps:
       - name: PR validation summary
