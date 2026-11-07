@@ -1,8 +1,9 @@
 import { test, expect } from '@playwright/test';
-import { resetProjectState, waitForAppMounted, TEST_PROJECT_ID } from './helpers';
+import { resetProjectState, setupAuthSession, waitForAppMounted, TEST_PROJECT_ID } from './helpers';
 
 test.describe('Project Pause and Resume Lifecycle', () => {
-  test.beforeEach(async ({ request }) => {
+  test.beforeEach(async ({ context, request }) => {
+    await setupAuthSession(context);
     await resetProjectState(request, TEST_PROJECT_ID);
   });
 

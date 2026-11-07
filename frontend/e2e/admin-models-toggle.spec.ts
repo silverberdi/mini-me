@@ -1,8 +1,9 @@
 import { test, expect } from '@playwright/test';
-import { resetModelEnablement, waitForAppMounted, TEST_MODEL_ID } from './helpers';
+import { resetModelEnablement, setupAuthSession, waitForAppMounted, TEST_MODEL_ID } from './helpers';
 
 test.describe('Provider Model Administration Toggle', () => {
-  test.beforeEach(async ({ request }) => {
+  test.beforeEach(async ({ context, request }) => {
+    await setupAuthSession(context);
     await resetModelEnablement(request, TEST_MODEL_ID);
   });
 

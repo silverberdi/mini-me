@@ -1,8 +1,9 @@
 import { test, expect } from '@playwright/test';
-import { waitForAppMounted } from './helpers';
+import { setupAuthSession, waitForAppMounted } from './helpers';
 
 test.describe('Observable Error Feedback and Runtime Resilience', () => {
-  test('displays observable error notification upon API failure without crashing Angular shell', async ({ page }) => {
+  test('displays observable error notification upon API failure without crashing Angular shell', async ({ context, page }) => {
+    await setupAuthSession(context);
     // 1. Navigate to /administracion/modelos-proveedores
     await page.goto('/administracion/modelos-proveedores');
     await waitForAppMounted(page);
