@@ -28,10 +28,10 @@ test.describe('Human Gate Lifecycle and Observability', () => {
     }
 
     // 5. Verify Diagnostic section reflects human intervention required and does NOT claim "Sin anomalías"
-    const anomalyReport = page.locator('div', { hasText: '✓ Sin anomalías reportadas' });
+    const anomalyReport = page.getByText('✓ Sin anomalías reportadas');
     await expect(anomalyReport).toBeHidden();
 
-    const interventionNotice = page.locator('div', { hasText: '⚠️ Intervención humana requerida' });
+    const interventionNotice = page.getByText('⚠️ Intervención humana requerida');
     await expect(interventionNotice).toBeVisible();
 
     // 6. Verify option buttons are displayed
@@ -62,7 +62,7 @@ test.describe('Human Gate Lifecycle and Observability', () => {
     await expect(page.locator('h3', { hasText: 'Atención Humana Requerida (HUMAN_REQUIRED)' })).toBeHidden({ timeout: 10000 });
 
     // Diagnóstico section now shows "Sin anomalías reportadas"
-    await expect(page.locator('div', { hasText: '✓ Sin anomalías reportadas' })).toBeVisible();
-    await expect(page.locator('div', { hasText: '⚠️ Intervención humana requerida' })).toBeHidden();
+    await expect(page.getByText('✓ Sin anomalías reportadas')).toBeVisible();
+    await expect(page.getByText('⚠️ Intervención humana requerida')).toBeHidden();
   });
 });
