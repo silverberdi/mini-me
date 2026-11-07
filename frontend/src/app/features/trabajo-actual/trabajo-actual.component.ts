@@ -108,6 +108,21 @@ interface PipelineStage {
             <span>Etapa actual observada: <strong class="text-sky-400">{{ targetRun()?.stage || 'UNKNOWN' }}</strong></span>
             <span>Salidas y evidencias vinculadas a SHA duradero</span>
           </div>
+
+          <div class="p-4 rounded-xl bg-slate-900/60 border border-slate-700/50 space-y-2" aria-label="Complejidad asignada">
+            <div class="flex flex-wrap items-center justify-between gap-2">
+              <span class="text-xs font-semibold uppercase tracking-wider text-slate-300 font-mono">Complejidad asignada</span>
+              <span class="px-2.5 py-1 rounded-lg bg-slate-800 border border-slate-700 text-xs font-bold text-sky-300 font-mono">
+                {{ assignedComplexity() }}
+              </span>
+            </div>
+            <p *ngIf="complexityEvidence()" class="text-xs text-slate-300 whitespace-pre-wrap">
+              <strong class="text-slate-400">Evidencia:</strong> {{ complexityEvidence() }}
+            </p>
+            <p *ngIf="isHighComplexity()" class="text-xs text-amber-200" role="status">
+              La complejidad alta requiere revisión de propuesta y revisión de código; esta indicación no confirma que esas revisiones ya hayan ocurrido.
+            </p>
+          </div>
         </div>
 
         <div *ngIf="isGateResponsePending()" class="p-4 rounded-xl bg-sky-500/10 border border-sky-500/30 text-sm text-sky-200" role="status" aria-live="polite">
@@ -347,6 +362,28 @@ export class TrabajoActualComponent {
     // Default only to current work; historical runs require explicit selection.
     return runs.find(r => r.is_active) || null;
   });
+
+  assignedComplexity(): 'high' | 'moderate' | 'low' | 'Pendiente' {
+    const complexity = this.targetRun()?.stop_details?.['complexity'];
+    return complexity === 'high' || complexity === 'moderate' || complexity === 'low'
+      ? complexity
+      : 'Pendiente';
+  }
+
+  complexityEvidence(): string | null {
+    const evidence = this.targetRun()?.stop_details?.['complexity_evidence'];
+    if (evidence === null || evidence === undefined || evidence === '') return null;
+    if (typeof evidence === 'string') return evidence;
+    try {
+      return JSON.stringify(evidence);
+    } catch {
+      return null;
+    }
+  }
+
+  isHighComplexity(): boolean {
+    return this.targetRun()?.stop_details?.['complexity'] === 'high';
+  }
 
   constructor() {
     effect(() => {
