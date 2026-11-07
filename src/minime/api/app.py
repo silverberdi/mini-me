@@ -2862,6 +2862,12 @@ else:
 )
 @app.api_route("/proyectos", methods=["GET", "HEAD"], tags=["dashboard-ui"], response_model=None)
 @app.api_route("/backlog", methods=["GET", "HEAD"], tags=["dashboard-ui"], response_model=None)
+@app.api_route(
+    "/administracion/modelos-proveedores",
+    methods=["GET", "HEAD"],
+    tags=["dashboard-ui"],
+    response_model=None,
+)
 def get_dashboard_page() -> Response:
     """Serve the operations dashboard single-page web interface."""
     index_file = STATIC_DIR / "index.html"
