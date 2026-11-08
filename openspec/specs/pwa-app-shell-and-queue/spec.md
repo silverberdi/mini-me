@@ -6,27 +6,31 @@ TBD - created by archiving change 017-pwa-control-center. Update Purpose after a
 ## Requirements
 
 ### Requirement: PWA Application Shell and Navigation
-The system SHALL provide one Spanish web application with exactly five independent routed views: Dashboard, Trabajo, Trabajo actual, Proyectos and Backlog. Only Dashboard and Proyectos SHALL be primary navigation destinations. Dashboard SHALL link to Trabajo and Trabajo actual; Trabajo SHALL link to Trabajo actual; selected project detail SHALL link to its Backlog. Deep links, refresh, back and forward SHALL preserve authorized context. One bootstrap and one refresh lifecycle SHALL serve all views, with manual and 5s/10s/30s refresh options and no mutation during polling. A future frontend implementation MAY replace the legacy JavaScript view layer with Angular and TypeScript, but SHALL preserve these observable routes, navigation destinations and lifecycle guarantees without enabling F8 by this planning Change.
+The system SHALL provide one Spanish web application with exactly five independent routed views: Dashboard, Trabajo, Trabajo actual, Proyectos and Backlog. Only Dashboard and Proyectos SHALL be primary navigation destinations. Dashboard SHALL link to Trabajo and Trabajo actual; Trabajo SHALL link to Trabajo actual; selected project detail SHALL link to its Backlog. Deep links, back and forward SHALL preserve authorized context. One reactive event lifecycle and initial bootstrap SHALL serve all views without redundant manual refresh controls or periodic polling spinners. The client connection state SHALL reflect true network availability (`navigator.onLine`) and core server reachability, and SHALL NOT oscillate to a disconnected state during normal SSE reconnect cycles or transient secondary endpoint background failures.
 
 #### Scenario: View application shell with live health indicators
 - **WHEN** the authenticated application initializes
-- **THEN** it renders the brand header, backend connection state, compact health indicators and manual/5s/10s/30s refresh controls; scheduler and database health show only verified observations, with unavailable or stale sources explicitly labeled.
+- **THEN** it renders the brand header, stable backend connection indicator, compact health indicators and active project selector without manual refresh buttons or polling interval controls; scheduler and database health show only verified observations, with unavailable or stale sources explicitly labeled.
+
+#### Scenario: Background SSE reconnect preserves connected indicator
+- **WHEN** the server-sent events stream reconnects or experiences a transient transport interruption while browser network connectivity is active and core endpoints respond
+- **THEN** the application maintains its connected state and does not flash or latch the transversal disconnection banner.
 
 #### Scenario: Toggle auto-refresh interval
-- **WHEN** the operator selects 5s while the application is polling at 10s
-- **THEN** the single polling timer changes to 5s and performs an immediate read without sending a mutation.
+- **WHEN** the operator navigates between views or routes
+- **THEN** updates are delivered reactively without requiring or rendering interval toggle controls and without sending polling mutations.
 
 #### Scenario: Navigate five independent views
 - **WHEN** the operator follows Dashboard → Trabajo → Trabajo actual and Proyectos → selected project → Backlog
-- **THEN** each destination has its own URL and content, with exactly two primary destinations and no stacked Home screens, regardless of whether the current frontend is legacy JavaScript or the future Angular implementation.
+- **THEN** each destination has its own URL and content, with exactly two primary destinations and no stacked Home screens.
 
 #### Scenario: Reload a contextual deep link
 - **WHEN** an authenticated operator reloads or traverses browser history for a project, Request, Run or stage link
 - **THEN** the same authorized selection is restored and missing or forbidden identities produce an explicit error without silently selecting another Run.
 
 #### Scenario: Change refresh interval without duplication
-- **WHEN** the operator changes from 10s to 5s while switching views
-- **THEN** a single refresh lifecycle uses 5s, performs an immediate read and neither duplicates listeners nor starts work.
+- **WHEN** the operator switches views while real-time execution events arrive
+- **THEN** a single reactive event lifecycle handles updates and neither duplicates listeners nor starts background polling loops.
 
 ### Requirement: KPI Summary Overview Grid
 The system SHALL present Dashboard for an explicitly identified project in focus, with analog project and current Request/task progress gauges, model quota gauges, completed-Request effectiveness, and compact human attention and operational health. Every measured value SHALL expose source, unit, scope, observation time and freshness. Percentages SHALL require a verified numerator and denominator; absent data SHALL be labeled No disponible, never zero or fabricated. Administrative ACTIVE SHALL NOT imply a global executor selection or a started Run. A frontend migration SHALL preserve the same verified data semantics and SHALL NOT move KPI authority or calculations into the client.
