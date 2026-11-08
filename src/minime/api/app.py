@@ -51,6 +51,7 @@ from minime.domain.models import (
     Change,
     ContextDiscoveryReport,
     Event,
+    get_active_human_payload,
     OperatorActionRecord,
     OperatorIdentityDTO,
     ProjectConfigurationInput,
@@ -1550,7 +1551,7 @@ async def run_project_request(
         active_run = run_repo.get_for_update(active_runs[0].run_id)
         if active_run is None or not active_run.is_active:
             raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="The active run changed before the gate response was accepted")
-        active_payload = (active_run.stop_details or {}).get("human_payload")
+        active_payload = get_active_human_payload(active_run)
         if not isinstance(active_payload, dict):
             raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="There is no current human gate to answer")
         gate_fingerprint = hashlib.sha256(json.dumps({
@@ -2313,20 +2314,11 @@ def list_orchestration_runs(
         d = r.model_dump()
         stop_details = d.get("stop_details") or {}
         current_stage = getattr(r.current_stage, "value", r.current_stage)
-        human_payload = stop_details.get("human_payload")
-        if not (
-            isinstance(human_payload, dict)
-            and human_payload.get("stage") == current_stage
-        ):
-            human_payload = None
-
-        if not isinstance(human_payload, dict):
-            human_payload = None
-
-        if human_payload is None:
-            stop_details.pop("human_payload", None)
+        active_payload = get_active_human_payload(r)
+        if active_payload is not None:
+            stop_details["human_payload"] = active_payload
         else:
-            stop_details["human_payload"] = human_payload
+            stop_details.pop("human_payload", None)
 
         human_gate = getattr(r.human_gate, "value", r.human_gate)
         stop_outcome = getattr(r.stop_outcome, "value", r.stop_outcome)
@@ -2334,7 +2326,7 @@ def list_orchestration_runs(
             current_stage == "COMPLETED"
         )
         is_human_required = r.is_active and not is_terminal and (
-            bool(human_payload)
+            bool(active_payload)
             or human_gate == "NEEDS_HUMAN"
             or stop_outcome == "NEEDS_HUMAN"
         )
@@ -2362,6 +2354,11 @@ def list_orchestration_runs(
             d["human_gate"] = "HUMAN_REQUIRED"
         else:
             d["status"] = "RUNNING" if r.is_active else "COMPLETED"
+            if r.is_active and not active_payload:
+                if human_gate == "NEEDS_HUMAN":
+                    d["human_gate"] = None
+                if stop_outcome == "NEEDS_HUMAN":
+                    d["stop_outcome"] = None
         d["stop_details"] = stop_details
         d["stage"] = r.current_stage.value if r.current_stage else None
         results.append(d)

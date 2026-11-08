@@ -13,6 +13,8 @@ from sqlalchemy import select
 from minime.db.models import (
     AuthorizedOperatorModel,
     AuthSessionModel,
+    OrchestrationRunModel,
+    ProjectManagedRepositoryBindingModel,
     ProjectModel,
     ProviderModelRegistryModel,
 )
@@ -115,6 +117,38 @@ def seed_e2e_state() -> None:
             project.agent_profiles = profiles
             project.updated_at = now
 
+        # 3.b Ensure managed repository binding exists for e2e-project
+        os.makedirs("/tmp/e2e-project-repo", exist_ok=True)
+        os.makedirs("/tmp/e2e-project-worktrees", exist_ok=True)
+        binding = session.execute(
+            select(ProjectManagedRepositoryBindingModel).where(
+                ProjectManagedRepositoryBindingModel.project_id == "e2e-project"
+            )
+        ).scalar_one_or_none()
+        if binding is None:
+            logger.info("Creating e2e-project repository binding...")
+            binding = ProjectManagedRepositoryBindingModel(
+                id="e2e-project-binding",
+                project_id="e2e-project",
+                canonical_repository_identity="github.com/test-owner/e2e-project",
+                remote_name="origin",
+                managed_repository_root="/tmp/e2e-project-repo",
+                worktree_parent_dir="/tmp/e2e-project-worktrees",
+                default_base_branch="main",
+                ownership_marker_filename=".minime-managed-project.json",
+                is_valid=True,
+                mismatch_reasons=[],
+                created_at=now,
+                updated_at=now,
+            )
+            session.add(binding)
+        else:
+            logger.info("Resetting e2e-project repository binding...")
+            binding.managed_repository_root = "/tmp/e2e-project-repo"
+            binding.worktree_parent_dir = "/tmp/e2e-project-worktrees"
+            binding.is_valid = True
+            binding.updated_at = now
+
         # 4. Ensure deepseek-chat provider model is active and enabled
         model = session.execute(
             select(ProviderModelRegistryModel).where(
@@ -145,6 +179,52 @@ def seed_e2e_state() -> None:
             model.is_enabled = True
             model.discovery_status = "available"
             model.updated_at = now
+
+        # 5. Ensure an active OrchestrationRun with HUMAN_REQUIRED exists for human-gate E2E test
+        e2e_run = session.execute(
+            select(OrchestrationRunModel).where(
+                OrchestrationRunModel.id == "e2e-human-gate-run"
+            )
+        ).scalar_one_or_none()
+
+        human_payload = {
+            "gate": "explore_clarification",
+            "stage": "EXPLORING",
+            "question": "¿Desea persistir los datos en PostgreSQL o en memoria local?",
+            "options": [
+                {"id": "postgres", "label": "PostgreSQL"},
+                {"id": "memory", "label": "Memoria local"},
+            ],
+            "explanation_es": "El agente en etapa Explore requiere aclarar la estrategia de persistencia.",
+        }
+
+        if e2e_run is None:
+            logger.info("Creating e2e-human-gate-run in database...")
+            e2e_run = OrchestrationRunModel(
+                id="e2e-human-gate-run",
+                project_id="e2e-project",
+                change_name="issue-321-human-gate-test",
+                base_sha="0274272890abcdef1234567890abcdef12345678",
+                current_stage="EXPLORING",
+                resumable_stage="EXPLORING",
+                stop_outcome="NEEDS_HUMAN",
+                human_gate="NEEDS_HUMAN",
+                stop_reason="Clarification required",
+                stop_details={"human_payload": human_payload},
+                is_active=True,
+                created_at=now,
+                updated_at=now,
+            )
+            session.add(e2e_run)
+        else:
+            logger.info("Resetting e2e-human-gate-run to initial HUMAN_REQUIRED state...")
+            e2e_run.current_stage = "EXPLORING"
+            e2e_run.resumable_stage = "EXPLORING"
+            e2e_run.stop_outcome = "NEEDS_HUMAN"
+            e2e_run.human_gate = "NEEDS_HUMAN"
+            e2e_run.stop_details = {"human_payload": human_payload}
+            e2e_run.is_active = True
+            e2e_run.updated_at = now
 
         session.commit()
         logger.info("E2E database seeding completed successfully.")

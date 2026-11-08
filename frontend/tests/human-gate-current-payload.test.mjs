@@ -68,3 +68,19 @@ test('operator response submits through the existing authorized request endpoint
   assert.match(component, /humanResponseIdempotencyKey\(run, answer\)/);
   assert.match(component, /await this\.refresh\.read\(\)/);
 });
+
+test('Trabajo actual renders Spanish explanation and Apply diagnostic context', () => {
+  assert.match(component, /humanGateExplanationEs\(\)/);
+  assert.match(component, /Contexto Explicativo \(Español\):/);
+  assert.match(component, /humanGateAttempts\(\)/);
+  assert.match(component, /Diagnóstico de Implementación \(Apply\):/);
+  assert.match(component, /humanGatePendingTasks\(\)/);
+  assert.match(component, /humanGateCandidateSha\(\)/);
+  assert.match(component, /humanGateLogsAvailable\(\)/);
+});
+
+test('Trabajo actual suppresses "Sin anomalías reportadas" when human attention is required', () => {
+  assert.match(component, /!targetRun\(\)\?\.error_detail && !isHumanRequired\(\)/);
+  assert.match(component, /Intervención humana requerida/);
+});
+

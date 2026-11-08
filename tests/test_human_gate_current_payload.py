@@ -434,13 +434,39 @@ def test_run_projection_exposes_only_active_payload(in_memory_uow):
     assert projected["stop_details"]["human_payload"]["options"] == ["Estoy enterado"]
 
 
-def test_explore_checkpoint_is_not_promoted_to_active_payload(in_memory_uow):
+def test_explore_checkpoint_is_promoted_to_active_payload(in_memory_uow):
     run = _run(
         OrchestrationStage.EXPLORING,
         details={
             "explore_checkpoint": {
                 "status": "HUMAN_REQUIRED",
                 "human_payload": {"question": "Current Explore question", "options": ["one", "two"]},
+            }
+        },
+    )
+    in_memory_uow.orchestration_runs.save(run)
+
+    try:
+        with _get_runs_client(in_memory_uow) as client:
+            response = client.get("/api/v1/orchestration/runs")
+        projected = response.json()[0]
+    finally:
+        app.dependency_overrides.clear()
+
+    assert response.status_code == 200
+    assert projected["status"] == "HUMAN_REQUIRED"
+    assert projected["human_gate"] == "HUMAN_REQUIRED"
+    assert projected["stop_details"]["human_payload"]["question"] == "Current Explore question"
+    assert projected["stop_details"]["human_payload"]["options"] == ["one", "two"]
+
+
+def test_resolved_explore_checkpoint_does_not_resurface(in_memory_uow):
+    run = _run(
+        OrchestrationStage.PROPOSING,
+        details={
+            "explore_checkpoint": {
+                "status": "RESOLVED",
+                "human_payload": {"question": "Old resolved Explore question", "options": ["one", "two"]},
             }
         },
     )
@@ -576,3 +602,102 @@ def test_operator_response_endpoint_keeps_existing_run_response_path(
     from minime.api.app import _accepted_operations
 
     _accepted_operations.pop(("project-human-gate", schedule.call_args.args[2]), None)
+
+
+def test_explore_checkpoint_accepts_response_without_409_and_resolves(
+    in_memory_uow, monkeypatch, tmp_path: Path
+):
+    repo_root = tmp_path / "repo"
+    worktrees = tmp_path / "worktrees"
+    repo_root.mkdir()
+    worktrees.mkdir()
+    setup_managed_repository_fixture(
+        in_memory_uow,
+        "project-explore-test",
+        repo_root,
+        worktrees,
+        canonical_repository_identity="github.com/org/project-explore-test",
+    )
+    in_memory_uow.projects.save(
+        Project(
+            project_id="project-explore-test",
+            display_name="Explore gate test",
+            repository="org/project-explore-test",
+        )
+    )
+    run = _run(OrchestrationStage.EXPLORING)
+    run.project_id = "project-explore-test"
+    run.stop_details = {
+        "explore_checkpoint": {
+            "status": "HUMAN_REQUIRED",
+            "attempt_id": "explore-attempt-1",
+            "human_payload": {
+                "question": "¿Desea usar PostgreSQL o SQLite?",
+                "options": ["PostgreSQL", "SQLite"],
+            },
+        }
+    }
+    in_memory_uow.orchestration_runs.save(run)
+    operator = AuthorizedOperator(email="operator@example.com", name="Operator", roles=["admin"])
+    app.dependency_overrides[get_uow] = lambda: in_memory_uow
+    app.dependency_overrides[get_current_operator] = lambda: operator
+    schedule = MagicMock(return_value="operation-explore-gate")
+    monkeypatch.setattr("minime.api.app._schedule_request_worker", schedule)
+
+    try:
+        with TestClient(app) as client:
+            # 1. Verify Explore gate is projected as HUMAN_REQUIRED
+            get_resp = client.get("/api/v1/orchestration/runs")
+            assert get_resp.status_code == 200
+            proj = get_resp.json()[0]
+            assert proj["status"] == "HUMAN_REQUIRED"
+            assert proj["human_gate"] == "HUMAN_REQUIRED"
+            assert proj["stop_details"]["human_payload"]["question"] == "¿Desea usar PostgreSQL o SQLite?"
+
+            # 2. Submit response to Explore gate - must be accepted without 409 Conflict
+            post_resp = client.post(
+                "/api/v1/projects/project-explore-test/requests/run",
+                json={
+                    "operator_clarification": "PostgreSQL",
+                    "idempotency_key": "explore-clarification-key-1",
+                },
+            )
+            assert post_resp.status_code == 202
+            assert post_resp.json()["status"] == "ACCEPTED"
+
+            # 3. Verify operator action was recorded
+            actions = in_memory_uow.operator_actions.list_by_run(run.run_id)
+            assert len(actions) == 1
+            assert actions[0].parameters_json["accepted_response"] == "PostgreSQL"
+
+            # 4. Process gate resolution via coordinator
+            coordinator = NativeOrchestrationCoordinator(
+                uow_factory=lambda: in_memory_uow,
+                github_adapter=MagicMock(),
+                worktree_manager=MagicMock(),
+                agent_runner=MagicMock(),
+            )
+            coordinator._clear_current_human_gate(in_memory_uow, run, response_text="PostgreSQL")
+            in_memory_uow.orchestration_runs.save(run)
+            in_memory_uow.commit()
+
+            # 5. Verify gate was resolved in database and cleared
+            stored = in_memory_uow.orchestration_runs.get_by_id(run.run_id)
+            assert stored.stop_details["explore_checkpoint"]["status"] == "RESOLVED"
+            assert "human_payload" not in stored.stop_details
+            assert stored.human_gate is None
+            assert len(stored.stop_details.get("resolved_human_gates", [])) == 1
+            assert stored.stop_details["resolved_human_gates"][0]["response"] == "PostgreSQL"
+
+            # 6. Verify reload does not resurrect the answered gate
+            get_after = client.get("/api/v1/orchestration/runs")
+            assert get_after.status_code == 200
+            proj_after = get_after.json()[0]
+            assert proj_after["status"] == "RUNNING"
+            assert proj_after.get("human_gate") is None
+            assert "human_payload" not in proj_after["stop_details"]
+    finally:
+        app.dependency_overrides.clear()
+        from minime.api.app import _accepted_operations
+        _accepted_operations.pop(("project-explore-test", "explore-clarification-key-1"), None)
+

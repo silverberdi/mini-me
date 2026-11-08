@@ -1061,6 +1061,70 @@ class OrchestrationRun(BaseModel):
     def candidate_sha(self, val: str | None) -> None:
         self.current_candidate_sha = val
 
+    def get_active_human_payload(self) -> dict[str, Any] | None:
+        """Resolve the authoritative active human gate payload for this run."""
+        return get_active_human_payload(self)
+
+
+def get_active_human_payload(run: Any) -> dict[str, Any] | None:
+    """Resolve the authoritative active human gate payload for an orchestration run.
+
+    Returns None if the run is terminal, inactive, or has no unresolved gate.
+    Unifies current human_payload, Explore checkpoint, and stage-specific escalations.
+    """
+    if run is None:
+        return None
+
+    is_active = getattr(run, "is_active", True) if not isinstance(run, dict) else run.get("is_active", True)
+    if not is_active:
+        return None
+
+    current_stage_raw = getattr(run, "current_stage", None) if not isinstance(run, dict) else run.get("current_stage")
+    current_stage = getattr(current_stage_raw, "value", current_stage_raw)
+
+    stop_outcome_raw = getattr(run, "stop_outcome", None) if not isinstance(run, dict) else run.get("stop_outcome")
+    stop_outcome = getattr(stop_outcome_raw, "value", stop_outcome_raw)
+
+    if stop_outcome in {"COMPLETED", "FAILED", "CANCELLED"} or current_stage == "COMPLETED":
+        return None
+
+    stop_details = getattr(run, "stop_details", None) if not isinstance(run, dict) else run.get("stop_details")
+    if not isinstance(stop_details, dict):
+        return None
+
+    # 1. Primary active human_payload
+    human_payload = stop_details.get("human_payload")
+    if isinstance(human_payload, dict) and human_payload:
+        stage = human_payload.get("stage")
+        if not stage or stage == current_stage:
+            return dict(human_payload)
+
+    # 2. Explore checkpoint
+    if current_stage == "EXPLORING":
+        explore_cp = stop_details.get("explore_checkpoint")
+        if isinstance(explore_cp, dict) and explore_cp.get("status") == "HUMAN_REQUIRED":
+            payload = explore_cp.get("human_payload")
+            if isinstance(payload, dict) and payload:
+                payload_copy = dict(payload)
+                payload_copy.setdefault("stage", "EXPLORING")
+                payload_copy.setdefault("gate", "explore_clarification")
+                payload_copy.setdefault("gate_id", explore_cp.get("attempt_id") or "explore-gate")
+                return payload_copy
+
+    # 3. Propose human required
+    if current_stage == "PROPOSING":
+        propose_hr = stop_details.get("propose_human_required")
+        if isinstance(propose_hr, dict) and propose_hr.get("status") != "RESOLVED":
+            payload = propose_hr.get("human_payload") or propose_hr
+            if isinstance(payload, dict) and payload.get("question"):
+                payload_copy = dict(payload)
+                payload_copy.setdefault("stage", "PROPOSING")
+                payload_copy.setdefault("gate", "propose_clarification")
+                return payload_copy
+
+    return None
+
+
 
 class OrchestrationStageEvent(BaseModel):
     """Durable stage transition event for an orchestration run."""
