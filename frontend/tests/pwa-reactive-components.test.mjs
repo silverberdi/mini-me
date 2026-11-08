@@ -67,7 +67,9 @@ test('TrabajoActualComponent optimistically hides human gate and shows inline pr
   assert.match(trabajoActualSrc, /catch \(e: any\) \{\s*this\.pendingGateAcknowledgement\.set\(null\);/);
 });
 
-test('Global header includes manual refresh action that forces full revalidation', () => {
-  assert.match(appSrc, /button \(click\)="refresh\.read\(true\)"/);
-  assert.match(appSrc, /aria-label="Refrescar"/);
+test('Global header omits manual refresh button and syncing labels in favor of reactive events', () => {
+  assert.doesNotMatch(appSrc, /button \(click\)="refresh\.read\(true\)"/);
+  assert.doesNotMatch(appSrc, /aria-label="Refrescar"/);
+  assert.doesNotMatch(appSrc, /Sincronizando…/);
+  assert.match(appSrc, /refresh\.isConnected\(\)/);
 });

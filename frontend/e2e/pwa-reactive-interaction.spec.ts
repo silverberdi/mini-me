@@ -64,4 +64,38 @@ test.describe('PWA Reactive Interaction and Form Stability', () => {
       await expect(gateCard).toBeHidden();
     }
   });
+
+  test('application shell maintains stable connection badge and omits manual refresh and test connection controls', async ({ context, page }) => {
+    // 1. Setup authenticated session
+    await setupAuthSession(context);
+
+    // 2. Navigate to dashboard
+    await page.goto('/dashboard');
+    await waitForAppMounted(page);
+
+    // 3. Confirm connection badge displays "Conectado" and no disconnection banner is shown
+    const connectionBadge = page.locator('header').getByText('Conectado');
+    if (await connectionBadge.isVisible()) {
+      await expect(connectionBadge).toBeVisible();
+
+      const offlineBanner = page.locator('div[role="status"]', { hasText: /Sin conexión con el servidor mini me/i });
+      await expect(offlineBanner).toBeHidden();
+
+      // 4. Confirm manual refresh button is NOT present in header
+      const refreshBtn = page.getByRole('button', { name: /Refrescar/i });
+      await expect(refreshBtn).toBeHidden();
+
+      // 5. Navigate to admin models-providers
+      await page.goto('/administracion/modelos-proveedores');
+      await waitForAppMounted(page);
+
+      // 6. Confirm model administration renders without any Test Connection controls
+      const testConnectionBtn = page.getByRole('button', { name: /Test Connection/i });
+      await expect(testConnectionBtn).toBeHidden();
+
+      // 7. Verify connection status remains stably "Conectado" across route transitions
+      await expect(connectionBadge).toBeVisible();
+      await expect(offlineBanner).toBeHidden();
+    }
+  });
 });

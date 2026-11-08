@@ -35,3 +35,17 @@ test('refresh lifecycle marks retained observations stale and refreshes on recon
   assert.match(refresh, /void this\.read\(\)/);
   assert.match(refresh, /removeEventListener\('offline'/);
 });
+
+test('refresh lifecycle preserves isConnected during SSE reconnections when online', () => {
+  const refresh = read('src/app/core/refresh.service.ts');
+  assert.match(refresh, /this\.events\.onerror/);
+  assert.doesNotMatch(refresh, /readyState === EventSource\.CLOSED\)\s*\{\s*this\.isConnected\.set\(false\)/);
+  assert.match(refresh, /this\.isConnected\.set\(true\);\s*void this\.read\(\);/);
+});
+
+test('refresh lifecycle disconnects only when browser is offline or both core endpoints fail', () => {
+  const refresh = read('src/app/core/refresh.service.ts');
+  assert.match(refresh, /const browserOffline = typeof navigator !== 'undefined' && !navigator\.onLine;/);
+  assert.match(refresh, /const coreOffline = Boolean\(projRes\.offline && runsRes\.offline\);/);
+  assert.match(refresh, /if \(browserOffline \|\| coreOffline\) \{\s*this\.isConnected\.set\(false\);/);
+});
