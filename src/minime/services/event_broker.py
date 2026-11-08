@@ -11,10 +11,11 @@ from typing import Any
 class EventBroker:
     """Fan out bounded operational events without becoming durable state."""
 
-    def __init__(self, max_subscribers: int = 128, queue_size: int = 64) -> None:
+    def __init__(self, max_subscribers: int = 128, queue_size: int = 64, keepalive_seconds: float = 15.0) -> None:
         self._subscribers: set[asyncio.Queue[dict[str, Any]]] = set()
         self._max_subscribers = max_subscribers
         self._queue_size = queue_size
+        self._keepalive_seconds = keepalive_seconds
         self._lock = asyncio.Lock()
 
     async def subscribe(self) -> AsyncIterator[str]:
@@ -25,8 +26,11 @@ class EventBroker:
             self._subscribers.add(queue)
         try:
             while True:
-                event = await queue.get()
-                yield f"event: {event['type']}\ndata: {json.dumps(event['data'], separators=(',', ':'))}\n\n"
+                try:
+                    event = await asyncio.wait_for(queue.get(), timeout=self._keepalive_seconds)
+                    yield f"event: {event['type']}\ndata: {json.dumps(event['data'], separators=(',', ':'))}\n\n"
+                except asyncio.TimeoutError:
+                    yield ": keepalive\n\n"
         finally:
             async with self._lock:
                 self._subscribers.discard(queue)
