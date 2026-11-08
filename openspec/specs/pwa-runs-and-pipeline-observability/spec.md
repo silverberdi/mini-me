@@ -61,7 +61,7 @@ The system SHALL display Trabajo actual as an independent route with actual Open
 - **THEN** it reads the selected Run’s `stop_details.complexity` and `stop_details.complexity_evidence` already returned by `GET /api/v1/orchestration/runs`, and does not modify backend evaluation or persistence logic.
 
 ### Requirement: Prominent Attention Banner for Human Gates
-The system SHALL notify actual HUMAN_REQUIRED on Dashboard and link to the exact Trabajo actual Run and active stage for resolution. Trabajo actual SHALL render the question and options from the current unresolved gate's durable payload, and SHALL keep the existing authorized operator-response path available. When a later scoped gate replaces an earlier one, the later gate's question and options SHALL become visible after refresh or navigation; a resolved earlier gate's payload SHALL NOT be used as fallback or displayed as current. Original workflow wording and options SHALL be preserved, distinguished from labeled agent suggestions, with Spanish context, consequences and available authority. WAITING_CAPACITY, UNKNOWN and legacy status labels SHALL NOT independently create a human gate.
+The system SHALL notify actual HUMAN_REQUIRED on Dashboard and link to the exact Trabajo actual Run and active stage for resolution. Trabajo actual SHALL render the question and options from the current unresolved gate's durable payload, and SHALL keep the existing authorized operator-response path available. When a Run is in `NEEDS_HUMAN` or waiting on operator intervention, Trabajo actual and Dashboard attention indicators SHALL NOT report "Sin anomalías reportadas" or simulate normal execution. When a later scoped gate replaces an earlier one or a gate is resolved, the active gate SHALL reflect only the current unresolved request; a resolved earlier gate's payload SHALL NOT be used as fallback or displayed as current across page reloads or stage transitions. Original workflow wording and options SHALL be preserved verbatim, distinguished from labeled agent suggestions, with Spanish explanation of causes and consequences. For exhausted Apply recovery, the UI SHALL display diagnostic context (attempts, pending tasks, candidate SHA, test outcomes) and plainly indicate when logs are unavailable. WAITING_CAPACITY, UNKNOWN and legacy status labels SHALL NOT independently create a human gate.
 
 #### Scenario: Click attention banner to navigate to blocked run
 - **WHEN** the operator clicks the Dashboard attention alert for an authoritative unresolved HUMAN_REQUIRED
@@ -76,6 +76,19 @@ The system SHALL notify actual HUMAN_REQUIRED on Dashboard and link to the exact
 - **WHEN** the operator refreshes or reopens Trabajo actual for that Run
 - **THEN** the PWA displays the later gate's question and options from its current durable payload
 - **AND** does not display the resolved review question or its options as current.
+
+#### Scenario: Active human gate suppresses false normal status
+- **GIVEN** an active Run has an unresolved `HUMAN_REQUIRED` gate or `NEEDS_HUMAN` status
+- **WHEN** the operator views Trabajo actual or Dashboard attention summaries
+- **THEN** the UI indicates that human attention is required
+- **AND** does NOT display "Sin anomalías reportadas" or describe the Run as normally executing.
+
+#### Scenario: Exhausted Apply recovery displays actionable Spanish diagnosis
+- **GIVEN** an active Run halts at Apply recovery with exhausted attempts
+- **WHEN** the operator views the human intervention card in Trabajo actual
+- **THEN** the UI displays an actionable explanation in Spanish
+- **AND** details the attempts vs. limit, list of pending tasks, candidate commit SHA, and test outcomes
+- **AND** if logs are unavailable, explicitly discloses that execution details are absent rather than offering an ungrounded continue button.
 
 #### Scenario: Operator can answer the current gate
 - **GIVEN** Trabajo actual displays the active gate's question and options
