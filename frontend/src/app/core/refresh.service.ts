@@ -249,7 +249,15 @@ export class RefreshService implements OnDestroy {
     };
 
     this.events.onerror = () => {
-      this.isConnected.set(false);
+      if (typeof navigator !== 'undefined' && !navigator.onLine) {
+        this.isConnected.set(false);
+        this.stale.set(this.lastUpdated() !== null);
+      } else if (this.events?.readyState === EventSource.CLOSED) {
+        this.isConnected.set(false);
+        setTimeout(() => {
+          if (this.started) this.connectEvents();
+        }, 3000);
+      }
     };
   }
 
