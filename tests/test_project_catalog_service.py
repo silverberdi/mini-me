@@ -372,3 +372,71 @@ def test_provider_catalog_separates_metadata_from_connections():
     assert ado["available"] is False
     assert not any("repository_url" in item for item in catalog)
     assert not hasattr(_config().github, "global_project_number")
+
+
+def test_agent_catalog_caches_discovery_across_multiple_calls(monkeypatch):
+    import minime.services.project_catalog_service as catalog_module
+
+    call_count = 0
+
+    class CountingCapabilities:
+        async def discover_account_capabilities(self, timeout_seconds=10):
+            nonlocal call_count
+            call_count += 1
+            return {"models": {"live-codex": ["medium"]}}
+
+    monkeypatch.setattr(catalog_module.shutil, "which", lambda _: "/bin/fake-codex")
+    monkeypatch.setattr(
+        catalog_module,
+        "get_provider_adapter",
+        lambda provider_id, config: CountingCapabilities(),
+    )
+
+    service = ProjectCatalogService(_config(), _NativeSetup())
+    res1 = asyncio.run(service.agent_catalog())
+    res2 = asyncio.run(service.agent_catalog())
+
+    assert call_count == 1
+    assert res1 == res2
+
+
+def test_opencode_adapter_filters_models_to_configured_providers_only(monkeypatch):
+    from minime.adapters.provider_adapter import OpenCodeProviderAdapter
+
+    adapter = OpenCodeProviderAdapter()
+
+    # Mock _get_configured_providers to return only 'openrouter'
+    monkeypatch.setattr(adapter, "_get_configured_providers", lambda: {"openrouter"})
+    monkeypatch.setattr(adapter, "check_cli_present", lambda: True)
+
+    raw_output = b"\n".join([
+        b"openrouter/~anthropic/claude-fable-latest",
+        b"openrouter/~deepseek/deepseek-pro-latest",
+        b"deepseek/deepseek-chat",
+        b"opencode/beam-free",
+        b"ollama/gemma4:latest",
+    ])
+
+    class FakeProc:
+        returncode = 0
+        async def communicate(self):
+            return raw_output, b""
+
+    async def fake_subprocess_exec(*args, **kwargs):
+        return FakeProc()
+
+    monkeypatch.setattr(
+        "asyncio.create_subprocess_exec",
+        fake_subprocess_exec,
+    )
+    monkeypatch.setattr("shutil.which", lambda _: "/bin/opencode")
+
+    caps = asyncio.run(adapter.discover_account_capabilities())
+    models = caps.get("models", {})
+
+    assert "openrouter/~anthropic/claude-fable-latest" in models
+    assert "openrouter/~deepseek/deepseek-pro-latest" in models
+    assert "deepseek/deepseek-chat" not in models
+    assert "opencode/beam-free" not in models
+    assert "ollama/gemma4:latest" not in models
+

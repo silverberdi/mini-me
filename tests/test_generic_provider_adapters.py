@@ -230,6 +230,11 @@ async def test_opencode_adapter_discovery_parses_models(monkeypatch, tmp_path):
 
     adapter = OpenCodeProviderAdapter(executable="/bin/opencode")
     monkeypatch.setattr("minime.adapters.provider_adapter.shutil.which", lambda _: "/bin/opencode")
+    monkeypatch.setattr(
+        adapter,
+        "_get_configured_providers",
+        lambda: {"deepseek", "openrouter", "opencode"},
+    )
 
     async def fake_exec(*args, **kwargs):
         class _Proc:

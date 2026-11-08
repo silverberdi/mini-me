@@ -5,11 +5,12 @@ import { RouterModule, Router } from '@angular/router';
 import { RefreshService } from '../../core/refresh.service';
 import { ApiService } from '../../core/api.service';
 import { ProjectAgentProfile, ProjectExecutionPolicy } from '../../core/models';
+import { ModelComboboxComponent, ModelOption } from '../../shared/model-combobox.component';
 
 @Component({
   selector: 'app-proyectos',
   standalone: true,
-  imports: [CommonModule, FormsModule, RouterModule],
+  imports: [CommonModule, FormsModule, RouterModule, ModelComboboxComponent],
   template: `
     <div class="space-y-6">
       <!-- Header -->
@@ -222,48 +223,32 @@ import { ProjectAgentProfile, ProjectExecutionPolicy } from '../../core/models';
           </div>
 
           <div class="pt-3 border-t border-slate-800 space-y-3">
-            <h3 class="font-bold text-slate-200">Modelos Asignados por Etapa</h3>
+            <h3 class="font-bold text-slate-200">Modelos Asignados por Rol</h3>
 
             <div class="grid grid-cols-2 gap-3">
-              <div>
-                <label class="block text-slate-400 mb-1">Thinking (Exploración)</label>
-                <select [(ngModel)]="newProjectProfiles.thinking" name="model_thinking"
-                        class="w-full bg-slate-800 border border-slate-700 rounded-xl px-2.5 py-2 text-white focus:outline-none focus:border-sky-500 font-mono text-[11px]">
-                  <optgroup *ngFor="let g of modelGroups" [label]="g.name">
-                    <option *ngFor="let m of g.models" [value]="m.id">{{ m.label }}</option>
-                  </optgroup>
-                </select>
-              </div>
+              <app-model-combobox
+                label="Thinking (Exploración)"
+                [models]="availableModels"
+                [(modelValue)]="newProjectProfiles.thinking"
+              ></app-model-combobox>
 
-              <div>
-                <label class="block text-slate-400 mb-1">Execution (Código)</label>
-                <select [(ngModel)]="newProjectProfiles.execution" name="model_execution"
-                        class="w-full bg-slate-800 border border-slate-700 rounded-xl px-2.5 py-2 text-white focus:outline-none focus:border-sky-500 font-mono text-[11px]">
-                  <optgroup *ngFor="let g of modelGroups" [label]="g.name">
-                    <option *ngFor="let m of g.models" [value]="m.id">{{ m.label }}</option>
-                  </optgroup>
-                </select>
-              </div>
+              <app-model-combobox
+                label="Execution (Código)"
+                [models]="availableModels"
+                [(modelValue)]="newProjectProfiles.execution"
+              ></app-model-combobox>
 
-              <div>
-                <label class="block text-slate-400 mb-1">Review (Revisión)</label>
-                <select [(ngModel)]="newProjectProfiles.independent_review" name="model_review"
-                        class="w-full bg-slate-800 border border-slate-700 rounded-xl px-2.5 py-2 text-white focus:outline-none focus:border-sky-500 font-mono text-[11px]">
-                  <optgroup *ngFor="let g of modelGroups" [label]="g.name">
-                    <option *ngFor="let m of g.models" [value]="m.id">{{ m.label }}</option>
-                  </optgroup>
-                </select>
-              </div>
+              <app-model-combobox
+                label="Review (Revisión Independiente)"
+                [models]="availableModels"
+                [(modelValue)]="newProjectProfiles.independent_review"
+              ></app-model-combobox>
 
-              <div>
-                <label class="block text-slate-400 mb-1">Fallback (Respaldo)</label>
-                <select [(ngModel)]="newProjectProfiles.fallback" name="model_fallback"
-                        class="w-full bg-slate-800 border border-slate-700 rounded-xl px-2.5 py-2 text-white focus:outline-none focus:border-sky-500 font-mono text-[11px]">
-                  <optgroup *ngFor="let g of modelGroups" [label]="g.name">
-                    <option *ngFor="let m of g.models" [value]="m.id">{{ m.label }}</option>
-                  </optgroup>
-                </select>
-              </div>
+              <app-model-combobox
+                label="Fallback (Respaldo)"
+                [models]="availableModels"
+                [(modelValue)]="newProjectProfiles.fallback"
+              ></app-model-combobox>
             </div>
 
             <!-- Independence warning -->
@@ -322,48 +307,32 @@ import { ProjectAgentProfile, ProjectExecutionPolicy } from '../../core/models';
           </div>
 
           <div class="pt-3 border-t border-slate-800 space-y-3">
-            <h3 class="font-bold text-slate-200">Asignación de Modelos por Etapa</h3>
+            <h3 class="font-bold text-slate-200">Asignación de Modelos por Rol</h3>
 
             <div class="grid grid-cols-2 gap-3">
-              <div>
-                <label class="block text-slate-400 mb-1">Thinking (Exploración)</label>
-                <select [(ngModel)]="editProjectProfiles.thinking" name="edit_thinking"
-                        class="w-full bg-slate-800 border border-slate-700 rounded-xl px-2.5 py-2 text-white focus:outline-none focus:border-sky-500 font-mono text-[11px]">
-                  <optgroup *ngFor="let g of modelGroups" [label]="g.name">
-                    <option *ngFor="let m of g.models" [value]="m.id">{{ m.label }}</option>
-                  </optgroup>
-                </select>
-              </div>
+              <app-model-combobox
+                label="Thinking (Exploración)"
+                [models]="availableModels"
+                [(modelValue)]="editProjectProfiles.thinking"
+              ></app-model-combobox>
 
-              <div>
-                <label class="block text-slate-400 mb-1">Execution (Implementación)</label>
-                <select [(ngModel)]="editProjectProfiles.execution" name="edit_execution"
-                        class="w-full bg-slate-800 border border-slate-700 rounded-xl px-2.5 py-2 text-white focus:outline-none focus:border-sky-500 font-mono text-[11px]">
-                  <optgroup *ngFor="let g of modelGroups" [label]="g.name">
-                    <option *ngFor="let m of g.models" [value]="m.id">{{ m.label }}</option>
-                  </optgroup>
-                </select>
-              </div>
+              <app-model-combobox
+                label="Execution (Código)"
+                [models]="availableModels"
+                [(modelValue)]="editProjectProfiles.execution"
+              ></app-model-combobox>
 
-              <div>
-                <label class="block text-slate-400 mb-1">Review (Revisión Independiente)</label>
-                <select [(ngModel)]="editProjectProfiles.independent_review" name="edit_review"
-                        class="w-full bg-slate-800 border border-slate-700 rounded-xl px-2.5 py-2 text-white focus:outline-none focus:border-sky-500 font-mono text-[11px]">
-                  <optgroup *ngFor="let g of modelGroups" [label]="g.name">
-                    <option *ngFor="let m of g.models" [value]="m.id">{{ m.label }}</option>
-                  </optgroup>
-                </select>
-              </div>
+              <app-model-combobox
+                label="Review (Revisión Independiente)"
+                [models]="availableModels"
+                [(modelValue)]="editProjectProfiles.independent_review"
+              ></app-model-combobox>
 
-              <div>
-                <label class="block text-slate-400 mb-1">Fallback (Agotamiento)</label>
-                <select [(ngModel)]="editProjectProfiles.fallback" name="edit_fallback"
-                        class="w-full bg-slate-800 border border-slate-700 rounded-xl px-2.5 py-2 text-white focus:outline-none focus:border-sky-500 font-mono text-[11px]">
-                  <optgroup *ngFor="let g of modelGroups" [label]="g.name">
-                    <option *ngFor="let m of g.models" [value]="m.id">{{ m.label }}</option>
-                  </optgroup>
-                </select>
-              </div>
+              <app-model-combobox
+                label="Fallback (Respaldo)"
+                [models]="availableModels"
+                [(modelValue)]="editProjectProfiles.fallback"
+              ></app-model-combobox>
             </div>
 
             <!-- Independence warning -->
@@ -411,41 +380,9 @@ export class ProyectosComponent implements OnInit {
   showCreateModal = false;
   showEditModal = false;
 
-  // Available models catalog for selection
-  availableModels: {
-    id: string;
-    label: string;
-    agent: string;
-    provider_id?: string;
-    harness_id?: string;
-    route?: string;
-    effort: string;
-    group: string;
-  }[] = [
-    // OpenCode · DeepSeek (API directa) — real OpenCode namespace
-    { id: 'deepseek/deepseek-flash', label: 'DeepSeek Flash — API directa', agent: 'opencode', effort: 'medium', group: 'OpenCode · DeepSeek (API directa)' },
-    { id: 'deepseek/deepseek-v4-pro', label: 'DeepSeek V4 Pro — API directa', agent: 'opencode', effort: 'high', group: 'OpenCode · DeepSeek (API directa)' },
-
-    // Anthropic Claude via Antigravity
-    { id: 'claude-sonnet-5-5-medium', label: 'Claude Sonnet 5.5 — Medio', agent: 'antigravity', effort: 'medium', group: 'Anthropic Claude (vía Antigravity)' },
-    { id: 'claude-sonnet-5-5-high', label: 'Claude Sonnet 5.5 — Alto', agent: 'antigravity', effort: 'high', group: 'Anthropic Claude (vía Antigravity)' },
-    { id: 'claude-opus-5-5-medium', label: 'Claude Opus 5.5 — Medio', agent: 'antigravity', effort: 'medium', group: 'Anthropic Claude (vía Antigravity)' },
-    { id: 'claude-opus-5-5-high', label: 'Claude Opus 5.5 — Alto', agent: 'antigravity', effort: 'high', group: 'Anthropic Claude (vía Antigravity)' },
-
-    // Google Gemini via Antigravity
-    { id: 'gemini-3.8-flash-medium', label: 'Gemini 3.8 Flash — Medio', agent: 'antigravity', effort: 'medium', group: 'Google Gemini (vía Antigravity)' },
-    { id: 'gemini-3.8-flash-high', label: 'Gemini 3.8 Flash — Alto', agent: 'antigravity', effort: 'high', group: 'Google Gemini (vía Antigravity)' },
-    { id: 'gemini-4-argon-medium', label: 'Gemini 4 Argon — Medio', agent: 'antigravity', effort: 'medium', group: 'Google Gemini (vía Antigravity)' },
-    { id: 'gemini-4-argon-high', label: 'Gemini 4 Argon — Alto', agent: 'antigravity', effort: 'high', group: 'Google Gemini (vía Antigravity)' },
-    { id: 'gpt-oss-120b-medium', label: 'GPT-OSS 120B — Medio', agent: 'antigravity', effort: 'medium', group: 'Open Source (vía Antigravity)' },
-
-    // OpenAI via Codex
-    { id: 'gpt-5.6-luna', label: 'GPT-5.6 Luna — Medio', agent: 'codex', effort: 'medium', group: 'OpenAI GPT (vía Codex)' },
-    { id: 'gpt-5.6-sol', label: 'GPT-5.6 Sol — Alto', agent: 'codex', effort: 'high', group: 'OpenAI GPT (vía Codex)' },
-    { id: 'gpt-6.1-sol', label: 'GPT-6.1 Sol — Alto', agent: 'codex', effort: 'high', group: 'OpenAI GPT (vía Codex)' },
-    { id: 'gpt-6-astra', label: 'GPT-6 Astra — Alto', agent: 'codex', effort: 'high', group: 'OpenAI GPT (vía Codex)' },
-    { id: 'gpt-6.1-terra', label: 'GPT-6.1 Terra — Alto', agent: 'codex', effort: 'high', group: 'OpenAI GPT (vía Codex)' },
-  ];
+  // Available models catalog for selection (loaded authoritatively from backend)
+  availableModels: ModelOption[] = [];
+  isCatalogLoading = signal(false);
 
   newProject: any = {
     project_id: '',
@@ -496,93 +433,187 @@ export class ProyectosComponent implements OnInit {
     ]);
   }
 
+  formatModelEntry(modelKey: string, providerId: string, routes: Record<string, string>, efforts: string[]): {
+    label: string;
+    group: string;
+    provider_id: string;
+    harness_id: string;
+    route?: string;
+    effort: string;
+  } {
+    let effort = 'medium';
+    if (modelKey.endsWith('-high') || (efforts.includes('high') && !efforts.includes('medium'))) {
+      effort = 'high';
+    } else if (modelKey.endsWith('-low')) {
+      effort = 'low';
+    } else if (efforts.includes('medium')) {
+      effort = 'medium';
+    } else if (efforts.length > 0) {
+      effort = efforts[0];
+    }
+
+    const route = routes[modelKey] || '';
+
+    if (providerId === 'opencode') {
+      const isOpenRouter = route === 'openrouter' || modelKey.startsWith('openrouter/');
+      const isDirectDeepseek = route === 'deepseek_direct' || modelKey.startsWith('deepseek/');
+      const isNative = route === 'opencode_native' || modelKey.startsWith('opencode/');
+
+      if (isOpenRouter) {
+        let clean = modelKey.replace(/^openrouter\//, '').replace(/^~/, '');
+        const parts = clean.split('/');
+        let vendor = '';
+        let model = clean;
+        if (parts.length >= 2) {
+          vendor = parts[0];
+          model = parts.slice(1).join('/');
+        }
+        const cleanModel = model
+          .replace(/-latest$/, '')
+          .split(/[-_]/)
+          .map(w => (/^\d+/i.test(w) || ['gpt', 'oss', 'glm', 'vl'].includes(w.toLowerCase()) ? w.toUpperCase() : w.charAt(0).toUpperCase() + w.slice(1)))
+          .join(' ');
+        const cleanVendor = vendor ? vendor.charAt(0).toUpperCase() + vendor.slice(1) : '';
+        const displayLabel = cleanVendor ? `OpenRouter — ${cleanModel} (${cleanVendor})` : `OpenRouter — ${cleanModel}`;
+
+        return {
+          label: displayLabel,
+          group: 'OpenRouter (vía OpenCode)',
+          provider_id: 'openrouter',
+          harness_id: 'opencode',
+          route: 'openrouter',
+          effort,
+        };
+      }
+
+      if (isDirectDeepseek) {
+        const cleanName = this.friendlyDeepseekName(modelKey);
+        return {
+          label: `DeepSeek — ${cleanName || 'V4 Pro'} (API directa)`,
+          group: 'DeepSeek (API directa)',
+          provider_id: 'deepseek',
+          harness_id: 'opencode',
+          route: 'deepseek_direct',
+          effort,
+        };
+      }
+
+      if (isNative) {
+        const cleanName = modelKey.replace(/^opencode\//, '');
+        return {
+          label: `OpenCode — ${cleanName} (Nativo)`,
+          group: 'OpenCode Nativo',
+          provider_id: 'opencode',
+          harness_id: 'opencode',
+          route: 'opencode_native',
+          effort,
+        };
+      }
+
+      return {
+        label: `${modelKey} (OpenCode)`,
+        group: 'OpenCode · Otros',
+        provider_id: 'opencode',
+        harness_id: 'opencode',
+        route,
+        effort,
+      };
+    }
+
+    if (providerId === 'codex') {
+      const sub = modelKey.replace(/^gpt-/, '').toUpperCase();
+      return {
+        label: `Codex — GPT-${sub} [${effort.toUpperCase()}]`,
+        group: 'OpenAI GPT (vía Codex)',
+        provider_id: 'codex',
+        harness_id: 'codex',
+        route: 'native',
+        effort,
+      };
+    }
+
+    if (providerId === 'antigravity') {
+      let group = 'Antigravity';
+      let label = `Antigravity — ${modelKey}`;
+      if (modelKey.startsWith('claude')) {
+        group = 'Anthropic Claude (vía Antigravity)';
+        const sub = modelKey.replace(/^claude-/, '').replace(/-[a-z]+$/, '');
+        label = `Antigravity — Claude ${sub.replace('-', '.').toUpperCase()} [${effort.toUpperCase()}]`;
+      } else if (modelKey.startsWith('gemini')) {
+        group = 'Google Gemini (vía Antigravity)';
+        const sub = modelKey.replace(/^gemini-/, '').replace(/-[a-z]+$/, '');
+        label = `Antigravity — Gemini ${sub.toUpperCase()} [${effort.toUpperCase()}]`;
+      } else if (modelKey.includes('oss')) {
+        group = 'Open Source (vía Antigravity)';
+        label = `Antigravity — GPT-OSS 120B [${effort.toUpperCase()}]`;
+      }
+      return {
+        label,
+        group,
+        provider_id: 'antigravity',
+        harness_id: 'antigravity',
+        route: 'native',
+        effort,
+      };
+    }
+
+    return {
+      label: `${providerId} / ${modelKey}`,
+      group: 'Otros',
+      provider_id: providerId,
+      harness_id: providerId,
+      route,
+      effort,
+    };
+  }
+
   async loadAgentsCatalog(): Promise<void> {
     try {
+      this.isCatalogLoading.set(true);
       const res = await this.api.get<any>('/api/v1/catalogs/agents');
       if (res.ok && res.data?.agents) {
-        const parsed: typeof this.availableModels = [];
+        const parsed: ModelOption[] = [];
         for (const agent of res.data.agents) {
           const providerId = (agent.id || '').toLowerCase();
           const modelsObj = agent.models || {};
           const routes: Record<string, string> = agent.model_routes || {};
           for (const modelKey of Object.keys(modelsObj)) {
             const efforts: string[] = modelsObj[modelKey] || [];
-            let group = 'Otros Modelos';
-            let label = `${providerId} / ${modelKey}`;
-            let effort = 'medium';
-
-            if (modelKey.endsWith('-high') || (efforts.includes('high') && !efforts.includes('medium'))) {
-              effort = 'high';
-            } else if (modelKey.endsWith('-low')) {
-              effort = 'low';
-            } else if (efforts.includes('medium')) {
-              effort = 'medium';
-            } else if (efforts.length > 0) {
-              effort = efforts[0];
-            }
-
-            if (providerId === 'opencode') {
-              const route = routes[modelKey] || '';
-              const isOpenRouter = route === 'openrouter' || modelKey.startsWith('openrouter/');
-              const isDirectDeepseek = route === 'deepseek_direct' || modelKey.startsWith('deepseek/');
-              const isNative = route === 'opencode_native' || modelKey.startsWith('opencode/');
-              if (isDirectDeepseek) {
-                group = 'OpenCode · DeepSeek (API directa)';
-                label = `DeepSeek ${this.friendlyDeepseekName(modelKey)} — API directa`;
-              } else if (isOpenRouter) {
-                group = 'OpenCode · DeepSeek (OpenRouter)';
-                label = `DeepSeek ${this.friendlyDeepseekName(modelKey)} — OpenRouter`;
-              } else if (isNative) {
-                group = 'OpenCode · modelos nativos (free)';
-                label = modelKey;
-              } else {
-                group = 'OpenCode · otros';
-                label = modelKey;
-              }
-            } else if (modelKey.startsWith('claude')) {
-              group = 'Anthropic Claude (vía Antigravity)';
-              const sub = modelKey.replace('claude-', '').replace(/-[a-z]+$/, '');
-              label = `Claude ${sub.replace('-', '.').toUpperCase()} — ${effort.toUpperCase()}`;
-            } else if (modelKey.startsWith('gemini')) {
-              group = 'Google Gemini (vía Antigravity)';
-              const sub = modelKey.replace('gemini-', '').replace(/-[a-z]+$/, '');
-              label = `Gemini ${sub.toUpperCase()} — ${effort.toUpperCase()}`;
-            } else if (providerId === 'codex') {
-              group = 'OpenAI GPT (vía Codex)';
-              const sub = modelKey.replace('gpt-', '').toUpperCase();
-              label = `GPT-${sub} — ${effort.toUpperCase()}`;
-            } else if (modelKey.includes('oss')) {
-              group = 'Open Source (vía Antigravity)';
-              label = `GPT-OSS 120B — ${effort.toUpperCase()}`;
-            }
-
-              parsed.push({
-                id: modelKey,
-                label,
-                agent: providerId,
-                provider_id: providerId === 'opencode' && routes[modelKey] === 'deepseek_direct' ? 'deepseek' : providerId,
-                harness_id: providerId,
-                route: routes[modelKey],
-                effort,
-                group,
+            const entry = this.formatModelEntry(modelKey, providerId, routes, efforts);
+            parsed.push({
+              id: modelKey,
+              agent: providerId,
+              ...entry,
             });
           }
         }
         if (parsed.length > 0) {
-          // Sort with Claude and Gemini first, then Codex
           this.availableModels = parsed.sort((a, b) => a.group.localeCompare(b.group) || a.label.localeCompare(b.label));
         }
       }
     } catch {
-      // Keep sensible defaults
+      // Keep existing models
+    } finally {
+      this.isCatalogLoading.set(false);
     }
   }
 
+  resolveProviderForModel(modelId: string): string {
+    const found = this.availableModels.find(m => m.id === modelId);
+    if (found?.provider_id) return found.provider_id;
+    if (modelId.startsWith('openrouter/')) return 'openrouter';
+    if (modelId.startsWith('deepseek/') || modelId.startsWith('deepseek-')) return 'deepseek';
+    if (modelId.startsWith('gpt-')) return 'codex';
+    if (modelId.startsWith('claude-') || modelId.startsWith('gemini-')) return 'antigravity';
+    return found?.agent || '';
+  }
+
   isReviewerConflict(profiles: { thinking: string; execution: string; independent_review: string }): boolean {
-    const execAgent = this.resolveAgentForModel(profiles.execution);
-    const thinkAgent = this.resolveAgentForModel(profiles.thinking);
-    const reviewAgent = this.resolveAgentForModel(profiles.independent_review);
-    return reviewAgent === execAgent || reviewAgent === thinkAgent;
+    const execProvider = this.resolveProviderForModel(profiles.execution);
+    const thinkProvider = this.resolveProviderForModel(profiles.thinking);
+    const reviewProvider = this.resolveProviderForModel(profiles.independent_review);
+    if (!reviewProvider || !execProvider) return false;
+    return reviewProvider === execProvider || reviewProvider === thinkProvider;
   }
 
   friendlyDeepseekName(modelKey: string): string {
@@ -674,6 +705,12 @@ export class ProyectosComponent implements OnInit {
   }
 
   private buildProfile(role: string, modelId: string) {
+    const proj = this.refresh.activeProject();
+    const existing = proj?.agent_profiles?.[role];
+    if (existing && existing.model_id === modelId) {
+      return existing;
+    }
+
     const found = this.availableModels.find(m => m.id === modelId);
     let agent_id = found?.agent;
     if (!agent_id) agent_id = this.resolveAgentForModel(modelId);
@@ -714,12 +751,28 @@ export class ProyectosComponent implements OnInit {
       skills = [];
     }
 
+    const provider_id =
+      found?.provider_id ||
+      (agent_id === 'opencode' && modelId.startsWith('openrouter/')
+        ? 'openrouter'
+        : agent_id === 'opencode' && modelId.startsWith('deepseek/')
+        ? 'deepseek'
+        : agent_id);
+    const harness_id = found?.harness_id || agent_id;
+    const route =
+      found?.route ||
+      (provider_id === 'openrouter'
+        ? 'openrouter'
+        : provider_id === 'deepseek'
+        ? 'deepseek_direct'
+        : undefined);
+
     return {
       agent_id,
       model_id: modelId,
-      provider_id: found?.provider_id || (agent_id === 'opencode' && modelId.startsWith('deepseek/') ? 'deepseek' : agent_id),
-      harness_id: found?.harness_id || agent_id,
-      route: found?.route,
+      provider_id,
+      harness_id,
+      route,
       effort,
       workflows,
       skills,

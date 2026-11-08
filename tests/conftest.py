@@ -3099,3 +3099,12 @@ def test_capacity_strategy(monkeypatch):
                 monkeypatch.setitem(provider_adapter._ADAPTER_REGISTRY, provider, adapter)
 
     return install
+
+
+@pytest.fixture(autouse=True)
+def _clear_project_catalog_cache():
+    from minime.services.project_catalog_service import ProjectCatalogService
+
+    ProjectCatalogService.clear_cache()
+    yield
+    ProjectCatalogService.clear_cache()

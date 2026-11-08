@@ -1819,8 +1819,64 @@ class OpenCodeProviderAdapter(ProviderAdapterInterface):
             return "opencode_native"
         return "unknown"
 
+    @staticmethod
+    def _get_configured_providers() -> set[str]:
+        """Discover which upstream providers have configured credentials/access."""
+        configured: set[str] = set()
+
+        home = Path.home()
+        candidate_paths = [
+            Path(os.environ.get("XDG_DATA_HOME", home / ".local/share")) / "opencode" / "auth.json",
+            home / ".local" / "share" / "opencode" / "auth.json",
+            Path(os.environ.get("XDG_CONFIG_HOME", home / ".config")) / "opencode" / "auth.json",
+            home / ".config" / "opencode" / "auth.json",
+        ]
+        for p in candidate_paths:
+            if p.is_file():
+                try:
+                    data = json.loads(p.read_text(encoding="utf-8"))
+                    if isinstance(data, dict):
+                        for k in data.keys():
+                            configured.add(k.strip().lower())
+                except Exception:
+                    pass
+
+        config_paths = [
+            Path(os.environ.get("XDG_CONFIG_HOME", home / ".config")) / "opencode" / "opencode.json",
+            home / ".config" / "opencode" / "opencode.json",
+        ]
+        for cp in config_paths:
+            if cp.is_file():
+                try:
+                    data = json.loads(cp.read_text(encoding="utf-8"))
+                    if isinstance(data, dict) and "provider" in data:
+                        providers = data["provider"]
+                        if isinstance(providers, dict):
+                            for k in providers.keys():
+                                configured.add(k.strip().lower())
+                except Exception:
+                    pass
+
+        env_map = {
+            "openrouter": ["OPENROUTER_API_KEY", "OPENROUTER_KEY"],
+            "deepseek": ["DEEPSEEK_API_KEY"],
+            "anthropic": ["ANTHROPIC_API_KEY"],
+            "openai": ["OPENAI_API_KEY"],
+            "google": ["GEMINI_API_KEY", "GOOGLE_API_KEY"],
+            "opencode": ["OPENCODE_API_KEY"],
+        }
+        for prov, vars_list in env_map.items():
+            if any(os.environ.get(v, "").strip() for v in vars_list):
+                configured.add(prov)
+
+        return configured
+
     async def discover_account_capabilities(self, timeout_seconds: float = 10.0) -> dict[str, Any]:
-        """List real OpenCode models via ``opencode models`` (0 inference tokens)."""
+        """List real OpenCode models via ``opencode models`` (0 inference tokens).
+
+        Filters models to only expose providers with configured credentials,
+        omitting unconfigured providers and native models without active access.
+        """
         now = datetime.now(UTC)
         if self._cached_capabilities and self._capabilities_expires_at:
             if now < self._capabilities_expires_at:
@@ -1843,15 +1899,21 @@ class OpenCodeProviderAdapter(ProviderAdapterInterface):
             out_str = stdout.decode("utf-8", errors="replace")
             models: dict[str, list[str] | None] = {}
             model_routes: dict[str, str] = {}
+            configured_providers = self._get_configured_providers()
+
             for line in out_str.splitlines():
                 slug = line.strip().lower()
                 if not slug or " " in slug:
                     continue
+                namespace = slug.split("/", 1)[0]
+                if namespace not in configured_providers:
+                    continue
                 models[slug] = None
                 model_routes[slug] = self._route_for(slug)
+
             caps: dict[str, Any] = {"models": models, "model_routes": model_routes}
             self._cached_capabilities = caps
-            self._capabilities_expires_at = now + timedelta(seconds=60)
+            self._capabilities_expires_at = now + timedelta(seconds=600)
             return caps
         except (OSError, asyncio.TimeoutError):
             return {}
