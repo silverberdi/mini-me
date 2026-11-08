@@ -107,10 +107,13 @@ export class RefreshService implements OnDestroy {
         return;
       }
 
-      if (projRes.offline || runsRes.offline || (reqsRes?.offline ?? false)) {
+      const browserOffline = typeof navigator !== 'undefined' && !navigator.onLine;
+      const coreOffline = Boolean(projRes.offline && runsRes.offline);
+
+      if (browserOffline || coreOffline) {
         this.isConnected.set(false);
         this.stale.set(this.lastUpdated() !== null);
-      } else {
+      } else if (projRes.ok || runsRes.ok) {
         this.isConnected.set(true);
         this.stale.set(false);
       }
@@ -136,13 +139,15 @@ export class RefreshService implements OnDestroy {
         this.quotas.set(quotaRes.data.providers);
       }
 
-      if (!projRes.offline && !runsRes.offline) {
+      if (!projRes.offline || !runsRes.offline) {
         this.lastUpdated.set(new Date());
         this.syncState.set('idle');
       }
     } catch {
       this.syncState.set('error');
-      this.isConnected.set(false);
+      if (typeof navigator !== 'undefined' && !navigator.onLine) {
+        this.isConnected.set(false);
+      }
     } finally {
       if (currentGen === this.generation) {
         this.isRefreshing.set(false);
@@ -253,7 +258,8 @@ export class RefreshService implements OnDestroy {
         this.isConnected.set(false);
         this.stale.set(this.lastUpdated() !== null);
       } else if (this.events?.readyState === EventSource.CLOSED) {
-        this.isConnected.set(false);
+        // In online state, EventSource reconnects automatically or after this timeout;
+        // do not oscillate isConnected to false on transient transport reconnects.
         setTimeout(() => {
           if (this.started) this.connectEvents();
         }, 3000);
@@ -262,6 +268,7 @@ export class RefreshService implements OnDestroy {
   }
 
   private onOnline = () => {
+    this.isConnected.set(true);
     void this.read();
   };
 
