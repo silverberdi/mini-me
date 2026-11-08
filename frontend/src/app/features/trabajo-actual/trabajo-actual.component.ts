@@ -10,6 +10,19 @@ interface PipelineStage {
   label: string;
 }
 
+const STAGE_ILLUSTRATION_PATHS: Readonly<Record<string, string>> = Object.freeze({
+  ADMITTED: '/illustrations/admitted.png',
+  EXPLORING: '/illustrations/exploring.png',
+  PROPOSING: '/illustrations/proposing.png',
+  PROPOSAL_REVIEW: '/illustrations/proposal-review.png',
+  IMPLEMENTING: '/illustrations/implementing.png',
+  RUNNING_TESTS: '/illustrations/running-tests.png',
+  VERIFYING: '/illustrations/verifying.png',
+  CODE_REVIEW: '/illustrations/code-review.png',
+  PREPARING_PR: '/illustrations/preparing-pr.png',
+  COMPLETED: '/illustrations/completed.png',
+});
+
 @Component({
   selector: 'app-trabajo-actual',
   standalone: true,
@@ -17,8 +30,8 @@ interface PipelineStage {
   template: `
     <div class="space-y-6">
       <!-- Header -->
-      <div class="flex flex-col md:flex-row md:items-center justify-between gap-4 bg-slate-800/40 p-6 rounded-2xl border border-slate-700/50 backdrop-blur-sm">
-        <div>
+      <div class="grid gap-0 bg-slate-800/40 p-2 rounded-2xl border border-slate-700/50 backdrop-blur-sm md:grid-cols-[minmax(0,1fr)_minmax(8rem,10rem)] md:items-center">
+        <div class="min-w-0">
           <h1 class="text-2xl font-bold tracking-tight text-white flex items-center gap-3">
             <span>Trabajo Actual</span>
             <span *ngIf="targetRun()" class="text-xs font-mono font-bold px-2.5 py-1 rounded-md bg-sky-500/10 text-sky-400 border border-sky-500/20">
@@ -26,12 +39,13 @@ interface PipelineStage {
             </span>
           </h1>
           <p class="text-sm text-slate-400 mt-1">Supervisión detallada de la ejecución, avance de fases y resolución de atención humana.</p>
-        </div>
-        <div class="flex items-center gap-2">
-          <a routerLink="/trabajo" class="px-3.5 py-2 rounded-xl bg-slate-800 hover:bg-slate-700 border border-slate-700 text-xs font-semibold text-slate-300 transition-colors flex items-center gap-1.5">
+          <a routerLink="/trabajo" data-testid="back-to-work" class="mt-1 inline-flex max-w-full shrink-0 items-center gap-1.5 whitespace-nowrap px-3.5 py-1 rounded-xl bg-slate-800 hover:bg-slate-700 border border-slate-700 text-xs font-semibold text-slate-300 transition-colors">
             <span>&larr;</span>
             <span>Volver a Trabajo</span>
           </a>
+        </div>
+        <div *ngIf="stageIllustrationPath() as illustrationPath" class="flex h-16 min-w-0 items-center justify-center md:h-20" data-testid="stage-illustration-slot">
+          <img [src]="illustrationPath" alt="" data-testid="stage-illustration" class="h-full w-full object-contain object-center" />
         </div>
       </div>
 
@@ -390,6 +404,11 @@ export class TrabajoActualComponent {
     // Default only to current work; historical runs require explicit selection.
     return runs.find(r => r.is_active) || null;
   });
+
+  stageIllustrationPath(): string | null {
+    const stage = this.targetRun()?.stage;
+    return stage ? STAGE_ILLUSTRATION_PATHS[stage] ?? null : null;
+  }
 
   assignedComplexity(): 'high' | 'moderate' | 'low' | 'Pendiente' {
     const complexity = this.targetRun()?.stop_details?.['complexity'];
