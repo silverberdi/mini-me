@@ -7,6 +7,39 @@ test.describe('Searchable Model Combobox in Project Configuration', () => {
   });
 
   test('opens create project modal and filters models with keyboard and mouse', async ({ page }) => {
+    // Intercept agent catalog with deterministic test data so E2E does not rely on host CLI availability
+    await page.route('**/api/v1/catalogs/agents', async route => {
+      await route.fulfill({
+        status: 200,
+        contentType: 'application/json',
+        body: JSON.stringify({
+          agents: [
+            {
+              id: 'antigravity',
+              capability_status: 'OBSERVED_READ_ONLY',
+              models: {
+                'claude-sonnet-5-5-medium': ['medium'],
+                'gemini-3.8-flash-medium': ['medium'],
+              },
+              model_routes: {},
+            },
+            {
+              id: 'opencode',
+              capability_status: 'OBSERVED_READ_ONLY',
+              models: {
+                'openrouter/~anthropic/claude-fable-latest': null,
+                'deepseek/deepseek-v4-pro': null,
+              },
+              model_routes: {
+                'openrouter/~anthropic/claude-fable-latest': 'openrouter',
+                'deepseek/deepseek-v4-pro': 'deepseek_direct',
+              },
+            },
+          ],
+        }),
+      });
+    });
+
     // 1. Navigate to /proyectos view
     await page.goto('/proyectos');
     await waitForAppMounted(page);
