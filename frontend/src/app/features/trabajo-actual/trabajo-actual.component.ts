@@ -519,11 +519,11 @@ export class TrabajoActualComponent {
 
       this.codeReviewRecoverySuccess.set(true);
       this.codeReviewRecoveryMessage.set('Revisión autorizada. El mismo Run fue reanudado con el revisor independiente; actualizando…');
-      await this.refresh.read();
+      await this.refresh.refreshRuns();
     } catch (error: any) {
       this.codeReviewRecoverySuccess.set(false);
       this.codeReviewRecoveryMessage.set(error?.message || 'No se pudo recuperar la revisión');
-      await this.refresh.read();
+      await this.refresh.refreshRuns();
     } finally {
       this.isRecoveringCodeReview.set(false);
     }
@@ -575,11 +575,11 @@ export class TrabajoActualComponent {
 
       this.proposalReviewRecoverySuccess.set(true);
       this.proposalReviewRecoveryMessage.set('Revisión de propuesta autorizada. El mismo Run fue reanudado con el revisor independiente; actualizando…');
-      await this.refresh.read();
+      await this.refresh.refreshRuns();
     } catch (error: any) {
       this.proposalReviewRecoverySuccess.set(false);
       this.proposalReviewRecoveryMessage.set(error?.message || 'No se pudo recuperar la revisión de propuesta');
-      await this.refresh.read();
+      await this.refresh.refreshRuns();
     } finally {
       this.isRecoveringProposalReview.set(false);
     }

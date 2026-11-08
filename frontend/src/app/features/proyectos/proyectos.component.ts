@@ -490,7 +490,10 @@ export class ProyectosComponent implements OnInit {
   }
 
   async ngOnInit(): Promise<void> {
-    await this.loadAgentsCatalog();
+    await Promise.all([
+      this.loadAgentsCatalog(),
+      this.refresh.projects().length === 0 ? this.refresh.refreshProjects() : Promise.resolve(),
+    ]);
   }
 
   async loadAgentsCatalog(): Promise<void> {
@@ -763,7 +766,7 @@ export class ProyectosComponent implements OnInit {
         this.actionOk.set(true);
         this.actionMsg.set(`Proyecto '${payload.project_id}' registrado exitosamente.`);
         this.showCreateModal = false;
-        await this.refresh.read();
+        await this.refresh.refreshProjects();
         this.refresh.setSelectedProject(payload.project_id);
       } else {
         this.actionOk.set(false);
@@ -807,7 +810,7 @@ export class ProyectosComponent implements OnInit {
         this.actionOk.set(true);
         this.actionMsg.set(`Proyecto '${proj.project_id}' actualizado con nuevos modelos y ajustes.`);
         this.showEditModal = false;
-        await this.refresh.read();
+        await this.refresh.refreshProjects();
       } else {
         this.actionOk.set(false);
         this.actionMsg.set(`Error al actualizar proyecto: ${res.error || 'Verifica los parámetros'}`);
@@ -837,7 +840,7 @@ export class ProyectosComponent implements OnInit {
       if (res.ok) {
         this.actionOk.set(true);
         this.actionMsg.set(isCurrentlyPaused ? `Proyecto ${proj.project_id} reanudado.` : `Proyecto ${proj.project_id} pausado.`);
-        await this.refresh.read();
+        await this.refresh.refreshProjects();
       } else {
         this.actionOk.set(false);
         this.actionMsg.set(`Error: ${res.error || 'No se pudo cambiar el estado del proyecto'}`);

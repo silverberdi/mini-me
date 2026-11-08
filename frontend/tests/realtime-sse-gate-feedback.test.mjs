@@ -6,19 +6,18 @@ const sourceRoot = new URL('../src/app/', import.meta.url);
 const refresh = fs.readFileSync(new URL('core/refresh.service.ts', sourceRoot), 'utf8');
 const component = fs.readFileSync(new URL('features/trabajo-actual/trabajo-actual.component.ts', sourceRoot), 'utf8');
 
-test('new SSE events trigger an authoritative refresh while quota handling and polling remain', () => {
+test('new SSE events trigger targeted updates while quota handling functions without periodic polling', () => {
   for (const eventName of [
     'run.gate_acknowledged',
-    'project.pause_changed',
     'request.created',
     'request.deactivated',
     'request.reactivated',
   ]) {
-    assert.match(refresh, new RegExp(`addEventListener\\('${eventName}', refresh\\)`));
+    assert.match(refresh, new RegExp(`addEventListener\\('${eventName}', handleRunEvent\\)`));
   }
-  assert.match(refresh, /const refresh = \(\) => void this\.read\(\);/);
+  assert.match(refresh, /addEventListener\('project\.pause_changed', handleProjectEvent\)/);
   assert.match(refresh, /addEventListener\('quota\.update', \(event: MessageEvent\)/);
-  assert.match(refresh, /setInterval\(\(\) => \{\s*void this\.read\(\);/);
+  assert.doesNotMatch(refresh, /setInterval\(/);
 });
 
 test('gate response hides the current question and shows processing feedback only while pending', () => {

@@ -15,6 +15,7 @@ test("unauthenticated shell exposes the Google login action", () => {
 test("refresh side effects start only after authentication succeeds", () => {
   assert.match(app, /this\.refresh\.start\(\);/);
   assert.match(refresh, /private started = false;/);
-  assert.match(refresh, /if \(this\.started\) this\.setupTimer\(sec\);/);
-  assert.doesNotMatch(refresh, /this\.connectEvents\(\);\s*\}/);
+  assert.match(refresh, /if \(this\.started\) return;/);
+  assert.match(refresh, /this\.connectEvents\(\);/);
+  assert.doesNotMatch(refresh, /constructor\([^)]*\)\s*\{[^}]*connectEvents/);
 });

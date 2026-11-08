@@ -1,4 +1,4 @@
-import { Injectable, signal, computed, effect, OnDestroy } from "@angular/core";
+import { Injectable, signal, computed, OnDestroy } from "@angular/core";
 import { ApiService } from "./api.service";
 import { DashboardCost, Project, OrchestrationRun, RequestItem, QuotaObservation } from "./models";
 
@@ -6,13 +6,13 @@ import { DashboardCost, Project, OrchestrationRun, RequestItem, QuotaObservation
   providedIn: "root"
 })
 export class RefreshService implements OnDestroy {
-  private timer: any = null;
   private abortController: AbortController | null = null;
   private generation = 0;
   private started = false;
+  private lastDashboardFetchTime = 0;
+  private readonly DASHBOARD_CACHE_TTL_MS = 300_000; // 5 minutes amortized cache
 
   // Signals for state
-  readonly interval = signal<string>("10"); // "manual", "5", "10", "30"
   readonly isConnected = signal<boolean>(true);
   readonly isRefreshing = signal<boolean>(false);
   readonly lastUpdated = signal<Date | null>(null);
@@ -61,43 +61,24 @@ export class RefreshService implements OnDestroy {
   constructor(private api: ApiService) {
     window.addEventListener('online', this.onOnline);
     window.addEventListener('offline', this.onOffline);
-    effect(() => {
-      const sec = this.interval();
-      if (this.started) this.setupTimer(sec);
-    });
   }
 
   start(): void {
     if (this.started) return;
     this.started = true;
     this.connectEvents();
-    this.setupTimer(this.interval());
   }
 
-  setInterval(val: string) {
-    this.interval.set(val);
-  }
-
-  setSelectedProject(projectId: string) {
+  setSelectedProject(projectId: string): void {
     this.selectedProjectId.set(projectId);
-    void this.read();
+    void this.read(true);
   }
 
-  setupTimer(secStr: string) {
-    if (this.timer) {
-      clearInterval(this.timer);
-      this.timer = null;
-    }
-    if (secStr === "manual") return;
-    const sec = parseInt(secStr, 10);
-    if (!isNaN(sec) && sec > 0) {
-      this.timer = setInterval(() => {
-        void this.read();
-      }, sec * 1000);
-    }
-  }
-
-  async read(): Promise<void> {
+  /**
+   * Complete revalidation: used on app initialization, manual «Refrescar» button,
+   * or when switching active projects.
+   */
+  async read(force = false): Promise<void> {
     this.abortController?.abort();
     this.abortController = new AbortController();
     const signal = this.abortController.signal;
@@ -108,12 +89,18 @@ export class RefreshService implements OnDestroy {
     const activeId = this.activeProject()?.project_id || this.selectedProjectId();
     const query = activeId ? `?project_id=${encodeURIComponent(activeId)}` : "";
 
+    const now = Date.now();
+    const shouldFetchDashboard = force || (now - this.lastDashboardFetchTime >= this.DASHBOARD_CACHE_TTL_MS);
+
     try {
-      const [projRes, runsRes, reqsRes, dashboardRes] = await Promise.all([
+      const [projRes, runsRes, reqsRes, dashboardRes, quotaRes] = await Promise.all([
         this.api.get<Project[]>("/api/v1/projects", { signal }),
         this.api.get<OrchestrationRun[]>(`/api/v1/orchestration/runs${query}`, { signal }),
         activeId ? this.api.get<RequestItem[]>(`/api/v1/projects/${encodeURIComponent(activeId)}/requests`, { signal }) : Promise.resolve(null),
-        this.api.get<{ cost: DashboardCost }>(`/api/v1/dashboard/overview${query}`, { signal }),
+        shouldFetchDashboard
+          ? this.api.get<{ cost: DashboardCost }>(`/api/v1/dashboard/overview${query}`, { signal })
+          : Promise.resolve(null),
+        this.api.get<{ providers: QuotaObservation[] }>("/api/v1/providers/quotas", { signal }),
       ]);
 
       if (currentGen !== this.generation || projRes.aborted || runsRes.aborted) {
@@ -136,30 +123,18 @@ export class RefreshService implements OnDestroy {
         this.runs.set(runsRes.data);
       }
 
-      if (dashboardRes.ok && dashboardRes.data?.cost) {
+      if (dashboardRes && dashboardRes.ok && dashboardRes.data?.cost) {
         this.cost.set(dashboardRes.data.cost);
+        this.lastDashboardFetchTime = now;
       }
 
       if (reqsRes && reqsRes.ok && reqsRes.data) {
-        const payload: any = reqsRes.data;
-        if (Array.isArray(payload)) {
-          this.requests.set(payload);
-          this.allRequests.set(payload);
-        } else if (typeof payload === 'object') {
-          const allRequests = Array.isArray(payload.all_requests) ? payload.all_requests : [];
-          const eligibleRequests = Array.isArray(payload.eligible_requests)
-            ? payload.eligible_requests
-            : allRequests;
-          this.requests.set(eligibleRequests);
-          this.allRequests.set(allRequests.length > 0 ? allRequests : eligibleRequests);
-          if (payload.closed_requests && Array.isArray(payload.closed_requests)) {
-            this.closedRequests.set(payload.closed_requests);
-          }
-        }
+        this.applyRequestsPayload(reqsRes.data);
       }
 
-      const quotaRes = await this.api.get<{providers: QuotaObservation[]}>("/api/v1/providers/quotas", { signal });
-      if (quotaRes.ok && quotaRes.data?.providers) this.quotas.set(quotaRes.data.providers);
+      if (quotaRes.ok && quotaRes.data?.providers) {
+        this.quotas.set(quotaRes.data.providers);
+      }
 
       if (!projRes.offline && !runsRes.offline) {
         this.lastUpdated.set(new Date());
@@ -175,33 +150,105 @@ export class RefreshService implements OnDestroy {
     }
   }
 
-  stop() {
-    if (this.timer) {
-      clearInterval(this.timer);
-      this.timer = null;
+  /**
+   * Targeted update for runs and requests in response to SSE events.
+   * Does NOT touch `projects` or `cost`, keeping configuration views completely undisturbed.
+   */
+  async refreshRuns(): Promise<void> {
+    const activeId = this.activeProject()?.project_id || this.selectedProjectId();
+    const query = activeId ? `?project_id=${encodeURIComponent(activeId)}` : "";
+
+    try {
+      const [runsRes, reqsRes] = await Promise.all([
+        this.api.get<OrchestrationRun[]>(`/api/v1/orchestration/runs${query}`),
+        activeId ? this.api.get<RequestItem[]>(`/api/v1/projects/${encodeURIComponent(activeId)}/requests`) : Promise.resolve(null),
+      ]);
+
+      if (runsRes.ok && Array.isArray(runsRes.data)) {
+        this.runs.set(runsRes.data);
+      }
+
+      if (reqsRes && reqsRes.ok && reqsRes.data) {
+        this.applyRequestsPayload(reqsRes.data);
+      }
+      this.lastUpdated.set(new Date());
+      this.isConnected.set(true);
+    } catch {
+      // Background targeted refresh failure does not overwrite healthy state
     }
+  }
+
+  /**
+   * Targeted update for projects list when a project lifecycle change event arrives.
+   */
+  async refreshProjects(): Promise<void> {
+    try {
+      const projRes = await this.api.get<Project[]>("/api/v1/projects");
+      if (projRes.ok && Array.isArray(projRes.data)) {
+        this.projects.set(projRes.data);
+      }
+      this.lastUpdated.set(new Date());
+    } catch {
+      // Ignored in background
+    }
+  }
+
+  private applyRequestsPayload(payload: any): void {
+    if (Array.isArray(payload)) {
+      this.requests.set(payload);
+      this.allRequests.set(payload);
+    } else if (typeof payload === 'object') {
+      const allRequests = Array.isArray(payload.all_requests) ? payload.all_requests : [];
+      const eligibleRequests = Array.isArray(payload.eligible_requests)
+        ? payload.eligible_requests
+        : allRequests;
+      this.requests.set(eligibleRequests);
+      this.allRequests.set(allRequests.length > 0 ? allRequests : eligibleRequests);
+      if (payload.closed_requests && Array.isArray(payload.closed_requests)) {
+        this.closedRequests.set(payload.closed_requests);
+      }
+    }
+  }
+
+  stop(): void {
     this.abortController?.abort();
     this.events?.close();
+    this.events = null;
   }
 
   private connectEvents(): void {
     if (typeof EventSource === 'undefined') return;
     this.events?.close();
     this.events = new EventSource('/api/v1/events');
-    const refresh = () => void this.read();
-    this.events.addEventListener('run.transition', refresh);
-    this.events.addEventListener('run.accepted', refresh);
-    this.events.addEventListener('run.failed', refresh);
-    this.events.addEventListener('run.gate_acknowledged', refresh);
-    this.events.addEventListener('project.pause_changed', refresh);
-    this.events.addEventListener('request.created', refresh);
-    this.events.addEventListener('request.deactivated', refresh);
-    this.events.addEventListener('request.reactivated', refresh);
+
+    const handleRunEvent = () => void this.refreshRuns();
+    const handleProjectEvent = () => void this.refreshProjects();
+
+    this.events.addEventListener('run.transition', handleRunEvent);
+    this.events.addEventListener('run.accepted', handleRunEvent);
+    this.events.addEventListener('run.failed', handleRunEvent);
+    this.events.addEventListener('run.gate_acknowledged', handleRunEvent);
+    this.events.addEventListener('request.created', handleRunEvent);
+    this.events.addEventListener('request.deactivated', handleRunEvent);
+    this.events.addEventListener('request.reactivated', handleRunEvent);
+
+    this.events.addEventListener('project.pause_changed', handleProjectEvent);
+
     this.events.addEventListener('quota.update', (event: MessageEvent) => {
-      try { this.quotas.set(JSON.parse(event.data).providers || []); } catch { /* polling repairs malformed events */ }
+      try {
+        const data = JSON.parse(event.data);
+        if (data.providers) this.quotas.set(data.providers);
+      } catch {
+        // Ignored
+      }
     });
+
+    this.events.onopen = () => {
+      this.isConnected.set(true);
+      this.stale.set(false);
+    };
+
     this.events.onerror = () => {
-      // EventSource reconnects itself; polling remains the bounded fallback.
       this.isConnected.set(false);
     };
   }
