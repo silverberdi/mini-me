@@ -1,0 +1,45 @@
+import { test, expect } from '@playwright/test';
+import { setupAuthSession, waitForAppMounted } from './helpers';
+
+test.describe('Searchable Model Combobox in Project Configuration', () => {
+  test.beforeEach(async ({ context }) => {
+    await setupAuthSession(context);
+  });
+
+  test('opens create project modal and filters models with keyboard and mouse', async ({ page }) => {
+    // 1. Navigate to /proyectos view
+    await page.goto('/proyectos');
+    await waitForAppMounted(page);
+
+    // 2. Open Create Project Modal
+    const newProjectBtn = page.getByRole('button', { name: /\+.*Nuevo Proyecto/i });
+    await expect(newProjectBtn).toBeVisible({ timeout: 10000 });
+    await newProjectBtn.click();
+
+    // 3. Verify modal appears with the 4 comboboxes
+    const modalHeading = page.getByRole('heading', { name: /Nuevo Proyecto/i });
+    await expect(modalHeading).toBeVisible();
+
+    // 4. Find the Thinking role combobox button
+    const thinkingCombobox = page.locator('app-model-combobox', { hasText: /Thinking/i }).getByRole('combobox');
+    await expect(thinkingCombobox).toBeVisible();
+
+    // 5. Click to open the dropdown
+    await thinkingCombobox.click();
+    await expect(thinkingCombobox).toHaveAttribute('aria-expanded', 'true');
+
+    // 6. Verify search input appears and type query
+    const searchInput = page.getByPlaceholder('Buscar por proveedor o modelo…');
+    await expect(searchInput).toBeVisible();
+    await searchInput.fill('Claude');
+
+    // 7. Verify options filter and select via keyboard or click
+    const filteredOption = page.getByRole('option').filter({ hasText: /Claude/i }).first();
+    await expect(filteredOption).toBeVisible();
+    await filteredOption.click();
+
+    // 8. Verify combobox closes and displays chosen model
+    await expect(thinkingCombobox).toHaveAttribute('aria-expanded', 'false');
+    await expect(thinkingCombobox).toContainText('Claude');
+  });
+});

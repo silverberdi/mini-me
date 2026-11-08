@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import shutil
+import time
 from pathlib import Path
 from typing import Any
 
@@ -14,6 +15,14 @@ from minime.config import AppConfig, load_config, resolve_cli_invocation
 
 class ProjectCatalogService:
     """Expose selectable metadata without persisting connections or probing inference."""
+
+    _CATALOG_CACHE: dict[str, tuple[float, dict[str, Any]]] = {}
+    _CACHE_TTL_SECONDS: float = 600.0  # 10 minutes
+
+    @classmethod
+    def clear_cache(cls) -> None:
+        """Invalidate the in-memory agent catalog cache."""
+        cls._CATALOG_CACHE.clear()
 
     PROVIDERS = (
         {
@@ -112,7 +121,18 @@ class ProjectCatalogService:
                     read_only_roles.add(role)
         return file_edit_roles, read_only_roles
 
-    async def agent_catalog(self, project_root: str | Path | None = None) -> dict[str, Any]:
+    async def agent_catalog(
+        self,
+        project_root: str | Path | None = None,
+        force_refresh: bool = False,
+    ) -> dict[str, Any]:
+        cache_key = str(Path(project_root).resolve()) if project_root else "__global__"
+        now = time.monotonic()
+        if not force_refresh and cache_key in self._CATALOG_CACHE:
+            cached_time, cached_data = self._CATALOG_CACHE[cache_key]
+            if now - cached_time < self._CACHE_TTL_SECONDS:
+                return cached_data
+
         agents: list[dict[str, Any]] = []
         for provider_id, provider in sorted(self.config.providers.items()):
             executable_name = (provider.command or "").strip().split(maxsplit=1)
@@ -276,10 +296,12 @@ class ProjectCatalogService:
                     entry["installed_integrations"] = None
             agents.append(entry)
 
-        return {
+        result = {
             "agents": agents,
             "capability_discovery": "read-only; no inference or provider probe was invoked",
         }
+        self._CATALOG_CACHE[cache_key] = (now, result)
+        return result
 
     async def validate_project_profiles(
         self, profiles: dict[str, Any], project_root: str | Path | None = None
