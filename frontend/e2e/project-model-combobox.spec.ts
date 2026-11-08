@@ -6,9 +6,9 @@ test.describe('Searchable Model Combobox in Project Configuration', () => {
     await setupAuthSession(context);
   });
 
-  test('opens create project modal and filters models with keyboard and mouse', async ({ page }) => {
-    // Intercept agent catalog with deterministic test data so E2E does not rely on host CLI availability
-    await page.route('**/api/v1/catalogs/agents', async route => {
+  test('opens create project modal and filters models with keyboard and mouse', async ({ context, page }) => {
+    // Intercept agent catalog with deterministic test data at context level
+    await context.route('**/api/v1/catalogs/agents', async route => {
       await route.fulfill({
         status: 200,
         contentType: 'application/json',
@@ -44,6 +44,10 @@ test.describe('Searchable Model Combobox in Project Configuration', () => {
     await page.goto('/proyectos');
     await waitForAppMounted(page);
 
+    // Wait for the project card to be visible ensuring initial project list and catalog have loaded
+    const projectCard = page.locator('div', { hasText: 'E2E Test Project' }).first();
+    await expect(projectCard).toBeVisible({ timeout: 10000 });
+
     // 2. Open Create Project Modal
     const newProjectBtn = page.getByRole('button', { name: /\+.*Nuevo Proyecto/i });
     await expect(newProjectBtn).toBeVisible({ timeout: 10000 });
@@ -68,7 +72,7 @@ test.describe('Searchable Model Combobox in Project Configuration', () => {
 
     // 7. Verify options filter and select via keyboard or click
     const filteredOption = page.getByRole('option').filter({ hasText: /Claude/i }).first();
-    await expect(filteredOption).toBeVisible();
+    await expect(filteredOption).toBeVisible({ timeout: 10000 });
     await filteredOption.click();
 
     // 8. Verify combobox closes and displays chosen model

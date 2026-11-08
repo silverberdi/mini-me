@@ -1911,12 +1911,6 @@ class OpenCodeProviderAdapter(ProviderAdapterInterface):
                 models[slug] = None
                 model_routes[slug] = self._route_for(slug)
 
-            if "deepseek" in configured_providers:
-                for direct_model in ("deepseek/deepseek-chat", "deepseek/deepseek-reasoner"):
-                    if direct_model not in models:
-                        models[direct_model] = None
-                        model_routes[direct_model] = "deepseek_direct"
-
             caps: dict[str, Any] = {"models": models, "model_routes": model_routes}
             self._cached_capabilities = caps
             self._capabilities_expires_at = now + timedelta(seconds=600)
