@@ -349,8 +349,9 @@ class NativeOrchestrationCoordinator:
             uow.commit()
         return active_payload
 
+    @staticmethod
     def _clear_current_human_gate(
-        self, uow: Any, run: OrchestrationRun, *, response_text: str | None = None
+        uow: Any, run: OrchestrationRun, *, response_text: str | None = None
     ) -> None:
         """Clear an active gate only after its existing flow confirms resolution."""
         details = dict(run.stop_details or {})

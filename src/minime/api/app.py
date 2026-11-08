@@ -1594,6 +1594,8 @@ async def run_project_request(
                 },
             )
             action_repo.save(accepted_action)
+            from minime.services.orchestration_coordinator import NativeOrchestrationCoordinator
+            NativeOrchestrationCoordinator._clear_current_human_gate(uow, active_run, response_text=response_text)
             uow.commit()
         elif accepted_action.parameters_json.get("gate_fingerprint") != gate_fingerprint:
             raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="The accepted response belongs to a stale gate")
