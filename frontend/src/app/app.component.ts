@@ -93,6 +93,14 @@ import { VersionService } from './core/version.service';
           <span *ngIf="pushService.isSubscribed()" class="absolute top-1 right-1 w-2 h-2 rounded-full bg-emerald-400"></span>
         </button>
 
+        <!-- Manual Refresh Button -->
+        <button (click)="refresh.read(true)"
+                [disabled]="refresh.isRefreshing()"
+                class="p-2 rounded-lg bg-slate-800 hover:bg-slate-700 border border-slate-700 text-slate-300 transition-colors relative cursor-pointer"
+                title="Refrescar datos del sistema" aria-label="Refrescar">
+          <span class="text-sm inline-block" [class.animate-spin]="refresh.isRefreshing()">🔄</span>
+        </button>
+
         <span *ngIf="refresh.syncState() === 'syncing'" class="text-xs text-sky-300" role="status" aria-live="polite">Sincronizando…</span>
 
         <!-- Logout Button -->
