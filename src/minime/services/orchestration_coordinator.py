@@ -442,7 +442,8 @@ class NativeOrchestrationCoordinator:
             worktree_path, ["ls-files", "--others", "--exclude-standard", "-z"]
         )
         untracked_hashes: list[tuple[str, str]] = []
-        for relative in sorted(path for path in untracked.stdout.split("\0") if path):
+        untracked_text = getattr(untracked, "stdout", str(untracked))
+        for relative in sorted(path for path in untracked_text.split("\0") if path):
             candidate_path = worktree_path / relative
             if candidate_path.is_symlink():
                 content = os.readlink(candidate_path).encode()
@@ -451,17 +452,21 @@ class NativeOrchestrationCoordinator:
             else:
                 content = b""
             untracked_hashes.append((relative, hashlib.sha256(content).hexdigest()))
+        diff_text = getattr(diff, "stdout", str(diff))
+        status_text = getattr(status, "stdout", str(status))
         candidate_fingerprint = hashlib.sha256(
-            diff.stdout.encode() + status.stdout.encode()
+            diff_text.encode() + status_text.encode()
             + json.dumps(untracked_hashes, sort_keys=True).encode()
         ).hexdigest()
+        branch_text = getattr(branch, "stdout", str(branch))
+        head_text = getattr(head, "stdout", str(head))
         payload = {
             "run_id": run.run_id,
             "stage": stage,
             "worktree": str(worktree_path.resolve()),
-            "branch": branch.stdout.strip(),
+            "branch": branch_text.strip(),
             "generation": int(run.current_generation or 0),
-            "candidate_sha": head.stdout.strip(),
+            "candidate_sha": head_text.strip(),
             "candidate_fingerprint": candidate_fingerprint,
         }
         payload["fingerprint"] = hashlib.sha256(
@@ -2291,6 +2296,7 @@ class NativeOrchestrationCoordinator:
             )
 
         # Step 7: Apply Stage and Test Execution
+        outcome = None
         if active_run.current_stage in (
             OrchestrationStage.READY_TO_APPLY,
             OrchestrationStage.IMPLEMENTING,
@@ -2357,6 +2363,9 @@ class NativeOrchestrationCoordinator:
                             ),
                         ),
                     )
+                    if isinstance(outcome, bool):
+                        outcome = ApplyOutcome("COMPLETE" if outcome else "FAILED", (), (), None, (), None,
+                                               None, "Legacy boolean Apply result; no structured evidence.")
                     await self._finish_stage_invocation(
                         uow, active_run, invocation, outcome.status,
                         {
@@ -2376,9 +2385,6 @@ class NativeOrchestrationCoordinator:
                         current_stage=OrchestrationStage.IMPLEMENTING,
                         message="Apply invocation failed or lost its durable claim. Worktree preserved.",
                     )
-                if isinstance(outcome, bool):
-                    outcome = ApplyOutcome("COMPLETE" if outcome else "FAILED", (), (), None, (), None,
-                                           None, "Legacy boolean Apply result; no structured evidence.")
                 attempts += 1
                 if outcome.status == "HUMAN_REQUIRED":
                     payload = self._record_current_human_gate(
@@ -2451,6 +2457,7 @@ class NativeOrchestrationCoordinator:
             tests_ok, test_evidence = (outcome.tests_passed, outcome.test_evidence) if outcome else (None, "")
             if tests_ok is None:
                 tests_ok, test_evidence = await self._run_automated_tests(worktree_path, base_branch)
+            active_run.stop_details = dict(active_run.stop_details or {})
             active_run.stop_details["test_evidence"] = test_evidence
             if hasattr(uow, "orchestration_runs"):
                 uow.orchestration_runs.save(active_run)
@@ -4992,9 +4999,14 @@ class NativeOrchestrationCoordinator:
         diff_ok = getattr(diff, "ok", getattr(diff, "returncode", 0) == 0)
         digest = hashlib.sha256(diff_text.encode()).hexdigest() if diff_ok and diff_text else None
         handoff = getattr(result, "workflow_handoff", None)
-        tests_passed, test_evidence = await self._run_automated_tests(
-            worktree_path, base_branch, process_start_observer=process_start_observer
-        )
+        if process_start_observer is not None:
+            tests_passed, test_evidence = await self._run_automated_tests(
+                worktree_path, base_branch, process_start_observer=process_start_observer
+            )
+        else:
+            tests_passed, test_evidence = await self._run_automated_tests(
+                worktree_path, base_branch
+            )
         if getattr(result, "workflow_handoff_required", False) and handoff and handoff.status == "HUMAN_REQUIRED":
             return ApplyOutcome("HUMAN_REQUIRED", completed_ids, tuple(pending), sha_text.strip() if getattr(sha, "ok", True) else None,
                                 changed_files, digest, tests_passed, test_evidence,
@@ -5141,6 +5153,32 @@ class NativeOrchestrationCoordinator:
             worktree_path, changed_paths, candidate_paths
         )
         if not selected_tests:
+            frontend_changes = {
+                p for p in changed_paths
+                if p.startswith("frontend/") or p.startswith("openspec/") or p.endswith(".md")
+            }
+            if frontend_changes == changed_paths and any(p.startswith("frontend/") for p in changed_paths):
+                npm_cmd = ["npm", "--prefix", "frontend", "test"]
+                try:
+                    proc = await asyncio.create_subprocess_exec(
+                        *npm_cmd,
+                        cwd=str(worktree_path),
+                        stdout=asyncio.subprocess.PIPE,
+                        stderr=asyncio.subprocess.PIPE,
+                        start_new_session=True,
+                    )
+                    stdout, stderr = await proc.communicate()
+                    stdout_text = stdout.decode(errors="replace")
+                    stderr_text = stderr.decode(errors="replace")
+                    evidence = (
+                        f"command: {' '.join(npm_cmd)}\n"
+                        f"exit_code: {proc.returncode}\n"
+                        f"stdout:\n{stdout_text}\n"
+                        f"stderr:\n{stderr_text}"
+                    )
+                    return proc.returncode == 0, evidence
+                except OSError as exc:
+                    return False, f"Frontend test execution failed: {exc}"
             return False, (
                 "Test selection failed: no tests were selected; pytest was not run. "
                 f"Changed files: {', '.join(sorted(changed_paths)) or '(none)'}"
