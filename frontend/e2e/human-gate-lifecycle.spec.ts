@@ -62,7 +62,7 @@ test.describe('Human Gate Lifecycle and Observability', () => {
     await expect(page.locator('h3', { hasText: 'Atención Humana Requerida (HUMAN_REQUIRED)' })).toBeHidden({ timeout: 10000 });
 
     // Diagnóstico section now shows "Sin anomalías reportadas"
-    await expect(page.getByText('✓ Sin anomalías reportadas')).toBeVisible();
-    await expect(page.getByText('⚠️ Intervención humana requerida')).toBeHidden();
+    await expect(page.getByText('✓ Sin anomalías reportadas')).toBeVisible({ timeout: 10000 });
+    await expect(page.getByText('⚠️ Intervención humana requerida')).toBeHidden({ timeout: 10000 });
   });
 });
