@@ -121,4 +121,97 @@ test.describe('Searchable Model Combobox in Project Configuration', () => {
     await highEffortRadio.check();
     await expect(highEffortRadio).toBeChecked();
   });
+
+  test('renders error message inside create modal when submission fails without closing modal', async ({ context, page }) => {
+    await context.route('**/api/v1/auth/me', async route => {
+      await route.fulfill({
+        status: 200,
+        contentType: 'application/json',
+        body: JSON.stringify({
+          authenticated: true,
+          user: { email: 'e2e@example.com', name: 'E2E User' },
+        }),
+      });
+    });
+
+    await context.route('**/api/v1/projects', async route => {
+      if (route.request().method() === 'POST') {
+        await route.fulfill({
+          status: 400,
+          contentType: 'application/json',
+          body: JSON.stringify({ detail: 'Error al registrar proyecto: Canonical provider and harness are required for every role: thinking' }),
+        });
+      } else {
+        await route.fulfill({
+          status: 200,
+          contentType: 'application/json',
+          body: JSON.stringify([
+            {
+              project_id: 'e2e-project',
+              display_name: 'E2E Test Project',
+              status: 'ACTIVE',
+              repository: 'https://github.com/test/repo',
+              base_branch: 'main',
+              agent_profiles: {
+                thinking: { model_id: 'gpt-5.6-luna', effort: 'medium' },
+                execution: { model_id: 'gpt-5.6-luna', effort: 'medium' },
+                independent_review: { model_id: 'claude-sonnet-5-5-medium', effort: 'medium' },
+                fallback: { model_id: 'gpt-5.6-luna', effort: 'medium' },
+              },
+            },
+          ]),
+        });
+      }
+    });
+
+    await context.route('**/api/v1/catalogs/agents*', async route => {
+      await route.fulfill({
+        status: 200,
+        contentType: 'application/json',
+        body: JSON.stringify({
+          agents: [
+            {
+              id: 'antigravity',
+              capability_status: 'OBSERVED_READ_ONLY',
+              models: {
+                'claude-sonnet-5-5-medium': ['medium'],
+              },
+              model_routes: {},
+            },
+            {
+              id: 'codex',
+              capability_status: 'OBSERVED_READ_ONLY',
+              models: {
+                'gpt-5.6-luna': ['medium'],
+              },
+              model_routes: {},
+            },
+          ],
+        }),
+      });
+    });
+
+    await page.goto('/proyectos');
+    await waitForAppMounted(page);
+
+    const newProjectBtn = page.getByRole('button', { name: /\+.*Nuevo Proyecto/i });
+    await expect(newProjectBtn).toBeVisible({ timeout: 10000 });
+    await newProjectBtn.click();
+
+    const modalHeading = page.getByRole('heading', { name: /Nuevo Proyecto/i });
+    await expect(modalHeading).toBeVisible();
+
+    await page.locator('input[name="project_id"]').fill('test-proj');
+    await page.locator('input[name="display_name"]').fill('Test Project');
+    await page.locator('input[name="repository"]').fill('https://github.com/test/repo');
+
+    const submitBtn = page.getByRole('button', { name: /Crear Proyecto/i });
+    await expect(submitBtn).toBeEnabled();
+    await submitBtn.click();
+
+    const modalAlert = page.locator('div.fixed.inset-0').getByRole('alert');
+    await expect(modalAlert).toBeVisible();
+    await expect(modalAlert).toContainText('Error al registrar proyecto');
+    await expect(modalHeading).toBeVisible();
+  });
 });

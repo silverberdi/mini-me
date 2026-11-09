@@ -28,15 +28,12 @@ test('model toggle sends the row version and changes UI state only from server s
   assert.match(component, /is_enabled/);
 });
 
-test('role assignment uses selected project profiles and the existing project API', () => {
-  assert.match(component, /key: 'thinking', label: 'Thinker'/);
-  assert.match(component, /key: 'execution', label: 'Implementer'/);
-  assert.match(component, /key: 'independent_review', label: 'Reviewer'/);
-  assert.match(component, /'\/api\/v1\/projects'/);
-  assert.match(component, /\/api\/v1\/projects\/\$\{encodeURIComponent\(projectId\)\}/);
-  assert.match(component, /agent_profiles: profiles/);
-  assert.match(component, /fallback/);
-  assert.match(component, /Asignaciones guardadas y confirmadas por el servidor/);
+test('role assignment is retired from AdminModelsComponent to enforce Proyectos as single source of truth', () => {
+  assert.doesNotMatch(component, /Asignación por proyecto/);
+  assert.doesNotMatch(component, /saveRoleAssignments/);
+  assert.doesNotMatch(component, /roleProviders/);
+  assert.doesNotMatch(component, /roleModels/);
+  assert.doesNotMatch(component, /'\/api\/v1\/projects'/);
 });
 
 test('AdminModelsComponent omits artificial test connection controls in compliance with Contrato Rector 2.0', () => {

@@ -323,6 +323,16 @@ import { ModelComboboxComponent, ModelOption } from '../../shared/model-combobox
               <p>• <strong>OpenAI GPT</strong>: Opera vía el harness <strong>Codex</strong>.</p>
               <p>• <strong>DeepSeek Directo</strong>: Auditor de solo lectura (<code class="text-sky-300">CONTRACT_REVIEW</code> y <code class="text-sky-300">REVIEW</code>).</p>
             </div>
+
+            <!-- Modal Error Feedback -->
+            <div *ngIf="actionMsg() && !actionOk()" role="alert"
+                 class="p-3 rounded-xl bg-red-500/15 border border-red-500/30 text-red-300 text-xs flex items-center justify-between gap-2">
+              <div class="flex items-center gap-2">
+                <span>⚠️</span>
+                <span>{{ actionMsg() }}</span>
+              </div>
+              <button type="button" (click)="clearActionMsg()" class="text-red-400 hover:text-red-200 text-sm font-bold ml-2">✕</button>
+            </div>
           </div>
 
           <div class="pt-4 flex items-center justify-end gap-3">
@@ -462,6 +472,16 @@ import { ModelComboboxComponent, ModelOption } from '../../shared/model-combobox
               <p>• <strong>Anthropic Claude & Google Gemini</strong>: Operan vía el harness <strong>Antigravity</strong> con capacidades OpenSpec.</p>
               <p>• <strong>OpenAI GPT</strong>: Opera vía el harness <strong>Codex</strong>.</p>
               <p>• <strong>DeepSeek Directo</strong>: Auditor de solo lectura (<code class="text-sky-300">CONTRACT_REVIEW</code> y <code class="text-sky-300">REVIEW</code>).</p>
+            </div>
+
+            <!-- Modal Error Feedback -->
+            <div *ngIf="actionMsg() && !actionOk()" role="alert"
+                 class="p-3 rounded-xl bg-red-500/15 border border-red-500/30 text-red-300 text-xs flex items-center justify-between gap-2">
+              <div class="flex items-center gap-2">
+                <span>⚠️</span>
+                <span>{{ actionMsg() }}</span>
+              </div>
+              <button type="button" (click)="clearActionMsg()" class="text-red-400 hover:text-red-200 text-sm font-bold ml-2">✕</button>
             </div>
           </div>
 
@@ -804,6 +824,7 @@ export class ProyectosComponent implements OnInit {
   }
 
   openCreateModal() {
+    this.actionMsg.set(null);
     this.newProject = {
       project_id: '',
       display_name: '',
@@ -825,7 +846,12 @@ export class ProyectosComponent implements OnInit {
     this.showCreateModal = true;
   }
 
+  clearActionMsg(): void {
+    this.actionMsg.set(null);
+  }
+
   openEditModal() {
+    this.actionMsg.set(null);
     const proj = this.refresh.activeProject();
     if (!proj) return;
     this.editProject = {
@@ -876,8 +902,8 @@ export class ProyectosComponent implements OnInit {
     return legacyRoutes[modelId] || '';
   }
 
-  private buildProfile(role: string, modelId: string, effortVal?: string) {
-    const proj = this.refresh.activeProject();
+  private buildProfile(role: string, modelId: string, effortVal?: string, isNew = false) {
+    const proj = isNew ? null : this.refresh.activeProject();
     const existing = proj?.agent_profiles?.[role];
     const found = this.availableModels.find(
       m => m.id === modelId || (m.variants !== undefined && Object.values(m.variants).includes(modelId))
@@ -900,10 +926,10 @@ export class ProyectosComponent implements OnInit {
       targetModelId = `${baseName}-${effort}`;
     }
 
-    if (existing && existing.model_id === modelId && existing.effort === effort) {
+    if (existing && existing.model_id === modelId && existing.effort === effort && existing.provider_id && existing.harness_id) {
       return existing;
     }
-    if (existing && existing.model_id === targetModelId && existing.effort === effort) {
+    if (existing && existing.model_id === targetModelId && existing.effort === effort && existing.provider_id && existing.harness_id) {
       return existing;
     }
 
@@ -958,7 +984,7 @@ export class ProyectosComponent implements OnInit {
 
     return {
       agent_id,
-      model_id: modelId,
+      model_id: targetModelId,
       provider_id,
       harness_id,
       route,
@@ -995,10 +1021,10 @@ export class ProyectosComponent implements OnInit {
         git_pr: { provider_id: 'github', repository_url: this.newProject.repository.trim(), auth_mode: 'environment_app', secret_reference: null },
       },
       agent_profiles: {
-        thinking: this.buildProfile('thinking', this.newProjectProfiles.thinking, this.newProjectEfforts.thinking),
-        execution: this.buildProfile('execution', this.newProjectProfiles.execution, this.newProjectEfforts.execution),
-        independent_review: this.buildProfile('independent_review', this.newProjectProfiles.independent_review, this.newProjectEfforts.independent_review),
-        fallback: this.buildProfile('fallback', this.newProjectProfiles.fallback, this.newProjectEfforts.fallback),
+        thinking: this.buildProfile('thinking', this.newProjectProfiles.thinking, this.newProjectEfforts.thinking, true),
+        execution: this.buildProfile('execution', this.newProjectProfiles.execution, this.newProjectEfforts.execution, true),
+        independent_review: this.buildProfile('independent_review', this.newProjectProfiles.independent_review, this.newProjectEfforts.independent_review, true),
+        fallback: this.buildProfile('fallback', this.newProjectProfiles.fallback, this.newProjectEfforts.fallback, true),
       },
       execution_policy: {
         max_review_rounds: 2,
