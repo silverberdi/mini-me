@@ -88,3 +88,14 @@ test('ProyectosComponent deduplicates model variants with identical label and ma
   assert.match(proyectosSrc, /existing\.variants\[entry\.effort\] = modelKey;/);
   assert.match(comboboxSrc, /isSelected\(m: ModelOption\): boolean/);
 });
+
+test('ProyectosComponent renders inline error feedback inside modals and isolates new project profiles', () => {
+  // Inline modal error banner with role="alert"
+  assert.match(proyectosSrc, /\*ngIf="actionMsg\(\) && !actionOk\(\)" role="alert"/);
+  assert.match(proyectosSrc, /clearActionMsg\(\)/);
+
+  // buildProfile isolates new project profiles from active project
+  assert.match(proyectosSrc, /buildProfile\(role: string, modelId: string, effortVal\?: string, isNew = false\)/);
+  assert.match(proyectosSrc, /const proj = isNew \? null : this\.refresh\.activeProject\(\);/);
+  assert.match(proyectosSrc, /this\.buildProfile\('thinking', this\.newProjectProfiles\.thinking, this\.newProjectEfforts\.thinking, true\)/);
+});

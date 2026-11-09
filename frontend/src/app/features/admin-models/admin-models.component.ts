@@ -1,8 +1,6 @@
 import { CommonModule } from '@angular/common';
 import { Component, OnInit } from '@angular/core';
-import { FormsModule } from '@angular/forms';
 import { ApiService } from '../../core/api.service';
-import { Project } from '../../core/models';
 
 interface RegistryModel {
   id: string;
@@ -30,34 +28,19 @@ interface HarnessResult {
   summary: string;
 }
 
-interface AgentCatalogEntry {
-  id: string;
-  roles: string[];
-  file_edit_roles: string[];
-  read_only_roles: string[];
-  models: Record<string, string[] | null>;
-}
-
-interface RoleChoice {
-  key: 'thinking' | 'execution' | 'independent_review';
-  label: string;
-  capability: string[];
-  agentRole: string;
-}
-
 @Component({
   selector: 'app-admin-models',
   standalone: true,
-  imports: [CommonModule, FormsModule],
+  imports: [CommonModule],
   template: `
     <section class="space-y-6 text-slate-100">
       <header class="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
         <div>
           <h1 class="text-2xl font-bold">Administración / Modelos &amp; Proveedores</h1>
-          <p class="mt-1 text-sm text-slate-400">Catálogo persistido y asignaciones del proyecto seleccionado.</p>
+          <p class="mt-1 text-sm text-slate-400">Catálogo de proveedores, harnesses instalados y habilitación global de modelos.</p>
         </div>
         <button type="button" (click)="refreshHarnesses()" [disabled]="refreshingHarnesses"
-                class="rounded-lg border border-sky-500/30 bg-sky-500/10 px-4 py-2 text-sm font-semibold text-sky-200 disabled:opacity-50">
+                class="rounded-lg border border-sky-500/30 bg-sky-500/10 px-4 py-2 text-sm font-semibold text-sky-200 disabled:opacity-50 cursor-pointer">
           {{ refreshingHarnesses ? 'Consultando harnesses…' : 'Actualizar estado de harnesses' }}
         </button>
       </header>
@@ -92,7 +75,7 @@ interface RoleChoice {
                 <td class="p-3">{{ model.harness_id }}</td>
                 <td class="p-3"><span>{{ model.discovery_status }}</span><span *ngIf="model.diagnostic?.summary" class="mt-1 block max-w-sm text-xs text-slate-400">{{ model.diagnostic?.summary }}</span></td>
                 <td class="p-3">
-                  <label class="inline-flex items-center gap-2" [attr.aria-label]="(model.is_enabled ? 'Deshabilitar ' : 'Habilitar ') + model.canonical_model_id">
+                  <label class="inline-flex items-center gap-2 cursor-pointer" [attr.aria-label]="(model.is_enabled ? 'Deshabilitar ' : 'Habilitar ') + model.canonical_model_id">
                     <input type="checkbox" [checked]="model.is_enabled" [disabled]="busyModelId === model.id" (change)="toggleModel(model, $event)" class="h-4 w-4 rounded border-slate-600 bg-slate-800 text-sky-500">
                     <span>{{ model.is_enabled ? 'Habilitado' : 'Deshabilitado' }}</span>
                   </label>
@@ -103,81 +86,26 @@ interface RoleChoice {
           </table>
         </div>
       </section>
-
-      <section aria-labelledby="roles-heading" class="space-y-4 rounded-xl border border-slate-700 bg-slate-800/40 p-4 sm:p-6">
-        <div>
-          <h2 id="roles-heading" class="text-lg font-semibold">Asignación por proyecto</h2>
-          <p class="mt-1 text-sm text-slate-400">Los cambios se guardan en el perfil del proyecto mediante la API existente.</p>
-        </div>
-        <label class="block max-w-xl text-sm">Proyecto
-          <select [ngModel]="selectedProjectId" (ngModelChange)="selectProject($event)" class="mt-1 block w-full rounded-lg border border-slate-600 bg-slate-900 p-2.5">
-            <option value="">Selecciona un proyecto</option>
-            <option *ngFor="let project of projects" [value]="project.project_id">{{ project.display_name || project.name || project.project_id }}</option>
-          </select>
-        </label>
-        <div *ngIf="selectedProjectId" class="grid gap-4 md:grid-cols-3">
-          <div *ngFor="let role of roles" class="space-y-2">
-            <h3 class="text-sm font-semibold">{{ role.label }}</h3>
-            <label class="block text-xs text-slate-400">Proveedor
-              <select [ngModel]="roleProviders[role.key] || ''" (ngModelChange)="selectProvider(role, $event)" class="mt-1 block w-full rounded-lg border border-slate-600 bg-slate-900 p-2 text-sm text-slate-100">
-                <option value="">Selecciona proveedor</option>
-                <option *ngFor="let provider of providersFor(role)" [value]="provider">{{ provider }}</option>
-              </select>
-            </label>
-            <label class="block text-xs text-slate-400">Modelo
-              <select [ngModel]="roleModels[role.key] || ''" (ngModelChange)="roleModels[role.key] = $event" class="mt-1 block w-full rounded-lg border border-slate-600 bg-slate-900 p-2 text-sm text-slate-100">
-                <option value="">Selecciona modelo</option>
-                <option *ngFor="let model of modelsFor(role)" [value]="model.id">{{ model.canonical_model_id }}<ng-container *ngIf="!model.is_enabled"> (deshabilitado actualmente)</ng-container></option>
-              </select>
-            </label>
-          </div>
-        </div>
-        <p *ngIf="selectedProjectId && !hasEditableProfiles" role="status" class="text-sm text-amber-200">El proyecto no expone los cuatro perfiles necesarios; no se enviarán asignaciones parciales.</p>
-        <button type="button" (click)="saveRoleAssignments()" [disabled]="savingRoles || !hasEditableProfiles" class="rounded-lg bg-sky-500 px-4 py-2 text-sm font-bold text-slate-950 disabled:opacity-50">
-          {{ savingRoles ? 'Guardando…' : 'Guardar asignaciones' }}
-        </button>
-      </section>
     </section>
   `
 })
 export class AdminModelsComponent implements OnInit {
-  readonly roles: RoleChoice[] = [
-    { key: 'thinking', label: 'Thinker', capability: ['thinking', 'workflow'], agentRole: 'implementer' },
-    { key: 'execution', label: 'Implementer', capability: ['file_edit', 'workflow'], agentRole: 'implementer' },
-    { key: 'independent_review', label: 'Reviewer', capability: ['read_only_review'], agentRole: 'reviewer' }
-  ];
-
   catalog: ProviderCatalog | null = null;
-  projects: Project[] = [];
-  project: Project | null = null;
-  agentEntries: AgentCatalogEntry[] = [];
   harnessResults: HarnessResult[] | null = null;
-  selectedProjectId = '';
-  roleProviders: Partial<Record<RoleChoice['key'], string>> = {};
-  roleModels: Partial<Record<RoleChoice['key'], string>> = {};
   busyModelId: string | null = null;
   refreshingHarnesses = false;
-  savingRoles = false;
   errorMessage = '';
   successMessage = '';
 
   constructor(private readonly api: ApiService) {}
 
   async ngOnInit(): Promise<void> {
-    const [catalogResponse, projectsResponse, agentsResponse] = await Promise.all([
-      this.api.get<ProviderCatalog>('/api/v1/admin/providers/catalog'),
-      this.api.get<Project[]>('/api/v1/projects'),
-      this.api.get<{ agents: AgentCatalogEntry[] }>('/api/v1/catalogs/agents')
-    ]);
-    if (!catalogResponse.ok || !projectsResponse.ok || !agentsResponse.ok) {
-      this.errorMessage = 'No se pudo cargar el catálogo, los proyectos o las capacidades de agentes.';
+    const catalogResponse = await this.api.get<ProviderCatalog>('/api/v1/admin/providers/catalog');
+    if (!catalogResponse.ok || !catalogResponse.data) {
+      this.errorMessage = 'No se pudo cargar el catálogo de proveedores y modelos.';
       return;
     }
     this.catalog = catalogResponse.data;
-    this.projects = projectsResponse.data || [];
-    this.agentEntries = agentsResponse.data?.agents || [];
-    const preferredProjectId = this.projects[0]?.project_id || '';
-    if (preferredProjectId) await this.selectProject(preferredProjectId);
   }
 
   harnessCards(): Array<{ harness_id: string; status: string; summary: string }> {
@@ -231,107 +159,5 @@ export class AdminModelsComponent implements OnInit {
       this.errorMessage = `No se pudo cambiar ${model.canonical_model_id}: ${response.error || 'conflicto o error del servidor'}`;
     }
     this.busyModelId = null;
-  }
-
-  async selectProject(projectId: string): Promise<void> {
-    this.selectedProjectId = projectId;
-    this.project = null;
-    this.roleProviders = {};
-    this.roleModels = {};
-    this.errorMessage = '';
-    if (!projectId) return;
-    const response = await this.api.get<Project>(`/api/v1/projects/${encodeURIComponent(projectId)}`);
-    if (!response.ok || !response.data) {
-      this.errorMessage = `No se pudo cargar el proyecto: ${response.error || 'error del servidor'}`;
-      return;
-    }
-    this.project = response.data;
-    for (const role of this.roles) {
-      const profile = this.project.agent_profiles?.[role.key];
-      const selected = this.catalog?.models.find(model =>
-        model.provider_id === profile?.provider_id &&
-        model.harness_id === profile?.harness_id &&
-        model.canonical_model_id === profile?.model_id
-      );
-      if (selected) {
-        this.roleProviders[role.key] = selected.provider_id;
-        this.roleModels[role.key] = selected.id;
-      }
-    }
-  }
-
-  providersFor(role: RoleChoice): string[] {
-    return [...new Set(this.modelsForRole(role).map(model => model.provider_id))].sort();
-  }
-
-  modelsFor(role: RoleChoice): RegistryModel[] {
-    return this.modelsForRole(role).filter(model =>
-      !this.roleProviders[role.key] || model.provider_id === this.roleProviders[role.key]
-    );
-  }
-
-  private modelsForRole(role: RoleChoice): RegistryModel[] {
-    const currentId = this.roleModels[role.key];
-    return (this.catalog?.models || []).filter(model => {
-      const agent = this.agentEntries.find(entry => entry.id === model.harness_id);
-      const agentHasModel = Boolean(agent && Object.prototype.hasOwnProperty.call(agent.models || {}, model.canonical_model_id));
-      const roleSupported = Boolean(agent && agent.roles.includes(role.agentRole) && (
-        role.key === 'independent_review'
-          ? agent.read_only_roles.includes(role.agentRole)
-          : agent.file_edit_roles.includes(role.agentRole)
-      ));
-      const modelCompatible = role.capability.every(capability => model.capabilities?.[capability] === true);
-      const observed = model.discovery_status === 'available' && model.is_enabled && agentHasModel && roleSupported && modelCompatible;
-      return observed || model.id === currentId;
-    });
-  }
-
-  selectProvider(role: RoleChoice, providerId: string): void {
-    this.roleProviders[role.key] = providerId;
-    if (!this.modelsFor(role).some(model => model.id === this.roleModels[role.key])) {
-      this.roleModels[role.key] = '';
-    }
-  }
-
-  get hasEditableProfiles(): boolean {
-    const profiles = this.project?.agent_profiles || {};
-    return Boolean(this.project && ['thinking', 'execution', 'independent_review', 'fallback'].every(key => profiles[key]));
-  }
-
-  async saveRoleAssignments(): Promise<void> {
-    if (!this.project || !this.hasEditableProfiles) return;
-    const profiles = structuredClone(this.project.agent_profiles || {});
-    for (const role of this.roles) {
-      const selected = this.catalog?.models.find(model => model.id === this.roleModels[role.key]);
-      if (!selected || !selected.is_enabled || selected.discovery_status !== 'available') {
-        this.errorMessage = `Selecciona un modelo habilitado y disponible para ${role.label}.`;
-        return;
-      }
-      const current = profiles[role.key];
-      profiles[role.key] = {
-        ...current,
-        agent_id: selected.harness_id,
-        provider_id: selected.provider_id,
-        harness_id: selected.harness_id,
-        model_id: selected.canonical_model_id,
-        route: typeof selected.capabilities?.['model_route'] === 'string'
-          ? selected.capabilities['model_route'] as string
-          : current.route
-      };
-    }
-    this.savingRoles = true;
-    this.errorMessage = '';
-    this.successMessage = '';
-    const response = await this.api.patch<Project>(
-      `/api/v1/projects/${encodeURIComponent(this.project.project_id)}`,
-      { agent_profiles: profiles }
-    );
-    if (response.ok && response.data) {
-      this.project = response.data;
-      this.successMessage = 'Asignaciones guardadas y confirmadas por el servidor.';
-    } else {
-      this.errorMessage = `No se pudieron guardar las asignaciones: ${response.error || 'validación rechazada'}`;
-    }
-    this.savingRoles = false;
   }
 }
