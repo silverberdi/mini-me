@@ -4893,6 +4893,11 @@ class NativeOrchestrationCoordinator:
             f"REQUISITO OBLIGATORIO DE IDIOMA: Redacta el resumen ('summary') y cada hallazgo "
             f"('violated_requirement', 'expected_correction') obligatoriamente en español simple y directo. "
             f"No uses inglés.\n\n"
+            f"REGLA ESTRICTA DE TAMAÑO Y CONCISIÓN:\n"
+            f"- Toda la respuesta debe llegar en no más de 4000 caracteres para evitar que la API la trunque.\n"
+            f"- No generes análisis narrativo previo ni preámbulos extensos.\n"
+            f"- El resumen ('summary') debe ser conciso (máximo 2 a 3 oraciones en español simple).\n"
+            f"- Emite directamente el único bloque JSON con el veredicto.\n\n"
             f"{_REVIEW_VERDICT_SCHEMA_HINT}\n"
         )
         model = (
@@ -5455,6 +5460,11 @@ class NativeOrchestrationCoordinator:
             f"REQUISITO OBLIGATORIO DE IDIOMA: Redacta el resumen ('summary') y cada hallazgo "
             f"('violated_requirement', 'expected_correction') obligatoriamente en español simple y directo. "
             f"No uses inglés.\n\n"
+            f"REGLA ESTRICTA DE TAMAÑO Y CONCISIÓN:\n"
+            f"- Toda la respuesta debe llegar en no más de 4000 caracteres para evitar que la API la trunque.\n"
+            f"- No generes análisis narrativo previo ni preámbulos extensos.\n"
+            f"- El resumen ('summary') debe ser conciso (máximo 2 a 3 oraciones en español simple).\n"
+            f"- Emite directamente el único bloque JSON con el veredicto.\n\n"
             f"{_REVIEW_VERDICT_SCHEMA_HINT}\n"
             "Do not use APPROVED prose."
         )
