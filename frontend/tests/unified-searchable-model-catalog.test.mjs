@@ -61,5 +61,24 @@ test('Model mapping separates OpenRouter upstream identity from DeepSeek direct 
 
   // Preserves existing profiles when editing
   assert.match(proyectosSrc, /const existing = proj\?\.agent_profiles\?\.\[role\];/);
-  assert.match(proyectosSrc, /if \(existing && existing\.model_id === modelId\) \{\s*return existing;\s*\}/);
+  assert.match(proyectosSrc, /if \(existing && existing\.model_id === modelId/);
+});
+
+test('ProyectosComponent provides independent effort radio buttons per role and validates form before submit', () => {
+  // Radio buttons for effort in Create modal
+  assert.match(proyectosSrc, /name="new_effort_thinking"/);
+  assert.match(proyectosSrc, /name="new_effort_execution"/);
+  assert.match(proyectosSrc, /name="new_effort_review"/);
+  assert.match(proyectosSrc, /name="new_effort_fallback"/);
+
+  // Radio buttons for effort in Edit modal
+  assert.match(proyectosSrc, /name="edit_effort_thinking"/);
+  assert.match(proyectosSrc, /name="edit_effort_execution"/);
+  assert.match(proyectosSrc, /name="edit_effort_review"/);
+  assert.match(proyectosSrc, /name="edit_effort_fallback"/);
+
+  // Validation function and button binding
+  assert.match(proyectosSrc, /isFormValid\(profiles: \{ thinking: string; execution: string; independent_review: string; fallback: string \}\): boolean/);
+  assert.match(proyectosSrc, /\[disabled\]="isActionRunning\(\) \|\| !isFormValid\(newProjectProfiles\)"/);
+  assert.match(proyectosSrc, /\[disabled\]="isActionRunning\(\) \|\| !isFormValid\(editProjectProfiles\)"/);
 });

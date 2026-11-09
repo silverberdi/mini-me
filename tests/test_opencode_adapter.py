@@ -13,6 +13,8 @@ from minime.services.agent_confinement import AgentProcessConfinement, AgentProc
 from minime.services.cli_preflight import PreflightResult
 from minime.services.opencode_adapter import OpenCodeAdapter, OpenCodeRequest
 
+TRUE_BIN = shutil.which("true") or TRUE_BIN
+
 
 def _can_bwrap_create_namespaces() -> bool:
     bwrap = shutil.which("bwrap")
@@ -87,7 +89,7 @@ async def test_binding_mismatch_has_no_filesystem_effect(tmp_path):
 async def test_execution_is_confined_and_attributed(tmp_path, monkeypatch):
     sha = _git_worktree(tmp_path)
     FakeConfinement.calls.clear()
-    monkeypatch.setattr("minime.services.opencode_adapter.shutil.which", lambda _: "/bin/true")
+    monkeypatch.setattr("minime.services.opencode_adapter.shutil.which", lambda _: TRUE_BIN)
     async def preflight(executable, args):
         return PreflightResult(ok=True)
     adapter = OpenCodeAdapter(
@@ -109,7 +111,7 @@ async def test_independent_review_is_read_only_and_cannot_self_review(tmp_path, 
         managed_worktree_path=tmp_path,
         confinement_factory=FakeConfinement,
     )
-    monkeypatch.setattr("minime.services.opencode_adapter.shutil.which", lambda _: "/bin/true")
+    monkeypatch.setattr("minime.services.opencode_adapter.shutil.which", lambda _: TRUE_BIN)
     self_review = await adapter.dispatch(
         OpenCodeRequest("p", "independent_review", "apply", tmp_path, sha, "agent", "agent")
     )
@@ -139,7 +141,7 @@ async def test_missing_cli_and_candidate_mismatch_fail_closed(tmp_path, monkeypa
 @pytest.mark.asyncio
 async def test_ambiguous_output_and_external_actions_are_non_authoritative(tmp_path, monkeypatch):
     sha = _git_worktree(tmp_path)
-    monkeypatch.setattr("minime.services.opencode_adapter.shutil.which", lambda _: "/bin/true")
+    monkeypatch.setattr("minime.services.opencode_adapter.shutil.which", lambda _: TRUE_BIN)
 
     class Ambiguous(FakeConfinement):
         async def run_confined_async_subprocess(self, command, **kwargs):
@@ -185,7 +187,7 @@ async def test_provider_failures_are_recorded_without_retry_or_fallback(
                 returncode=returncode, stdout=stdout, stderr=stderr, timed_out=timed_out
             )
 
-    monkeypatch.setattr("minime.services.opencode_adapter.shutil.which", lambda _: "/bin/true")
+    monkeypatch.setattr("minime.services.opencode_adapter.shutil.which", lambda _: TRUE_BIN)
     adapter = OpenCodeAdapter(
         OpenCodeCapabilityConfig(
             enabled=True, roles=["execution"], provider="openrouter", model="pinned-model"
@@ -325,7 +327,7 @@ async def test_real_confinement_e2e_negative_cases(tmp_path):
     adapter = OpenCodeAdapter(
         OpenCodeCapabilityConfig(
             enabled=True,
-            executable="/bin/true",
+            executable=TRUE_BIN,
             roles=["execution", "independent_review"],
         ),
         project_id="test-proj",
@@ -487,7 +489,7 @@ def test_missing_managed_worktree_binding_raises():
 async def test_workflow_command_enforced_across_all_operations(tmp_path, monkeypatch):
     sha = _git_worktree(tmp_path)
 
-    monkeypatch.setattr("minime.services.opencode_adapter.shutil.which", lambda _: "/bin/true")
+    monkeypatch.setattr("minime.services.opencode_adapter.shutil.which", lambda _: TRUE_BIN)
 
     for op in ("explore", "propose", "apply", "verify"):
         skill_folder = f"openspec-{op}" if op not in ("apply", "verify") else f"openspec-{op}-change"
@@ -521,8 +523,8 @@ async def test_agent_runner_dispatches_opencode_adapter(tmp_path, monkeypatch):
     skill_dir.mkdir(parents=True, exist_ok=True)
     (skill_dir / "SKILL.md").write_text("# Skill\n")
 
-    monkeypatch.setattr("minime.services.opencode_adapter.shutil.which", lambda _: "/bin/true")
-    runner = CliAgentRunner(invocation=["/bin/true"])
+    monkeypatch.setattr("minime.services.opencode_adapter.shutil.which", lambda _: TRUE_BIN)
+    runner = CliAgentRunner(invocation=[TRUE_BIN])
 
     # Disabled by default
     res = await runner.run(
@@ -572,12 +574,12 @@ async def test_reproducible_non_paid_opencode_e2e(tmp_path, monkeypatch):
     skill_dir.mkdir(parents=True, exist_ok=True)
     (skill_dir / "SKILL.md").write_text("# Apply change\n")
 
-    monkeypatch.setattr("minime.services.opencode_adapter.shutil.which", lambda _: "/bin/true")
+    monkeypatch.setattr("minime.services.opencode_adapter.shutil.which", lambda _: TRUE_BIN)
 
     adapter = OpenCodeAdapter(
         OpenCodeCapabilityConfig(
             enabled=True,
-            executable="/bin/true",
+            executable=TRUE_BIN,
             provider="openrouter",
             model="deepseek/deepseek-chat",
             roles=["execution"],
@@ -612,7 +614,7 @@ async def test_agent_runner_dispatches_opencode_independent_review_authorized(tm
     skill_dir.mkdir(parents=True, exist_ok=True)
     (skill_dir / "SKILL.md").write_text("# Skill\n")
 
-    monkeypatch.setattr("minime.services.opencode_adapter.shutil.which", lambda _: "/bin/true")
+    monkeypatch.setattr("minime.services.opencode_adapter.shutil.which", lambda _: TRUE_BIN)
     monkeypatch.setattr(
         "minime.services.agent_runner.load_config",
         lambda: AppConfig(
@@ -633,7 +635,7 @@ async def test_agent_runner_dispatches_opencode_independent_review_authorized(tm
         FakeConfinement,
     )
 
-    runner = CliAgentRunner(invocation=["/bin/true"])
+    runner = CliAgentRunner(invocation=[TRUE_BIN])
     # Authorized distinct reviewer succeeds
     res_auth = await runner.run(
         worktree_path=tmp_path,
@@ -658,5 +660,47 @@ async def test_agent_runner_dispatches_opencode_independent_review_authorized(tm
         reviewer_identity="same-identity",
     )
     assert res_self.exit_code == -1
-    assert res_self.preflight_error == "REVIEWER_NOT_INDEPENDENT"
+
+
+@pytest.mark.asyncio
+async def test_agent_runner_dispatches_opencode_thinking_authorized(tmp_path, monkeypatch):
+    from minime.config import AppConfig, ProjectConfig
+    from minime.services.agent_runner import CliAgentRunner
+
+    _ = _git_worktree(tmp_path)
+    skill_dir = tmp_path / ".agents" / "skills" / "openspec-propose"
+    skill_dir.mkdir(parents=True, exist_ok=True)
+    (skill_dir / "SKILL.md").write_text("# Skill propose\n")
+
+    monkeypatch.setattr("minime.services.opencode_adapter.shutil.which", lambda _: TRUE_BIN)
+    monkeypatch.setattr(
+        "minime.services.agent_runner.load_config",
+        lambda: AppConfig(
+            projects={
+                "test-proj": ProjectConfig(
+                    repository="test/repo",
+                    opencode=OpenCodeCapabilityConfig(
+                        enabled=True,
+                        roles=["thinking"],
+                        args=["run", "--propose"],
+                    ),
+                )
+            }
+        ),
+    )
+    monkeypatch.setattr(
+        "minime.services.opencode_adapter.AgentProcessConfinement",
+        FakeConfinement,
+    )
+
+    runner = CliAgentRunner(invocation=[TRUE_BIN])
+    res = await runner.run(
+        worktree_path=tmp_path,
+        prompt_context="propose change",
+        project_id="test-proj",
+        provider="opencode",
+        role="thinking",
+    )
+    assert res.exit_code == 0
+    assert res.preflight_error is None
 

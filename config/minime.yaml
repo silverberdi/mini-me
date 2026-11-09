@@ -65,10 +65,13 @@ providers:
     type: cli
     command: opencode
     enabled: true
-    roles: [implementer, reviewer]
-    file_edit_roles: [implementer]
+    roles: [thinker, implementer, reviewer]
+    file_edit_roles: [thinker, implementer]
     read_only_roles: [reviewer]
     invocation:
+      thinker:
+        args: [run, "{prompt}"]
+        prompt_transport: argument
       implementer:
         args: [run, "{prompt}"]
         prompt_transport: argument

@@ -32,6 +32,8 @@ eggs/
 .coverage
 htmlcov/
 .test-tmp/
+test-results/
+
 
 # Local runtime/logs
 logs/

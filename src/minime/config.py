@@ -351,10 +351,10 @@ class OpenCodeCapabilityConfig(BaseModel):
     @classmethod
     def _supported_roles(cls, value: list[str]) -> list[str]:
         normalized = [role.strip() for role in value]
-        unsupported = sorted(set(normalized) - {"execution", "independent_review"})
+        unsupported = sorted(set(normalized) - {"thinking", "execution", "independent_review"})
         if unsupported:
             raise ValueError(
-                "OpenCode capability supports only execution and independent_review roles: "
+                "OpenCode capability supports only thinking, execution and independent_review roles: "
                 + ", ".join(unsupported)
             )
         if len(normalized) != len(set(normalized)):

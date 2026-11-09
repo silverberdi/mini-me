@@ -625,19 +625,20 @@ class CliAgentRunner:
             proj_cfg = app_cfg.projects.get(proj_id) if hasattr(app_cfg, "projects") else None
             opencode_cfg = proj_cfg.opencode if proj_cfg else OpenCodeCapabilityConfig()
 
-            if role in ("reviewer", "independent_review"):
+            if role in ("thinker", "thinking"):
+                opencode_role = "thinking"
+            elif role in ("reviewer", "independent_review"):
                 opencode_role = "independent_review"
             elif role in ("implementer", "execution"):
                 opencode_role = "execution"
             else:
-                # F9 authorizes OpenCode for execution and independent_review only.
                 return AgentExecutionResult(
                     exit_code=-2,
                     timed_out=False,
                     stdout=[],
                     stderr=[
                         f"OpenCode is not authorized for role '{role}' "
-                        "(F9 supports execution and independent_review only)."
+                        "(supports thinking, execution, and independent_review only)."
                     ],
                     duration_ms=0,
                     environment_error=True,
@@ -645,7 +646,12 @@ class CliAgentRunner:
                 )
 
             if not opencode_cfg.enabled:
-                profile_key = "independent_review" if opencode_role == "independent_review" else "execution"
+                if opencode_role == "thinking":
+                    profile_key = "thinking"
+                elif opencode_role == "independent_review":
+                    profile_key = "independent_review"
+                else:
+                    profile_key = "execution"
                 p = self.profiles.get((profile_key, "opencode")) if hasattr(self, "profiles") and self.profiles else None
                 if p:
                     # Canonical OpenCode model identity, e.g. deepseek/deepseek-v4-pro
@@ -675,7 +681,7 @@ class CliAgentRunner:
                         provider="openrouter" if is_openrouter else "deepseek",
                         model=model_val,
                         api_key_env="OPENROUTER_API_KEY" if is_openrouter else "DEEPSEEK_API_KEY",
-                        roles=["execution", "independent_review"],
+                        roles=["thinking", "execution", "independent_review"],
                         args=[],
                     )
 
@@ -685,7 +691,11 @@ class CliAgentRunner:
             operation = (
                 workflow.operation
                 if workflow and workflow.operation
-                else ("verify" if opencode_role == "independent_review" else "apply")
+                else (
+                    "propose"
+                    if opencode_role == "thinking"
+                    else ("verify" if opencode_role == "independent_review" else "apply")
+                )
             )
             candidate_sha = _git_head(Path(worktree_path)) or ""
 

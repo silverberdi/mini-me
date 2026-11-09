@@ -427,10 +427,18 @@ class CanonicalProfileResolver:
             raise ValueError(f"{role}: model observation is stale")
         if not row.diagnostic_code or row.diagnostic_code not in {"ok", "custom_metadata"}:
             raise ValueError(f"{role}: credential or harness diagnostic is not verified")
+        row_capabilities = dict(row.capabilities or {})
+        row_origin = getattr(row, "origin", "discovered")
+        row_harness = getattr(row, "harness_id", "")
+        if row_origin == "discovered" and row_harness in {"opencode", "ollama"}:
+            row_capabilities.setdefault("thinking", True)
+            row_capabilities.setdefault("workflow", True)
+            row_capabilities.setdefault("file_edit", True)
+            row_capabilities.setdefault("read_only_review", True)
         for capability in ROLE_CAPABILITIES.get(role, ()):
-            if not bool((row.capabilities or {}).get(capability)):
+            if not bool(row_capabilities.get(capability)):
                 raise ValueError(f"{role}: missing capability {capability}")
-        observed_route = (row.capabilities or {}).get("model_route")
+        observed_route = row_capabilities.get("model_route")
         selected_route = selection.get("route")
         if selected_route and observed_route and selected_route != observed_route:
             raise ValueError(f"{role}: route does not match canonical catalog entry")

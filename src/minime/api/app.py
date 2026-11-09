@@ -635,7 +635,13 @@ async def refresh_administrative_provider_catalog(
                 "harness_id": canonical_harness,
                 "canonical_model_id": model_id,
                 "origin": "discovered",
-                "capabilities": {"model_route": route},
+                "capabilities": {
+                    "model_route": route,
+                    "thinking": True,
+                    "workflow": True,
+                    "file_edit": True,
+                    "read_only_review": True,
+                },
                 "discovery_status": "available",
                 "diagnostic_code": result.code,
                 "diagnostic_summary": result.summary,
@@ -659,6 +665,7 @@ async def project_agent_catalog(
     _operator: AuthenticatedOperatorDep,
     uow: UowDep,
     project_id: str | None = None,
+    only_enabled: bool = True,
 ) -> dict[str, Any]:
     """Expose locally configured, read-only discovered agent capabilities."""
     project_root = (
@@ -669,7 +676,39 @@ async def project_agent_catalog(
             status_code=status.HTTP_409_CONFLICT,
             detail="Project workspace binding is unavailable or does not match its repository identity",
         )
-    return await ProjectCatalogService().agent_catalog(project_root)
+    catalog = await ProjectCatalogService().agent_catalog(project_root)
+    if only_enabled:
+        registry = getattr(uow, "provider_model_registry", None)
+        if registry is not None:
+            registry_models = registry.list()
+            if registry_models:
+                enabled_models = {
+                    row.canonical_model_id.lower()
+                    for row in registry_models
+                    if row.is_enabled
+                }
+                filtered_agents = []
+                for agent in catalog.get("agents", []):
+                    harness_id = (agent.get("id") or "").lower()
+                    harness_entries = [
+                        row for row in registry_models
+                        if row.harness_id.lower() == harness_id or row.provider_id.lower() == harness_id
+                    ]
+                    if not harness_entries:
+                        filtered_agents.append(agent)
+                        continue
+
+                    new_models = {
+                        m_key: efforts
+                        for m_key, efforts in (agent.get("models") or {}).items()
+                        if m_key.lower() in enabled_models
+                    }
+                    new_agent = dict(agent)
+                    new_agent["models"] = new_models
+                    filtered_agents.append(new_agent)
+                catalog = dict(catalog)
+                catalog["agents"] = filtered_agents
+    return catalog
 
 
 @app.get("/api/v1/projects", tags=["projects"])
