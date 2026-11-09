@@ -35,6 +35,21 @@ test.describe('Project Creation Stepper and Selection Persistence (Ref #355)', (
   });
 
   test('creation modal displays 4-stage stepper and surfaces GitHub authorization error feedback', async ({ page }) => {
+    // Intercept POST /api/v1/projects with canonical GitHub App grant error
+    await page.route('**/api/v1/projects', async route => {
+      if (route.request().method() === 'POST') {
+        await route.fulfill({
+          status: 400,
+          contentType: 'application/json',
+          body: JSON.stringify({
+            detail: "Error al registrar proyecto en etapa connection_and_grants: La GitHub App no tiene acceso al repositorio 'unauthorized-org/unauthorized-repo'. Por favor, configure el acceso en los ajustes de instalación de la GitHub App (agregue el repositorio a la lista permitida o seleccione 'All repositories').",
+          }),
+        });
+      } else {
+        await route.continue();
+      }
+    });
+
     // 1. Navigate to /proyectos view
     await page.goto('/proyectos');
     await waitForAppMounted(page);
@@ -67,13 +82,17 @@ test.describe('Project Creation Stepper and Selection Persistence (Ref #355)', (
     const alertBox = page.locator('div[role="alert"]').filter({ hasText: /error/i });
     await expect(alertBox).toBeVisible({ timeout: 15000 });
 
-    // 7. Verify GitHub authorization guidance is displayed
+    // 7. Verify stepper progress is displayed
+    const stepperHeading = page.getByText(/Progreso de Creación Guiada/i);
+    await expect(stepperHeading).toBeVisible();
+
+    // 8. Verify GitHub authorization guidance is displayed
     const guidanceBox = page.locator('div').filter({ hasText: /Autorización de GitHub requerida/i }).first();
     await expect(guidanceBox).toBeVisible();
     await expect(guidanceBox).toContainText('Installed GitHub Apps');
     await expect(guidanceBox).toContainText('All repositories');
 
-    // 8. Cancel modal
+    // 9. Cancel modal
     const cancelBtn = page.getByRole('button', { name: /Cancelar/i });
     await cancelBtn.click();
     await expect(modalHeading).toBeHidden();
