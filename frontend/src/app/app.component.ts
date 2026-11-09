@@ -1,5 +1,6 @@
 import { Component, OnInit } from '@angular/core';
 import { CommonModule } from '@angular/common';
+import { FormsModule } from '@angular/forms';
 import { RouterModule, Router } from '@angular/router';
 import { SwUpdate } from '@angular/service-worker';
 import { AuthService } from './core/auth.service';
@@ -10,7 +11,7 @@ import { VersionService } from './core/version.service';
 @Component({
   selector: 'app-root',
   standalone: true,
-  imports: [CommonModule, RouterModule],
+  imports: [CommonModule, RouterModule, FormsModule],
   template: `
     <div *ngIf="updateAvailable" class="flex flex-col gap-3 border-b border-sky-400/30 bg-sky-500/10 px-4 py-3 text-sky-100 sm:flex-row sm:items-center sm:justify-center" role="status" aria-live="polite">
       <span class="text-sm">Hay una nueva versión de mini me disponible.</span>
@@ -55,10 +56,12 @@ import { VersionService } from './core/version.service';
         <div class="hidden sm:flex items-center gap-2">
           <label for="projectSelector" class="text-xs text-slate-400 font-medium">Proyecto:</label>
           <select id="projectSelector"
-                  [value]="refresh.activeProject()?.project_id || ''"
-                  (change)="onProjectChange($event)"
+                  [ngModel]="refresh.activeProject().project_id || ''"
+                  (ngModelChange)="onProjectChange($event)"
                   class="bg-slate-800 border border-slate-700 text-xs rounded-lg px-2.5 py-1.5 text-slate-200 focus:outline-none focus:border-sky-500">
-            <option *ngFor="let p of refresh.projects()" [value]="p.project_id">
+            <option *ngFor="let p of refresh.projects()"
+                    [value]="p.project_id"
+                    [selected]="p.project_id === (refresh.activeProject().project_id || '')">
               {{ p.project_id }}{{ p.status && p.status !== 'ACTIVE' ? ' (' + p.status + ')' : '' }}
             </option>
           </select>
@@ -312,9 +315,9 @@ export class AppComponent implements OnInit {
     this.pushService.updateCategory(category, event.target.checked);
   }
 
-  onProjectChange(event: any) {
-    const pid = event.target.value;
-    if (pid) {
+  onProjectChange(value: any) {
+    const pid = typeof value === 'string' ? value : value?.target?.value;
+    if (pid && pid !== this.refresh.selectedProjectId()) {
       this.refresh.setSelectedProject(pid);
     }
   }

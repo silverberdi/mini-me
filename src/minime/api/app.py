@@ -43,21 +43,21 @@ from minime.domain.enums import (
     EventType,
     OperatorActionType,
     OperatorAuthDecision,
+    ProjectType,
 )
 from minime.domain.interfaces import PersistenceUnitOfWork
 from minime.domain.models import (
     AuthorizedOperator,
     AuthStatusDTO,
-    Change,
     ContextDiscoveryReport,
     Event,
-    get_active_human_payload,
     OperatorActionRecord,
     OperatorIdentityDTO,
     ProjectConfigurationInput,
     ProjectConfigurationPatch,
     ProviderHealth,
     SchedulerStatus,
+    get_active_human_payload,
 )
 from minime.logging import redact_secrets
 from minime.services.auth_service import (
@@ -69,7 +69,6 @@ from minime.services.auth_service import (
 from minime.services.budget_service import BudgetService
 from minime.services.capacity_lifecycle_service import CapacityLifecycleService
 from minime.services.context_discovery_service import ContextDiscoveryService
-from minime.services.current_check_batch import validate_current_checks_batch
 from minime.services.dashboard_service import DashboardOverviewResponse, OperationsDashboardService
 from minime.services.event_broker import event_broker
 from minime.services.greenfield_bootstrap import (
@@ -758,7 +757,14 @@ async def create_project_configuration(
                 raise ValueError(f"Fallo en la preparación del repositorio: {onboarding_exc}") from onboarding_exc
         return service.public_project_payload(project)
     except ValueError as exc:
+        logger.warning("Error de validación al crear proyecto: %s", exc)
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
+    except Exception as exc:
+        logger.exception("Error inesperado al crear proyecto: %s", exc)
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Error inesperado al crear proyecto: {exc}",
+        ) from exc
 
 
 @app.post(
