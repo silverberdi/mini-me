@@ -20,14 +20,3 @@ The Angular application SHALL expose an administration view that reads the authe
 #### Scenario: Keep model state after toggle failure
 - **WHEN** the enablement operation fails or returns a version conflict
 - **THEN** the view retains the last server-confirmed state and shows the failure without reporting success
-
-### Requirement: Configure provider and model for project roles
-The administration view SHALL let the operator select an existing project and assign a provider/model pair to the `thinker`, `implementer`, and `reviewer` roles, mapping them to the existing `thinking`, `execution`, and `independent_review` profile keys. It SHALL load and persist these assignments through the existing project configuration API and SHALL show the saved server response. It SHALL NOT create a separate persisted role store or modify the project's `fallback` profile.
-
-#### Scenario: Save selected project role assignments
-- **WHEN** the operator saves valid provider/model selections for the three roles on the selected project
-- **THEN** the existing project endpoint persists the matching canonical profile keys and the view reflects the returned project configuration
-
-#### Scenario: Reject unavailable model assignment
-- **WHEN** the selected model is disabled, unavailable, or lacks the role capability
-- **THEN** the save is rejected by the existing validation contract, the view retains the last server-confirmed assignment, and no success is shown
