@@ -698,7 +698,7 @@ export class ProyectosComponent implements OnInit {
       this.isCatalogLoading.set(true);
       const res = await this.api.get<any>('/api/v1/catalogs/agents');
       if (res.ok && res.data?.agents) {
-        const parsed: ModelOption[] = [];
+        const parsedMap = new Map<string, ModelOption>();
         for (const agent of res.data.agents) {
           const providerId = (agent.id || '').toLowerCase();
           const modelsObj = agent.models || {};
@@ -706,15 +706,31 @@ export class ProyectosComponent implements OnInit {
           for (const modelKey of Object.keys(modelsObj)) {
             const efforts: string[] = modelsObj[modelKey] || [];
             const entry = this.formatModelEntry(modelKey, providerId, routes, efforts);
-            parsed.push({
-              id: modelKey,
-              agent: providerId,
-              ...entry,
-            });
+            const dedupKey = `${providerId}:${entry.label}:${entry.group}`;
+
+            if (parsedMap.has(dedupKey)) {
+              const existing = parsedMap.get(dedupKey)!;
+              if (existing.variants) {
+                existing.variants[entry.effort] = modelKey;
+              }
+              if (entry.effort === 'medium') {
+                existing.id = modelKey;
+              }
+            } else {
+              const variants: Record<string, string> = { [entry.effort]: modelKey };
+              parsedMap.set(dedupKey, {
+                id: modelKey,
+                agent: providerId,
+                ...entry,
+                variants,
+              });
+            }
           }
         }
-        if (parsed.length > 0) {
-          this.availableModels = parsed.sort((a, b) => a.group.localeCompare(b.group) || a.label.localeCompare(b.label));
+        if (parsedMap.size > 0) {
+          this.availableModels = Array.from(parsedMap.values()).sort(
+            (a, b) => a.group.localeCompare(b.group) || a.label.localeCompare(b.label)
+          );
         }
       }
     } catch {
@@ -725,7 +741,9 @@ export class ProyectosComponent implements OnInit {
   }
 
   resolveProviderForModel(modelId: string): string {
-    const found = this.availableModels.find(m => m.id === modelId);
+    const found = this.availableModels.find(
+      m => m.id === modelId || (m.variants !== undefined && Object.values(m.variants).includes(modelId))
+    );
     if (found?.provider_id) return found.provider_id;
     if (modelId.startsWith('openrouter/')) return 'openrouter';
     if (modelId.startsWith('deepseek/') || modelId.startsWith('deepseek-')) return 'deepseek';
@@ -756,7 +774,9 @@ export class ProyectosComponent implements OnInit {
     if (!proj || !proj.agent_profiles) return 'Configuración por defecto';
     const profile = proj.agent_profiles[role];
     if (!profile) return 'No asignado';
-    const found = this.availableModels.find(m => m.id === profile.model_id);
+    const found = this.availableModels.find(
+      m => m.id === profile.model_id || (m.variants !== undefined && Object.values(m.variants).includes(profile.model_id))
+    );
     const effort = profile.effort ? ` [${profile.effort.slice(0, 3)}]` : '';
     if (found) {
       return `${found.label}${effort}`;
@@ -834,14 +854,18 @@ export class ProyectosComponent implements OnInit {
     if (!profiles.thinking || !profiles.execution || !profiles.independent_review || !profiles.fallback) return false;
     for (const role of ['thinking', 'execution', 'independent_review', 'fallback'] as const) {
       const modelKey = profiles[role];
-      const found = this.availableModels.find(m => m.id === modelKey);
+      const found = this.availableModels.find(
+        m => m.id === modelKey || (m.variants !== undefined && Object.values(m.variants).includes(modelKey))
+      );
       if (!found || !found.provider_id || !found.harness_id) return false;
     }
     return !this.isReviewerConflict(profiles);
   }
 
   resolveAgentForModel(modelId: string): string {
-    const found = this.availableModels.find(m => m.id === modelId);
+    const found = this.availableModels.find(
+      m => m.id === modelId || (m.variants !== undefined && Object.values(m.variants).includes(modelId))
+    );
     if (found) return found.agent;
     const legacyRoutes: Record<string, string> = {
       'deepseek-chat': 'deepseek',
@@ -855,7 +879,9 @@ export class ProyectosComponent implements OnInit {
   private buildProfile(role: string, modelId: string, effortVal?: string) {
     const proj = this.refresh.activeProject();
     const existing = proj?.agent_profiles?.[role];
-    const found = this.availableModels.find(m => m.id === modelId);
+    const found = this.availableModels.find(
+      m => m.id === modelId || (m.variants !== undefined && Object.values(m.variants).includes(modelId))
+    );
 
     let effort = effortVal || 'medium';
     if (!effortVal) {
@@ -866,12 +892,23 @@ export class ProyectosComponent implements OnInit {
       else if (existing?.effort) effort = existing.effort;
     }
 
+    let targetModelId = modelId;
+    if (found?.variants && found.variants[effort]) {
+      targetModelId = found.variants[effort];
+    } else if (found?.agent === 'antigravity') {
+      const baseName = (found?.id || modelId).replace(/-(low|medium|high)$/, '');
+      targetModelId = `${baseName}-${effort}`;
+    }
+
     if (existing && existing.model_id === modelId && existing.effort === effort) {
+      return existing;
+    }
+    if (existing && existing.model_id === targetModelId && existing.effort === effort) {
       return existing;
     }
 
     let agent_id = found?.agent;
-    if (!agent_id) agent_id = this.resolveAgentForModel(modelId);
+    if (!agent_id) agent_id = this.resolveAgentForModel(targetModelId);
 
     let workflows: string[] = [];
     let skills: string[] = [];

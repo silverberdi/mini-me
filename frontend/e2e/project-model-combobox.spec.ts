@@ -51,7 +51,9 @@ test.describe('Searchable Model Combobox in Project Configuration', () => {
               id: 'antigravity',
               capability_status: 'OBSERVED_READ_ONLY',
               models: {
+                'claude-sonnet-5-5-low': ['low'],
                 'claude-sonnet-5-5-medium': ['medium'],
+                'claude-sonnet-5-5-high': ['high'],
                 'gemini-3.8-flash-medium': ['medium'],
               },
               model_routes: {},
@@ -103,10 +105,10 @@ test.describe('Searchable Model Combobox in Project Configuration', () => {
     await expect(searchInput).toBeVisible();
     await searchInput.fill('Claude');
 
-    // 7. Verify options filter and select via keyboard or click
-    const filteredOption = page.getByRole('option').filter({ hasText: /Claude/i }).first();
-    await expect(filteredOption).toBeVisible({ timeout: 10000 });
-    await filteredOption.click();
+    // 7. Verify options filter, ensure no duplicated options (exactly 1 Claude Sonnet), and select
+    const claudeSonnetOptions = page.getByRole('option').filter({ hasText: /Claude SONNET/i });
+    await expect(claudeSonnetOptions).toHaveCount(1);
+    await claudeSonnetOptions.first().click();
 
     // 8. Verify combobox closes and displays chosen model
     await expect(thinkingCombobox).toHaveAttribute('aria-expanded', 'false');

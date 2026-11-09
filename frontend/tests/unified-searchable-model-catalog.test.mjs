@@ -82,3 +82,9 @@ test('ProyectosComponent provides independent effort radio buttons per role and 
   assert.match(proyectosSrc, /\[disabled\]="isActionRunning\(\) \|\| !isFormValid\(newProjectProfiles\)"/);
   assert.match(proyectosSrc, /\[disabled\]="isActionRunning\(\) \|\| !isFormValid\(editProjectProfiles\)"/);
 });
+
+test('ProyectosComponent deduplicates model variants with identical label and maps effort variants', () => {
+  assert.match(proyectosSrc, /const dedupKey = `\${providerId}:\${entry\.label}:\${entry\.group}`;/);
+  assert.match(proyectosSrc, /existing\.variants\[entry\.effort\] = modelKey;/);
+  assert.match(comboboxSrc, /isSelected\(m: ModelOption\): boolean/);
+});

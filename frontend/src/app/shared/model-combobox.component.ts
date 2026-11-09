@@ -20,6 +20,7 @@ export interface ModelOption {
   provider_id: string;
   harness_id: string;
   route?: string;
+  variants?: Record<string, string>;
 }
 
 @Component({
@@ -99,7 +100,7 @@ export interface ModelOption {
             *ngFor="let m of filteredModels; let idx = index"
             type="button"
             role="option"
-            [attr.aria-selected]="m.id === modelValue"
+            [attr.aria-selected]="isSelected(m)"
             (click)="selectModel(m)"
             (mouseenter)="highlightedIndex = idx"
             [attr.title]="m.label + ' (' + m.group + ')'"
@@ -110,14 +111,14 @@ export interface ModelOption {
             class="w-full text-left px-2.5 py-1.5 rounded-lg text-[11px] font-mono flex items-center justify-between cursor-pointer border transition-colors"
           >
             <div class="pr-2 min-w-0">
-              <span class="font-medium text-slate-200 block truncate" [class.text-sky-300]="m.id === modelValue">
+              <span class="font-medium text-slate-200 block truncate" [class.text-sky-300]="isSelected(m)">
                 {{ m.label }}
               </span>
               <span class="block text-[10px] text-slate-400 truncate">
                 {{ m.group }}
               </span>
             </div>
-            <span *ngIf="m.id === modelValue" class="text-sky-400 shrink-0 text-xs">✓</span>
+            <span *ngIf="isSelected(m)" class="text-sky-400 shrink-0 text-xs">✓</span>
           </button>
         </div>
       </div>
@@ -156,8 +157,19 @@ export class ModelComboboxComponent {
 
   constructor(private elementRef: ElementRef) {}
 
+  isSelected(m: ModelOption): boolean {
+    return (
+      m.id === this.modelValue ||
+      (m.variants !== undefined && Object.values(m.variants).includes(this.modelValue))
+    );
+  }
+
   get selectedModel(): ModelOption | undefined {
-    return this.models.find(m => m.id === this.modelValue);
+    return this.models.find(
+      m =>
+        m.id === this.modelValue ||
+        (m.variants !== undefined && Object.values(m.variants).includes(this.modelValue))
+    );
   }
 
   get selectedLabel(): string {
