@@ -510,7 +510,7 @@ def _validate_live_canonical_profiles(profiles: dict[str, Any], uow: Any) -> Non
             "effort": data.get("effort"),
             "route": data.get("route"),
         }
-    resolver = CanonicalProfileResolver(uow.provider_model_registry)
+    resolver = CanonicalProfileResolver(uow.provider_model_registry, freshness=None)
     for role_name, sel in selections.items():
         prov = str(sel.get("provider_id", "")).strip().lower()
         harn = str(sel.get("harness_id", "")).strip().lower()

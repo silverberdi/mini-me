@@ -1,4 +1,5 @@
 import asyncio
+from datetime import datetime, timedelta, timezone
 import json
 import stat
 
@@ -191,6 +192,50 @@ def test_canonical_resolver_accepts_opencode_thinker_with_discovered_capabilitie
     assert resolved["provider_id"] == "openrouter"
     assert resolved["harness_id"] == "opencode"
     assert resolved["effort"] == "high"
+
+
+def test_canonical_resolver_does_not_expire_enabled_models_without_explicit_freshness():
+    class Row:
+        provider_id = "deepseek"
+        harness_id = "opencode"
+        canonical_model_id = "deepseek/deepseek-flash"
+        origin = "discovered"
+        discovery_status = "available"
+        is_enabled = True
+        diagnostic_code = "ok"
+        diagnostic_summary = "verified"
+        last_observed_at = datetime.now(timezone.utc) - timedelta(days=5)
+        capabilities = {"model_route": "deepseek_direct"}
+
+    class Repo:
+        def get(self, provider, harness, model):
+            return Row() if (provider, harness, model) == ("deepseek", "opencode", "deepseek/deepseek-flash") else None
+
+    # Default freshness is None: model observation older than 24h is NOT rejected
+    resolved = CanonicalProfileResolver(Repo()).resolve(
+        "reviewer",
+        {
+            "provider_id": "deepseek",
+            "harness_id": "opencode",
+            "canonical_model_id": "deepseek/deepseek-flash",
+            "route": "deepseek_direct",
+            "effort": "medium",
+        },
+    )
+    assert resolved["canonical_model_id"] == "deepseek/deepseek-flash"
+
+    # Explicit freshness rejects stale observations
+    with pytest.raises(ValueError, match="stale"):
+        CanonicalProfileResolver(Repo(), freshness=timedelta(hours=24)).resolve(
+            "reviewer",
+            {
+                "provider_id": "deepseek",
+                "harness_id": "opencode",
+                "canonical_model_id": "deepseek/deepseek-flash",
+                "route": "deepseek_direct",
+                "effort": "medium",
+            },
+        )
 
 
 
