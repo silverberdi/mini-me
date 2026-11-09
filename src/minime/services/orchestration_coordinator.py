@@ -538,12 +538,14 @@ class NativeOrchestrationCoordinator:
         ]
         if prior_finished:
             last_status = prior_finished[-1]
-            if last_status == "COMPLETE":
+            if last_status == "COMPLETE" and not (authorized_retry or allow_human_resume):
                 return None
             if last_status == "HUMAN_REQUIRED" and not allow_human_resume:
                 return None
             if last_status in {"FAILED", "PARTIAL"} and not (
-                authorized_retry or (stage == "APPLY" and last_status == "PARTIAL")
+                authorized_retry
+                or allow_human_resume
+                or (stage == "APPLY" and last_status == "PARTIAL")
             ):
                 return None
         incomplete = [item for key, item in starts.items() if key not in terminal]
@@ -745,6 +747,10 @@ class NativeOrchestrationCoordinator:
             authorized_retry=authorized_retry,
         )
         if invocation is None:
+            self._finish_native_dispatch(
+                uow, run, operation, attempt_id, action_key, claim, "AMBIGUOUS",
+                f"{operation.title()} stage invocation is already active or ambiguous",
+            )
             raise RuntimeError(f"{operation.title()} stage invocation is already active or ambiguous")
         try:
             result = await self._run_claimed(
@@ -1901,10 +1907,14 @@ class NativeOrchestrationCoordinator:
                             else (operator_clarification if verified_propose_human_gate else None)
                         ),
                         process_start_observer=process_observer,
+                        pending_revision=bool(pending_revision),
                     ),
                     lambda result: result.get("status") in {"READY_TO_VALIDATE", "HUMAN_REQUIRED"},
                     worktree_path=worktree_path,
-                    allow_human_resume=bool(verified_propose_human_gate and operator_clarification),
+                    allow_human_resume=bool(
+                        (verified_propose_human_gate and operator_clarification)
+                        or pending_revision
+                    ),
                     authorized_retry=propose_recovery_needed and not pending_revision,
                 )
                 propose_attempt_id = dispatch[0]
@@ -4482,29 +4492,46 @@ class NativeOrchestrationCoordinator:
         continue_existing: bool = False,
         operator_clarification: str | None = None,
         process_start_observer: Any = None,
+        pending_revision: bool = False,
     ) -> dict[str, Any]:
-        """Dispatch native Propose or native Continue for an incomplete proposal."""
-        operation = "continue" if continue_existing else "propose"
+        """Dispatch native Propose, Continue, or Update for a proposal."""
+        if pending_revision:
+            operation = "update"
+        elif continue_existing:
+            operation = "continue"
+        else:
+            operation = "propose"
+
         wf = self.agent_runner.resolve_workflow(
             worktree_path=worktree_path,
             provider=provider,
             operation=operation,
             change_name=change_name,
         )
-        prompt = (
-            f"Execute official OpenSpec {'Continue' if continue_existing else 'Propose'} for change '{change_name}'.\n"
-            f"Workflow dispatch command: {wf.dispatch_command}\n\n"
-            f"Remote Request #{issue_number}: {issue_title}\n"
-            f"Description:\n{issue_body}\n"
-            + (
-                f"Continue the existing native change workflow and preserve every valid artifact under "
-                f"openspec/changes/{change_name}/; complete only the missing canonical planning artifacts."
-                if continue_existing
-                else f"Generate canonical change planning artifacts under openspec/changes/{change_name}/: proposal.md, specs/, design.md, and tasks.md."
+        if operation == "update":
+            prompt = (
+                f"Execute official OpenSpec Update for change '{change_name}'.\n"
+                f"Workflow dispatch command: {wf.dispatch_command}\n\n"
+                f"Remote Request #{issue_number}: {issue_title}\n"
+                f"Description:\n{issue_body}\n"
+                f"Update the existing planning artifacts under openspec/changes/{change_name}/ to address the independent review findings:\n"
+                f"{operator_clarification or ''}\n"
             )
-        )
-        if continue_existing and operator_clarification:
-            prompt += f"\nOperator clarification for the pending native workflow:\n{operator_clarification}\n"
+        else:
+            prompt = (
+                f"Execute official OpenSpec {'Continue' if continue_existing else 'Propose'} for change '{change_name}'.\n"
+                f"Workflow dispatch command: {wf.dispatch_command}\n\n"
+                f"Remote Request #{issue_number}: {issue_title}\n"
+                f"Description:\n{issue_body}\n"
+                + (
+                    f"Continue the existing native change workflow and preserve every valid artifact under "
+                    f"openspec/changes/{change_name}/; complete only the missing canonical planning artifacts."
+                    if continue_existing
+                    else f"Generate canonical change planning artifacts under openspec/changes/{change_name}/: proposal.md, specs/, design.md, and tasks.md."
+                )
+            )
+            if continue_existing and operator_clarification:
+                prompt += f"\nOperator clarification for the pending native workflow:\n{operator_clarification}\n"
         res = await self.agent_runner.run(
             worktree_path=worktree_path,
             prompt_context=prompt,
