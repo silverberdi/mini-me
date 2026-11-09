@@ -104,7 +104,10 @@ _REVIEW_VERDICT_SCHEMA_HINT = (
     '"violated_requirement":"what was violated",'
     '"expected_correction":"what must change"}]}. '
     "Use READY_TO_MERGE only when the review is clean and findings is empty; otherwise "
-    "use CHANGES_REQUIRED with at least one concrete finding."
+    "use CHANGES_REQUIRED with at least one concrete finding.\n"
+    "REQUISITO OBLIGATORIO DE IDIOMA: Todo texto de 'summary', 'violated_requirement' y "
+    "'expected_correction' debe estar redactado obligatoriamente en español simple, claro y conciso, "
+    "apto para el operador humano. NO uses inglés en las descripciones de los hallazgos ni en el resumen."
 )
 
 
@@ -2183,6 +2186,7 @@ class NativeOrchestrationCoordinator:
                 attempt_id = str(uuid4())
                 review_invocation = await self._begin_stage_invocation(
                     uow, active_run, worktree_path, "PROPOSAL_REVIEW",
+                    allow_human_resume=bool(operator_clarification or action == _REVIEW_STALE),
                     authorized_retry=needs_auth,
                 )
                 if review_invocation is None:
@@ -2653,6 +2657,7 @@ class NativeOrchestrationCoordinator:
                 attempt_id = str(uuid4())
                 review_invocation = await self._begin_stage_invocation(
                     uow, active_run, worktree_path, "CODE_REVIEW",
+                    allow_human_resume=bool(operator_clarification or action == _REVIEW_STALE),
                     authorized_retry=needs_auth,
                 )
                 if review_invocation is None:
@@ -4780,12 +4785,13 @@ class NativeOrchestrationCoordinator:
         ambiguous or stale — requires an explicit governed re-dispatch.
         """
         if not isinstance(stored, dict):
-            # No durable review evidence. A fresh dispatch is safe only on the
-            # pass that just entered the stage; on a resume it is ambiguous
-            # (e.g. a legacy run whose review was never recorded).
-            return _REVIEW_AMBIGUOUS if is_resume else _REVIEW_STALE
+            # No durable review evidence. If no prior review exists, it is stale
+            # (ready for fresh dispatch).
+            return _REVIEW_STALE
         status = stored.get("status")
         if status == "dispatched":
+            if not identity_matches:
+                return _REVIEW_STALE
             # An in-flight attempt with no definitive result is ambiguous no
             # matter what identity it recorded.
             return _REVIEW_AMBIGUOUS
@@ -4883,7 +4889,10 @@ class NativeOrchestrationCoordinator:
             f"the change cannot be implemented safely at all; a MAJOR must mean a real "
             f"correctness or security gap; a MINOR is a nit that must not block. Do not re-flag a "
             f"requirement that is already covered by an existing task; report only findings that "
-            f"are new and material.\n"
+            f"are new and material.\n\n"
+            f"REQUISITO OBLIGATORIO DE IDIOMA: Redacta el resumen ('summary') y cada hallazgo "
+            f"('violated_requirement', 'expected_correction') obligatoriamente en español simple y directo. "
+            f"No uses inglés.\n\n"
             f"{_REVIEW_VERDICT_SCHEMA_HINT}\n"
         )
         model = (
@@ -5442,7 +5451,10 @@ class NativeOrchestrationCoordinator:
             f"A BLOCKER means the change cannot be implemented safely at all; a MAJOR means a real "
             f"correctness or security gap; a MINOR is a nit that must not block. Do not re-flag a "
             f"requirement that is already covered by an existing task; report only findings that "
-            f"are new and material.\n"
+            f"are new and material.\n\n"
+            f"REQUISITO OBLIGATORIO DE IDIOMA: Redacta el resumen ('summary') y cada hallazgo "
+            f"('violated_requirement', 'expected_correction') obligatoriamente en español simple y directo. "
+            f"No uses inglés.\n\n"
             f"{_REVIEW_VERDICT_SCHEMA_HINT}\n"
             "Do not use APPROVED prose."
         )
