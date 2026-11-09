@@ -5,6 +5,49 @@ test.describe('Project Creation Stepper and Selection Persistence (Ref #355)', (
   test.beforeEach(async ({ context }) => {
     await setupAuthSession(context);
 
+    await context.route('**/api/v1/auth/me', async route => {
+      await route.fulfill({
+        status: 200,
+        contentType: 'application/json',
+        body: JSON.stringify({
+          authenticated: true,
+          user: { email: 'e2e@example.com', name: 'E2E User' },
+        }),
+      });
+    });
+
+    await context.route('**/api/v1/projects', async route => {
+      if (route.request().method() === 'POST') {
+        await route.fulfill({
+          status: 400,
+          contentType: 'application/json',
+          body: JSON.stringify({
+            detail: "Error al registrar proyecto en etapa connection_and_grants: La GitHub App no tiene acceso al repositorio 'unauthorized-org/unauthorized-repo'. Por favor, configure el acceso en los ajustes de instalación de la GitHub App (agregue el repositorio a la lista permitida o seleccione 'All repositories').",
+          }),
+        });
+      } else {
+        await route.fulfill({
+          status: 200,
+          contentType: 'application/json',
+          body: JSON.stringify([
+            {
+              project_id: 'e2e-project',
+              display_name: 'E2E Test Project',
+              status: 'ACTIVE',
+              repository: 'https://github.com/test/repo',
+              base_branch: 'main',
+              agent_profiles: {
+                thinking: { model_id: 'gpt-5.6-luna', effort: 'medium' },
+                execution: { model_id: 'gpt-5.6-luna', effort: 'medium' },
+                independent_review: { model_id: 'claude-sonnet-5-5-medium', effort: 'medium' },
+                fallback: { model_id: 'gpt-5.6-luna', effort: 'medium' },
+              },
+            },
+          ]),
+        });
+      }
+    });
+
     // Provide deterministic models catalog
     await context.route('**/api/v1/catalogs/agents*', async route => {
       await route.fulfill({
@@ -35,21 +78,6 @@ test.describe('Project Creation Stepper and Selection Persistence (Ref #355)', (
   });
 
   test('creation modal displays 4-stage stepper and surfaces GitHub authorization error feedback', async ({ page }) => {
-    // Intercept POST /api/v1/projects with canonical GitHub App grant error
-    await page.route('**/api/v1/projects', async route => {
-      if (route.request().method() === 'POST') {
-        await route.fulfill({
-          status: 400,
-          contentType: 'application/json',
-          body: JSON.stringify({
-            detail: "Error al registrar proyecto en etapa connection_and_grants: La GitHub App no tiene acceso al repositorio 'unauthorized-org/unauthorized-repo'. Por favor, configure el acceso en los ajustes de instalación de la GitHub App (agregue el repositorio a la lista permitida o seleccione 'All repositories').",
-          }),
-        });
-      } else {
-        await route.continue();
-      }
-    });
-
     // 1. Navigate to /proyectos view
     await page.goto('/proyectos');
     await waitForAppMounted(page);
