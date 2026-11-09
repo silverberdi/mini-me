@@ -6,7 +6,7 @@ TBD - created by archiving change 017-pwa-control-center. Update Purpose after a
 ## Requirements
 
 ### Requirement: PWA Application Shell and Navigation
-The system SHALL provide one Spanish web application with exactly five independent routed views: Dashboard, Trabajo, Trabajo actual, Proyectos and Backlog. Only Dashboard and Proyectos SHALL be primary navigation destinations. Dashboard SHALL link to Trabajo and Trabajo actual; Trabajo SHALL link to Trabajo actual; selected project detail SHALL link to its Backlog. Deep links, back and forward SHALL preserve authorized context. One reactive event lifecycle and initial bootstrap SHALL serve all views without redundant manual refresh controls or periodic polling spinners. The client connection state SHALL reflect true network availability (`navigator.onLine`) and core server reachability, and SHALL NOT oscillate to a disconnected state during normal SSE reconnect cycles or transient secondary endpoint background failures.
+The system SHALL provide one Spanish web application with exactly five independent routed views: Dashboard, Trabajo, Trabajo actual, Proyectos and Backlog. Only Dashboard and Proyectos SHALL be primary navigation destinations. Dashboard SHALL link to Trabajo and Trabajo actual; Trabajo SHALL link to Trabajo actual; selected project detail SHALL link to its Backlog. Deep links, back and forward SHALL preserve authorized context. One reactive event lifecycle and initial bootstrap SHALL serve all views without redundant manual refresh controls or periodic polling spinners. The client connection state SHALL reflect true network availability (`navigator.onLine`) and core server reachability, and SHALL NOT oscillate to a disconnected state during normal SSE reconnect cycles or transient secondary endpoint background failures. The operator's manual project selection SHALL be durably persisted in `localStorage` across page reloads, route changes, and SSE event cycles, and SHALL NOT be reset automatically to default or active project fallbacks.
 
 #### Scenario: View application shell with live health indicators
 - **WHEN** the authenticated application initializes
@@ -31,6 +31,11 @@ The system SHALL provide one Spanish web application with exactly five independe
 #### Scenario: Change refresh interval without duplication
 - **WHEN** the operator switches views while real-time execution events arrive
 - **THEN** a single reactive event lifecycle handles updates and neither duplicates listeners nor starts background polling loops.
+
+#### Scenario: Persistent operator project selection
+- **WHEN** the operator selects a project in the application shell or project views
+- **THEN** the selection is stored in `localStorage`
+- **AND** subsequent background updates, route navigation, or page reloads preserve the operator's explicitly selected project without resetting to an arbitrary active project.
 
 ### Requirement: KPI Summary Overview Grid
 The system SHALL present Dashboard for an explicitly identified project in focus, with analog project and current Request/task progress gauges, model quota gauges, completed-Request effectiveness, and compact human attention and operational health. Every measured value SHALL expose source, unit, scope, observation time and freshness. Percentages SHALL require a verified numerator and denominator; absent data SHALL be labeled No disponible, never zero or fabricated. Administrative ACTIVE SHALL NOT imply a global executor selection or a started Run. A frontend migration SHALL preserve the same verified data semantics and SHALL NOT move KPI authority or calculations into the client.
