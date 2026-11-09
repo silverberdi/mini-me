@@ -1643,3 +1643,58 @@ def test_agent_catalog_api_returns_only_validated_local_capabilities(in_memory_u
     assert response.json()["agents"][0]["models"] == {"verified-model": ["medium"]}
     assert "private_key" not in response.text
     assert "api_key" not in response.text
+
+
+def test_agent_catalog_api_filters_disabled_models(monkeypatch):
+    from fastapi.testclient import TestClient
+    from minime.api.app import app, get_current_operator, get_uow
+
+    async def observed_catalog(self, project_root=None):
+        return {
+            "agents": [
+                {
+                    "id": "opencode",
+                    "available": True,
+                    "models": {
+                        "openrouter/deepseek/deepseek-chat": ["medium"],
+                        "openrouter/other/disabled-model": ["low"],
+                    },
+                }
+            ]
+        }
+
+    class MockRow:
+        def __init__(self, canonical_model_id, is_enabled):
+            self.canonical_model_id = canonical_model_id
+            self.harness_id = "opencode"
+            self.provider_id = "openrouter"
+            self.is_enabled = is_enabled
+
+    class MockRegistry:
+        def list(self):
+            return [
+                MockRow("openrouter/deepseek/deepseek-chat", True),
+                MockRow("openrouter/other/disabled-model", False),
+            ]
+
+    class MockUow:
+        provider_model_registry = MockRegistry()
+
+    monkeypatch.setattr(
+        "minime.api.app.ProjectCatalogService.agent_catalog", observed_catalog
+    )
+    monkeypatch.setenv("MINIME_AUTH_ENABLED", "false")
+    app.dependency_overrides[get_uow] = lambda: MockUow()
+    app.dependency_overrides[get_current_operator] = lambda: object()
+    try:
+        response = TestClient(app).get("/api/v1/catalogs/agents")
+    finally:
+        app.dependency_overrides.clear()
+
+    assert response.status_code == 200
+    agents = response.json()["agents"]
+    assert len(agents) == 1
+    # Only the enabled model should be in the returned models dict
+    assert "openrouter/deepseek/deepseek-chat" in agents[0]["models"]
+    assert "openrouter/other/disabled-model" not in agents[0]["models"]
+

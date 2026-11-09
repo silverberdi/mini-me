@@ -225,30 +225,86 @@ import { ModelComboboxComponent, ModelOption } from '../../shared/model-combobox
           <div class="pt-3 border-t border-slate-800 space-y-3">
             <h3 class="font-bold text-slate-200">Modelos Asignados por Rol</h3>
 
-            <div class="grid grid-cols-2 gap-3">
-              <app-model-combobox
-                label="Thinking (Exploración)"
-                [models]="availableModels"
-                [(modelValue)]="newProjectProfiles.thinking"
-              ></app-model-combobox>
+            <div class="grid grid-cols-1 md:grid-cols-2 gap-3.5">
+              <div class="space-y-1 bg-slate-800/40 p-2.5 rounded-xl border border-slate-800">
+                <app-model-combobox
+                  label="Thinking (Exploración)"
+                  [models]="availableModels"
+                  [(modelValue)]="newProjectProfiles.thinking"
+                ></app-model-combobox>
+                <div class="flex items-center gap-2 text-[10px] text-slate-400 font-mono pt-1 border-t border-slate-800/60">
+                  <span class="text-slate-500">Esfuerzo:</span>
+                  <label class="inline-flex items-center gap-1 cursor-pointer hover:text-slate-200">
+                    <input type="radio" name="new_effort_thinking" value="low" [(ngModel)]="newProjectEfforts.thinking" class="text-sky-500 focus:ring-0"> Bajo
+                  </label>
+                  <label class="inline-flex items-center gap-1 cursor-pointer hover:text-slate-200">
+                    <input type="radio" name="new_effort_thinking" value="medium" [(ngModel)]="newProjectEfforts.thinking" class="text-sky-500 focus:ring-0"> Medio
+                  </label>
+                  <label class="inline-flex items-center gap-1 cursor-pointer hover:text-slate-200">
+                    <input type="radio" name="new_effort_thinking" value="high" [(ngModel)]="newProjectEfforts.thinking" class="text-sky-500 focus:ring-0"> Alto
+                  </label>
+                </div>
+              </div>
 
-              <app-model-combobox
-                label="Execution (Código)"
-                [models]="availableModels"
-                [(modelValue)]="newProjectProfiles.execution"
-              ></app-model-combobox>
+              <div class="space-y-1 bg-slate-800/40 p-2.5 rounded-xl border border-slate-800">
+                <app-model-combobox
+                  label="Execution (Código)"
+                  [models]="availableModels"
+                  [(modelValue)]="newProjectProfiles.execution"
+                ></app-model-combobox>
+                <div class="flex items-center gap-2 text-[10px] text-slate-400 font-mono pt-1 border-t border-slate-800/60">
+                  <span class="text-slate-500">Esfuerzo:</span>
+                  <label class="inline-flex items-center gap-1 cursor-pointer hover:text-slate-200">
+                    <input type="radio" name="new_effort_execution" value="low" [(ngModel)]="newProjectEfforts.execution" class="text-sky-500 focus:ring-0"> Bajo
+                  </label>
+                  <label class="inline-flex items-center gap-1 cursor-pointer hover:text-slate-200">
+                    <input type="radio" name="new_effort_execution" value="medium" [(ngModel)]="newProjectEfforts.execution" class="text-sky-500 focus:ring-0"> Medio
+                  </label>
+                  <label class="inline-flex items-center gap-1 cursor-pointer hover:text-slate-200">
+                    <input type="radio" name="new_effort_execution" value="high" [(ngModel)]="newProjectEfforts.execution" class="text-sky-500 focus:ring-0"> Alto
+                  </label>
+                </div>
+              </div>
 
-              <app-model-combobox
-                label="Review (Revisión Independiente)"
-                [models]="availableModels"
-                [(modelValue)]="newProjectProfiles.independent_review"
-              ></app-model-combobox>
+              <div class="space-y-1 bg-slate-800/40 p-2.5 rounded-xl border border-slate-800">
+                <app-model-combobox
+                  label="Review (Revisión Independiente)"
+                  [models]="availableModels"
+                  [(modelValue)]="newProjectProfiles.independent_review"
+                ></app-model-combobox>
+                <div class="flex items-center gap-2 text-[10px] text-slate-400 font-mono pt-1 border-t border-slate-800/60">
+                  <span class="text-slate-500">Esfuerzo:</span>
+                  <label class="inline-flex items-center gap-1 cursor-pointer hover:text-slate-200">
+                    <input type="radio" name="new_effort_review" value="low" [(ngModel)]="newProjectEfforts.independent_review" class="text-sky-500 focus:ring-0"> Bajo
+                  </label>
+                  <label class="inline-flex items-center gap-1 cursor-pointer hover:text-slate-200">
+                    <input type="radio" name="new_effort_review" value="medium" [(ngModel)]="newProjectEfforts.independent_review" class="text-sky-500 focus:ring-0"> Medio
+                  </label>
+                  <label class="inline-flex items-center gap-1 cursor-pointer hover:text-slate-200">
+                    <input type="radio" name="new_effort_review" value="high" [(ngModel)]="newProjectEfforts.independent_review" class="text-sky-500 focus:ring-0"> Alto
+                  </label>
+                </div>
+              </div>
 
-              <app-model-combobox
-                label="Fallback (Respaldo)"
-                [models]="availableModels"
-                [(modelValue)]="newProjectProfiles.fallback"
-              ></app-model-combobox>
+              <div class="space-y-1 bg-slate-800/40 p-2.5 rounded-xl border border-slate-800">
+                <app-model-combobox
+                  label="Fallback (Respaldo)"
+                  [models]="availableModels"
+                  [(modelValue)]="newProjectProfiles.fallback"
+                ></app-model-combobox>
+                <div class="flex items-center gap-2 text-[10px] text-slate-400 font-mono pt-1 border-t border-slate-800/60">
+                  <span class="text-slate-500">Esfuerzo:</span>
+                  <label class="inline-flex items-center gap-1 cursor-pointer hover:text-slate-200">
+                    <input type="radio" name="new_effort_fallback" value="low" [(ngModel)]="newProjectEfforts.fallback" class="text-sky-500 focus:ring-0"> Bajo
+                  </label>
+                  <label class="inline-flex items-center gap-1 cursor-pointer hover:text-slate-200">
+                    <input type="radio" name="new_effort_fallback" value="medium" [(ngModel)]="newProjectEfforts.fallback" class="text-sky-500 focus:ring-0"> Medio
+                  </label>
+                  <label class="inline-flex items-center gap-1 cursor-pointer hover:text-slate-200">
+                    <input type="radio" name="new_effort_fallback" value="high" [(ngModel)]="newProjectEfforts.fallback" class="text-sky-500 focus:ring-0"> Alto
+                  </label>
+                </div>
+              </div>
             </div>
 
             <!-- Independence warning -->
@@ -274,7 +330,7 @@ import { ModelComboboxComponent, ModelOption } from '../../shared/model-combobox
                     class="px-4 py-2 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-300 font-semibold cursor-pointer">
               Cancelar
             </button>
-            <button type="submit" [disabled]="isActionRunning() || isReviewerConflict(newProjectProfiles)"
+            <button type="submit" [disabled]="isActionRunning() || !isFormValid(newProjectProfiles)"
                     class="px-4 py-2 rounded-xl bg-sky-500 hover:bg-sky-400 disabled:opacity-50 text-slate-950 font-bold cursor-pointer">
               {{ isActionRunning() ? 'Guardando…' : 'Crear Proyecto' }}
             </button>
@@ -309,30 +365,86 @@ import { ModelComboboxComponent, ModelOption } from '../../shared/model-combobox
           <div class="pt-3 border-t border-slate-800 space-y-3">
             <h3 class="font-bold text-slate-200">Asignación de Modelos por Rol</h3>
 
-            <div class="grid grid-cols-2 gap-3">
-              <app-model-combobox
-                label="Thinking (Exploración)"
-                [models]="availableModels"
-                [(modelValue)]="editProjectProfiles.thinking"
-              ></app-model-combobox>
+            <div class="grid grid-cols-1 md:grid-cols-2 gap-3.5">
+              <div class="space-y-1 bg-slate-800/40 p-2.5 rounded-xl border border-slate-800">
+                <app-model-combobox
+                  label="Thinking (Exploración)"
+                  [models]="availableModels"
+                  [(modelValue)]="editProjectProfiles.thinking"
+                ></app-model-combobox>
+                <div class="flex items-center gap-2 text-[10px] text-slate-400 font-mono pt-1 border-t border-slate-800/60">
+                  <span class="text-slate-500">Esfuerzo:</span>
+                  <label class="inline-flex items-center gap-1 cursor-pointer hover:text-slate-200">
+                    <input type="radio" name="edit_effort_thinking" value="low" [(ngModel)]="editProjectEfforts.thinking" class="text-sky-500 focus:ring-0"> Bajo
+                  </label>
+                  <label class="inline-flex items-center gap-1 cursor-pointer hover:text-slate-200">
+                    <input type="radio" name="edit_effort_thinking" value="medium" [(ngModel)]="editProjectEfforts.thinking" class="text-sky-500 focus:ring-0"> Medio
+                  </label>
+                  <label class="inline-flex items-center gap-1 cursor-pointer hover:text-slate-200">
+                    <input type="radio" name="edit_effort_thinking" value="high" [(ngModel)]="editProjectEfforts.thinking" class="text-sky-500 focus:ring-0"> Alto
+                  </label>
+                </div>
+              </div>
 
-              <app-model-combobox
-                label="Execution (Código)"
-                [models]="availableModels"
-                [(modelValue)]="editProjectProfiles.execution"
-              ></app-model-combobox>
+              <div class="space-y-1 bg-slate-800/40 p-2.5 rounded-xl border border-slate-800">
+                <app-model-combobox
+                  label="Execution (Código)"
+                  [models]="availableModels"
+                  [(modelValue)]="editProjectProfiles.execution"
+                ></app-model-combobox>
+                <div class="flex items-center gap-2 text-[10px] text-slate-400 font-mono pt-1 border-t border-slate-800/60">
+                  <span class="text-slate-500">Esfuerzo:</span>
+                  <label class="inline-flex items-center gap-1 cursor-pointer hover:text-slate-200">
+                    <input type="radio" name="edit_effort_execution" value="low" [(ngModel)]="editProjectEfforts.execution" class="text-sky-500 focus:ring-0"> Bajo
+                  </label>
+                  <label class="inline-flex items-center gap-1 cursor-pointer hover:text-slate-200">
+                    <input type="radio" name="edit_effort_execution" value="medium" [(ngModel)]="editProjectEfforts.execution" class="text-sky-500 focus:ring-0"> Medio
+                  </label>
+                  <label class="inline-flex items-center gap-1 cursor-pointer hover:text-slate-200">
+                    <input type="radio" name="edit_effort_execution" value="high" [(ngModel)]="editProjectEfforts.execution" class="text-sky-500 focus:ring-0"> Alto
+                  </label>
+                </div>
+              </div>
 
-              <app-model-combobox
-                label="Review (Revisión Independiente)"
-                [models]="availableModels"
-                [(modelValue)]="editProjectProfiles.independent_review"
-              ></app-model-combobox>
+              <div class="space-y-1 bg-slate-800/40 p-2.5 rounded-xl border border-slate-800">
+                <app-model-combobox
+                  label="Review (Revisión Independiente)"
+                  [models]="availableModels"
+                  [(modelValue)]="editProjectProfiles.independent_review"
+                ></app-model-combobox>
+                <div class="flex items-center gap-2 text-[10px] text-slate-400 font-mono pt-1 border-t border-slate-800/60">
+                  <span class="text-slate-500">Esfuerzo:</span>
+                  <label class="inline-flex items-center gap-1 cursor-pointer hover:text-slate-200">
+                    <input type="radio" name="edit_effort_review" value="low" [(ngModel)]="editProjectEfforts.independent_review" class="text-sky-500 focus:ring-0"> Bajo
+                  </label>
+                  <label class="inline-flex items-center gap-1 cursor-pointer hover:text-slate-200">
+                    <input type="radio" name="edit_effort_review" value="medium" [(ngModel)]="editProjectEfforts.independent_review" class="text-sky-500 focus:ring-0"> Medio
+                  </label>
+                  <label class="inline-flex items-center gap-1 cursor-pointer hover:text-slate-200">
+                    <input type="radio" name="edit_effort_review" value="high" [(ngModel)]="editProjectEfforts.independent_review" class="text-sky-500 focus:ring-0"> Alto
+                  </label>
+                </div>
+              </div>
 
-              <app-model-combobox
-                label="Fallback (Respaldo)"
-                [models]="availableModels"
-                [(modelValue)]="editProjectProfiles.fallback"
-              ></app-model-combobox>
+              <div class="space-y-1 bg-slate-800/40 p-2.5 rounded-xl border border-slate-800">
+                <app-model-combobox
+                  label="Fallback (Respaldo)"
+                  [models]="availableModels"
+                  [(modelValue)]="editProjectProfiles.fallback"
+                ></app-model-combobox>
+                <div class="flex items-center gap-2 text-[10px] text-slate-400 font-mono pt-1 border-t border-slate-800/60">
+                  <span class="text-slate-500">Esfuerzo:</span>
+                  <label class="inline-flex items-center gap-1 cursor-pointer hover:text-slate-200">
+                    <input type="radio" name="edit_effort_fallback" value="low" [(ngModel)]="editProjectEfforts.fallback" class="text-sky-500 focus:ring-0"> Bajo
+                  </label>
+                  <label class="inline-flex items-center gap-1 cursor-pointer hover:text-slate-200">
+                    <input type="radio" name="edit_effort_fallback" value="medium" [(ngModel)]="editProjectEfforts.fallback" class="text-sky-500 focus:ring-0"> Medio
+                  </label>
+                  <label class="inline-flex items-center gap-1 cursor-pointer hover:text-slate-200">
+                    <input type="radio" name="edit_effort_fallback" value="high" [(ngModel)]="editProjectEfforts.fallback" class="text-sky-500 focus:ring-0"> Alto
+                  </label>
+                </div>
+              </div>
             </div>
 
             <!-- Independence warning -->
@@ -358,7 +470,7 @@ import { ModelComboboxComponent, ModelOption } from '../../shared/model-combobox
                     class="px-4 py-2 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-300 font-semibold cursor-pointer">
               Cancelar
             </button>
-            <button type="submit" [disabled]="isActionRunning() || isReviewerConflict(editProjectProfiles)"
+            <button type="submit" [disabled]="isActionRunning() || !isFormValid(editProjectProfiles)"
                     class="px-4 py-2 rounded-xl bg-sky-500 hover:bg-sky-400 disabled:opacity-50 text-slate-950 font-bold cursor-pointer">
               {{ isActionRunning() ? 'Guardando…' : 'Guardar Cambios' }}
             </button>
@@ -398,6 +510,13 @@ export class ProyectosComponent implements OnInit {
     fallback: 'gpt-5.6-luna',
   };
 
+  newProjectEfforts = {
+    thinking: 'medium',
+    execution: 'medium',
+    independent_review: 'medium',
+    fallback: 'medium',
+  };
+
   editProject: any = {
     project_id: '',
     display_name: '',
@@ -409,6 +528,13 @@ export class ProyectosComponent implements OnInit {
     execution: 'gpt-5.6-luna',
     independent_review: 'claude-sonnet-5-5-medium',
     fallback: 'gpt-5.6-luna',
+  };
+
+  editProjectEfforts = {
+    thinking: 'medium',
+    execution: 'medium',
+    independent_review: 'medium',
+    fallback: 'medium',
   };
 
   get modelGroups() {
@@ -523,7 +649,7 @@ export class ProyectosComponent implements OnInit {
     if (providerId === 'codex') {
       const sub = modelKey.replace(/^gpt-/, '').toUpperCase();
       return {
-        label: `Codex — GPT-${sub} [${effort.toUpperCase()}]`,
+        label: `Codex — GPT-${sub}`,
         group: 'OpenAI GPT (vía Codex)',
         provider_id: 'codex',
         harness_id: 'codex',
@@ -538,14 +664,14 @@ export class ProyectosComponent implements OnInit {
       if (modelKey.startsWith('claude')) {
         group = 'Anthropic Claude (vía Antigravity)';
         const sub = modelKey.replace(/^claude-/, '').replace(/-[a-z]+$/, '');
-        label = `Antigravity — Claude ${sub.replace('-', '.').toUpperCase()} [${effort.toUpperCase()}]`;
+        label = `Antigravity — Claude ${sub.replace('-', '.').toUpperCase()}`;
       } else if (modelKey.startsWith('gemini')) {
         group = 'Google Gemini (vía Antigravity)';
         const sub = modelKey.replace(/^gemini-/, '').replace(/-[a-z]+$/, '');
-        label = `Antigravity — Gemini ${sub.toUpperCase()} [${effort.toUpperCase()}]`;
+        label = `Antigravity — Gemini ${sub.toUpperCase()}`;
       } else if (modelKey.includes('oss')) {
         group = 'Open Source (vía Antigravity)';
-        label = `Antigravity — GPT-OSS 120B [${effort.toUpperCase()}]`;
+        label = `Antigravity — GPT-OSS 120B`;
       }
       return {
         label,
@@ -670,6 +796,12 @@ export class ProyectosComponent implements OnInit {
       independent_review: 'claude-sonnet-5-5-medium',
       fallback: 'gpt-5.6-luna',
     };
+    this.newProjectEfforts = {
+      thinking: 'medium',
+      execution: 'medium',
+      independent_review: 'medium',
+      fallback: 'medium',
+    };
     this.showCreateModal = true;
   }
 
@@ -689,7 +821,23 @@ export class ProyectosComponent implements OnInit {
       independent_review: profiles['independent_review']?.model_id || 'claude-sonnet-5-5-medium',
       fallback: profiles['fallback']?.model_id || 'gpt-5.6-luna',
     };
+    this.editProjectEfforts = {
+      thinking: profiles['thinking']?.effort || 'medium',
+      execution: profiles['execution']?.effort || 'medium',
+      independent_review: profiles['independent_review']?.effort || 'medium',
+      fallback: profiles['fallback']?.effort || 'medium',
+    };
     this.showEditModal = true;
+  }
+
+  isFormValid(profiles: { thinking: string; execution: string; independent_review: string; fallback: string }): boolean {
+    if (!profiles.thinking || !profiles.execution || !profiles.independent_review || !profiles.fallback) return false;
+    for (const role of ['thinking', 'execution', 'independent_review', 'fallback'] as const) {
+      const modelKey = profiles[role];
+      const found = this.availableModels.find(m => m.id === modelKey);
+      if (!found || !found.provider_id || !found.harness_id) return false;
+    }
+    return !this.isReviewerConflict(profiles);
   }
 
   resolveAgentForModel(modelId: string): string {
@@ -704,22 +852,26 @@ export class ProyectosComponent implements OnInit {
     return legacyRoutes[modelId] || '';
   }
 
-  private buildProfile(role: string, modelId: string) {
+  private buildProfile(role: string, modelId: string, effortVal?: string) {
     const proj = this.refresh.activeProject();
     const existing = proj?.agent_profiles?.[role];
-    if (existing && existing.model_id === modelId) {
+    const found = this.availableModels.find(m => m.id === modelId);
+
+    let effort = effortVal || 'medium';
+    if (!effortVal) {
+      if (modelId.endsWith('-high')) effort = 'high';
+      else if (modelId.endsWith('-low')) effort = 'low';
+      else if (modelId.endsWith('-medium')) effort = 'medium';
+      else if (found?.effort) effort = found.effort;
+      else if (existing?.effort) effort = existing.effort;
+    }
+
+    if (existing && existing.model_id === modelId && existing.effort === effort) {
       return existing;
     }
 
-    const found = this.availableModels.find(m => m.id === modelId);
     let agent_id = found?.agent;
     if (!agent_id) agent_id = this.resolveAgentForModel(modelId);
-
-    let effort = 'medium';
-    if (modelId.endsWith('-high')) effort = 'high';
-    else if (modelId.endsWith('-low')) effort = 'low';
-    else if (modelId.endsWith('-medium')) effort = 'medium';
-    else if (found?.effort) effort = found.effort;
 
     let workflows: string[] = [];
     let skills: string[] = [];
@@ -780,6 +932,12 @@ export class ProyectosComponent implements OnInit {
   }
 
   async submitCreateProject() {
+    if (!this.isFormValid(this.newProjectProfiles)) {
+      this.actionOk.set(false);
+      this.actionMsg.set('Configuración incompleta: selecciona un modelo válido para cada rol.');
+      return;
+    }
+
     if (this.isReviewerConflict(this.newProjectProfiles)) {
       this.actionOk.set(false);
       this.actionMsg.set('Conflicto de Independencia: La revisión independiente debe ser de un proveedor distinto a la ejecución.');
@@ -800,10 +958,10 @@ export class ProyectosComponent implements OnInit {
         git_pr: { provider_id: 'github', repository_url: this.newProject.repository.trim(), auth_mode: 'environment_app', secret_reference: null },
       },
       agent_profiles: {
-        thinking: this.buildProfile('thinking', this.newProjectProfiles.thinking),
-        execution: this.buildProfile('execution', this.newProjectProfiles.execution),
-        independent_review: this.buildProfile('independent_review', this.newProjectProfiles.independent_review),
-        fallback: this.buildProfile('fallback', this.newProjectProfiles.fallback),
+        thinking: this.buildProfile('thinking', this.newProjectProfiles.thinking, this.newProjectEfforts.thinking),
+        execution: this.buildProfile('execution', this.newProjectProfiles.execution, this.newProjectEfforts.execution),
+        independent_review: this.buildProfile('independent_review', this.newProjectProfiles.independent_review, this.newProjectEfforts.independent_review),
+        fallback: this.buildProfile('fallback', this.newProjectProfiles.fallback, this.newProjectEfforts.fallback),
       },
       execution_policy: {
         max_review_rounds: 2,
@@ -834,6 +992,12 @@ export class ProyectosComponent implements OnInit {
   }
 
   async submitEditProject() {
+    if (!this.isFormValid(this.editProjectProfiles)) {
+      this.actionOk.set(false);
+      this.actionMsg.set('Configuración incompleta: selecciona un modelo válido para cada rol.');
+      return;
+    }
+
     if (this.isReviewerConflict(this.editProjectProfiles)) {
       this.actionOk.set(false);
       this.actionMsg.set('Conflicto de Independencia: La revisión independiente debe ser de un proveedor distinto a la ejecución.');
@@ -850,10 +1014,10 @@ export class ProyectosComponent implements OnInit {
       display_name: this.editProject.display_name.trim(),
       base_branch: this.editProject.base_branch.trim() || 'main',
       agent_profiles: {
-        thinking: this.buildProfile('thinking', this.editProjectProfiles.thinking),
-        execution: this.buildProfile('execution', this.editProjectProfiles.execution),
-        independent_review: this.buildProfile('independent_review', this.editProjectProfiles.independent_review),
-        fallback: this.buildProfile('fallback', this.editProjectProfiles.fallback),
+        thinking: this.buildProfile('thinking', this.editProjectProfiles.thinking, this.editProjectEfforts.thinking),
+        execution: this.buildProfile('execution', this.editProjectProfiles.execution, this.editProjectEfforts.execution),
+        independent_review: this.buildProfile('independent_review', this.editProjectProfiles.independent_review, this.editProjectEfforts.independent_review),
+        fallback: this.buildProfile('fallback', this.editProjectProfiles.fallback, this.editProjectEfforts.fallback),
       },
     };
 

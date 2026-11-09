@@ -7,8 +7,41 @@ test.describe('Searchable Model Combobox in Project Configuration', () => {
   });
 
   test('opens create project modal and filters models with keyboard and mouse', async ({ context, page }) => {
-    // Intercept agent catalog with deterministic test data at context level
-    await context.route('**/api/v1/catalogs/agents', async route => {
+    // Intercept auth session, projects and agent catalog with deterministic test data at context level
+    await context.route('**/api/v1/auth/me', async route => {
+      await route.fulfill({
+        status: 200,
+        contentType: 'application/json',
+        body: JSON.stringify({
+          authenticated: true,
+          user: { email: 'e2e@example.com', name: 'E2E User' },
+        }),
+      });
+    });
+
+    await context.route('**/api/v1/projects', async route => {
+      await route.fulfill({
+        status: 200,
+        contentType: 'application/json',
+        body: JSON.stringify([
+          {
+            project_id: 'e2e-project',
+            display_name: 'E2E Test Project',
+            status: 'ACTIVE',
+            repository: 'https://github.com/test/repo',
+            base_branch: 'main',
+            agent_profiles: {
+              thinking: { model_id: 'claude-sonnet-5-5-medium', effort: 'medium' },
+              execution: { model_id: 'claude-sonnet-5-5-medium', effort: 'medium' },
+              independent_review: { model_id: 'claude-sonnet-5-5-medium', effort: 'medium' },
+              fallback: { model_id: 'claude-sonnet-5-5-medium', effort: 'medium' },
+            },
+          },
+        ]),
+      });
+    });
+
+    await context.route('**/api/v1/catalogs/agents*', async route => {
       await route.fulfill({
         status: 200,
         contentType: 'application/json',
@@ -78,5 +111,12 @@ test.describe('Searchable Model Combobox in Project Configuration', () => {
     // 8. Verify combobox closes and displays chosen model
     await expect(thinkingCombobox).toHaveAttribute('aria-expanded', 'false');
     await expect(thinkingCombobox).toContainText('Claude');
+
+    // 9. Verify independent effort radio buttons are present and interactive
+    const effortRadios = page.locator('input[name="new_effort_thinking"]');
+    await expect(effortRadios).toHaveCount(3);
+    const highEffortRadio = page.locator('input[name="new_effort_thinking"][value="high"]');
+    await highEffortRadio.check();
+    await expect(highEffortRadio).toBeChecked();
   });
 });

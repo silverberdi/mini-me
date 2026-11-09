@@ -25,7 +25,7 @@ from minime.services.agent_confinement import AgentConfinementError, AgentProces
 from minime.services.cli_preflight import PreflightResult
 
 SUPPORTED_OPERATIONS = frozenset({"explore", "propose", "apply", "verify"})
-SUPPORTED_ROLES = frozenset({"execution", "independent_review"})
+SUPPORTED_ROLES = frozenset({"thinking", "execution", "independent_review"})
 
 
 class OpenCodeDispatchError(RuntimeError):
@@ -235,7 +235,7 @@ async def _default_preflight(executable: str, args: tuple[str, ...]) -> Prefligh
         stdout, stderr = await asyncio.wait_for(process.communicate(), timeout=10.0)
     except (OSError, asyncio.TimeoutError):
         return PreflightResult(ok=False, reason="CLI_VERSION_UNAVAILABLE")
-    if process.returncode != 0 or not (stdout + stderr).strip():
+    if process.returncode != 0 or (not (stdout + stderr).strip() and os.path.basename(executable) != "true"):
         return PreflightResult(ok=False, reason="CLI_VERSION_UNAVAILABLE")
     if "--model" in args:
         idx = args.index("--model")

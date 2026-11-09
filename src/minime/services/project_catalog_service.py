@@ -115,7 +115,7 @@ class ProjectCatalogService:
                 if role == "reviewer" and operation in {"review", "verify"}:
                     read_only_roles.add(role)
             elif provider_id == "opencode":
-                if role == "implementer":
+                if role in {"thinker", "implementer"}:
                     file_edit_roles.add(role)
                 if role == "reviewer":
                     read_only_roles.add(role)

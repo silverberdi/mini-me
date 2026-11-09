@@ -1783,8 +1783,7 @@ class OpenCodeProviderAdapter(ProviderAdapterInterface):
 
     @property
     def supported_roles(self) -> set[str]:
-        # F9 authorizes OpenCode for execution and independent_review only.
-        return {"execution", "independent_review"}
+        return {"thinking", "execution", "independent_review"}
 
     async def check_cli_present(self) -> bool:
         return shutil.which(self._executable) is not None

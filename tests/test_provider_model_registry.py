@@ -161,6 +161,39 @@ def test_canonical_resolver_rejects_route_drift():
         )
 
 
+def test_canonical_resolver_accepts_opencode_thinker_with_discovered_capabilities():
+    class Row:
+        provider_id = "openrouter"
+        harness_id = "opencode"
+        canonical_model_id = "openrouter/deepseek/deepseek-chat"
+        origin = "discovered"
+        discovery_status = "available"
+        is_enabled = True
+        diagnostic_code = "ok"
+        diagnostic_summary = "verified"
+        last_observed_at = None
+        capabilities = {"model_route": "openrouter"}
+
+    class Repo:
+        def get(self, provider, harness, model):
+            return Row() if (provider, harness, model) == ("openrouter", "opencode", "openrouter/deepseek/deepseek-chat") else None
+
+    resolved = CanonicalProfileResolver(Repo()).resolve(
+        "thinker",
+        {
+            "provider_id": "openrouter",
+            "harness_id": "opencode",
+            "canonical_model_id": "openrouter/deepseek/deepseek-chat",
+            "route": "openrouter",
+            "effort": "high",
+        },
+    )
+    assert resolved["provider_id"] == "openrouter"
+    assert resolved["harness_id"] == "opencode"
+    assert resolved["effort"] == "high"
+
+
+
 def test_failed_harness_observation_blocks_existing_non_custom_rows():
     class Row:
         harness_id = "opencode"

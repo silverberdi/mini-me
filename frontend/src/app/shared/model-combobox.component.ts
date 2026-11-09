@@ -45,7 +45,7 @@ export interface ModelOption {
         (click)="toggleOpen()"
         class="w-full bg-slate-800 border border-slate-700 hover:border-slate-600 rounded-xl px-2.5 py-2 text-left text-white focus:outline-none focus:border-sky-500 font-mono text-[11px] flex items-center justify-between transition-colors disabled:opacity-50 disabled:cursor-not-allowed cursor-pointer"
       >
-        <span class="truncate pr-2" [class.text-slate-500]="!selectedModel">
+        <span class="truncate pr-2" [class.text-slate-500]="!selectedModel" [attr.title]="selectedLabel">
           {{ selectedLabel }}
         </span>
         <svg
@@ -64,7 +64,7 @@ export interface ModelOption {
         *ngIf="isOpen"
         [id]="listboxId"
         role="listbox"
-        class="absolute z-50 left-0 right-0 mt-1 bg-slate-900 border border-slate-700/80 rounded-xl shadow-2xl p-2 max-h-64 overflow-hidden flex flex-col backdrop-blur-md animate-fade-in"
+        class="absolute z-50 left-0 w-max min-w-[360px] max-w-[480px] mt-1 bg-slate-900 border border-slate-700/80 rounded-xl shadow-2xl p-2 max-h-72 overflow-hidden flex flex-col backdrop-blur-md animate-fade-in"
       >
         <!-- Search Input -->
         <div class="relative mb-1.5 shrink-0">
@@ -102,17 +102,18 @@ export interface ModelOption {
             [attr.aria-selected]="m.id === modelValue"
             (click)="selectModel(m)"
             (mouseenter)="highlightedIndex = idx"
+            [attr.title]="m.label + ' (' + m.group + ')'"
             [ngClass]="{
               'bg-sky-500/20 border-sky-500/30 text-sky-200': idx === highlightedIndex,
               'border-transparent text-slate-300 hover:bg-slate-800/80': idx !== highlightedIndex
             }"
             class="w-full text-left px-2.5 py-1.5 rounded-lg text-[11px] font-mono flex items-center justify-between cursor-pointer border transition-colors"
           >
-            <div class="truncate pr-2">
-              <span class="font-medium text-slate-200" [class.text-sky-300]="m.id === modelValue">
+            <div class="pr-2 min-w-0">
+              <span class="font-medium text-slate-200 block truncate" [class.text-sky-300]="m.id === modelValue">
                 {{ m.label }}
               </span>
-              <span class="block text-[10px] text-slate-400">
+              <span class="block text-[10px] text-slate-400 truncate">
                 {{ m.group }}
               </span>
             </div>
