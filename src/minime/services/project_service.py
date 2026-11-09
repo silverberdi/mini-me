@@ -50,6 +50,7 @@ class ProjectService:
         *,
         allow_greenfield: bool = False,
         onboarding_checkpoint: dict[str, Any] | None = None,
+        validate_grants: bool = False,
     ) -> Project:
         """Persist a validated project configuration without claiming bootstrap readiness.
 
@@ -99,7 +100,10 @@ class ProjectService:
                 connections[key] = connection
 
             now = utc_now()
-            project = Project(
+            exec_policy = configuration.execution_policy.model_dump(mode="json")
+            exec_policy["effective_pause"] = True
+
+            provisional_project = Project(
                 project_id=project_id,
                 display_name=configuration.display_name.strip(),
                 repository=repository,
@@ -110,7 +114,7 @@ class ProjectService:
                     key: value.model_dump(mode="json")
                     for key, value in configuration.agent_profiles.items()
                 },
-                execution_policy=configuration.execution_policy.model_dump(mode="json"),
+                execution_policy=exec_policy,
                 onboarding_status=(
                     ProjectOnboardingStatus.BOOTSTRAPPING
                     if configuration.project_type == ProjectType.GREENFIELD
@@ -122,10 +126,24 @@ class ProjectService:
                     else "Brownfield adaptation is deferred; project is configuration-only."
                 ],
                 onboarding_checkpoint=onboarding_checkpoint or {},
-                status=ProjectStatus.ACTIVE,
+                status=ProjectStatus.PAUSED,
                 created_at=now,
                 updated_at=now,
             )
+
+            if validate_grants:
+                from minime.services.project_connection_service import ProjectConnectionService
+                conn_svc = ProjectConnectionService(self.credential_store)
+                git_adapter = conn_svc.adapter_for(provisional_project, "git_pr")
+                grant_validator = getattr(git_adapter, "validate_repository_grants", None)
+                if callable(grant_validator):
+                    res = grant_validator(repository)
+                else:
+                    res = git_adapter.verify_repository(repository)
+                if res.outcome.value != "SUCCESS":
+                    raise ValueError(res.error_message or "GitHub App lacks required repository grants.")
+
+            project = provisional_project
             self.uow.projects.save(project)
             self.uow.events.save(
                 Event(

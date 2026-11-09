@@ -647,6 +647,66 @@ class GitHubAdapter(GitHubAdapterInterface):
             },
         )
 
+    def validate_repository_grants(
+        self, repository: str
+    ) -> ExternalActionResult[dict[str, Any]]:
+        """Validate that the GitHub App has full access and required grants for tickets and git_pr."""
+        repo = self._repo(repository)
+        tickets_res = self.verify_connection_permissions(repo, "tickets")
+        if tickets_res.outcome != ExternalOutcome.SUCCESS:
+            err = tickets_res.error_message
+            if tickets_res.reason_code == ExternalReasonCode.NOT_FOUND:
+                err = (
+                    f"La GitHub App no tiene acceso al repositorio '{repo}'. "
+                    "Por favor, configure el acceso en los ajustes de instalación de la GitHub App "
+                    "(agregue el repositorio a la lista permitida o seleccione 'All repositories')."
+                )
+            return ExternalActionResult(
+                outcome=tickets_res.outcome,
+                source_adapter="github_rest",
+                reason_code=tickets_res.reason_code,
+                retry_safety=tickets_res.retry_safety,
+                error_message=err,
+                provider_detail=tickets_res.provider_detail,
+            )
+
+        pr_res = self.verify_connection_permissions(repo, "git_pr")
+        if pr_res.outcome != ExternalOutcome.SUCCESS:
+            err = pr_res.error_message
+            if pr_res.reason_code == ExternalReasonCode.NOT_FOUND:
+                err = (
+                    f"La GitHub App no tiene acceso al repositorio '{repo}'. "
+                    "Por favor, configure el acceso en los ajustes de instalación de la GitHub App "
+                    "(agregue el repositorio a la lista permitida o seleccione 'All repositories')."
+                )
+            return ExternalActionResult(
+                outcome=pr_res.outcome,
+                source_adapter="github_rest",
+                reason_code=pr_res.reason_code,
+                retry_safety=pr_res.retry_safety,
+                error_message=err,
+                provider_detail=pr_res.provider_detail,
+            )
+
+        combined_permissions: dict[str, Any] = {}
+        if tickets_res.data and "permissions" in tickets_res.data:
+            combined_permissions.update(tickets_res.data["permissions"])
+        if pr_res.data and "permissions" in pr_res.data:
+            combined_permissions.update(pr_res.data["permissions"])
+
+        return ExternalActionResult(
+            outcome=ExternalOutcome.SUCCESS,
+            source_adapter="github_rest",
+            reason_code=ExternalReasonCode.EXECUTION_SUCCESS,
+            retry_safety=RetrySafety.SAFE,
+            data={
+                "repository": repo,
+                "permissions": combined_permissions,
+                "tickets": tickets_res.data,
+                "git_pr": pr_res.data,
+            },
+        )
+
     def validate_issue_binding(
         self, expected_repository: str, issue_number: int, github_repository: str | None = None
     ) -> ExternalActionResult[bool]:

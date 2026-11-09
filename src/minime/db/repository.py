@@ -967,6 +967,11 @@ class PostgresProjectRepository(ProjectRepositoryInterface):
         models = self.session.scalars(stmt).all()
         return [project_model_to_domain(m) for m in models]
 
+    def delete(self, project_id: str) -> None:
+        model = self.session.get(ProjectModel, project_id)
+        if model:
+            self.session.delete(model)
+
 
 class PostgresChangeRepository(ChangeRepositoryInterface):
     def __init__(self, session: Session):

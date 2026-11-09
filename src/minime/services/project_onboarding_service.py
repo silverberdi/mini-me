@@ -145,7 +145,11 @@ class ProjectOnboardingService:
 
         is_accessible = True
         try:
-            verify_res = self.github_adapter.verify_repository(norm_repo)
+            grant_validator = getattr(self.github_adapter, "validate_repository_grants", None)
+            if callable(grant_validator):
+                verify_res = grant_validator(norm_repo)
+            else:
+                verify_res = self.github_adapter.verify_repository(norm_repo)
             if verify_res.is_failure:
                 is_accessible = False
                 onboarding_status = ProjectOnboardingStatus.BLOCKED
@@ -671,6 +675,31 @@ class ProjectOnboardingService:
             onboarding_status = ProjectOnboardingStatus.BLOCKED
             raise ValueError(
                 f"Project onboarding failed closed on worktree parent directory creation: {exc}"
+            ) from exc
+
+        # 6h. Provision canonical skills & workflows and verify preflight readiness
+        from minime.services.canonical_capabilities import (
+            provision_canonical_capabilities,
+            verify_workflow_readiness,
+        )
+
+        try:
+            provision_canonical_capabilities(
+                Path(managed_root), profiles=getattr(project, "agent_profiles", None)
+            )
+            is_ready, missing = verify_workflow_readiness(
+                Path(managed_root), profiles=getattr(project, "agent_profiles", {})
+            )
+            if not is_ready:
+                raise ValueError(
+                    f"Readiness verification failed for project '{project_id}': missing workflows: {', '.join(missing)}"
+                )
+        except Exception as exc:
+            mismatch_reasons.append(f"Failed to provision or verify capabilities: {exc}")
+            reasons.extend(mismatch_reasons)
+            onboarding_status = ProjectOnboardingStatus.BLOCKED
+            raise ValueError(
+                f"Project onboarding failed closed on capability readiness: {exc}"
             ) from exc
 
         managed_binding_kwargs = {

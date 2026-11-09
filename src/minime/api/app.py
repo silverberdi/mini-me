@@ -731,12 +731,32 @@ async def create_project_configuration(
     _operator: AuthenticatedOperatorDep,
     uow: UowDep,
 ) -> dict[str, Any]:
-    """Create a configuration-only Brownfield registration; Greenfield needs ZIP bootstrap."""
+    """Create an atomic multi-stage Brownfield registration; Greenfield needs ZIP bootstrap."""
     try:
         _validate_live_canonical_profiles(configuration.agent_profiles, uow)
         await ProjectCatalogService().validate_project_profiles(configuration.agent_profiles)
         service = ProjectService(uow)
-        return service.public_project_payload(service.create_configured_project(configuration))
+        should_validate_live = os.environ.get("MINIME_AUTH_ENABLED", "true").lower() != "false"
+        project = service.create_configured_project(configuration, validate_grants=should_validate_live)
+        if should_validate_live and configuration.project_type != ProjectType.GREENFIELD:
+            from minime.services.project_onboarding_service import ProjectOnboardingService
+            onboarding_service = ProjectOnboardingService(uow)
+            operator_email = getattr(_operator, "email", "operator")
+            try:
+                onboarding_service.onboard_project(project, operator_email=operator_email)
+            except Exception as onboarding_exc:
+                try:
+                    import shutil
+                    trusted_root = os.environ.get("MINIME_MANAGED_ROOT", "/opt/minime/repos")
+                    managed_root = os.path.realpath(f"{trusted_root}/{project.project_id}")
+                    if os.path.exists(managed_root):
+                        shutil.rmtree(managed_root, ignore_errors=True)
+                    uow.projects.delete(project.project_id)
+                    uow.commit()
+                except Exception:
+                    pass
+                raise ValueError(f"Fallo en la preparación del repositorio: {onboarding_exc}") from onboarding_exc
+        return service.public_project_payload(project)
     except ValueError as exc:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
 

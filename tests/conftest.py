@@ -300,6 +300,9 @@ class InMemoryProjectRepository(ProjectRepositoryInterface):
     def list_all(self) -> list[Project]:
         return [p.model_copy(deep=True) for p in self._store.values()]
 
+    def delete(self, project_id: str) -> None:
+        self._store.pop(project_id, None)
+
 
 class InMemoryChangeRepository(ChangeRepositoryInterface):
     def __init__(self):

@@ -80,6 +80,9 @@ class ProjectRepositoryInterface(ABC):
     @abstractmethod
     def list_all(self) -> list[Project]: ...
 
+    @abstractmethod
+    def delete(self, project_id: str) -> None: ...
+
 
 class ChangeRepositoryInterface(ABC):
     @abstractmethod
