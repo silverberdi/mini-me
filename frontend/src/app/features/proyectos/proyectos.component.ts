@@ -635,8 +635,8 @@ export class ProyectosComponent implements OnInit {
       if (isDirectDeepseek) {
         const cleanName = this.friendlyDeepseekName(modelKey);
         return {
-          label: `DeepSeek — ${cleanName || 'V4 Pro'} (API directa)`,
-          group: 'DeepSeek (API directa)',
+          label: `DeepSeek — ${cleanName || 'V4 Pro'} (API directa vía OpenCode)`,
+          group: 'DeepSeek — API directa (vía OpenCode)',
           provider_id: 'deepseek',
           harness_id: 'opencode',
           route: 'deepseek_direct',
@@ -803,11 +803,11 @@ export class ProyectosComponent implements OnInit {
     }
     // Legacy persisted ids: translate to the operator-friendly deepseek routes.
     const legacyRoutes: Record<string, string> = {
-      'deepseek-chat': 'DeepSeek — API directa',
-      'deepseek-reasoner': 'DeepSeek R1 — API directa',
-      'deepseek/deepseek-chat': 'DeepSeek — OpenRouter',
-      'deepseek-flash': 'DeepSeek Flash — API directa',
-      'deepseek-v4-pro': 'DeepSeek V4 Pro — API directa',
+      'deepseek-chat': 'DeepSeek — API directa (vía OpenCode)',
+      'deepseek-reasoner': 'DeepSeek R1 — API directa (vía OpenCode)',
+      'deepseek/deepseek-chat': 'DeepSeek — OpenRouter (vía OpenCode)',
+      'deepseek-flash': 'DeepSeek Flash — API directa (vía OpenCode)',
+      'deepseek-v4-pro': 'DeepSeek V4 Pro — API directa (vía OpenCode)',
     };
     if (legacyRoutes[profile.model_id]) {
       return `${legacyRoutes[profile.model_id]}${effort}`;

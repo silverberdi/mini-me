@@ -53,7 +53,8 @@ test('Model mapping separates OpenRouter upstream identity from DeepSeek direct 
   // Format model entry separates OpenRouter from DeepSeek direct
   assert.match(proyectosSrc, /group:\s*'OpenRouter \(vía OpenCode\)'/);
   assert.match(proyectosSrc, /provider_id:\s*'openrouter'/);
-  assert.match(proyectosSrc, /group:\s*'DeepSeek \(API directa\)'/);
+  assert.match(proyectosSrc, /group:\s*'DeepSeek — API directa \(vía OpenCode\)'/);
+  assert.match(proyectosSrc, /label:\s*`DeepSeek — \$\{cleanName \|\| 'V4 Pro'\} \(API directa vía OpenCode\)`/);
   assert.match(proyectosSrc, /provider_id:\s*'deepseek'/);
 
   // Does not force DeepSeek prefix on all OpenRouter models

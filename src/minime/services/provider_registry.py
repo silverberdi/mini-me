@@ -409,7 +409,7 @@ ROLE_CAPABILITIES = {
 class CanonicalProfileResolver:
     """Resolve role assignments only from an observed canonical registry row."""
 
-    def __init__(self, repository: ProviderModelRepository, freshness: timedelta = timedelta(hours=24)):
+    def __init__(self, repository: ProviderModelRepository, freshness: timedelta | None = None):
         self.repository, self.freshness = repository, freshness
 
     def resolve(self, role: str, selection: dict[str, Any]) -> dict[str, Any]:
@@ -423,7 +423,7 @@ class CanonicalProfileResolver:
             raise ValueError(f"{role}: model is disabled by operator")
         if row.discovery_status != "available":
             raise ValueError(f"{role}: model diagnostic is {row.discovery_status}")
-        if row.last_observed_at is not None and row.last_observed_at < utc_now() - self.freshness:
+        if self.freshness is not None and row.last_observed_at is not None and row.last_observed_at < utc_now() - self.freshness:
             raise ValueError(f"{role}: model observation is stale")
         if not row.diagnostic_code or row.diagnostic_code not in {"ok", "custom_metadata"}:
             raise ValueError(f"{role}: credential or harness diagnostic is not verified")
