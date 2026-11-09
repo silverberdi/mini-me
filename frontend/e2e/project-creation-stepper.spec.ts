@@ -4,6 +4,34 @@ import { setupAuthSession, waitForAppMounted } from './helpers';
 test.describe('Project Creation Stepper and Selection Persistence (Ref #355)', () => {
   test.beforeEach(async ({ context }) => {
     await setupAuthSession(context);
+
+    // Provide deterministic models catalog
+    await context.route('**/api/v1/catalogs/agents*', async route => {
+      await route.fulfill({
+        status: 200,
+        contentType: 'application/json',
+        body: JSON.stringify({
+          agents: [
+            {
+              id: 'codex',
+              capability_status: 'OBSERVED_READ_ONLY',
+              models: {
+                'gpt-5.6-luna': ['medium'],
+              },
+              model_routes: {},
+            },
+            {
+              id: 'antigravity',
+              capability_status: 'OBSERVED_READ_ONLY',
+              models: {
+                'claude-sonnet-5-5-medium': ['medium'],
+              },
+              model_routes: {},
+            },
+          ],
+        }),
+      });
+    });
   });
 
   test('creation modal displays 4-stage stepper and surfaces GitHub authorization error feedback', async ({ page }) => {
@@ -32,7 +60,7 @@ test.describe('Project Creation Stepper and Selection Persistence (Ref #355)', (
 
     // 5. Submit creation
     const submitBtn = page.getByRole('button', { name: /Crear Proyecto/i });
-    await expect(submitBtn).toBeEnabled();
+    await expect(submitBtn).toBeEnabled({ timeout: 10000 });
     await submitBtn.click();
 
     // 6. Verify error feedback appears inside the modal

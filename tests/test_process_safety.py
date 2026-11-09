@@ -24,6 +24,8 @@ marker = sys.argv[1]
 def handler(signum, frame):
     with open(marker, "w") as f:
         f.write("sigterm")
+        f.flush()
+        os.fsync(f.fileno())
     sys.exit(0)
 signal.signal(signal.SIGTERM, handler)
 import time
@@ -35,6 +37,8 @@ marker = sys.argv[1]
 def handler(signum, frame):
     with open(marker, "w") as f:
         f.write("sigterm")
+        f.flush()
+        os.fsync(f.fileno())
 signal.signal(signal.SIGTERM, handler)
 import time
 time.sleep(60)"""
