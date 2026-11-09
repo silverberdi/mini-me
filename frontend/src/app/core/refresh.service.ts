@@ -2,6 +2,8 @@ import { Injectable, signal, computed, OnDestroy } from "@angular/core";
 import { ApiService } from "./api.service";
 import { DashboardCost, Project, OrchestrationRun, RequestItem, QuotaObservation } from "./models";
 
+const SELECTED_PROJECT_STORAGE_KEY = 'minime_selected_project_id';
+
 @Injectable({
   providedIn: "root"
 })
@@ -12,13 +14,24 @@ export class RefreshService implements OnDestroy {
   private lastDashboardFetchTime = 0;
   private readonly DASHBOARD_CACHE_TTL_MS = 300_000; // 5 minutes amortized cache
 
+  private static getStoredProjectId(): string | null {
+    if (typeof localStorage !== 'undefined') {
+      try {
+        return localStorage.getItem(SELECTED_PROJECT_STORAGE_KEY);
+      } catch {
+        return null;
+      }
+    }
+    return null;
+  }
+
   // Signals for state
   readonly isConnected = signal<boolean>(true);
   readonly isRefreshing = signal<boolean>(false);
   readonly lastUpdated = signal<Date | null>(null);
   readonly stale = signal<boolean>(false);
 
-  readonly selectedProjectId = signal<string | null>(null);
+  readonly selectedProjectId = signal<string | null>(RefreshService.getStoredProjectId());
   readonly projects = signal<Project[]>([]);
   readonly runs = signal<OrchestrationRun[]>([]);
   readonly requests = signal<RequestItem[]>([]);
@@ -70,6 +83,13 @@ export class RefreshService implements OnDestroy {
   }
 
   setSelectedProject(projectId: string): void {
+    if (typeof localStorage !== 'undefined') {
+      try {
+        localStorage.setItem(SELECTED_PROJECT_STORAGE_KEY, projectId);
+      } catch {
+        // Ignored in environments where localStorage is unavailable
+      }
+    }
     this.selectedProjectId.set(projectId);
     void this.read(true);
   }

@@ -324,6 +324,34 @@ import { ModelComboboxComponent, ModelOption } from '../../shared/model-combobox
               <p>• <strong>DeepSeek Directo</strong>: Auditor de solo lectura (<code class="text-sky-300">CONTRACT_REVIEW</code> y <code class="text-sky-300">REVIEW</code>).</p>
             </div>
 
+            <!-- Stepper de 4 Etapas de Creación -->
+            <div *ngIf="isActionRunning() || creationStep() > 0" class="p-3.5 bg-slate-800/80 rounded-xl border border-slate-700 space-y-2.5">
+              <span class="text-[11px] font-bold text-sky-300 uppercase tracking-wider block">Progreso de Creación Guiada</span>
+              <div class="space-y-2">
+                <div *ngFor="let st of createStages; let i = index" class="flex items-start gap-2.5 text-xs">
+                  <div class="w-5 h-5 rounded-full flex items-center justify-center text-[10px] font-bold shrink-0 mt-0.5"
+                       [ngClass]="{
+                         'bg-emerald-500/20 text-emerald-400 border border-emerald-500/40': creationStep() > i + 1,
+                         'bg-sky-500 text-slate-950 animate-pulse font-bold': creationStep() === i + 1 && isActionRunning(),
+                         'bg-slate-800 text-slate-500 border border-slate-700': creationStep() < i + 1
+                       }">
+                    {{ creationStep() > i + 1 ? '✓' : (i + 1) }}
+                  </div>
+                  <div>
+                    <span class="font-medium block"
+                          [ngClass]="{
+                            'text-emerald-400': creationStep() > i + 1,
+                            'text-sky-300 font-bold': creationStep() === i + 1 && isActionRunning(),
+                            'text-slate-400': creationStep() < i + 1
+                          }">
+                      {{ st.label }}
+                    </span>
+                    <span class="text-[11px] text-slate-400 block">{{ st.desc }}</span>
+                  </div>
+                </div>
+              </div>
+            </div>
+
             <!-- Modal Error Feedback -->
             <div *ngIf="actionMsg() && !actionOk()" role="alert"
                  class="p-3 rounded-xl bg-red-500/15 border border-red-500/30 text-red-300 text-xs flex items-center justify-between gap-2">
@@ -332,6 +360,21 @@ import { ModelComboboxComponent, ModelOption } from '../../shared/model-combobox
                 <span>{{ actionMsg() }}</span>
               </div>
               <button type="button" (click)="clearActionMsg()" class="text-red-400 hover:text-red-200 text-sm font-bold ml-2">✕</button>
+            </div>
+
+            <!-- Guidance for GitHub App Permission Grants -->
+            <div *ngIf="actionMsg() && !actionOk() && isGitHubGrantError(actionMsg())"
+                 class="p-3 rounded-xl bg-amber-500/10 border border-amber-500/30 text-amber-300 text-xs space-y-1.5">
+              <div class="font-bold flex items-center gap-1.5">
+                <span>🔐</span>
+                <span>Autorización de GitHub requerida</span>
+              </div>
+              <p>La GitHub App de mini me necesita acceso explícito a este repositorio. Puedes habilitarlo en GitHub:</p>
+              <ol class="list-decimal list-inside pl-1 space-y-0.5 text-[11px] text-amber-200">
+                <li>Ve a <strong>GitHub &rarr; Settings &rarr; Applications &rarr; Installed GitHub Apps</strong></li>
+                <li>Selecciona la instalación de <strong>mini me</strong> &rarr; sección <em>Repository Access</em></li>
+                <li>Elige <strong>All repositories</strong> o añade este repositorio a la lista seleccionada.</li>
+              </ol>
             </div>
           </div>
 
@@ -508,6 +551,20 @@ export class ProyectosComponent implements OnInit {
   readonly isActionRunning = signal<boolean>(false);
   readonly actionMsg = signal<string | null>(null);
   readonly actionOk = signal<boolean>(false);
+
+  createStages = [
+    { key: 'connection', label: '1. Conexión GitHub & Grants', desc: 'Validación de acceso al repositorio y permisos (issues, contents, PRs)' },
+    { key: 'repository', label: '2. Repositorio Gestionado', desc: 'Aprovisionamiento de clon base y binding duradero' },
+    { key: 'skills', label: '3. Aprovisionamiento de Skills', desc: 'Instalación de capacidades canónicas (Codex, Antigravity, OpenCode)' },
+    { key: 'readiness', label: '4. Verificación de Preparación', desc: 'Comprobación de workflows y legibilidad de archivos' },
+  ];
+  creationStep = signal<number>(0);
+
+  isGitHubGrantError(msg: string | null): boolean {
+    if (!msg) return false;
+    const lower = msg.toLowerCase();
+    return lower.includes('github app') || lower.includes('permisos') || lower.includes('all repositories') || lower.includes('grants');
+  }
 
   showCreateModal = false;
   showEditModal = false;
@@ -824,6 +881,7 @@ export class ProyectosComponent implements OnInit {
   }
 
   openCreateModal() {
+    this.creationStep.set(0);
     this.actionMsg.set(null);
     this.newProject = {
       project_id: '',
@@ -1009,6 +1067,7 @@ export class ProyectosComponent implements OnInit {
 
     this.isActionRunning.set(true);
     this.actionMsg.set(null);
+    this.creationStep.set(1);
 
     const payload = {
       project_id: this.newProject.project_id.trim(),

@@ -4315,6 +4315,13 @@ class WorktreeManager:
             self._finalize_created_ownership(ownership)
             self.uow.commit()
 
+        # Ensure canonical agent skills & workflows are present in the candidate worktree
+        from minime.services.canonical_capabilities import provision_canonical_capabilities
+        try:
+            provision_canonical_capabilities(worktree_path)
+        except Exception as exc:
+            logger.warning(f"Could not provision canonical capabilities in worktree {worktree_path}: {exc}")
+
         return WorktreeInfo(
             path=worktree_path,
             branch_name=branch_name,
