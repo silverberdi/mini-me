@@ -2456,7 +2456,14 @@ class NativeOrchestrationCoordinator:
         if active_run.current_stage == OrchestrationStage.RUNNING_TESTS:
             tests_ok, test_evidence = (outcome.tests_passed, outcome.test_evidence) if outcome else (None, "")
             if tests_ok is None:
-                tests_ok, test_evidence = await self._run_automated_tests(worktree_path, base_branch)
+                try:
+                    tests_ok, test_evidence = await self._run_automated_tests(
+                        worktree_path, base_branch, project_id=active_run.project_id
+                    )
+                except TypeError:
+                    tests_ok, test_evidence = await self._run_automated_tests(
+                        worktree_path, base_branch
+                    )
             active_run.stop_details = dict(active_run.stop_details or {})
             active_run.stop_details["test_evidence"] = test_evidence
             if hasattr(uow, "orchestration_runs"):
@@ -4999,14 +5006,29 @@ class NativeOrchestrationCoordinator:
         diff_ok = getattr(diff, "ok", getattr(diff, "returncode", 0) == 0)
         digest = hashlib.sha256(diff_text.encode()).hexdigest() if diff_ok and diff_text else None
         handoff = getattr(result, "workflow_handoff", None)
-        if process_start_observer is not None:
-            tests_passed, test_evidence = await self._run_automated_tests(
-                worktree_path, base_branch, process_start_observer=process_start_observer
-            )
-        else:
-            tests_passed, test_evidence = await self._run_automated_tests(
-                worktree_path, base_branch
-            )
+        try:
+            if process_start_observer is not None:
+                tests_passed, test_evidence = await self._run_automated_tests(
+                    worktree_path,
+                    base_branch,
+                    project_id=project_id,
+                    process_start_observer=process_start_observer,
+                )
+            else:
+                tests_passed, test_evidence = await self._run_automated_tests(
+                    worktree_path,
+                    base_branch,
+                    project_id=project_id,
+                )
+        except TypeError:
+            if process_start_observer is not None:
+                tests_passed, test_evidence = await self._run_automated_tests(
+                    worktree_path, base_branch, process_start_observer=process_start_observer
+                )
+            else:
+                tests_passed, test_evidence = await self._run_automated_tests(
+                    worktree_path, base_branch
+                )
         if getattr(result, "workflow_handoff_required", False) and handoff and handoff.status == "HUMAN_REQUIRED":
             return ApplyOutcome("HUMAN_REQUIRED", completed_ids, tuple(pending), sha_text.strip() if getattr(sha, "ok", True) else None,
                                 changed_files, digest, tests_passed, test_evidence,
@@ -5127,15 +5149,16 @@ class NativeOrchestrationCoordinator:
         return sorted(selected)
 
     async def _run_automated_tests(
-        self, worktree_path: Path, base_branch: str = "main",
+        self,
+        worktree_path: Path,
+        base_branch: str = "main",
+        project_id: str | None = None,
         process_start_observer: Any = None,
     ) -> tuple[bool, str]:
-        """Run only pytest files selected from Git-observed candidate changes."""
+        """Run candidate tests using polyglot resolver strategy or configured project checks."""
         import sys
 
-        # Use the runtime interpreter that launched mini me.  A PATH-resolved
-        # pytest may belong to another environment and can produce a false
-        # failure even when the candidate's declared dependencies pass.
+        # 1. Resolve changed and candidate paths from Git
         try:
             changed_paths, selection_error = await self._git_changed_paths_for_tests(
                 worktree_path, base_branch
@@ -5149,51 +5172,73 @@ class NativeOrchestrationCoordinator:
             candidate_paths = {path for path in files_result.stdout.split("\0") if path}
         except (GitOperationError, OSError) as exc:
             return False, f"Test selection failed; pytest was not run. {exc}"
-        selected_tests = self._select_relevant_test_paths(
+
+        # 2. Select relevant Python pytest files if present
+        selected_python_tests = self._select_relevant_test_paths(
             worktree_path, changed_paths, candidate_paths
         )
-        if not selected_tests:
-            frontend_changes = {
-                p for p in changed_paths
-                if p.startswith("frontend/") or p.startswith("openspec/") or p.endswith(".md")
-            }
-            if frontend_changes == changed_paths and any(p.startswith("frontend/") for p in changed_paths):
-                npm_cmd = ["npm", "--prefix", "frontend", "test"]
-                try:
-                    proc = await asyncio.create_subprocess_exec(
-                        *npm_cmd,
-                        cwd=str(worktree_path),
-                        stdout=asyncio.subprocess.PIPE,
-                        stderr=asyncio.subprocess.PIPE,
-                        start_new_session=True,
-                    )
-                    stdout, stderr = await proc.communicate()
-                    stdout_text = stdout.decode(errors="replace")
-                    stderr_text = stderr.decode(errors="replace")
-                    evidence = (
-                        f"command: {' '.join(npm_cmd)}\n"
-                        f"exit_code: {proc.returncode}\n"
-                        f"stdout:\n{stdout_text}\n"
-                        f"stderr:\n{stderr_text}"
-                    )
-                    return proc.returncode == 0, evidence
-                except OSError as exc:
-                    return False, f"Frontend test execution failed: {exc}"
-            return False, (
-                "Test selection failed: no tests were selected; pytest was not run. "
-                f"Changed files: {', '.join(sorted(changed_paths)) or '(none)'}"
-            )
 
-        cmd = [sys.executable, "-m", "pytest", "-q", *selected_tests]
-        command_text = shlex.join(cmd)
-        selected_text = ", ".join(selected_tests)
+        # 3. Retrieve optional explicit project checks if project_id is available
+        project_checks = None
+        if project_id and hasattr(self, "uow") and self.uow and hasattr(self.uow, "projects"):
+            try:
+                project = self.uow.projects.get_by_id(project_id)
+                if project and getattr(project, "checks", None):
+                    project_checks = project.checks
+            except Exception:
+                pass
+
+        # 4. Resolve candidate test plan via polyglot resolver strategy
+        from minime.services.candidate_test_resolver import (
+            CandidateTestResolver,
+            CandidateTestStrategyKind,
+        )
+
+        plan = CandidateTestResolver.resolve(
+            worktree_path,
+            changed_paths,
+            project_checks=project_checks,
+            selected_python_tests=selected_python_tests,
+        )
+
+        if not plan.is_executable:
+            return False, plan.diagnostic
+
+        # 5. Handle explicit project checks strategy
+        if plan.kind == CandidateTestStrategyKind.PROJECT_CHECKS:
+            from minime.services.checks_runner import ChecksRunner
+
+            runner = ChecksRunner()
+            res = await runner.run(
+                job_id="apply-test-gate",
+                checks=plan.custom_checks,
+                worktree_path=worktree_path,
+            )
+            evidence_lines = []
+            for r in res.results:
+                evidence_lines.append(
+                    f"check: {r.check_name}\ncommand: {r.command}\nexit_code: {r.exit_code}\noutput:\n{r.output_snippet}"
+                )
+            evidence = "\n---\n".join(evidence_lines) or "Configured project checks completed."
+            return res.passed, evidence
+
+        # 6. Unified subprocess execution with environment sanitization
+        clean_env = os.environ.copy()
+        clean_env.pop("MINIME_DATABASE_URL", None)
+        clean_env.pop("MINIME_EXPECTED_DATABASE", None)
+
+        cmd = plan.command
+        command_text = plan.command_text
+        selected_text = ", ".join(plan.selected_tests)
+
         try:
             proc = await asyncio.create_subprocess_exec(
                 *cmd,
-                cwd=str(worktree_path),
+                cwd=str(plan.cwd),
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
                 start_new_session=True,
+                env=clean_env,
             )
             if process_start_observer is not None:
                 identity = process_identity(proc.pid)
@@ -5207,7 +5252,8 @@ class NativeOrchestrationCoordinator:
                         proc.kill()
                     await proc.communicate()
                     return False, (
-                        f"selected_tests: {selected_text}\ncommand: {command_text}\n"
+                        (f"selected_tests: {selected_text}\n" if selected_text else "")
+                        + f"command: {command_text}\n"
                         "exit_code: NOT_STARTED\nstdout:\n\nstderr:\n"
                         f"Unable to persist test process identity: {type(exc).__name__}"
                     )
@@ -5215,28 +5261,31 @@ class NativeOrchestrationCoordinator:
             stdout_text = stdout.decode(errors="replace")
             stderr_text = stderr.decode(errors="replace")
             evidence = (
-                f"selected_tests: {selected_text}\n"
-                f"command: {command_text}\n"
+                (f"selected_tests: {selected_text}\n" if selected_text else "")
+                + f"command: {command_text}\n"
                 f"exit_code: {proc.returncode}\n"
                 f"stdout:\n{stdout_text}\n"
                 f"stderr:\n{stderr_text}"
             )
             if proc.returncode == 0:
-                normalized = evidence.lower()
-                has_execution = bool(
-                    re.search(r"\b\d+\s+(?:passed|failed|skipped|xfailed|xpassed)\b", normalized)
-                    or re.search(r"collected\s+[1-9]\d*\s+items?", normalized)
-                )
-                if has_execution and "no tests ran" not in normalized:
-                    return True, evidence
-                return False, evidence or "Tests produced no collection/execution evidence."
+                if plan.kind == CandidateTestStrategyKind.PYTHON_PYTEST:
+                    normalized = evidence.lower()
+                    has_execution = bool(
+                        re.search(r"\b\d+\s+(?:passed|failed|skipped|xfailed|xpassed)\b", normalized)
+                        or re.search(r"collected\s+[1-9]\d*\s+items?", normalized)
+                    )
+                    if has_execution and "no tests ran" not in normalized:
+                        return True, evidence
+                    return False, evidence or "Tests produced no collection/execution evidence."
+                return True, evidence
             if "no tests ran" in evidence.lower() or proc.returncode == 5:
                 return False, evidence
             return False, evidence
         except OSError as exc:
             logger.warning(f"Automated test runner exception: {exc}")
             return False, (
-                f"selected_tests: {selected_text}\ncommand: {command_text}\n"
+                (f"selected_tests: {selected_text}\n" if selected_text else "")
+                + f"command: {command_text}\n"
                 f"exit_code: NOT_STARTED\nstdout:\n\nstderr:\n{exc}"
             )
 
