@@ -89,7 +89,7 @@ The UI-facing `resolveAgentForModel`, `buildProfile`, and `getRoleModel` behavio
 - **THEN** the UI identifies the provider as OpenRouter, preserves the upstream model name, and does not prepend DeepSeek to the model label
 
 ### Requirement: Unified searchable model selection
-Project creation and project editing SHALL share a single authoritative catalog source without displaying a temporary initial static list. The model selector in project configuration views SHALL expose exclusively models enabled by the operator (`is_enabled: true`) in the administrative registry across all active harnesses (Codex, Antigravity, OpenCode), be searchable by provider or model name, operable via keyboard, render a dropdown popup with at least 360px width without destructive truncation, and clearly display provider, model, and execution harness in both search results and active selection. Reasoning effort SHALL be selected via independent radio controls alongside each role selector without duplicating model entries in the dropdown. Project creation and editing forms SHALL validate reactively that all four required roles have valid resolved models before submission.
+Project creation and project editing SHALL share a single authoritative catalog source without displaying a temporary initial static list. The model selector in project configuration views SHALL expose exclusively models enabled by the operator (`is_enabled: true`) in the administrative registry across all active harnesses (Codex, Antigravity, OpenCode), be searchable by provider or model name, operable via keyboard, render a dropdown popup with at least 360px width without destructive truncation, and clearly display provider, model, and execution harness in both search results and active selection. Models that report distinct effort variants (such as Antigravity models with `-low`, `-medium`, `-high` suffixes) SHALL be deduplicated in the dropdown to present exactly one option per model family, while an independent radio control alongside the dropdown allows choosing the reasoning effort (Bajo, Medio, Alto). When saving, the system SHALL automatically map the base model selection and effort choice to the exact variant identifier required by the execution harness. Project creation and editing forms SHALL validate reactively that all four required roles have valid resolved models before submission.
 
 #### Scenario: Single authoritative catalog on form open
 - **WHEN** an operator opens the project creation or edit modal
@@ -105,7 +105,11 @@ Project creation and project editing SHALL share a single authoritative catalog 
 
 #### Scenario: Independent reasoning effort selection without model duplication
 - **WHEN** an operator configures a role in project creation or editing
-- **THEN** each model appears once in the dropdown, and a radio control alongside the dropdown allows choosing the reasoning effort (Bajo, Medio, Alto) for that role
+- **THEN** each model family appears exactly once in the dropdown (deduplicating suffixed variants), and a radio control alongside the dropdown allows choosing the reasoning effort (Bajo, Medio, Alto) for that role
+
+#### Scenario: Harness effort variant mapping upon profile submission
+- **WHEN** an operator selects a model whose execution harness encodes effort into model slugs (such as Antigravity) and chooses an effort level
+- **THEN** the persisted role profile receives the exact suffixed model identifier corresponding to that effort level and harness validation succeeds
 
 #### Scenario: Project form blocks incomplete role configurations
 - **WHEN** any of the four required roles lacks a resolved valid model
