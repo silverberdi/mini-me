@@ -380,11 +380,47 @@ def test_run_projection_ignores_payload_from_resolved_earlier_checkpoint(in_memo
     assert projected["status"] == "RUNNING"
 
 
+def test_run_projection_exposes_new_apply_cycle_before_first_attempt(in_memory_uow):
+    run = _run(
+        OrchestrationStage.IMPLEMENTING,
+        details={
+            "apply_total_attempts": 0,
+            "apply_no_progress": 0,
+            "apply_limits": {"max_attempts": 3, "max_no_progress": 2},
+            "apply_cycle_started_by_action_id": "accepted-action-375",
+        },
+    )
+    in_memory_uow.orchestration_runs.save(run)
+
+    try:
+        with _get_runs_client(in_memory_uow) as client:
+            response = client.get("/api/v1/orchestration/runs")
+        projected = response.json()[0]
+    finally:
+        app.dependency_overrides.clear()
+
+    assert response.status_code == 200
+    assert projected["apply_cycle"] == {
+        "attempts": 0,
+        "hard_limit": 3,
+        "no_progress": 0,
+        "no_progress_limit": 2,
+        "started_by_action_id": "accepted-action-375",
+    }
+
+
 def test_inactive_run_with_residual_human_gate_projects_completed(in_memory_uow):
-    run = _run(OrchestrationStage.VERIFYING)
+    run = _run(
+        OrchestrationStage.VERIFYING,
+        details={
+            "apply_total_attempts": 3,
+            "apply_no_progress": 2,
+            "apply_limits": {"max_attempts": 3, "max_no_progress": 2},
+        },
+    )
     run.is_active = False
     run.human_gate = HumanGate.NEEDS_HUMAN
-    run.stop_outcome = OrchestrationStopOutcome.NEEDS_HUMAN
+    run.stop_outcome = OrchestrationStopOutcome.CANCELLED
     in_memory_uow.orchestration_runs.save(run)
 
     try:
@@ -398,6 +434,8 @@ def test_inactive_run_with_residual_human_gate_projects_completed(in_memory_uow)
     assert projected["is_active"] is False
     assert projected["stage"] == OrchestrationStage.VERIFYING.value
     assert projected["status"] == "COMPLETED"
+    assert projected["stop_details"]["apply_total_attempts"] == 3
+    assert "apply_cycle" not in projected
     assert projected["status"] != "HUMAN_REQUIRED"
 
 

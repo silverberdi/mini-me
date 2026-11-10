@@ -1215,6 +1215,11 @@ async def _execute_request_in_fresh_session(
                 propose_recovery_authorization_id=body.propose_recovery_authorization_id,
                 proposal_review_recovery_authorization_id=body.proposal_review_recovery_authorization_id,
                 code_review_recovery_authorization_id=body.code_review_recovery_authorization_id,
+                operator_action_id=(
+                    intent_key
+                    if body.operator_clarification or body.operator_response or body.operator_ack
+                    else None
+                ),
                 thinker_provider=runner.provider_for_role("thinker"),
                 implementer_provider=runner.provider_for_role("implementer"),
                 reviewer_provider=runner.provider_for_role("reviewer"),
@@ -2390,6 +2395,21 @@ def list_orchestration_runs(
             stop_details["human_payload"] = active_payload
         else:
             stop_details.pop("human_payload", None)
+
+        apply_limits = stop_details.get("apply_limits")
+        if (
+            r.is_active
+            and current_stage == "IMPLEMENTING"
+            and isinstance(apply_limits, dict)
+            and isinstance(stop_details.get("apply_total_attempts"), int)
+        ):
+            d["apply_cycle"] = {
+                "attempts": stop_details["apply_total_attempts"],
+                "hard_limit": apply_limits.get("max_attempts"),
+                "no_progress": stop_details.get("apply_no_progress", 0),
+                "no_progress_limit": apply_limits.get("max_no_progress"),
+                "started_by_action_id": stop_details.get("apply_cycle_started_by_action_id"),
+            }
 
         human_gate = getattr(r.human_gate, "value", r.human_gate)
         stop_outcome = getattr(r.stop_outcome, "value", r.stop_outcome)

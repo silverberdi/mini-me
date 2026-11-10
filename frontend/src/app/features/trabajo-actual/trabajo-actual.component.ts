@@ -123,6 +123,11 @@ const STAGE_ILLUSTRATION_PATHS: Readonly<Record<string, string>> = Object.freeze
             <span>Salidas y evidencias vinculadas a SHA duradero</span>
           </div>
 
+          <div *ngIf="activeApplyCycle() as cycle" class="p-3 rounded-xl bg-slate-900/70 border border-sky-500/20 text-xs font-mono text-slate-300" role="status" aria-label="Ciclo activo de Apply">
+            Ciclo de Apply: <strong class="text-white">{{ cycle.attempts }}/{{ cycle.hard_limit }}</strong>
+            <span class="text-slate-500"> · Sin progreso: {{ cycle.no_progress }}/{{ cycle.no_progress_limit }}</span>
+          </div>
+
           <div class="p-4 rounded-xl bg-slate-900/60 border border-slate-700/50 space-y-2" aria-label="Complejidad asignada">
             <div class="flex flex-wrap items-center justify-between gap-2">
               <span class="text-xs font-semibold uppercase tracking-wider text-slate-300 font-mono">Complejidad asignada</span>
@@ -652,6 +657,13 @@ export class TrabajoActualComponent {
     if (!run) return null;
     const payload = run.stop_details?.['human_payload'];
     return typeof payload?.attempts === 'number' ? payload.attempts : null;
+  }
+
+  activeApplyCycle(): { attempts: number; hard_limit: number; no_progress: number; no_progress_limit: number } | null {
+    const cycle = this.targetRun()?.['apply_cycle'];
+    return cycle && typeof cycle.attempts === 'number' && typeof cycle.hard_limit === 'number'
+      ? cycle
+      : null;
   }
 
   humanGateHardLimit(): number | null {

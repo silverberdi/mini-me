@@ -56,6 +56,13 @@ export interface OrchestrationRun {
   metadata?: Record<string, any>;
   human_gate?: string | null;
   stop_details?: Record<string, any> | null;
+  apply_cycle?: {
+    attempts: number;
+    hard_limit: number;
+    no_progress: number;
+    no_progress_limit: number;
+    started_by_action_id?: string | null;
+  } | null;
 }
 
 export interface RequestItem {
