@@ -96,18 +96,21 @@ _REVIEW_STALE = "stale"
 # or an API-backed model emits prose-shaped JSON and the review fails closed as
 # invalid_response.
 _REVIEW_VERDICT_SCHEMA_HINT = (
-    "Return exactly one JSON object matching this schema: "
+    "REGLA OBLIGATORIA DE FORMATO (VERDICT-FIRST):\n"
+    "- Tu respuesta DEBE iniciar directamente con el único bloque JSON estructurado con el veredicto en la primera línea (sin preámbulos, intros ni análisis previo):\n"
+    "```json\n"
     '{"verdict":"READY_TO_MERGE|CHANGES_REQUIRED",'
-    '"summary":"brief concrete result",'
+    '"summary":"Resumen conciso en 2 o 3 oraciones en español simple.",'
     '"findings":[{"severity":"BLOCKER|MAJOR|MINOR",'
     '"location":"file or requirement",'
     '"violated_requirement":"what was violated",'
-    '"expected_correction":"what must change"}]}. '
-    "Use READY_TO_MERGE only when the review is clean and findings is empty; otherwise "
-    "use CHANGES_REQUIRED with at least one concrete finding.\n"
-    "REQUISITO OBLIGATORIO DE IDIOMA: Todo texto de 'summary', 'violated_requirement' y "
-    "'expected_correction' debe estar redactado obligatoriamente en español simple, claro y conciso, "
-    "apto para el operador humano. NO uses inglés en las descripciones de los hallazgos ni en el resumen."
+    '"expected_correction":"what must change"}]}\n'
+    "```\n"
+    "- Usa READY_TO_MERGE únicamente cuando la revisión esté completamente limpia y no haya defectos (findings vacío). Use READY_TO_MERGE only when the review is clean and findings is empty; otherwise use CHANGES_REQUIRED with at least one concrete finding.\n"
+    "- Usa CHANGES_REQUIRED con al menos un hallazgo concreto si detectas defectos sustantivos (severidad: BLOCKER, MAJOR o MINOR).\n"
+    "- REQUISITO OBLIGATORIO DE IDIOMA: Todo texto de 'summary', 'violated_requirement' y "
+    "'expected_correction' debe estar redactado obligatoriamente en español simple, claro y conciso. NO uses inglés.\n"
+    "- Si deseas incluir notas o análisis complementario, hazlo ÚNICAMENTE DESPUÉS del bloque JSON."
 )
 
 
@@ -2700,6 +2703,7 @@ class NativeOrchestrationCoordinator:
                             process_start_observer=self._observe_stage_process(
                                 uow, active_run, review_invocation
                             ),
+                            base_sha=active_run.base_sha,
                         ),
                     )
                     review_status = (
@@ -4815,7 +4819,11 @@ class NativeOrchestrationCoordinator:
         if status == "provider_error":
             return f"Independent {kind} review provider failed: {result.get('error', 'unknown error')}. Worktree preserved."
         if status == "invalid_response":
-            return f"Independent {kind} review produced invalid response: {result.get('error', 'malformed output')}. Worktree preserved."
+            err = result.get("error", "malformed output")
+            diag = result.get("raw_diagnostic")
+            if diag:
+                return f"Independent {kind} review produced invalid response: {err} [{diag}]. Worktree preserved."
+            return f"Independent {kind} review produced invalid response: {err}. Worktree preserved."
         return f"Independent {kind} review did not approve. Worktree preserved."
 
     @staticmethod
@@ -4880,6 +4888,7 @@ class NativeOrchestrationCoordinator:
         )
         prompt = (
             f"You are the independent reviewer agent (read-only). Perform independent review on OpenSpec change '{change_name}'.\n\n"
+            f"{_REVIEW_VERDICT_SCHEMA_HINT}\n\n"
             f"Proposal Artifacts:\n{proposal_text}\n\n"
             f"Design Artifacts:\n{design_text}\n\n"
             f"Tasks Artifacts:\n{tasks_text}\n\n"
@@ -4889,16 +4898,7 @@ class NativeOrchestrationCoordinator:
             f"the change cannot be implemented safely at all; a MAJOR must mean a real "
             f"correctness or security gap; a MINOR is a nit that must not block. Do not re-flag a "
             f"requirement that is already covered by an existing task; report only findings that "
-            f"are new and material.\n\n"
-            f"REQUISITO OBLIGATORIO DE IDIOMA: Redacta el resumen ('summary') y cada hallazgo "
-            f"('violated_requirement', 'expected_correction') obligatoriamente en español simple y directo. "
-            f"No uses inglés.\n\n"
-            f"REGLA ESTRICTA DE TAMAÑO Y CONCISIÓN:\n"
-            f"- Toda la respuesta debe llegar en no más de 4000 caracteres para evitar que la API la trunque.\n"
-            f"- No generes análisis narrativo previo ni preámbulos extensos.\n"
-            f"- El resumen ('summary') debe ser conciso (máximo 2 a 3 oraciones en español simple).\n"
-            f"- Emite directamente el único bloque JSON con el veredicto.\n\n"
-            f"{_REVIEW_VERDICT_SCHEMA_HINT}\n"
+            f"are new and material.\n"
         )
         model = (
             self._configured_model(uow, project_id, "reviewer") if (uow and project_id) else None
@@ -4954,6 +4954,10 @@ class NativeOrchestrationCoordinator:
                 }
             )
         except MalformedReviewOutputError as exc:
+            raw_text = res.response_output or ("\n".join(res.stdout) if res.stdout else "")
+            diag_prefix = raw_text[:500]
+            diag_suffix = raw_text[-500:] if len(raw_text) > 500 else ""
+            raw_diagnostic = f"Prefix: {diag_prefix!r} | Suffix: {diag_suffix!r}" if raw_text else "Empty response"
             return ReviewResult(
                 {
                     **base_record,
@@ -4961,6 +4965,7 @@ class NativeOrchestrationCoordinator:
                     "verdict": None,
                     "findings": [],
                     "error": str(exc),
+                    "raw_diagnostic": raw_diagnostic,
                 }
             )
 
@@ -5444,28 +5449,43 @@ class NativeOrchestrationCoordinator:
         candidate_sha: str | None = None,
         uow: Any = None,
         process_start_observer: Any = None,
+        base_sha: str | None = None,
     ) -> ReviewResult:
         """Execute independent read-only code review for high-complexity changes."""
-        diff_result = await self._git_run(worktree_path, ["diff", "HEAD~1..HEAD"])
+        diff_range = "HEAD~1..HEAD"
+        if base_sha:
+            if base_sha != "main":
+                diff_range = f"{base_sha}..HEAD"
+            else:
+                try:
+                    mb_res = await self._git_run(worktree_path, ["merge-base", "origin/main", "HEAD"])
+                    if mb_res.returncode == 0 and mb_res.stdout.strip():
+                        diff_range = f"{mb_res.stdout.strip()}..HEAD"
+                except Exception:
+                    pass
+
+        diff_cmd = [
+            "diff",
+            diff_range,
+            "--",
+            ".",
+            ":!package-lock.json",
+            ":!poetry.lock",
+            ":!pnpm-lock.yaml",
+            ":!yarn.lock",
+        ]
+        diff_result = await self._git_run(worktree_path, diff_cmd)
         diff = diff_result.stdout
         prompt = (
             f"You are the independent reviewer agent (read-only). Perform code review on OpenSpec change '{change_name}'.\n\n"
+            f"{_REVIEW_VERDICT_SCHEMA_HINT}\n\n"
             f"Candidate Diff:\n{diff}\n\n"
             f"Evaluate only substantive correctness, security, and scope defects. "
             f"Do NOT request wording or formatting changes. "
             f"A BLOCKER means the change cannot be implemented safely at all; a MAJOR means a real "
             f"correctness or security gap; a MINOR is a nit that must not block. Do not re-flag a "
             f"requirement that is already covered by an existing task; report only findings that "
-            f"are new and material.\n\n"
-            f"REQUISITO OBLIGATORIO DE IDIOMA: Redacta el resumen ('summary') y cada hallazgo "
-            f"('violated_requirement', 'expected_correction') obligatoriamente en español simple y directo. "
-            f"No uses inglés.\n\n"
-            f"REGLA ESTRICTA DE TAMAÑO Y CONCISIÓN:\n"
-            f"- Toda la respuesta debe llegar en no más de 4000 caracteres para evitar que la API la trunque.\n"
-            f"- No generes análisis narrativo previo ni preámbulos extensos.\n"
-            f"- El resumen ('summary') debe ser conciso (máximo 2 a 3 oraciones en español simple).\n"
-            f"- Emite directamente el único bloque JSON con el veredicto.\n\n"
-            f"{_REVIEW_VERDICT_SCHEMA_HINT}\n"
+            f"are new and material.\n"
             "Do not use APPROVED prose."
         )
         model = (
@@ -5521,6 +5541,10 @@ class NativeOrchestrationCoordinator:
                 }
             )
         except MalformedReviewOutputError as exc:
+            raw_text = res.response_output or ("\n".join(res.stdout) if res.stdout else "")
+            diag_prefix = raw_text[:500]
+            diag_suffix = raw_text[-500:] if len(raw_text) > 500 else ""
+            raw_diagnostic = f"Prefix: {diag_prefix!r} | Suffix: {diag_suffix!r}" if raw_text else "Empty response"
             return ReviewResult(
                 {
                     **base_record,
@@ -5528,6 +5552,7 @@ class NativeOrchestrationCoordinator:
                     "verdict": None,
                     "findings": [],
                     "error": str(exc),
+                    "raw_diagnostic": raw_diagnostic,
                 }
             )
 
