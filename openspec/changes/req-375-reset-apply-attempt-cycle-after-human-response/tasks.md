@@ -14,5 +14,5 @@
 
 - [x] 3.1 Add focused tests proving an accepted Apply gate response resets the current cycle, executes within the same candidate identity, and preserves prior attempt history.
 - [x] 3.2 Add regression tests proving a duplicate response does not create another cycle or invocation, cancellation and unrelated gates do not reset Apply counters, and the three-attempt and no-progress limits still stop a cycle.
-- [ ] 3.3 Run a PostgreSQL-backed API/coordinator E2E that observes the accepted action, cycle transition, invocation result, and retained Run/candidate identity; label any deterministic runner as simulated and do not claim real-agent evidence from it.
+- [x] 3.3 Run a PostgreSQL-backed API/coordinator E2E that observes the accepted action, cycle transition, invocation result, and retained Run/candidate identity; label any deterministic runner as simulated and do not claim real-agent evidence from it.
 - [x] 3.4 Run relevant repository validation and OpenSpec validation, then capture the resulting evidence against the exact candidate SHA; report any provider-backed E2E separately and only when an authorized test environment is available.

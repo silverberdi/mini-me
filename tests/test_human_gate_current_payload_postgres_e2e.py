@@ -331,13 +331,18 @@ def test_postgres_apply_gate_response_starts_one_simulated_cycle(monkeypatch, tm
         assert result.run_id == run_id
         assert persisted.stop_details["apply_total_attempts"] == 1
         assert persisted.stop_details["apply_cycle_started_by_action_id"] == action_id
-        assert persisted.stop_details["apply_snapshot"]["candidate_sha"] == candidate_sha
+        assert persisted.stop_details["apply_snapshot"]["sha"] == candidate_sha
         assert len(starts) == len(finishes) == 1
         assert starts[0].evidence_references["operator_action_id"] == action_id
         assert starts[0].evidence_references["candidate"]["candidate_sha"] == candidate_sha
         assert finishes[0].evidence_references["candidate"]["candidate_sha"] == candidate_sha
     finally:
         app.dependency_overrides.clear()
-        session.rollback()
+        session.execute(
+            text("DELETE FROM recovery_claims WHERE claim_key LIKE :prefix"),
+            {"prefix": f"stage-invocation:{run_id}:%"},
+        )
+        session.execute(text("DELETE FROM projects WHERE id = :project_id"), {"project_id": project_id})
+        session.commit()
         session.close()
         engine.dispose()
