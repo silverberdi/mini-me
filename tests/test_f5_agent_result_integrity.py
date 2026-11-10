@@ -225,7 +225,10 @@ async def test_code_review_prompt_includes_complete_diff_and_convergence_guidanc
     )
 
     assert result["status"] == "approved"
-    coordinator._git_run.assert_awaited_once_with(tmp_path, ["diff", "HEAD~1..HEAD"])
+    coordinator._git_run.assert_awaited_once_with(
+        tmp_path,
+        ["diff", "HEAD~1..HEAD", "--", ".", ":!package-lock.json", ":!poetry.lock", ":!pnpm-lock.yaml", ":!yarn.lock"],
+    )
     call = coordinator.agent_runner.run.await_args
     prompt = call.kwargs["prompt_context"]
     assert len(diff) > 4_000
