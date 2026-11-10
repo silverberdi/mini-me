@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import re
+from typing import Any
 
 from pydantic import ValidationError
 
@@ -15,6 +16,62 @@ class MalformedReviewOutputError(ValueError):
     """Raised when reviewer output cannot be unambiguously parsed into an authoritative verdict."""
 
     pass
+
+
+def _extract_candidate_payloads(text: str) -> list[tuple[dict[str, Any] | None, str]]:
+    """Extract candidate JSON objects from fenced codeblocks or raw stream using JSONDecoder."""
+    decoder = json.JSONDecoder()
+    fenced_candidates: list[tuple[dict[str, Any] | None, str]] = []
+
+    # 1. Inspect fenced codeblocks first
+    fence_pattern = re.compile(r"```(?:json)?\s*([\s\S]*?)\s*```", re.IGNORECASE)
+    fenced_blocks = [b.strip() for b in fence_pattern.findall(text) if b.strip()]
+    for block in fenced_blocks:
+        idx = block.find("{")
+        if idx != -1:
+            try:
+                obj, _ = decoder.raw_decode(block[idx:])
+                if isinstance(obj, dict) and ("verdict" in obj or "findings" in obj):
+                    fenced_candidates.append((obj, block))
+            except (json.JSONDecodeError, ValueError):
+                if "verdict" in block or "findings" in block:
+                    fenced_candidates.append((None, block))
+        elif "verdict" in block or "findings" in block:
+            fenced_candidates.append((None, block))
+
+    # If any fenced block produced a verdict candidate, prefer fenced blocks
+    if any(isinstance(c[0], dict) and "verdict" in c[0] for c in fenced_candidates):
+        return fenced_candidates
+
+    # 2. Otherwise (or if fenced blocks were only ancillary snippets like CSS),
+    # scan text for top-level JSON objects using raw_decode
+    raw_candidates: list[tuple[dict[str, Any] | None, str]] = []
+    i = 0
+    n = len(text)
+    while i < n:
+        if text[i] == "{":
+            try:
+                obj, end = decoder.raw_decode(text[i:])
+                slice_text = text[i : i + end]
+                if isinstance(obj, dict) and ("verdict" in obj or "findings" in obj):
+                    raw_candidates.append((obj, slice_text))
+                i += max(end, 1)
+                continue
+            except (json.JSONDecodeError, ValueError):
+                pass
+        i += 1
+
+    if raw_candidates:
+        return raw_candidates
+
+    # Check if raw text had an unparseable verdict attempt
+    broken_match = re.search(r'\{[^{}]*"(?:verdict|findings)"', text)
+    if broken_match:
+        start = broken_match.start()
+        raw_candidates.append((None, text[start : start + 300]))
+        return raw_candidates
+
+    return fenced_candidates
 
 
 def parse_review_verdict(raw_output: str | list[str]) -> ReviewVerdictPayload:
@@ -31,38 +88,24 @@ def parse_review_verdict(raw_output: str | list[str]) -> ReviewVerdictPayload:
     if not text:
         raise MalformedReviewOutputError("Reviewer output is empty.")
 
-    # 1. Look for fenced JSON codeblocks first
-    fence_pattern = re.compile(r"```(?:json)?\s*([\s\S]*?)\s*```", re.IGNORECASE)
-    fenced_blocks = [b.strip() for b in fence_pattern.findall(text) if b.strip()]
-
-    candidate_strings: list[str] = []
-    if fenced_blocks:
-        candidate_strings = fenced_blocks
-    else:
-        # 2. Look for top-level JSON objects containing "verdict"
-        # Match outermost { ... }
-        brace_pattern = re.compile(r"\{[^{}]*(?:\{[^{}]*\}[^{}]*)*\}", re.DOTALL)
-        candidate_strings = [m.group(0).strip() for m in brace_pattern.finditer(text)]
-
-    if not candidate_strings:
+    candidates = _extract_candidate_payloads(text)
+    if not candidates:
         raise MalformedReviewOutputError("No structured JSON payload found in reviewer output.")
 
     valid_payloads: list[ReviewVerdictPayload] = []
     malformed_verdict_attempts: list[str] = []
 
-    for candidate in candidate_strings:
-        # Check if candidate mentions "verdict" or looks like a review payload
-        if "verdict" not in candidate and "findings" not in candidate:
+    for candidate_obj, candidate_raw in candidates:
+        if candidate_obj is None:
+            malformed_verdict_attempts.append(candidate_raw)
+            continue
+
+        if not isinstance(candidate_obj, dict) or "verdict" not in candidate_obj:
+            malformed_verdict_attempts.append(candidate_raw)
             continue
 
         try:
-            data = json.loads(candidate)
-            if not isinstance(data, dict) or "verdict" not in data:
-                malformed_verdict_attempts.append(candidate)
-                continue
-
-            # Validate schema strictly
-            payload = ReviewVerdictPayload.model_validate(data)
+            payload = ReviewVerdictPayload.model_validate(candidate_obj)
 
             # Validate finding fields
             for finding in payload.findings:
@@ -99,8 +142,8 @@ def parse_review_verdict(raw_output: str | list[str]) -> ReviewVerdictPayload:
 
             valid_payloads.append(payload)
 
-        except (json.JSONDecodeError, ValidationError, MalformedReviewOutputError) as exc:
-            malformed_verdict_attempts.append(f"{candidate} (Error: {exc})")
+        except (ValidationError, MalformedReviewOutputError) as exc:
+            malformed_verdict_attempts.append(f"{candidate_raw} (Error: {exc})")
 
     # Ambiguity checks
     if len(valid_payloads) == 0:
