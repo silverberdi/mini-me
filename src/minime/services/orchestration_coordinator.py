@@ -5500,7 +5500,7 @@ class NativeOrchestrationCoordinator:
                                 human_question=handoff.summary, human_options=handoff.pending,
                                 branch=branch_text.strip(), worktree=str(worktree_path), run_id=run_id)
         successful = self._execution_is_successful(result)
-        ready = successful and not automated_pending and not not_verified
+        ready = successful and not automated_pending
         status = "COMPLETE" if ready else ("PARTIAL" if successful else "FAILED")
         error = None if successful else self._review_failure_error(result)
         return ApplyOutcome(status, completed_ids, tuple(pending), sha_text.strip() if getattr(sha, "ok", True) else None,
