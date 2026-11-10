@@ -61,7 +61,7 @@ Before dispatching any agent invocation, the system SHALL check provider health,
 - **AND** preserves worktree files and current stage without advancing or dispatching.
 
 ### Requirement: Human Intervention Protocol and Option Fidelity
-When human intervention is required, the system SHALL persist and expose the exact question and options for the currently blocking gate across all workflow stages (including Explore checkpoint, Propose clarification, review escalation, Apply recovery exhaustion, PR1 merge acknowledgement, and physical validation), preserving original wording emitted by OpenSpec or the agent and distinguishing native options from agent-generated recommendations. The active payload SHALL be unified in PostgreSQL across stage checkpoints, `orchestration_runs.human_gate`, and `stop_details.human_payload`, and SHALL NOT be sourced from a resolved or superseded earlier gate. For exhausted Apply recovery, the active payload SHALL capture attempt counts, hard ceilings, pending task lists, candidate SHA, and test outcomes, providing a concise, actionable Spanish explanation of what stopped the workflow and what decision is needed. When the operator submits an authorized response, the system SHALL accept it idempotently, record it atomically in PostgreSQL, clear the active gate immediately, and resume execution without rejecting the response with HTTP 409 or re-surfacing resolved gates.
+When human intervention is required, the system SHALL persist and expose the exact question and options for the currently blocking gate across all workflow stages (including Explore checkpoint, Propose clarification, review escalation, Apply recovery exhaustion, PR1 merge acknowledgement, and physical validation), preserving original wording emitted by OpenSpec or the agent and distinguishing native options from agent-generated recommendations. The active payload SHALL be unified in PostgreSQL across stage checkpoints, `orchestration_runs.human_gate`, and `stop_details.human_payload`, and SHALL NOT be sourced from a resolved or superseded earlier gate. For exhausted Apply recovery, the active payload SHALL capture attempt counts for the current cycle, the hard ceiling, pending task lists, candidate SHA, and test outcomes, providing a concise, actionable Spanish explanation of what stopped the workflow and what decision is needed. When the operator submits an authorized response, the system SHALL accept it idempotently, record it atomically in PostgreSQL, clear the active gate immediately, and resume execution without rejecting the response with HTTP 409 or re-surfacing resolved gates. An accepted response that authorizes continuation from an Apply exhaustion gate SHALL start exactly one new Apply recovery cycle at 0/3; prior cycle attempts and outcomes SHALL remain durably auditable and SHALL NOT be rewritten.
 
 #### Scenario: Verbatim options displayed to operator
 - **GIVEN** OpenSpec Explore or Propose emitting explicit options during clarification
@@ -99,9 +99,23 @@ When human intervention is required, the system SHALL persist and expose the exa
 #### Scenario: Exhausted Apply recovery gate explains diagnostic context
 - **GIVEN** Apply recovery halts due to reaching the attempt ceiling or lack of progress
 - **WHEN** Apply escalation becomes the active human gate
-- **THEN** the active payload retains attempt count vs. ceiling, pending tasks, candidate SHA, and test results
+- **THEN** the active payload retains current-cycle attempt count vs. ceiling, pending tasks, candidate SHA, and test results
 - **AND** Trabajo actual presents an actionable Spanish explanation of why recovery stopped, what tasks remain, and what decision is required
 - **AND** if execution logs are unavailable, explicitly indicates their absence instead of presenting a generic unformatted string.
+
+#### Scenario: Accepted Apply response resets one cycle without losing history
+- **GIVEN** an active Run is stopped at an exhausted Apply recovery gate
+- **WHEN** the operator submits an accepted response that authorizes continuation
+- **THEN** the resolved gate is cleared and exactly one new Apply recovery cycle starts at 0/3
+- **AND** the current attempt count is zero before the first new Apply invocation
+- **AND** historical attempts and their results remain auditable
+- **AND** the same Run, candidate, branch, and worktree continue.
+
+#### Scenario: Replayed Apply response does not create another cycle
+- **GIVEN** an accepted response has already started the next Apply recovery cycle for a gate
+- **WHEN** the same idempotent response is submitted again
+- **THEN** the prior response result is returned
+- **AND** no additional cycle or Apply invocation is created.
 
 #### Scenario: Proposal-review response does not approve or bypass review
 - **GIVEN** an operator responds to an exhausted proposal-review gate
