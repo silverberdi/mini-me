@@ -128,6 +128,19 @@ const STAGE_ILLUSTRATION_PATHS: Readonly<Record<string, string>> = Object.freeze
             <span class="text-slate-500"> · Sin progreso: {{ cycle.no_progress }}/{{ cycle.no_progress_limit }}</span>
           </div>
 
+          <div *ngIf="targetRun()?.stop_details?.['apply_gate_update'] as update" class="p-3 rounded-xl bg-slate-900/70 border border-amber-500/20 text-xs text-slate-300 space-y-1" role="status" aria-label="Resultado de actualización OpenSpec del gate Apply">
+            <div>Decisión del gate → OpenSpec Update: <strong class="text-white">{{ update.status }}</strong>
+              <span *ngIf="update.validation?.status"> · Validación estricta: {{ update.validation.status }}</span>
+            </div>
+            <div *ngIf="update.error || update.question" class="text-amber-200 whitespace-pre-wrap">{{ update.error || update.question }}</div>
+            <div *ngIf="update.deferred_tasks?.length" class="text-slate-400">
+              Diferidas y aún pendientes: {{ update.deferred_task_details?.join(' · ') || update.deferred_tasks.join(', ') }}
+            </div>
+            <div *ngIf="update.before?.candidate_sha || update.after?.candidate_sha" class="font-mono text-slate-500">
+              Candidato antes: {{ update.before?.candidate_sha || 'desconocido' }} · después: {{ update.after?.candidate_sha || 'sin cambio registrado' }}
+            </div>
+          </div>
+
           <div class="p-4 rounded-xl bg-slate-900/60 border border-slate-700/50 space-y-2" aria-label="Complejidad asignada">
             <div class="flex flex-wrap items-center justify-between gap-2">
               <span class="text-xs font-semibold uppercase tracking-wider text-slate-300 font-mono">Complejidad asignada</span>

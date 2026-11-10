@@ -380,6 +380,32 @@ def test_classify_pending_tasks_splits_not_verified():
     assert not_verified == ["3.1", "3.2"]
 
 
+def test_deferred_task_stays_pending_without_being_apply_work_or_completed():
+    tasks = (
+        "## Tasks\n"
+        "- [ ] 4.2 Validar audio en iPhone [DEFERRED] hasta integrar TTS; SHA de versión publicada: desconocido.\n"
+    )
+
+    automated, not_verified = NativeOrchestrationCoordinator._classify_pending_tasks(tasks)
+
+    assert automated == []
+    assert not_verified == []
+    assert NativeOrchestrationCoordinator._deferred_task_ids(tasks) == ["4.2"]
+
+
+def test_published_version_evidence_needs_exact_candidate_sha_to_complete():
+    candidate_sha = "a" * 40
+    matching = f'- [x] 4.1 Desktop check [PUBLISHED_EVIDENCE source="GitHub Pages"; sha={candidate_sha}]'
+    mismatched = '- [x] 4.2 iPhone check [PUBLISHED_EVIDENCE source="GitHub Pages"; sha=unknown]'
+
+    assert NativeOrchestrationCoordinator._invalid_published_evidence_completions(
+        matching, candidate_sha
+    ) == []
+    assert NativeOrchestrationCoordinator._invalid_published_evidence_completions(
+        mismatched, candidate_sha
+    ) == ["4.2"]
+
+
 def test_apply_recovery_progress_uses_pending_count_or_diff_fingerprint():
     previous = {"pending": ["1.1", "1.2"], "fingerprint": "old"}
     fewer_tasks = ApplyOutcome("PARTIAL", ("1.1",), ("1.2",), "sha-1", (), None, False, "red")
