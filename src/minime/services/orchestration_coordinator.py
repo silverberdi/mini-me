@@ -2461,6 +2461,16 @@ class NativeOrchestrationCoordinator:
                     uow, active_run, response_text=operator_clarification
                 )
                 details = dict(active_run.stop_details or {})
+                update_checkpoint = details.get("apply_gate_update") or {}
+                authorized_reclassifications = self._validated_apply_reclassifications(
+                    update_checkpoint,
+                    operator_action_id=operator_action_id,
+                    prior=prior,
+                    run_id=active_run.run_id,
+                    change_name=change_name,
+                )
+            else:
+                authorized_reclassifications = set()
             while attempts < hard_limit:
                 invocation = await self._begin_stage_invocation(
                     uow, active_run, worktree_path, "APPLY",
@@ -2526,7 +2536,9 @@ class NativeOrchestrationCoordinator:
                     )
                 if outcome.status == "COMPLETE":
                     break
-                if prior and self._apply_regressed(prior, outcome):
+                if prior and self._apply_regressed(
+                    prior, outcome, ignored_task_losses=authorized_reclassifications
+                ):
                     return self._escalate_apply_to_human(
                         uow,
                         active_run,
@@ -3596,6 +3608,7 @@ class NativeOrchestrationCoordinator:
         return attempts if isinstance(attempts, int) and attempts >= 0 else 0
 
     _UNCHECKED_TASK_RE = re.compile(r"(?m)^\s*-\s*\[\s\]\s+([^\n]*)$")
+    _TASK_DISPOSITION_RE = re.compile(r"(?m)^\s*-\s*\[([ xX])\]\s+(\S+)([^\n]*)$")
     _DEFERRED_TASK_MARKER = re.compile(r"\[(?:DEFERRED|DIFERIDA|DIFERIDO)\]", re.IGNORECASE)
     _PUBLISHED_EVIDENCE_MARKER = re.compile(
         r"\[PUBLISHED_EVIDENCE\s+source=(?:\"[^\"]+\"|[^;\]]+);\s*sha=([^\]]+)\]",
@@ -3619,6 +3632,79 @@ class NativeOrchestrationCoordinator:
             for match in cls._UNCHECKED_TASK_RE.finditer(tasks_text)
             if cls._DEFERRED_TASK_MARKER.search(match.group(1))
         ]
+
+    @classmethod
+    def _task_dispositions(cls, tasks_text: str) -> dict[str, str]:
+        """Return observable checkbox/deferment state for each OpenSpec task."""
+        dispositions: dict[str, str] = {}
+        for match in cls._TASK_DISPOSITION_RE.finditer(tasks_text):
+            checked, task_id, suffix = match.groups()
+            if checked.strip().lower() == "x":
+                disposition = "completed"
+            elif cls._DEFERRED_TASK_MARKER.search(suffix):
+                disposition = "deferred"
+            elif "NOT_VERIFIED" in suffix.upper():
+                disposition = "not_verified"
+            else:
+                disposition = "pending"
+            dispositions[task_id] = disposition
+        return dispositions
+
+    @staticmethod
+    def _validated_apply_reclassifications(
+        checkpoint: dict[str, Any],
+        *,
+        operator_action_id: str | None,
+        prior: dict[str, Any] | None,
+        run_id: str,
+        change_name: str,
+    ) -> set[str]:
+        """Return only task IDs changed by a validated Update for this exact candidate."""
+        if (
+            not prior
+            or checkpoint.get("status") != "VALIDATED"
+            or checkpoint.get("operator_action_id") != operator_action_id
+            or checkpoint.get("change_name") != change_name
+            or not isinstance(operator_action_id, str)
+            or not isinstance(checkpoint.get("reclassified_tasks"), list)
+        ):
+            return set()
+        before = checkpoint.get("before") or {}
+        after = checkpoint.get("after") or {}
+        identity_keys = ("run_id", "worktree", "branch", "generation")
+        if any(before.get(key) != after.get(key) for key in identity_keys):
+            return set()
+        if before.get("run_id") != run_id or prior.get("run_id") != run_id:
+            return set()
+        if (before.get("candidate_sha") != prior.get("sha")
+                or after.get("candidate_sha") != prior.get("sha")):
+            return set()
+        if (before.get("branch") != prior.get("branch")
+                or before.get("worktree") != prior.get("worktree")):
+            return set()
+        reported = checkpoint["reclassified_tasks"]
+        before_states = checkpoint.get("task_dispositions_before")
+        after_states = checkpoint.get("task_dispositions_after")
+        if (
+            not isinstance(before_states, dict)
+            or not isinstance(after_states, dict)
+            or not all(isinstance(task_id, str) and task_id for task_id in reported)
+        ):
+            return set()
+        changed = {
+            task_id
+            for task_id in set(before_states) | set(after_states)
+            if before_states.get(task_id) != after_states.get(task_id)
+        }
+        if changed != set(reported):
+            return set()
+        prior_completed = set(prior.get("completed", ()))
+        return {
+            task_id
+            for task_id in changed & prior_completed
+            if before_states.get(task_id) == "completed"
+            and after_states.get(task_id) in {"pending", "deferred", "not_verified"}
+        }
 
     @classmethod
     def _invalid_published_evidence_completions(
@@ -3693,13 +3779,21 @@ class NativeOrchestrationCoordinator:
                  current.diff_fingerprint != previous.get("fingerprint")))
 
     @staticmethod
-    def _apply_regressed(previous: dict[str, Any], current: ApplyOutcome) -> bool:
+    def _apply_regressed(
+        previous: dict[str, Any],
+        current: ApplyOutcome,
+        *,
+        ignored_task_losses: set[str] | None = None,
+    ) -> bool:
         identity_changed = any((previous.get(key) and value and previous[key] != value)
                                for key, value in (("branch", current.branch),
                                                   ("worktree", current.worktree),
                                                   ("run_id", current.run_id)))
         files_removed = set(previous.get("files", ())) - set(current.changed_files)
-        tasks_lost = set(previous.get("completed", ())) - set(current.completed_tasks)
+        tasks_lost = (
+            set(previous.get("completed", ())) - set(current.completed_tasks)
+            - set(ignored_task_losses or ())
+        )
         tests_regressed = previous.get("tests_passed") is True and current.tests_passed is False
         return identity_changed or bool(files_removed or tasks_lost or tests_regressed)
 
@@ -4774,13 +4868,19 @@ class NativeOrchestrationCoordinator:
         """Apply an accepted criterion disposition through native OpenSpec Update."""
         before = await self._stage_candidate_identity(run, worktree_path, "UPDATE")
         files_before = await self._candidate_file_fingerprints(worktree_path)
+        tasks_path = worktree_path / "openspec" / "changes" / change_name / "tasks.md"
+        task_dispositions_before = self._task_dispositions(
+            tasks_path.read_text(encoding="utf-8", errors="replace")
+        ) if tasks_path.is_file() else {}
         details = dict(run.stop_details or {})
         checkpoint = {
             "status": "UPDATE_STARTED",
             "operator_action_id": operator_action_id,
+            "change_name": change_name,
             "gate": self._safe_human_payload(gate_payload),
             "before": before,
             "file_fingerprints_before": files_before,
+            "task_dispositions_before": task_dispositions_before,
             "updated_at": utc_now().isoformat(),
         }
         details["apply_gate_update"] = checkpoint
@@ -4932,6 +5032,14 @@ class NativeOrchestrationCoordinator:
                     )
                     return self._persist_apply_gate_update(run, checkpoint)
                 validation = self.openspec_adapter.validate_change_strict(change_name, worktree_path)
+                task_dispositions_after = self._task_dispositions(
+                    tasks_path.read_text(encoding="utf-8", errors="replace")
+                ) if tasks_path.is_file() else {}
+                reclassified_tasks = sorted(
+                    task_id
+                    for task_id in set(task_dispositions_before) | set(task_dispositions_after)
+                    if task_dispositions_before.get(task_id) != task_dispositions_after.get(task_id)
+                )
                 checkpoint.update(
                     after=after,
                     file_fingerprints_after=files_after,
@@ -4942,9 +5050,10 @@ class NativeOrchestrationCoordinator:
                         .read_text(encoding="utf-8", errors="replace")
                     ),
                     deferred_task_details=self._deferred_task_details(
-                        (worktree_path / "openspec" / "changes" / change_name / "tasks.md")
-                        .read_text(encoding="utf-8", errors="replace")
+                        tasks_path.read_text(encoding="utf-8", errors="replace")
                     ),
+                    task_dispositions_after=task_dispositions_after,
+                    reclassified_tasks=reclassified_tasks,
                     validation={
                         "status": validation.get("status"),
                         "returncode": validation.get("returncode"),

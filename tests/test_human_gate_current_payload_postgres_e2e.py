@@ -221,6 +221,7 @@ def test_postgres_apply_gate_response_starts_one_simulated_cycle(monkeypatch, tm
     candidate = tmp_path / "candidate"
     candidate.mkdir()
     subprocess.run(["git", "init", "-q", str(candidate)], check=True)
+    subprocess.run(["git", "-C", str(candidate), "checkout", "-qb", "feature/issue-375"], check=True)
     subprocess.run(["git", "-C", str(candidate), "config", "user.email", "test@example.com"], check=True)
     subprocess.run(["git", "-C", str(candidate), "config", "user.name", "Test"], check=True)
     change_name = "issue-375-reset-apply-attempt-cycle"
@@ -258,7 +259,12 @@ def test_postgres_apply_gate_response_starts_one_simulated_cycle(monkeypatch, tm
             "apply_total_attempts": 3,
             "apply_no_progress": 2,
             "apply_limits": {"max_attempts": 3, "max_no_progress": 2},
-            "apply_snapshot": {"candidate_sha": candidate_sha},
+            "apply_snapshot": {
+                "run_id": run_id, "sha": candidate_sha,
+                "branch": "feature/issue-375", "worktree": str(candidate.resolve()),
+                "completed": ["1.1"], "pending": ["1.3"],
+                "files": [], "tests_passed": None,
+            },
             "human_payload": {
                 "gate_id": "gate-apply-375",
                 "gate": "apply_escalation",
@@ -329,6 +335,18 @@ def test_postgres_apply_gate_response_starts_one_simulated_cycle(monkeypatch, tm
                 path=candidate, branch_name="feature/issue-375", base_sha="base-sha"
             )
         )
+        async def simulated_update_with_task_reclassification(**kwargs):
+            tasks_path = change_dir / "tasks.md"
+            tasks_text = tasks_path.read_text(encoding="utf-8")
+            tasks_path.write_text(
+                tasks_text.replace(
+                    "- [x] 1.1 Trace the accepted gate response",
+                    "- [ ] 1.1 Trace the accepted gate response [DEFERRED] Operator supplied published-version evidence; candidate-specific evidence remains pending.",
+                ),
+                encoding="utf-8",
+            )
+            return simulated_update
+
         simulated_update = MagicMock(
             exit_code=0,
             timed_out=False,
@@ -338,14 +356,15 @@ def test_postgres_apply_gate_response_starts_one_simulated_cycle(monkeypatch, tm
             structured_output_too_large=False,
             workflow_handoff_required=False,
             final_response_status="COMPLETE",
-            response_output="No material disposition change in this simulated scenario.",
+            response_output="Deterministic simulated authorized task reclassification.",
         )
         coordinator.agent_runner.resolve_workflow = MagicMock(return_value=MagicMock())
-        coordinator.agent_runner.run = AsyncMock(return_value=simulated_update)
+        coordinator.agent_runner.run = AsyncMock(side_effect=simulated_update_with_task_reclassification)
         coordinator._run_apply = AsyncMock(return_value=ApplyOutcome(
             status="FAILED", completed_tasks=(), pending_tasks=("Simulated pending task",),
             candidate_sha=candidate_sha, changed_files=(), diff_fingerprint=None,
             tests_passed=None, test_evidence="", error="deterministic simulated failure",
+            branch="feature/issue-375", worktree=str(candidate.resolve()), run_id=run_id,
         ))
         result = asyncio.run(coordinator.execute_project_request(
             project_id,
@@ -371,6 +390,9 @@ def test_postgres_apply_gate_response_starts_one_simulated_cycle(monkeypatch, tm
         assert persisted.stop_details["apply_snapshot"]["sha"] == candidate_sha
         assert persisted.stop_details["apply_gate_update"]["status"] == "VALIDATED"
         assert persisted.stop_details["apply_gate_update"]["validation"]["status"] == "PASS"
+        assert persisted.stop_details["apply_gate_update"]["reclassified_tasks"] == ["1.1"]
+        assert persisted.stop_details["apply_snapshot"]["pending"] == ["Simulated pending task"]
+        assert persisted.stop_details["apply_snapshot"]["completed"] == []
         assert coordinator.agent_runner.resolve_workflow.call_args.kwargs["operation"] == "update"
         assert coordinator.agent_runner.run.await_args.kwargs["role"] == "thinker"
         update_starts = [event for event in starts if ":UPDATE:" in event.evidence_references["claim_key"]]
