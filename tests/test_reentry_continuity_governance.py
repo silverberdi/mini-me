@@ -1256,7 +1256,7 @@ async def test_apply_failure_escalates_after_ceiling(base_setup):
 
 
 @pytest.mark.asyncio
-async def test_accepted_apply_gate_response_starts_new_cycle_on_same_candidate(base_setup):
+async def test_simulated_accepted_apply_gate_response_starts_new_cycle_on_same_candidate(base_setup):
     uow, candidate_worktree, _ = base_setup
     action_id = "accepted-apply-gate-action-375"
     run = OrchestrationRun(
@@ -1325,11 +1325,21 @@ async def test_accepted_apply_gate_response_starts_new_cycle_on_same_candidate(b
     candidate_sha = subprocess.check_output(
         ["git", "-C", str(candidate_worktree), "rev-parse", "HEAD"], text=True
     ).strip()
-    coordinator._run_apply = AsyncMock(return_value=ApplyOutcome(
+    stage_order = []
+    async def apply_after_update(*args, **kwargs):
+        stage_order.append("APPLY")
+        return ApplyOutcome(
         status="FAILED", completed_tasks=(), pending_tasks=("Task 1",),
         candidate_sha=candidate_sha, changed_files=(), diff_fingerprint=None,
         tests_passed=None, test_evidence="", error="simulated failure",
-    ))
+        )
+
+    async def update_before_apply(**kwargs):
+        stage_order.append("UPDATE")
+        return {"status": "VALIDATED"}
+
+    coordinator._run_apply = AsyncMock(side_effect=apply_after_update)
+    coordinator._run_apply_gate_update = AsyncMock(side_effect=update_before_apply)
 
     result = await coordinator.execute_project_request(
         "mini-me",
@@ -1341,6 +1351,9 @@ async def test_accepted_apply_gate_response_starts_new_cycle_on_same_candidate(b
     updated = uow.orchestration_runs.get_by_id(run.run_id)
     assert result.status == "HUMAN_REQUIRED"
     assert result.run_id == run.run_id
+    coordinator._run_apply_gate_update.assert_awaited_once()
+    assert coordinator._run_apply_gate_update.await_args.kwargs["operator_response"] == "Continue Apply recovery"
+    assert stage_order == ["UPDATE", "APPLY"]
     assert coordinator._run_apply.await_count == 1
     assert coordinator._run_apply.await_args.kwargs["operator_response"] == "Continue Apply recovery"
     assert updated.stop_details["apply_total_attempts"] == 1
@@ -1418,6 +1431,163 @@ async def test_unrelated_human_gate_does_not_reset_apply_cycle(base_setup):
     assert updated.stop_details["apply_no_progress"] == 2
     assert "apply_cycle_started_by_action_id" not in updated.stop_details
     coordinator._run_apply.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_simulated_apply_gate_update_uses_native_workflow_and_strict_validation(base_setup):
+    uow, candidate_worktree, _ = base_setup
+    run = OrchestrationRun(
+        project_id="mini-me", run_id="run-native-update", change_name="gacela-05-ui-self-hosted",
+        base_sha="base_sha_123", current_stage=OrchestrationStage.IMPLEMENTING,
+        stop_details=make_stop_details(),
+    )
+    uow.orchestration_runs.save(run)
+    runner = MagicMock()
+    runner.resolve_workflow.return_value = MagicMock(name="native-update-workflow")
+    runner.run = AsyncMock(return_value=make_mock_execution("Updated and validated"))
+    coordinator = NativeOrchestrationCoordinator(
+        github_adapter=MagicMock(), worktree_manager=MagicMock(), agent_runner=runner,
+        uow_factory=lambda: uow,
+    )
+    before = {
+        "run_id": run.run_id, "worktree": str(candidate_worktree.resolve()), "branch": "main",
+        "generation": 0, "candidate_sha": "sha-before", "candidate_fingerprint": "fp-before",
+    }
+    after = {**before, "candidate_sha": "sha-after", "candidate_fingerprint": "fp-after"}
+    coordinator._stage_candidate_identity = AsyncMock(side_effect=[before, after])
+    coordinator._begin_stage_invocation = AsyncMock(return_value=MagicMock(claim=MagicMock()))
+    async def run_claimed(_uow, _claim, operation):
+        return await operation()
+
+    coordinator._run_claimed = AsyncMock(side_effect=run_claimed)
+    coordinator._finish_stage_invocation = AsyncMock()
+    coordinator.openspec_adapter.validate_change_strict = MagicMock(return_value={
+        "status": "PASS", "returncode": 0, "stdout": "validated", "stderr": "",
+    })
+
+    result = await coordinator._run_apply_gate_update(
+        uow=uow, run=run, worktree_path=candidate_worktree, provider="codex",
+        change_name=run.change_name, project_id="mini-me", operator_action_id="action-378",
+        operator_response="Defer the iPhone audio validation until the TTS issue.",
+        gate_payload={"gate": "apply_escalation", "question": "Which checks can be deferred?"},
+    )
+
+    assert result["status"] == "VALIDATED", run.stop_details["apply_gate_update"].get("error")
+    runner.resolve_workflow.assert_called_once_with(
+        worktree_path=candidate_worktree, provider="codex", operation="update",
+        change_name=run.change_name,
+    )
+    assert runner.run.await_args.kwargs["role"] == "thinker"
+    assert "Defer the iPhone audio validation" in runner.run.await_args.kwargs["prompt_context"]
+    assert coordinator.openspec_adapter.validate_change_strict.call_count == 1
+    assert run.stop_details["apply_gate_update"]["before"]["candidate_sha"] == "sha-before"
+    assert run.stop_details["apply_gate_update"]["after"]["candidate_sha"] == "sha-after"
+
+
+@pytest.mark.asyncio
+async def test_simulated_apply_gate_update_fails_closed_when_strict_validation_fails(base_setup):
+    uow, candidate_worktree, _ = base_setup
+    run = OrchestrationRun(
+        project_id="mini-me", run_id="run-invalid-update", change_name="gacela-05-ui-self-hosted",
+        base_sha="base_sha_123", current_stage=OrchestrationStage.IMPLEMENTING,
+        stop_details=make_stop_details(),
+    )
+    uow.orchestration_runs.save(run)
+    runner = MagicMock()
+    runner.resolve_workflow.return_value = MagicMock(name="native-update-workflow")
+    runner.run = AsyncMock(return_value=make_mock_execution("Updated artifacts"))
+    coordinator = NativeOrchestrationCoordinator(
+        github_adapter=MagicMock(), worktree_manager=MagicMock(), agent_runner=runner,
+        uow_factory=lambda: uow,
+    )
+    identity = {
+        "run_id": run.run_id, "worktree": str(candidate_worktree.resolve()), "branch": "main",
+        "generation": 0, "candidate_sha": "sha", "candidate_fingerprint": "fp",
+    }
+    coordinator._stage_candidate_identity = AsyncMock(side_effect=[identity, identity])
+    coordinator._begin_stage_invocation = AsyncMock(return_value=MagicMock(claim=MagicMock()))
+    async def run_claimed(_uow, _claim, operation):
+        return await operation()
+
+    coordinator._run_claimed = AsyncMock(side_effect=run_claimed)
+    coordinator._finish_stage_invocation = AsyncMock()
+    coordinator.openspec_adapter.validate_change_strict = MagicMock(return_value={
+        "status": "FAIL", "returncode": 1, "stdout": "invalid", "stderr": "bad artifact",
+    })
+
+    result = await coordinator._run_apply_gate_update(
+        uow=uow, run=run, worktree_path=candidate_worktree, provider="codex",
+        change_name=run.change_name, project_id="mini-me", operator_action_id="action-invalid",
+        operator_response="Defer mobile validation.",
+        gate_payload={"gate": "apply_escalation", "question": "Which checks can be deferred?"},
+    )
+
+    assert result["status"] == "INVALID"
+    assert "strict validation" in result["question"]
+    assert coordinator.openspec_adapter.validate_change_strict.call_count == 1
+
+
+@pytest.mark.asyncio
+async def test_simulated_ambiguous_update_returns_current_human_question(base_setup):
+    uow, candidate_worktree, _ = base_setup
+    run = OrchestrationRun(
+        project_id="mini-me", run_id="run-ambiguous-update", change_name="gacela-05-ui-self-hosted",
+        base_sha="base_sha_123", current_stage=OrchestrationStage.IMPLEMENTING,
+        stop_details=make_stop_details(),
+    )
+    uow.orchestration_runs.save(run)
+    handoff = MagicMock(
+        status="HUMAN_REQUIRED", summary="Need the exact criterion disposition.",
+        pending=("Which validation should be deferred, and what evidence remains required?",),
+    )
+    runner = MagicMock()
+    runner.resolve_workflow.return_value = MagicMock(name="native-update-workflow")
+    runner.run = AsyncMock(return_value=MagicMock(workflow_handoff=handoff))
+    coordinator = NativeOrchestrationCoordinator(
+        github_adapter=MagicMock(), worktree_manager=MagicMock(), agent_runner=runner,
+        uow_factory=lambda: uow,
+    )
+    identity = {
+        "run_id": run.run_id, "worktree": str(candidate_worktree.resolve()), "branch": "main",
+        "generation": 0, "candidate_sha": "sha", "candidate_fingerprint": "fp",
+    }
+    coordinator._stage_candidate_identity = AsyncMock(side_effect=[identity, identity])
+    coordinator._begin_stage_invocation = AsyncMock(return_value=MagicMock(claim=MagicMock()))
+
+    async def run_claimed(_uow, _claim, operation):
+        return await operation()
+
+    coordinator._run_claimed = AsyncMock(side_effect=run_claimed)
+    coordinator._finish_stage_invocation = AsyncMock()
+    coordinator.openspec_adapter.validate_change_strict = MagicMock()
+
+    result = await coordinator._run_apply_gate_update(
+        uow=uow, run=run, worktree_path=candidate_worktree, provider="codex",
+        change_name=run.change_name, project_id="mini-me", operator_action_id="action-ambiguous",
+        operator_response="Handle mobile later, maybe.",
+        gate_payload={"gate": "physical_validation", "question": "What should be deferred?"},
+    )
+
+    assert result["status"] == "HUMAN_REQUIRED"
+    assert result["question"] == handoff.pending[0]
+    assert run.stop_details["apply_gate_update"]["status"] == "HUMAN_REQUIRED"
+    coordinator.openspec_adapter.validate_change_strict.assert_not_called()
+
+
+def test_same_accepted_response_cannot_replay_an_unvalidated_update():
+    blocked = {"operator_action_id": "same-action", "status": "UPDATE_STARTED"}
+    validated = {"operator_action_id": "same-action", "status": "VALIDATED"}
+    other_action = {"operator_action_id": "previous-action", "status": "UPDATE_STARTED"}
+
+    assert NativeOrchestrationCoordinator._same_apply_gate_response_has_unvalidated_update(
+        blocked, "same-action"
+    )
+    assert not NativeOrchestrationCoordinator._same_apply_gate_response_has_unvalidated_update(
+        validated, "same-action"
+    )
+    assert not NativeOrchestrationCoordinator._same_apply_gate_response_has_unvalidated_update(
+        other_action, "same-action"
+    )
 
 
 @pytest.mark.asyncio

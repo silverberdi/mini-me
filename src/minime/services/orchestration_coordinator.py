@@ -480,6 +480,27 @@ class NativeOrchestrationCoordinator:
         ).hexdigest()
         return payload
 
+    async def _candidate_file_fingerprints(self, worktree_path: Path) -> dict[str, str]:
+        """Hash tracked and untracked candidate files for narrow Update scope checks."""
+        tracked = await self._git_run(worktree_path, ["diff", "--name-only", "-z", "HEAD"])
+        untracked = await self._git_run(
+            worktree_path, ["ls-files", "--others", "--exclude-standard", "-z"]
+        )
+        tracked_text = getattr(tracked, "stdout", str(tracked))
+        untracked_text = getattr(untracked, "stdout", str(untracked))
+        paths = set(path for path in (tracked_text + "\0" + untracked_text).split("\0") if path)
+        fingerprints: dict[str, str] = {}
+        for relative in sorted(paths):
+            path = worktree_path / relative
+            if path.is_symlink():
+                content = os.readlink(path).encode()
+            elif path.is_file():
+                content = path.read_bytes()
+            else:
+                content = b"<deleted-or-non-file>"
+            fingerprints[relative] = hashlib.sha256(content).hexdigest()
+        return fingerprints
+
     def _save_stage_invocation_event(
         self, uow: Any, run: OrchestrationRun, event_type: str, evidence: dict[str, Any]
     ) -> None:
@@ -2322,6 +2343,25 @@ class NativeOrchestrationCoordinator:
             OrchestrationStage.IMPLEMENTING,
         ):
             self._update_stage(uow, active_run, OrchestrationStage.IMPLEMENTING)
+            current_gate = get_active_human_payload(active_run)
+            accepted_apply_gate_response = (
+                entry_stage == OrchestrationStage.IMPLEMENTING
+                and gate_pending
+                and accepted_response
+                and operator_action_id
+                and isinstance(current_gate, dict)
+                and current_gate.get("gate") == "apply_escalation"
+                and isinstance(current_gate.get("attempts"), int)
+                and isinstance(current_gate.get("hard_limit"), int)
+            )
+            accepted_update_gate_response = (
+                entry_stage == OrchestrationStage.IMPLEMENTING
+                and gate_pending
+                and accepted_response
+                and operator_action_id
+                and isinstance(current_gate, dict)
+                and current_gate.get("gate") in {"apply_gate_update", "physical_validation"}
+            )
             # Physical-validation tasks (marked NOT_VERIFIED in tasks.md) require
             # evidence only a human can produce (real devices, manual scenarios).
             # If they are the only remaining unchecked work, escalate immediately
@@ -2330,7 +2370,9 @@ class NativeOrchestrationCoordinator:
             if tasks_path.is_file():
                 tasks_text = tasks_path.read_text(encoding="utf-8", errors="replace")
                 automated_pending, not_verified = self._classify_pending_tasks(tasks_text)
-                if not automated_pending and not_verified:
+                if not automated_pending and not_verified and not (
+                    accepted_apply_gate_response or accepted_update_gate_response
+                ):
                     reason = (
                         "Physical validation required: task(s) "
                         + ", ".join(not_verified)
@@ -2357,17 +2399,6 @@ class NativeOrchestrationCoordinator:
             no_progress_limit = self._positive_policy_limit(policy, "apply_max_no_progress", 2)
             details = dict(active_run.stop_details or {})
             apply_cycle_started = False
-            current_gate = get_active_human_payload(active_run)
-            accepted_apply_gate_response = (
-                entry_stage == OrchestrationStage.IMPLEMENTING
-                and gate_pending
-                and accepted_response
-                and operator_action_id
-                and isinstance(current_gate, dict)
-                and current_gate.get("gate") == "apply_escalation"
-                and isinstance(current_gate.get("attempts"), int)
-                and isinstance(current_gate.get("hard_limit"), int)
-            )
             if accepted_apply_gate_response:
                 started_by = details.get("apply_cycle_started_by_action_id")
                 if started_by != operator_action_id:
@@ -2381,7 +2412,51 @@ class NativeOrchestrationCoordinator:
                     apply_cycle_started = True
             details["apply_limits"] = {"max_attempts": hard_limit, "max_no_progress": no_progress_limit}
             self._persist_run_stop_details(active_run, details)
-            if apply_cycle_started:
+            if accepted_apply_gate_response or accepted_update_gate_response:
+                update_checkpoint = details.get("apply_gate_update") or {}
+                if self._same_apply_gate_response_has_unvalidated_update(
+                    update_checkpoint, operator_action_id
+                ):
+                    update_result = {
+                        "status": "BLOCKED",
+                        "question": (
+                            "La respuesta ya inició OpenSpec Update, pero no existe un resultado "
+                            "validado durable. Se conserva el candidato y no se repite Update ni Apply."
+                        ),
+                    }
+                elif update_checkpoint.get("operator_action_id") == operator_action_id and update_checkpoint.get("status") == "VALIDATED":
+                    update_result = {"status": "VALIDATED"}
+                else:
+                    update_result = await self._run_apply_gate_update(
+                        uow=uow,
+                        run=active_run,
+                        worktree_path=worktree_path,
+                        provider=thinker_provider,
+                        change_name=change_name,
+                        project_id=project_id,
+                        operator_action_id=operator_action_id,
+                        operator_response=operator_clarification,
+                        gate_payload=current_gate,
+                    )
+                if update_result["status"] != "VALIDATED":
+                    question = update_result.get("question") or (
+                        "OpenSpec Update no pudo validar la decisión humana. Revisa el detalle y elige cómo continuar."
+                    )
+                    payload = self._record_current_human_gate(
+                        uow,
+                        active_run,
+                        gate="apply_gate_update",
+                        question=question,
+                        options=update_result.get("options") or [
+                            "Revisar el detalle y responder cómo continuar",
+                            "Conservar el candidato detenido",
+                        ],
+                    )
+                    return OrchestrationCoordinationResult(
+                        status="HUMAN_REQUIRED", run_id=active_run.run_id,
+                        current_stage=OrchestrationStage.IMPLEMENTING,
+                        message=payload["question"], human_payload=payload,
+                    )
                 self._clear_current_human_gate(
                     uow, active_run, response_text=operator_clarification
                 )
@@ -3521,9 +3596,56 @@ class NativeOrchestrationCoordinator:
         return attempts if isinstance(attempts, int) and attempts >= 0 else 0
 
     _UNCHECKED_TASK_RE = re.compile(r"(?m)^\s*-\s*\[\s\]\s+([^\n]*)$")
+    _DEFERRED_TASK_MARKER = re.compile(r"\[(?:DEFERRED|DIFERIDA|DIFERIDO)\]", re.IGNORECASE)
+    _PUBLISHED_EVIDENCE_MARKER = re.compile(
+        r"\[PUBLISHED_EVIDENCE\s+source=(?:\"[^\"]+\"|[^;\]]+);\s*sha=([^\]]+)\]",
+        re.IGNORECASE,
+    )
 
-    @staticmethod
-    def _classify_pending_tasks(tasks_text: str) -> tuple[list[str], list[str]]:
+    @classmethod
+    def _deferred_task_ids(cls, tasks_text: str) -> list[str]:
+        """Return unchecked task ids explicitly deferred by the active Change."""
+        return [
+            line.split()[0]
+            for match in cls._UNCHECKED_TASK_RE.finditer(tasks_text)
+            if cls._DEFERRED_TASK_MARKER.search(line := match.group(1).strip()) and line
+        ]
+
+    @classmethod
+    def _deferred_task_details(cls, tasks_text: str) -> list[str]:
+        """Expose deferred task notes, including evidence source/SHA when recorded."""
+        return [
+            match.group(1).strip()
+            for match in cls._UNCHECKED_TASK_RE.finditer(tasks_text)
+            if cls._DEFERRED_TASK_MARKER.search(match.group(1))
+        ]
+
+    @classmethod
+    def _invalid_published_evidence_completions(
+        cls, tasks_text: str, candidate_sha: str | None
+    ) -> list[str]:
+        """Reject completed tasks sourced from a published build without exact SHA proof."""
+        invalid: list[str] = []
+        for line in tasks_text.splitlines():
+            completed = re.match(r"^\s*-\s*\[x\]\s+(\S+)", line, re.IGNORECASE)
+            if not completed:
+                continue
+            marker = cls._PUBLISHED_EVIDENCE_MARKER.search(line)
+            if not marker:
+                if re.search(r"published|github pages", line, re.IGNORECASE):
+                    invalid.append(completed.group(1))
+                continue
+            source_sha = marker.group(1).strip()
+            if (
+                not re.fullmatch(r"[0-9a-f]{40,64}", source_sha, re.IGNORECASE)
+                or not candidate_sha
+                or source_sha.lower() != candidate_sha.lower()
+            ):
+                invalid.append(completed.group(1))
+        return invalid
+
+    @classmethod
+    def _classify_pending_tasks(cls, tasks_text: str) -> tuple[list[str], list[str]]:
         """Split unchecked tasks.md boxes into (automated_pending, not_verified) ids.
 
         A task whose line carries the ``NOT_VERIFIED`` marker needs evidence only a
@@ -3533,9 +3655,11 @@ class NativeOrchestrationCoordinator:
         """
         automated_pending: list[str] = []
         not_verified: list[str] = []
-        for match in NativeOrchestrationCoordinator._UNCHECKED_TASK_RE.finditer(tasks_text):
+        for match in cls._UNCHECKED_TASK_RE.finditer(tasks_text):
             line = match.group(1).strip()
             task_id = line.split()[0] if line else "?"
+            if cls._DEFERRED_TASK_MARKER.search(line):
+                continue
             if "NOT_VERIFIED" in line.upper():
                 not_verified.append(task_id)
             else:
@@ -3629,8 +3753,9 @@ class NativeOrchestrationCoordinator:
         elif worktree_path and change_name:
             tasks_path = Path(worktree_path) / "openspec" / "changes" / change_name / "tasks.md"
             if tasks_path.exists():
-                automated, not_ver = self._classify_pending_tasks(tasks_path.read_text(errors="ignore"))
-                pending_tasks = automated + not_ver
+                tasks_text = tasks_path.read_text(errors="ignore")
+                automated, not_ver = self._classify_pending_tasks(tasks_text)
+                pending_tasks = automated + not_ver + self._deferred_task_ids(tasks_text)
 
         candidate_sha = (
             getattr(outcome, "candidate_sha", None)
@@ -4633,6 +4758,248 @@ class NativeOrchestrationCoordinator:
             }
         return {"status": "READY_TO_VALIDATE", "workflow": wf, "execution": res}
 
+    async def _run_apply_gate_update(
+        self,
+        *,
+        uow: Any,
+        run: OrchestrationRun,
+        worktree_path: Path,
+        provider: str,
+        change_name: str,
+        project_id: str,
+        operator_action_id: str,
+        operator_response: str,
+        gate_payload: dict[str, Any],
+    ) -> dict[str, Any]:
+        """Apply an accepted criterion disposition through native OpenSpec Update."""
+        before = await self._stage_candidate_identity(run, worktree_path, "UPDATE")
+        files_before = await self._candidate_file_fingerprints(worktree_path)
+        details = dict(run.stop_details or {})
+        checkpoint = {
+            "status": "UPDATE_STARTED",
+            "operator_action_id": operator_action_id,
+            "gate": self._safe_human_payload(gate_payload),
+            "before": before,
+            "file_fingerprints_before": files_before,
+            "updated_at": utc_now().isoformat(),
+        }
+        details["apply_gate_update"] = checkpoint
+        run.stop_details = details
+        self._persist_run_stop_details(run, details)
+        try:
+            invocation = await self._begin_stage_invocation(
+                uow, run, worktree_path, "UPDATE",
+                allow_human_resume=bool(operator_response),
+                operator_action_id=operator_action_id,
+            )
+            if invocation is None:
+                checkpoint.update(status="BLOCKED", error=(
+                    "OpenSpec Update has an active invocation or ambiguous recovery evidence."
+                ))
+                return self._persist_apply_gate_update(run, checkpoint)
+            try:
+                workflow = self.agent_runner.resolve_workflow(
+                    worktree_path=worktree_path,
+                    provider=provider,
+                    operation="update",
+                    change_name=change_name,
+                )
+                prompt = (
+                    f"An operator accepted the current Apply human gate for Run {run.run_id}, "
+                    f"Change {change_name}. Use ONLY the resolved native OpenSpec Update workflow "
+                    "to interpret and apply the operator's explicit disposition of existing "
+                    "acceptance criteria. Do not implement product code, create another Change, "
+                    "or expand scope. If the response does not clearly authorize a material "
+                    "criterion disposition, leave the artifacts unchanged and report that; if it "
+                    "is ambiguous or conflicts with the governing contract, request human input. "
+                    "A deferred criterion must remain visibly deferred/pending and must not be "
+                    "marked complete. Evidence from a published version is not candidate evidence "
+                    "unless its immutable SHA matches the candidate. If the operator reports "
+                    "published-version evidence, record its source identity and exact SHA when "
+                    "verifiable; otherwise explicitly record that SHA as unknown. Preserve the "
+                    "original task and evidence history. Use this exact task note form: "
+                    "[PUBLISHED_EVIDENCE source=\"<source identity>\"; sha=<full immutable SHA|unknown>]. "
+                    "Represent an authorized deferment only on an unchecked task line with the "
+                    "literal [DEFERRED] marker, followed by its reason and future evidence needed.\n\n"
+                    f"Current gate (authoritative question/options): {json.dumps(gate_payload, ensure_ascii=False)}\n"
+                    f"Accepted operator response: {operator_response}\n"
+                    f"Candidate identity before Update: {json.dumps(before, sort_keys=True)}\n"
+                    "The Run, Change, branch, and worktree must remain the same. After Update, "
+                    "report completion only after native OpenSpec strict validation can pass."
+                )
+                result = await self._run_claimed(
+                    uow, invocation.claim,
+                    lambda: self.agent_runner.run(
+                        worktree_path=worktree_path,
+                        prompt_context=prompt,
+                        project_id=project_id,
+                        role="thinker",
+                        provider=provider,
+                        workflow=workflow,
+                        process_start_observer=self._observe_stage_process(uow, run, invocation),
+                    ),
+                )
+                handoff = getattr(result, "workflow_handoff", None)
+                if handoff is not None and handoff.status == "HUMAN_REQUIRED":
+                    after = await self._stage_candidate_identity(run, worktree_path, "UPDATE")
+                    files_after = await self._candidate_file_fingerprints(worktree_path)
+                    identity_changed = any(
+                        before.get(key) != after.get(key)
+                        for key in ("run_id", "worktree", "branch", "generation")
+                    )
+                    changed_outside_change = sorted(
+                        path for path in set(files_before) | set(files_after)
+                        if not path.startswith(f"openspec/changes/{change_name}/")
+                        and files_before.get(path) != files_after.get(path)
+                    )
+                    if identity_changed or changed_outside_change:
+                        error = (
+                            "Update changed the Run/worktree/branch identity."
+                            if identity_changed else
+                            "Native Update changed files outside the active Change: "
+                            + ", ".join(changed_outside_change[:20])
+                        )
+                        checkpoint.update(
+                            status="BLOCKED", error=error, after=after,
+                            file_fingerprints_after=files_after,
+                        )
+                        await self._finish_stage_invocation(
+                            uow, run, invocation, "FAILED", {"error": error, "after": after},
+                        )
+                        return self._persist_apply_gate_update(run, checkpoint)
+                    status = "HUMAN_REQUIRED"
+                    checkpoint.update(
+                        status=status,
+                        after=after,
+                        file_fingerprints_after=files_after,
+                        deferred_tasks=self._deferred_task_ids(
+                            (worktree_path / "openspec" / "changes" / change_name / "tasks.md")
+                            .read_text(encoding="utf-8", errors="replace")
+                        ),
+                        deferred_task_details=self._deferred_task_details(
+                            (worktree_path / "openspec" / "changes" / change_name / "tasks.md")
+                            .read_text(encoding="utf-8", errors="replace")
+                        ),
+                        question=handoff.pending[0],
+                        pending=list(handoff.pending),
+                        summary=handoff.summary,
+                    )
+                    await self._finish_stage_invocation(
+                        uow, run, invocation, status,
+                        {"summary": handoff.summary, "pending": list(handoff.pending)},
+                    )
+                    return self._persist_apply_gate_update(run, checkpoint)
+                if not self._execution_is_successful(result):
+                    checkpoint.update(status="FAILED", error=redact_secrets(
+                        getattr(result, "preflight_error", None)
+                        or getattr(result, "response_output", "")
+                        or "Native OpenSpec Update did not complete successfully."
+                    )[:1500])
+                    await self._finish_stage_invocation(
+                        uow, run, invocation, "FAILED", {"error": checkpoint["error"]}
+                    )
+                    return self._persist_apply_gate_update(run, checkpoint)
+                after = await self._stage_candidate_identity(run, worktree_path, "UPDATE")
+                files_after = await self._candidate_file_fingerprints(worktree_path)
+                if any(
+                    before.get(key) != after.get(key)
+                    for key in ("run_id", "worktree", "branch", "generation")
+                ):
+                    checkpoint.update(status="BLOCKED", error=(
+                        "Run, worktree, branch, or generation identity changed during Update."
+                    ), after=after)
+                    await self._finish_stage_invocation(
+                        uow, run, invocation, "FAILED", {"error": checkpoint["error"], "after": after}
+                    )
+                    return self._persist_apply_gate_update(run, checkpoint)
+                change_prefix = f"openspec/changes/{change_name}/"
+                changed_outside_change = sorted(
+                    path for path in set(files_before) | set(files_after)
+                    if not path.startswith(change_prefix)
+                    and files_before.get(path) != files_after.get(path)
+                )
+                if changed_outside_change:
+                    checkpoint.update(
+                        status="BLOCKED",
+                        error="Native Update changed files outside the active Change: "
+                              + ", ".join(changed_outside_change[:20]),
+                        after=after,
+                        file_fingerprints_after=files_after,
+                    )
+                    await self._finish_stage_invocation(
+                        uow, run, invocation, "FAILED",
+                        {"error": checkpoint["error"], "after": after},
+                    )
+                    return self._persist_apply_gate_update(run, checkpoint)
+                validation = self.openspec_adapter.validate_change_strict(change_name, worktree_path)
+                checkpoint.update(
+                    after=after,
+                    file_fingerprints_after=files_after,
+                    changed=(before.get("candidate_fingerprint") != after.get("candidate_fingerprint")
+                             or before.get("candidate_sha") != after.get("candidate_sha")),
+                    deferred_tasks=self._deferred_task_ids(
+                        (worktree_path / "openspec" / "changes" / change_name / "tasks.md")
+                        .read_text(encoding="utf-8", errors="replace")
+                    ),
+                    deferred_task_details=self._deferred_task_details(
+                        (worktree_path / "openspec" / "changes" / change_name / "tasks.md")
+                        .read_text(encoding="utf-8", errors="replace")
+                    ),
+                    validation={
+                        "status": validation.get("status"),
+                        "returncode": validation.get("returncode"),
+                        "stdout": redact_secrets(validation.get("stdout", ""))[-3000:],
+                        "stderr": redact_secrets(validation.get("stderr", ""))[-3000:],
+                    },
+                )
+                if validation.get("status") != "PASS":
+                    checkpoint.update(status="INVALID", error="OpenSpec strict validation did not pass.")
+                    await self._finish_stage_invocation(
+                        uow, run, invocation, "FAILED", {"validation": checkpoint["validation"]}
+                    )
+                    return self._persist_apply_gate_update(run, checkpoint)
+                checkpoint.update(status="VALIDATED", validated_at=utc_now().isoformat())
+                await self._finish_stage_invocation(
+                    uow, run, invocation, "COMPLETE",
+                    {"after": after, "changed": checkpoint["changed"], "validation": checkpoint["validation"]},
+                )
+                return self._persist_apply_gate_update(run, checkpoint)
+            except NativeOpenSpecWorkflowUnavailable as exc:
+                checkpoint.update(status="FAILED", error=redact_secrets(str(exc))[:1500])
+                if "invocation" in locals():
+                    await self._finish_stage_invocation(
+                        uow, run, invocation, "FAILED", {"error": checkpoint["error"]}
+                    )
+                return self._persist_apply_gate_update(run, checkpoint)
+        except Exception as exc:
+            logger.warning("Apply-gate OpenSpec Update failed: %s", exc)
+            checkpoint.update(status="FAILED", error=redact_secrets(str(exc))[:1500])
+            return self._persist_apply_gate_update(run, checkpoint)
+
+    def _persist_apply_gate_update(
+        self, run: OrchestrationRun, checkpoint: dict[str, Any]
+    ) -> dict[str, Any]:
+        details = dict(run.stop_details or {})
+        details["apply_gate_update"] = self._safe_human_payload(checkpoint)
+        run.stop_details = details
+        self._persist_run_stop_details(run, details)
+        status = checkpoint.get("status")
+        return {
+            "status": "VALIDATED" if status == "VALIDATED" else status,
+            "question": checkpoint.get("question") or checkpoint.get("error"),
+            "options": checkpoint.get("options") or [],
+        }
+
+    @staticmethod
+    def _same_apply_gate_response_has_unvalidated_update(
+        checkpoint: dict[str, Any], operator_action_id: str
+    ) -> bool:
+        """Prevent replaying the same accepted response before its Update validates."""
+        return (
+            checkpoint.get("operator_action_id") == operator_action_id
+            and checkpoint.get("status") != "VALIDATED"
+        )
+
     async def _run_propose_correction(
         self,
         worktree_path: Path,
@@ -5043,6 +5410,10 @@ class NativeOrchestrationCoordinator:
             f"Workflow command: {wf.dispatch_command}\n\n"
             f"Implement all pending tasks specified in tasks.md, write unit and E2E tests, "
             f"ensure the test suite passes, and mark completed tasks as [x] only when coordinator-observed diff and passing relevant tests support completion."
+            " For any evidence from a published version, preserve a task note using "
+            "[PUBLISHED_EVIDENCE source=\"<source identity>\"; sha=<full immutable SHA|unknown>]. "
+            "Never mark such evidence complete for this candidate unless its full SHA exactly "
+            "matches the candidate SHA; otherwise keep the task unchecked and identify the missing candidate evidence."
             f"{correction_instruction}"
             f"{recovery_context}"
         )
@@ -5066,7 +5437,9 @@ class NativeOrchestrationCoordinator:
         if not tasks_path.is_file():
             return ApplyOutcome("FAILED", (), (), None, (), None, None, "", error="tasks.md missing")
         tasks_text = tasks_path.read_text(encoding="utf-8", errors="replace") if tasks_path.is_file() else ""
-        pending, _ = self._classify_pending_tasks(tasks_text)
+        automated_pending, not_verified = self._classify_pending_tasks(tasks_text)
+        deferred_pending = self._deferred_task_ids(tasks_text)
+        pending = automated_pending + not_verified + deferred_pending
         completed = re.findall(r"(?m)^\s*-\s*\[x\]\s+([^\n]*)$", tasks_text, re.I)
         completed_ids = tuple(line.strip().split()[0] for line in completed if line.strip())
         try:
@@ -5080,6 +5453,20 @@ class NativeOrchestrationCoordinator:
         diff_text = diff.stdout if hasattr(diff, "stdout") else str(diff)
         paths_text = paths.stdout if hasattr(paths, "stdout") else str(paths)
         branch_text = branch.stdout if hasattr(branch, "stdout") else str(branch)
+        invalid_published_tasks = self._invalid_published_evidence_completions(
+            tasks_text, sha_text.strip() if getattr(sha, "ok", True) else None
+        )
+        if invalid_published_tasks:
+            return ApplyOutcome(
+                "FAILED", completed_ids, tuple(pending),
+                sha_text.strip() if getattr(sha, "ok", True) else None,
+                (), None, None, "",
+                error=(
+                    "Published-version evidence cannot complete candidate task(s) without an exact "
+                    "matching full SHA: " + ", ".join(invalid_published_tasks)
+                ),
+                branch=branch_text.strip(), worktree=str(worktree_path), run_id=run_id,
+            )
         changed_files = tuple(sorted({line[3:].strip() for line in paths_text.splitlines() if len(line) > 3}))
         diff_ok = getattr(diff, "ok", getattr(diff, "returncode", 0) == 0)
         digest = hashlib.sha256(diff_text.encode()).hexdigest() if diff_ok and diff_text else None
@@ -5113,7 +5500,7 @@ class NativeOrchestrationCoordinator:
                                 human_question=handoff.summary, human_options=handoff.pending,
                                 branch=branch_text.strip(), worktree=str(worktree_path), run_id=run_id)
         successful = self._execution_is_successful(result)
-        ready = successful and not pending
+        ready = successful and not automated_pending
         status = "COMPLETE" if ready else ("PARTIAL" if successful else "FAILED")
         error = None if successful else self._review_failure_error(result)
         return ApplyOutcome(status, completed_ids, tuple(pending), sha_text.strip() if getattr(sha, "ok", True) else None,
