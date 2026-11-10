@@ -141,7 +141,7 @@ For high-complexity changes, the configured independent reviewer agent SHALL rec
 - **AND** does not re-flag requirements already covered or request wording or formatting changes.
 
 ### Requirement: Guided Recovery of Partial OpenSpec Apply
-When native Apply leaves automatic tasks incomplete without a terminal failure or human-required question, the system SHALL evaluate recovery from coordinator-observed evidence and, when progress is observable, retry the native workflow on the same Change, branch, worktree, and candidate. The structured outcome SHALL include completed and pending automatic tasks, candidate SHA/fingerprint, errors, blockers, and original human-required questions and options. Git SHALL provide changed-file and diff evidence, and the coordinator SHALL provide test results; agent self-report alone SHALL NOT establish task completion. A task may be marked `[x]` only when observed diff and passing relevant tests support completion. Recovery instructions SHALL describe observed prior work and pending work, direct the agent to mark supported completed tasks and preserve valid work, and remain distinct from reviewer findings supplied via `corrections`. Native Continue SHALL be used only when the workflow permits direct resumption. Retries SHALL stop at configured no-progress and hard total-attempt limits, respecting correction and budget limits, and SHALL stop fail-closed on worktree, branch, or run identity change or observed regression. Verify SHALL run only after evidence-backed completion or native readiness.
+When native Apply leaves automatic tasks incomplete without a terminal failure or human-required question, the system SHALL evaluate recovery from coordinator-observed evidence and, when progress is observable, retry the native workflow on the same Change, branch, worktree, and candidate. The structured outcome SHALL include completed and pending automatic tasks, candidate SHA/fingerprint, errors, blockers, and original human-required questions and options. Git SHALL provide changed-file and diff evidence, and the coordinator SHALL provide test results; agent self-report alone SHALL NOT establish task completion. A task may be marked `[x]` only when observed diff and passing relevant tests support completion. Recovery instructions SHALL describe observed prior work and pending work, direct the agent to mark supported completed tasks and preserve valid work, and remain distinct from reviewer findings supplied via `corrections`. Native Continue SHALL be used only when the workflow permits direct resumption. The hard limit of three Apply attempts and the no-progress limit SHALL apply per automatic recovery cycle. When an accepted response to an Apply exhaustion gate authorizes continuation, the system SHALL start a new cycle at 0/3 attempts and reset that cycle's no-progress count to zero; it SHALL retain all prior invocation outcomes and the operator decision as immutable audit evidence. The human response SHALL NOT count as an Apply attempt. Retries SHALL respect correction and budget limits and SHALL stop fail-closed on worktree, branch, or run identity change or observed regression. Verify SHALL run only after evidence-backed completion or native readiness.
 
 #### Scenario: Partial Apply with progress is retried on the same candidate
 - **GIVEN** native Apply leaves automatic tasks pending without terminal failure or human-required question
@@ -164,9 +164,17 @@ When native Apply leaves automatic tasks incomplete without a terminal failure o
 - **THEN** the coordinator may invoke native Continue
 - **AND** otherwise uses a guided native Apply retry.
 
+#### Scenario: An accepted Apply gate response starts a fresh bounded cycle
+- **GIVEN** Apply recovery has stopped at its human gate after three attempts in the current cycle
+- **WHEN** the operator's response is accepted and authorizes continuation
+- **THEN** the next Apply recovery cycle begins with 0/3 attempts and zero no-progress attempts
+- **AND** the prior cycle's attempts, results, and operator response remain available as historical evidence
+- **AND** the same Run, Change, branch, worktree, and candidate identity are retained
+- **AND** the human response itself is not counted as an Apply attempt.
+
 #### Scenario: Retry limits and regression stop recovery
-- **GIVEN** Apply remains incomplete
-- **WHEN** no-progress or hard total-attempt limits are reached, or worktree, branch, or run identity changes, or observed valid files, supported completed tasks, or passing tests regress
+- **GIVEN** Apply remains incomplete in the current recovery cycle
+- **WHEN** no-progress or three-attempt hard limits are reached, or worktree, branch, or run identity changes, or observed valid files, supported completed tasks, or passing tests regress
 - **THEN** automatic retries stop and the candidate and evidence are preserved for escalation
 - **AND** configured correction and budget limits are respected.
 
