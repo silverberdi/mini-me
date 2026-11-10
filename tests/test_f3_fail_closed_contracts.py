@@ -442,6 +442,50 @@ def test_apply_regression_guard_detects_identity_files_tasks_and_test_loss():
     assert NativeOrchestrationCoordinator._apply_regressed(previous, failing_tests)
 
 
+def test_validated_update_ignores_only_exact_task_reclassification_losses():
+    from minime.services.orchestration_coordinator import NativeOrchestrationCoordinator
+
+    prior = {
+        "run_id": "run-1", "sha": "sha-1", "branch": "request-259",
+        "worktree": "/candidate", "completed": ["1.1", "1.2"],
+    }
+    checkpoint = {
+        "status": "VALIDATED", "operator_action_id": "action-1",
+        "change_name": "change-1",
+        "before": {"run_id": "run-1", "candidate_sha": "sha-1",
+                   "branch": "request-259", "worktree": "/candidate", "generation": 1},
+        "after": {"run_id": "run-1", "candidate_sha": "sha-1",
+                  "branch": "request-259", "worktree": "/candidate", "generation": 1},
+        "reclassified_tasks": ["1.1"],
+        "task_dispositions_before": {"1.1": "completed", "1.2": "completed"},
+        "task_dispositions_after": {"1.1": "deferred", "1.2": "completed"},
+    }
+    current = ApplyOutcome(
+        "PARTIAL", ("1.2",), ("1.1", "1.3"), "sha-1", (), None, None, "",
+        branch="request-259", worktree="/candidate", run_id="run-1",
+    )
+    ignored = NativeOrchestrationCoordinator._validated_apply_reclassifications(
+        checkpoint, operator_action_id="action-1", prior=prior, run_id="run-1",
+        change_name="change-1",
+    )
+    assert ignored == {"1.1"}
+    assert not NativeOrchestrationCoordinator._apply_regressed(
+        prior, current, ignored_task_losses=ignored
+    )
+
+    unrelated_loss = ApplyOutcome(
+        "PARTIAL", (), ("1.1", "1.2", "1.3"), "sha-1", (), None, None, "",
+        branch="request-259", worktree="/candidate", run_id="run-1",
+    )
+    assert NativeOrchestrationCoordinator._apply_regressed(
+        prior, unrelated_loss, ignored_task_losses=ignored
+    )
+    assert NativeOrchestrationCoordinator._validated_apply_reclassifications(
+        {**checkpoint, "after": {**checkpoint["after"], "candidate_sha": "other-sha"}},
+        operator_action_id="action-1", prior=prior, run_id="run-1", change_name="change-1",
+    ) == set()
+
+
 def test_apply_retry_limits_are_persistable_and_bounded():
     assert NativeOrchestrationCoordinator._positive_policy_limit(
         {"apply_max_attempts": 4}, "apply_max_attempts", 3
