@@ -33,12 +33,12 @@ from minime.domain.interfaces import PersistenceUnitOfWork
 from minime.domain.models import (
     DispatchAuthorization,
     ExternalActionResult,
-    get_active_human_payload,
     OperatorActionRecord,
     OrchestrationExternalAction,
     OrchestrationRun,
     OrchestrationStageEvent,
     RecoveryClaimContext,
+    get_active_human_payload,
     utc_now,
 )
 from minime.logging import get_logger, redact_secrets
@@ -500,6 +500,7 @@ class NativeOrchestrationCoordinator:
     async def _begin_stage_invocation(
         self, uow: Any, run: OrchestrationRun, worktree_path: Path, stage: str,
         *, allow_human_resume: bool = False, authorized_retry: bool = False,
+        operator_action_id: str | None = None,
     ) -> StageInvocation | None:
         claims = getattr(uow, "claims", None)
         if claims is None or not all(
@@ -635,6 +636,7 @@ class NativeOrchestrationCoordinator:
                         else "AWAITING_WORKFLOW_PROCESS_IDENTITY"
                     ),
                     "recovery_count": recovery_count,
+                    "operator_action_id": operator_action_id,
                     "recovered_from_attempt_id": (
                         abandoned_attempt.get("attempt_id") if abandoned_attempt else None
                     ),
@@ -1336,6 +1338,7 @@ class NativeOrchestrationCoordinator:
         propose_recovery_authorization_id: str | None = None,
         proposal_review_recovery_authorization_id: str | None = None,
         code_review_recovery_authorization_id: str | None = None,
+        operator_action_id: str | None = None,
         thinker_provider: str = "antigravity",
         implementer_provider: str = "codex",
         reviewer_provider: str = "antigravity",
@@ -2353,12 +2356,41 @@ class NativeOrchestrationCoordinator:
             hard_limit = self._positive_policy_limit(policy, "apply_max_attempts", max(1, min(self.max_correction_attempts, 5)))
             no_progress_limit = self._positive_policy_limit(policy, "apply_max_no_progress", 2)
             details = dict(active_run.stop_details or {})
+            apply_cycle_started = False
+            current_gate = get_active_human_payload(active_run)
+            accepted_apply_gate_response = (
+                entry_stage == OrchestrationStage.IMPLEMENTING
+                and gate_pending
+                and accepted_response
+                and operator_action_id
+                and isinstance(current_gate, dict)
+                and current_gate.get("gate") == "apply_escalation"
+                and isinstance(current_gate.get("attempts"), int)
+                and isinstance(current_gate.get("hard_limit"), int)
+            )
+            if accepted_apply_gate_response:
+                started_by = details.get("apply_cycle_started_by_action_id")
+                if started_by != operator_action_id:
+                    details["apply_total_attempts"] = 0
+                    details["apply_no_progress"] = 0
+                    details["apply_cycle_started_by_action_id"] = operator_action_id
+                    active_run.stop_details = details
+                    self._persist_run_stop_details(active_run, details)
+                    attempts = 0
+                    no_progress = 0
+                    apply_cycle_started = True
             details["apply_limits"] = {"max_attempts": hard_limit, "max_no_progress": no_progress_limit}
             self._persist_run_stop_details(active_run, details)
+            if apply_cycle_started:
+                self._clear_current_human_gate(
+                    uow, active_run, response_text=operator_clarification
+                )
+                details = dict(active_run.stop_details or {})
             while attempts < hard_limit:
                 invocation = await self._begin_stage_invocation(
                     uow, active_run, worktree_path, "APPLY",
                     allow_human_resume=bool(operator_clarification),
+                    operator_action_id=(operator_action_id if accepted_apply_gate_response else None),
                 )
                 if invocation is None:
                     return OrchestrationCoordinationResult(

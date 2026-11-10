@@ -5,9 +5,16 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 from tests.conftest import InMemoryPersistenceUnitOfWork, setup_managed_repository_fixture
 
-from minime.domain.enums import ExternalOutcome, ExternalReasonCode, OrchestrationStage, RetrySafety
-from minime.domain.models import ExternalActionResult, OrchestrationRun
-from minime.services.orchestration_coordinator import NativeOrchestrationCoordinator
+from minime.domain.enums import (
+    ExternalOutcome,
+    ExternalReasonCode,
+    HumanGate,
+    OrchestrationStage,
+    OrchestrationStopOutcome,
+    RetrySafety,
+)
+from minime.domain.models import ExternalActionResult, OrchestrationRun, OrchestrationStageEvent
+from minime.services.orchestration_coordinator import ApplyOutcome, NativeOrchestrationCoordinator
 from minime.services.worktree_manager import WorktreeInfo
 
 
@@ -95,7 +102,6 @@ async def test_reentry_proposal_review_no_approval_pauses(base_setup):
         ),
     )
     uow.orchestration_runs.save(run)
-
     coordinator = NativeOrchestrationCoordinator(
         github_adapter=MagicMock(),
         worktree_manager=MagicMock(),
@@ -1215,7 +1221,7 @@ async def test_apply_injects_pending_corrections(base_setup):
 
 @pytest.mark.asyncio
 async def test_apply_failure_escalates_after_ceiling(base_setup):
-    """A repeatedly-failing Apply must escalate to the operator, never loop silently."""
+    """A repeatedly-failing Apply must escalate at the unchanged hard ceiling."""
     uow, candidate_worktree, change_dir = base_setup
     run = OrchestrationRun(
         project_id="mini-me",
@@ -1241,9 +1247,225 @@ async def test_apply_failure_escalates_after_ceiling(base_setup):
     coordinator._run_apply = AsyncMock(return_value=False)
 
     res = await coordinator.execute_project_request("mini-me")
-    assert res.status == "PAUSED"
+    assert res.status == "HUMAN_REQUIRED"
     assert res.current_stage == OrchestrationStage.IMPLEMENTING
     assert "ceiling" in res.message
     updated = uow.orchestration_runs.get_by_id("run-apply-loop")
     assert updated.stop_details["apply_total_attempts"] == 3
     assert updated.stop_details["apply_escalated"] is True
+
+
+@pytest.mark.asyncio
+async def test_accepted_apply_gate_response_starts_new_cycle_on_same_candidate(base_setup):
+    uow, candidate_worktree, _ = base_setup
+    action_id = "accepted-apply-gate-action-375"
+    run = OrchestrationRun(
+        project_id="mini-me",
+        run_id="run-apply-cycle-reset",
+        change_name="gacela-05-ui-self-hosted",
+        base_sha="base_sha_123",
+        current_stage=OrchestrationStage.IMPLEMENTING,
+        human_gate=HumanGate.NEEDS_HUMAN,
+        stop_outcome=OrchestrationStopOutcome.NEEDS_HUMAN,
+        stop_details=make_stop_details({
+            "apply_total_attempts": 3,
+            "apply_no_progress": 2,
+            "apply_limits": {"max_attempts": 3, "max_no_progress": 2},
+            "apply_snapshot": {"sha": "candidate-before-human", "pending": ["Task 1"]},
+            "human_payload": {
+                "gate_id": "gate-apply-cycle-reset",
+                "gate": "apply_escalation",
+                "stage": "IMPLEMENTING",
+                "attempts": 3,
+                "hard_limit": 3,
+                "no_progress": 2,
+                "question": "Continue Apply recovery?",
+                "options": [{"id": "retry", "label": "Continue"}],
+            },
+        }),
+    )
+    uow.orchestration_runs.save(run)
+    historical_candidate = {"run_id": run.run_id, "candidate_sha": "historical-sha"}
+    historical_start = OrchestrationStageEvent(
+        run_id=run.run_id,
+        from_stage=OrchestrationStage.IMPLEMENTING,
+        to_stage=OrchestrationStage.IMPLEMENTING,
+        event_type="STAGE_INVOCATION_STARTED",
+        evidence_references={
+            "attempt_id": "historical-apply-attempt",
+            "claim_key": f"stage-invocation:{run.run_id}:APPLY:historical-candidate",
+            "candidate": historical_candidate,
+        },
+    )
+    historical_finish = OrchestrationStageEvent(
+        run_id=run.run_id,
+        from_stage=OrchestrationStage.IMPLEMENTING,
+        to_stage=OrchestrationStage.IMPLEMENTING,
+        event_type="STAGE_INVOCATION_FAILED",
+        evidence_references={
+            "attempt_id": "historical-apply-attempt",
+            "claim_key": f"stage-invocation:{run.run_id}:APPLY:historical-candidate",
+            "candidate": historical_candidate,
+            "status": "FAILED",
+        },
+    )
+    uow.orchestration_stage_events.save(historical_start)
+    uow.orchestration_stage_events.save(historical_finish)
+    coordinator = NativeOrchestrationCoordinator(
+        github_adapter=MagicMock(),
+        worktree_manager=MagicMock(),
+        agent_runner=MagicMock(),
+        uow_factory=lambda: uow,
+    )
+    coordinator.worktree_manager.create_request_worktree = AsyncMock(
+        return_value=WorktreeInfo(
+            path=candidate_worktree, branch_name="feature/f5", base_sha="base_sha_123"
+        )
+    )
+    candidate_sha = subprocess.check_output(
+        ["git", "-C", str(candidate_worktree), "rev-parse", "HEAD"], text=True
+    ).strip()
+    coordinator._run_apply = AsyncMock(return_value=ApplyOutcome(
+        status="FAILED", completed_tasks=(), pending_tasks=("Task 1",),
+        candidate_sha=candidate_sha, changed_files=(), diff_fingerprint=None,
+        tests_passed=None, test_evidence="", error="simulated failure",
+    ))
+
+    result = await coordinator.execute_project_request(
+        "mini-me",
+        target_run_id=run.run_id,
+        operator_clarification="Continue Apply recovery",
+        operator_action_id=action_id,
+    )
+
+    updated = uow.orchestration_runs.get_by_id(run.run_id)
+    assert result.status == "HUMAN_REQUIRED"
+    assert result.run_id == run.run_id
+    assert coordinator._run_apply.await_count == 1
+    assert coordinator._run_apply.await_args.kwargs["operator_response"] == "Continue Apply recovery"
+    assert updated.stop_details["apply_total_attempts"] == 1
+    assert updated.stop_details["apply_cycle_started_by_action_id"] == action_id
+    assert updated.stop_details["apply_no_progress"] == 1
+    assert updated.stop_details["apply_snapshot"]["sha"] == candidate_sha
+    resolved = updated.stop_details["resolved_human_gates"]
+    assert any(item["gate_id"] == "gate-apply-cycle-reset" for item in resolved)
+    events = uow.orchestration_stage_events.list_by_run(run.run_id)
+    assert historical_start in events
+    assert historical_finish in events
+    started = [
+        event for event in events
+        if event.event_type == "STAGE_INVOCATION_STARTED"
+        and event.evidence_references.get("operator_action_id") == action_id
+    ]
+    assert len(started) == 1
+    assert started[0].evidence_references["operator_action_id"] == action_id
+    candidate_identity = started[0].evidence_references["candidate"]
+    assert candidate_identity["run_id"] == run.run_id
+    assert candidate_identity["worktree"] == str(candidate_worktree.resolve())
+    assert candidate_identity["branch"] == "master" or candidate_identity["branch"] == "main"
+    assert candidate_identity["candidate_sha"] == candidate_sha
+
+
+@pytest.mark.asyncio
+async def test_unrelated_human_gate_does_not_reset_apply_cycle(base_setup):
+    uow, candidate_worktree, _ = base_setup
+    run = OrchestrationRun(
+        project_id="mini-me",
+        run_id="run-unrelated-gate-no-reset",
+        change_name="gacela-05-ui-self-hosted",
+        base_sha="base_sha_123",
+        current_stage=OrchestrationStage.IMPLEMENTING,
+        human_gate=HumanGate.NEEDS_HUMAN,
+        stop_outcome=OrchestrationStopOutcome.NEEDS_HUMAN,
+        stop_details=make_stop_details({
+            "apply_total_attempts": 3,
+            "apply_no_progress": 2,
+            "apply_limits": {"max_attempts": 3, "max_no_progress": 2},
+            "human_payload": {
+                "gate_id": "gate-physical-validation",
+                "gate": "physical_validation",
+                "stage": "IMPLEMENTING",
+                "attempts": 3,
+                "hard_limit": 3,
+                "question": "Validate on device?",
+                "options": [],
+            },
+        }),
+    )
+    uow.orchestration_runs.save(run)
+    coordinator = NativeOrchestrationCoordinator(
+        github_adapter=MagicMock(),
+        worktree_manager=MagicMock(),
+        agent_runner=MagicMock(),
+        uow_factory=lambda: uow,
+    )
+    coordinator.worktree_manager.create_request_worktree = AsyncMock(
+        return_value=WorktreeInfo(
+            path=candidate_worktree, branch_name="feature/f5", base_sha="base_sha_123"
+        )
+    )
+    coordinator._run_apply = AsyncMock(return_value=False)
+
+    await coordinator.execute_project_request(
+        "mini-me",
+        target_run_id=run.run_id,
+        operator_clarification="I will validate on device",
+        operator_action_id="accepted-physical-gate-action",
+    )
+
+    updated = uow.orchestration_runs.get_by_id(run.run_id)
+    assert updated.stop_details["apply_total_attempts"] == 3
+    assert updated.stop_details["apply_no_progress"] == 2
+    assert "apply_cycle_started_by_action_id" not in updated.stop_details
+    coordinator._run_apply.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_apply_no_progress_limit_still_stops_current_cycle(base_setup):
+    uow, candidate_worktree, _ = base_setup
+    project = uow.projects.get_by_id("mini-me")
+    project.execution_policy = {"apply_max_no_progress": 1}
+    uow.projects.save(project)
+    candidate_sha = subprocess.check_output(
+        ["git", "-C", str(candidate_worktree), "rev-parse", "HEAD"], text=True
+    ).strip()
+    run = OrchestrationRun(
+        project_id="mini-me",
+        run_id="run-apply-no-progress-limit",
+        change_name="gacela-05-ui-self-hosted",
+        base_sha="base_sha_123",
+        current_stage=OrchestrationStage.IMPLEMENTING,
+        stop_details=make_stop_details({
+            "apply_total_attempts": 0,
+            "apply_no_progress": 0,
+            "apply_snapshot": {
+                "pending": ["Task 1"], "completed": [], "sha": candidate_sha,
+                "files": [], "fingerprint": "unchanged",
+            },
+        }),
+    )
+    uow.orchestration_runs.save(run)
+    coordinator = NativeOrchestrationCoordinator(
+        github_adapter=MagicMock(),
+        worktree_manager=MagicMock(),
+        agent_runner=MagicMock(),
+        uow_factory=lambda: uow,
+    )
+    coordinator.worktree_manager.create_request_worktree = AsyncMock(
+        return_value=WorktreeInfo(
+            path=candidate_worktree, branch_name="feature/f5", base_sha="base_sha_123"
+        )
+    )
+    coordinator._run_apply = AsyncMock(return_value=ApplyOutcome(
+        status="PARTIAL", completed_tasks=(), pending_tasks=("Task 1",),
+        candidate_sha=candidate_sha, changed_files=(), diff_fingerprint="unchanged",
+        tests_passed=None, test_evidence="", run_id=run.run_id,
+    ))
+
+    result = await coordinator.execute_project_request("mini-me")
+
+    updated = uow.orchestration_runs.get_by_id(run.run_id)
+    assert result.status == "HUMAN_REQUIRED"
+    assert coordinator._run_apply.await_count == 1
+    assert updated.stop_details["apply_total_attempts"] == 1
+    assert updated.stop_details["apply_no_progress"] == 1

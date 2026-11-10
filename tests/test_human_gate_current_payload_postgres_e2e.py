@@ -4,8 +4,9 @@ from __future__ import annotations
 
 import asyncio
 import os
+import subprocess
 from pathlib import Path
-from unittest.mock import MagicMock
+from unittest.mock import AsyncMock, MagicMock
 from uuid import uuid4
 
 import pytest
@@ -22,7 +23,8 @@ from minime.domain.models import (
     Project,
     ProjectManagedRepositoryBinding,
 )
-from minime.services.orchestration_coordinator import NativeOrchestrationCoordinator
+from minime.services.orchestration_coordinator import ApplyOutcome, NativeOrchestrationCoordinator
+from minime.services.worktree_manager import WorktreeInfo
 
 DATABASE_URL = os.environ.get("MINIME_TEST_DATABASE_URL")
 pytestmark = pytest.mark.skipif(
@@ -204,4 +206,138 @@ def test_persisted_current_gate_reaches_operator_response_api(monkeypatch, tmp_p
             )
             run_uow.commit()
             run_uow.session.close()
+        engine.dispose()
+
+
+def test_postgres_apply_gate_response_starts_one_simulated_cycle(monkeypatch, tmp_path):
+    """PostgreSQL/API/coordinator E2E with a deterministic simulated Apply runner."""
+    engine = create_engine(DATABASE_URL, pool_pre_ping=True)
+    with engine.connect() as connection:
+        database_name = connection.execute(text("select current_database()")).scalar_one()
+        assert "test" in database_name.lower(), "Refusing to write outside a test database"
+    project_id = str(uuid4())
+    run_id = str(uuid4())
+    candidate = tmp_path / "candidate"
+    candidate.mkdir()
+    subprocess.run(["git", "init", "-q", str(candidate)], check=True)
+    subprocess.run(["git", "-C", str(candidate), "config", "user.email", "test@example.com"], check=True)
+    subprocess.run(["git", "-C", str(candidate), "config", "user.name", "Test"], check=True)
+    change_dir = candidate / "openspec" / "changes" / "issue-375-reset-apply-attempt-cycle"
+    change_dir.mkdir(parents=True)
+    (change_dir / "tasks.md").write_text("# Tasks\n- [ ] Simulated pending task\n")
+    subprocess.run(["git", "-C", str(candidate), "add", "."], check=True)
+    subprocess.run(["git", "-C", str(candidate), "commit", "-qm", "seed candidate"], check=True)
+    candidate_sha = subprocess.check_output(
+        ["git", "-C", str(candidate), "rev-parse", "HEAD"], text=True
+    ).strip()
+
+    session = sessionmaker(bind=engine, autoflush=False, expire_on_commit=False)()
+    uow = PostgresPersistenceUnitOfWork(session)
+    run = OrchestrationRun(
+        run_id=run_id,
+        project_id=project_id,
+        change_name="issue-375-reset-apply-attempt-cycle",
+        base_sha="base-sha",
+        current_stage=OrchestrationStage.IMPLEMENTING,
+        resumable_stage=OrchestrationStage.IMPLEMENTING,
+        human_gate=HumanGate.NEEDS_HUMAN,
+        stop_outcome=OrchestrationStopOutcome.NEEDS_HUMAN,
+        current_candidate_sha=candidate_sha,
+        stop_details={
+            "issue_number": 375,
+            "issue_title": "Reset Apply recovery cycle after operator response",
+            "request_normalization": {"normalized_body": "Implement the authorized Issue #375 change."},
+            "apply_total_attempts": 3,
+            "apply_no_progress": 2,
+            "apply_limits": {"max_attempts": 3, "max_no_progress": 2},
+            "apply_snapshot": {"candidate_sha": candidate_sha},
+            "human_payload": {
+                "gate_id": "gate-apply-375",
+                "gate": "apply_escalation",
+                "stage": "IMPLEMENTING",
+                "attempts": 3,
+                "hard_limit": 3,
+                "no_progress": 2,
+                "candidate_sha": candidate_sha,
+                "question": "Continue Apply recovery?",
+                "options": [{"id": "retry", "label": "Continue"}],
+            },
+        },
+    )
+    uow.projects.save(Project(
+        project_id=project_id,
+        display_name="Apply cycle E2E",
+        repository="org/issue-375-apply-cycle-test",
+        execution_policy={},
+    ))
+    uow.project_managed_repository_bindings.save(ProjectManagedRepositoryBinding(
+        project_id=project_id,
+        canonical_repository_identity="github.com/org/issue-375-apply-cycle-test",
+        managed_repository_root=str(tmp_path / "managed-repo"),
+        worktree_parent_dir=str(tmp_path / "worktrees"),
+    ))
+    uow.orchestration_runs.save(run)
+    uow.commit()
+
+    operator = AuthorizedOperator(email="operator@example.com", name="Operator", roles=["admin"])
+    app.dependency_overrides[get_uow] = lambda: uow
+    app.dependency_overrides[get_current_operator] = lambda: operator
+    scheduled: list[tuple[str, object, str]] = []
+    monkeypatch.setattr(
+        "minime.api.app._schedule_request_worker",
+        lambda project, body, key: scheduled.append((project, body, key)) or "apply-cycle-operation",
+    )
+    try:
+        with TestClient(app) as client:
+            response = client.post(
+                f"/api/v1/projects/{project_id}/requests/run",
+                json={"target_run_id": run_id, "operator_clarification": "Continue Apply recovery"},
+            )
+        assert response.status_code == 202
+        assert len(scheduled) == 1
+        action_id = response.json()["idempotency_key"]
+        accepted_action = uow.operator_actions.get_by_request_id(action_id)
+        assert accepted_action is not None
+        assert accepted_action.status == "ACCEPTED"
+
+        coordinator = NativeOrchestrationCoordinator(
+            uow_factory=lambda: uow,
+            github_adapter=MagicMock(),
+            worktree_manager=MagicMock(),
+            agent_runner=MagicMock(),
+        )
+        coordinator.worktree_manager.create_request_worktree = AsyncMock(
+            return_value=WorktreeInfo(
+                path=candidate, branch_name="feature/issue-375", base_sha="base-sha"
+            )
+        )
+        coordinator._run_apply = AsyncMock(return_value=ApplyOutcome(
+            status="FAILED", completed_tasks=(), pending_tasks=("Simulated pending task",),
+            candidate_sha=candidate_sha, changed_files=(), diff_fingerprint=None,
+            tests_passed=None, test_evidence="", error="deterministic simulated failure",
+        ))
+        result = asyncio.run(coordinator.execute_project_request(
+            project_id,
+            target_run_id=run_id,
+            operator_clarification="Continue Apply recovery",
+            operator_action_id=action_id,
+        ))
+
+        persisted = uow.orchestration_runs.get_by_id(run_id)
+        events = uow.orchestration_stage_events.list_by_run(run_id)
+        starts = [event for event in events if event.event_type == "STAGE_INVOCATION_STARTED"]
+        finishes = [event for event in events if event.event_type == "STAGE_INVOCATION_FAILED"]
+        assert result.status == "HUMAN_REQUIRED"
+        assert result.run_id == run_id
+        assert persisted.stop_details["apply_total_attempts"] == 1
+        assert persisted.stop_details["apply_cycle_started_by_action_id"] == action_id
+        assert persisted.stop_details["apply_snapshot"]["candidate_sha"] == candidate_sha
+        assert len(starts) == len(finishes) == 1
+        assert starts[0].evidence_references["operator_action_id"] == action_id
+        assert starts[0].evidence_references["candidate"]["candidate_sha"] == candidate_sha
+        assert finishes[0].evidence_references["candidate"]["candidate_sha"] == candidate_sha
+    finally:
+        app.dependency_overrides.clear()
+        session.rollback()
+        session.close()
         engine.dispose()
