@@ -225,7 +225,13 @@ def test_postgres_apply_gate_response_starts_one_simulated_cycle(monkeypatch, tm
     subprocess.run(["git", "-C", str(candidate), "config", "user.name", "Test"], check=True)
     change_name = "issue-375-reset-apply-attempt-cycle"
     change_dir = candidate / "openspec" / "changes" / change_name
-    source_change = Path(__file__).resolve().parents[1] / "openspec" / "changes" / "req-378-human-directed-validation-deferral"
+    source_change = (
+        Path(__file__).resolve().parents[1]
+        / "openspec"
+        / "changes"
+        / "archive"
+        / "2026-11-10-req-378-human-directed-validation-deferral"
+    )
     shutil.copytree(source_change, change_dir)
     subprocess.run(["git", "-C", str(candidate), "add", "."], check=True)
     subprocess.run(["git", "-C", str(candidate), "commit", "-qm", "seed candidate"], check=True)
