@@ -2412,7 +2412,7 @@ class NativeOrchestrationCoordinator:
                     apply_cycle_started = True
             details["apply_limits"] = {"max_attempts": hard_limit, "max_no_progress": no_progress_limit}
             self._persist_run_stop_details(active_run, details)
-            if accepted_apply_gate_response or accepted_update_gate_response:
+            if accepted_update_gate_response:
                 update_checkpoint = details.get("apply_gate_update") or {}
                 if self._same_apply_gate_response_has_unvalidated_update(
                     update_checkpoint, operator_action_id
@@ -2464,9 +2464,46 @@ class NativeOrchestrationCoordinator:
                 update_checkpoint = details.get("apply_gate_update") or {}
                 authorized_reclassifications = self._validated_apply_reclassifications(
                     update_checkpoint,
-                    operator_action_id=operator_action_id,
+                    operator_action_id=update_checkpoint.get("operator_action_id"),
                     prior=prior,
                     run_id=active_run.run_id,
+                    generation=int(active_run.current_generation or 0),
+                    change_name=change_name,
+                )
+            elif accepted_apply_gate_response:
+                update_checkpoint = details.get("apply_gate_update") or {}
+                if self._same_apply_gate_response_has_unvalidated_update(
+                    update_checkpoint, operator_action_id
+                ):
+                    payload = self._record_current_human_gate(
+                        uow,
+                        active_run,
+                        gate="apply_gate_update",
+                        question=(
+                            "La respuesta ya inició OpenSpec Update, pero no existe un resultado "
+                            "validado durable. Se conserva el candidato y no se repite Update ni Apply."
+                        ),
+                        options=[
+                            "Revisar el detalle y responder cómo continuar",
+                            "Conservar el candidato detenido",
+                        ],
+                    )
+                    return OrchestrationCoordinationResult(
+                        status="HUMAN_REQUIRED", run_id=active_run.run_id,
+                        current_stage=OrchestrationStage.IMPLEMENTING,
+                        message=payload["question"], human_payload=payload,
+                    )
+                self._clear_current_human_gate(
+                    uow, active_run, response_text=operator_clarification
+                )
+                details = dict(active_run.stop_details or {})
+                update_checkpoint = details.get("apply_gate_update") or {}
+                authorized_reclassifications = self._validated_apply_reclassifications(
+                    update_checkpoint,
+                    operator_action_id=update_checkpoint.get("operator_action_id"),
+                    prior=prior,
+                    run_id=active_run.run_id,
+                    generation=int(active_run.current_generation or 0),
                     change_name=change_name,
                 )
             else:
@@ -3657,6 +3694,7 @@ class NativeOrchestrationCoordinator:
         operator_action_id: str | None,
         prior: dict[str, Any] | None,
         run_id: str,
+        generation: int,
         change_name: str,
     ) -> set[str]:
         """Return only task IDs changed by a validated Update for this exact candidate."""
@@ -3673,6 +3711,8 @@ class NativeOrchestrationCoordinator:
         after = checkpoint.get("after") or {}
         identity_keys = ("run_id", "worktree", "branch", "generation")
         if any(before.get(key) != after.get(key) for key in identity_keys):
+            return set()
+        if before.get("generation") != generation:
             return set()
         if before.get("run_id") != run_id or prior.get("run_id") != run_id:
             return set()
