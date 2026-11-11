@@ -5,9 +5,12 @@ import pytest
 from tests.conftest import InMemoryPersistenceUnitOfWork, setup_managed_repository_fixture
 
 from minime.domain.enums import OrchestrationStage
-from minime.domain.models import OrchestrationRun
+from minime.domain.models import ExternalActionResult, OrchestrationRun
 from minime.services.agent_runner import AgentExecutionResult, AgentWorkflowHandoff, CliAgentRunner
-from minime.services.orchestration_coordinator import NativeOrchestrationCoordinator
+from minime.services.orchestration_coordinator import (
+    ComplexityAssessment,
+    NativeOrchestrationCoordinator,
+)
 from minime.services.worktree_manager import WorktreeInfo, WorktreeManager
 
 
@@ -1134,3 +1137,291 @@ async def test_validating_unknown_openspec_status_never_redispatches(mock_env):
     assert result.current_stage == OrchestrationStage.VALIDATING
     assert "unobservable" in result.message
     coordinator._run_propose.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_blocked_feasibility_stops_before_apply_without_spending_attempt(mock_env):
+    coordinator, uow, _, repo_dir = mock_env
+    change_name = "req-101-add-caching-layer"
+    change_dir = repo_dir / "openspec" / "changes" / change_name
+    (change_dir / "specs" / "feature").mkdir(parents=True)
+    (change_dir / "proposal.md").write_text("# Proposal\nBounded cache behavior.")
+    (change_dir / "design.md").write_text("# Design\nUse the existing cache boundary.")
+    (change_dir / "tasks.md").write_text("## Verification\n- [ ] 1.1 Validate candidate behavior")
+    (change_dir / "specs" / "feature" / "spec.md").write_text(
+        "## Requirement: Cache behavior\n### Scenario: Candidate is verifiable\n- WHEN checked\n- THEN evidence is recorded"
+    )
+    run = OrchestrationRun(
+        project_id="proj-1",
+        change_name=change_name,
+        base_sha="abc1234",
+        current_stage=OrchestrationStage.VALIDATING,
+        resumable_stage=OrchestrationStage.VALIDATING,
+        stop_details={
+            "issue_number": 101,
+            "issue_title": "Add caching layer",
+            "request_normalization": {"normalized_body": "We need redis caching layer"},
+            "propose_attempt": {"attempt_id": "attempt-1", "status": "COMPLETE"},
+        },
+    )
+    uow.orchestration_runs.save(run)
+    coordinator.openspec_adapter.planning_status = MagicMock(
+        return_value={"status": "PASS", "pending": []}
+    )
+    coordinator.openspec_adapter.validate_change_strict = MagicMock(
+        return_value={"status": "PASS"}
+    )
+    coordinator.proposal_feasibility.collect_inputs = MagicMock(
+        return_value={
+            "status": "READY",
+            "candidate_sha": "a" * 40,
+            "tasks": [{"task_id": "1.1", "text": "Validate candidate behavior"}],
+            "scenarios": [{"scenario_id": "feature:1:1", "text": "Candidate is verifiable"}],
+            "capabilities": [],
+            "mandatory_blockers": ["Required capability profile:execution is unavailable."],
+        }
+    )
+    coordinator._assess_complexity = AsyncMock(
+        return_value=ComplexityAssessment(
+            status="VALID",
+            evidence="Execution capability is missing.",
+            feasibility_status="BLOCKED",
+            feasibility_blockers=("Required capability profile:execution is unavailable.",),
+            feasibility_actions=("Configure a verified execution profile.",),
+        )
+    )
+    coordinator._run_apply = AsyncMock(side_effect=AssertionError("Apply must not dispatch"))
+
+    result = await coordinator.execute_project_request(
+        "proj-1",
+        thinker_provider="antigravity",
+        implementer_provider="antigravity",
+        reviewer_provider="antigravity",
+    )
+
+    assert result.status == "HUMAN_REQUIRED"
+    assert result.current_stage == OrchestrationStage.VALIDATING
+    assert result.human_payload["gate"] == "proposal_feasibility"
+    assert "execution is unavailable" in result.message
+    coordinator._run_apply.assert_not_awaited()
+    persisted = uow.orchestration_runs.get_by_id(run.run_id)
+    assert persisted is not None
+    assert persisted.stop_details["human_payload"]["gate"] == "proposal_feasibility"
+    assert not persisted.stop_details.get("apply_attempts")
+
+
+@pytest.mark.asyncio
+async def test_changed_capability_evidence_reassesses_existing_feasibility_gate(mock_env):
+    from minime.domain.enums import ExternalOutcome, ExternalReasonCode, RetrySafety
+
+    coordinator, uow, github, repo_dir = mock_env
+    change_name = "req-101-add-caching-layer"
+    change_dir = repo_dir / "openspec" / "changes" / change_name
+    (change_dir / "specs" / "feature").mkdir(parents=True)
+    (change_dir / "proposal.md").write_text("# Proposal\nBounded cache behavior.")
+    (change_dir / "design.md").write_text("# Design\nUse the existing cache boundary.")
+    (change_dir / "tasks.md").write_text("## Verification\n- [ ] 1.1 Validate candidate behavior")
+    (change_dir / "specs" / "feature" / "spec.md").write_text(
+        "## Requirement: Cache behavior\n### Scenario: Candidate is verifiable\n- WHEN checked\n- THEN evidence is recorded"
+    )
+    request_body = "We need redis caching layer"
+    run = OrchestrationRun(
+        project_id="proj-1",
+        change_name=change_name,
+        base_sha="abc1234",
+        current_stage=OrchestrationStage.VALIDATING,
+        resumable_stage=OrchestrationStage.VALIDATING,
+        stop_details={
+            "issue_number": 101,
+            "issue_title": "Add caching layer",
+            "request_normalization": {
+                "normalized_body": request_body,
+                "original_body": request_body,
+            },
+            "propose_attempt": {"attempt_id": "attempt-1", "status": "COMPLETE"},
+            "complexity_assessment": {
+                "status": "VALID",
+                "complexity": None,
+                "evidence": "Preview capability was missing.",
+                "feasibility_status": "BLOCKED",
+                "artifact_hashes": {"proposal.md": "same-artifact"},
+                "context_hashes": {
+                    "request": "same-request",
+                    "capabilities": "old-capability-fingerprint",
+                },
+            },
+            "human_payload": {
+                "gate": "proposal_feasibility",
+                "question": "Provide verified preview evidence.",
+                "options": ["Provide a preview"],
+            },
+        },
+    )
+    uow.orchestration_runs.save(run)
+    github.get_issue.return_value = ExternalActionResult(
+        outcome=ExternalOutcome.SUCCESS,
+        source_adapter="github",
+        reason_code=ExternalReasonCode.EXECUTION_SUCCESS,
+        retry_safety=RetrySafety.SAFE,
+        data={"number": 101, "title": "Add caching layer", "body": request_body},
+    )
+    coordinator.openspec_adapter.planning_status = MagicMock(
+        return_value={"status": "PASS", "pending": []}
+    )
+    coordinator.openspec_adapter.validate_change_strict = MagicMock(
+        return_value={"status": "PASS"}
+    )
+    coordinator._proposal_artifact_hashes = MagicMock(
+        return_value={"proposal.md": "same-artifact"}
+    )
+    coordinator._classification_context_hashes = MagicMock(
+        return_value={"request": "same-request"}
+    )
+    new_inputs = {
+        "status": "READY",
+        "candidate_sha": "a" * 40,
+        "tasks": [{"task_id": "1.1", "text": "Validate candidate behavior"}],
+        "scenarios": [{"scenario_id": "feature:1:1", "text": "Candidate is verifiable"}],
+        "capabilities": [{"ref": "preview:new-sha", "available": True}],
+        "mandatory_blockers": [],
+    }
+    coordinator.proposal_feasibility.collect_inputs = MagicMock(return_value=new_inputs)
+    coordinator._assess_complexity = AsyncMock(
+        return_value=ComplexityAssessment(
+            status="VALID",
+            evidence="The new evidence still does not prove all task preconditions.",
+            feasibility_status="BLOCKED",
+            feasibility_blockers=("A task precondition remains unverified.",),
+            feasibility_actions=("Provide the missing candidate evidence.",),
+        )
+    )
+    coordinator._run_apply = AsyncMock(side_effect=AssertionError("Apply must remain blocked"))
+
+    result = await coordinator.execute_project_request(
+        "proj-1",
+        operator_clarification="The preview is now available.",
+        thinker_provider="antigravity",
+        implementer_provider="antigravity",
+        reviewer_provider="antigravity",
+    )
+
+    assert result.status == "HUMAN_REQUIRED"
+    assert result.current_stage == OrchestrationStage.VALIDATING
+    coordinator._assess_complexity.assert_awaited_once()
+    assert coordinator._assess_complexity.await_args.kwargs["feasibility_inputs"] == new_inputs
+    coordinator._run_apply.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_changed_authoritative_request_uses_native_update_then_reassesses(mock_env):
+    from minime.domain.enums import (
+        ExternalOutcome,
+        ExternalReasonCode,
+        HumanGate,
+        OrchestrationStopOutcome,
+        RetrySafety,
+    )
+
+    coordinator, uow, github, repo_dir = mock_env
+    change_name = "req-101-add-caching-layer"
+    change_dir = repo_dir / "openspec" / "changes" / change_name
+    (change_dir / "specs" / "feature").mkdir(parents=True)
+    (change_dir / "proposal.md").write_text("# Proposal\nOld request scope.")
+    (change_dir / "design.md").write_text("# Design\nOld request design.")
+    (change_dir / "tasks.md").write_text("## Verification\n- [ ] 1.1 Validate candidate behavior")
+    (change_dir / "specs" / "feature" / "spec.md").write_text(
+        "## Requirement: Cache behavior\n### Scenario: Candidate is verifiable\n- WHEN checked\n- THEN evidence is recorded"
+    )
+    old_body = "We need redis caching layer"
+    new_body = "Add bounded in-memory caching without an external service."
+    run = OrchestrationRun(
+        project_id="proj-1",
+        change_name=change_name,
+        base_sha="abc1234",
+        current_stage=OrchestrationStage.VALIDATING,
+        resumable_stage=OrchestrationStage.VALIDATING,
+        human_gate=HumanGate.NEEDS_HUMAN,
+        stop_outcome=OrchestrationStopOutcome.NEEDS_HUMAN,
+        stop_details={
+            "issue_number": 101,
+            "issue_title": "Add caching layer",
+            "request_normalization": {"normalized_body": old_body, "original_body": old_body},
+            "propose_attempt": {"attempt_id": "attempt-1", "status": "COMPLETE"},
+            "complexity_attempts": [{"attempt_id": "assessment-1", "status": "VALID"}],
+            "complexity_assessment": {
+                "status": "VALID",
+                "complexity": None,
+                "evidence": "Old request depended on an unavailable external service.",
+                "feasibility_status": "BLOCKED",
+                "artifact_hashes": {"proposal.md": "old-artifact"},
+                "context_hashes": {"request": old_body, "capabilities": "capability-fingerprint"},
+            },
+            "human_payload": {
+                "gate": "proposal_feasibility",
+                "question": "The Request requires an unavailable external service.",
+                "options": ["Revise the Request"],
+            },
+        },
+    )
+    uow.orchestration_runs.save(run)
+    github.get_issue.return_value = ExternalActionResult(
+        outcome=ExternalOutcome.SUCCESS,
+        source_adapter="github",
+        reason_code=ExternalReasonCode.EXECUTION_SUCCESS,
+        retry_safety=RetrySafety.SAFE,
+        data={
+            "number": 101,
+            "title": "Use bounded in-memory caching",
+            "body": new_body,
+        },
+    )
+    coordinator._run_propose = AsyncMock(
+        return_value={"status": "READY_TO_VALIDATE", "message": "Native Update completed."}
+    )
+    coordinator.openspec_adapter.planning_status = MagicMock(
+        return_value={"status": "PASS", "pending": []}
+    )
+    coordinator.openspec_adapter.validate_change_strict = MagicMock(
+        return_value={"status": "PASS"}
+    )
+    coordinator._proposal_artifact_hashes = MagicMock(return_value={"proposal.md": "new-artifact"})
+    coordinator._classification_context_hashes = MagicMock(
+        side_effect=lambda _run, _number, title, body: {"request": f"{title}:{body}"}
+    )
+    updated_inputs = {
+        "status": "READY",
+        "candidate_sha": "b" * 40,
+        "tasks": [{"task_id": "1.1", "text": "Validate candidate behavior"}],
+        "scenarios": [{"scenario_id": "feature:1:1", "text": "Candidate is verifiable"}],
+        "capabilities": [{"ref": "workflow:execution:apply", "available": True}],
+        "mandatory_blockers": [],
+    }
+    coordinator.proposal_feasibility.collect_inputs = MagicMock(return_value=updated_inputs)
+    coordinator._assess_complexity = AsyncMock(
+        return_value=ComplexityAssessment(
+            status="VALID",
+            evidence="The revised Request was assessed against its updated artifacts.",
+            feasibility_status="BLOCKED",
+            feasibility_blockers=("A revised task still lacks verified completion evidence.",),
+            feasibility_actions=("Provide observable evidence for task 1.1.",),
+        )
+    )
+    coordinator._run_apply = AsyncMock(side_effect=AssertionError("Apply must remain blocked"))
+
+    result = await coordinator.execute_project_request(
+        "proj-1",
+        operator_clarification="The Request was revised to use bounded in-memory caching.",
+        thinker_provider="antigravity",
+        implementer_provider="antigravity",
+        reviewer_provider="antigravity",
+    )
+
+    assert result.status == "HUMAN_REQUIRED"
+    assert result.current_stage == OrchestrationStage.VALIDATING
+    coordinator._run_propose.assert_awaited_once()
+    assert coordinator._run_propose.await_args.kwargs["pending_revision"] is True
+    assert coordinator._run_propose.await_args.kwargs["continue_existing"] is True
+    coordinator.openspec_adapter.validate_change_strict.assert_called_once_with(change_name, repo_dir)
+    coordinator._assess_complexity.assert_awaited_once()
+    assert new_body in coordinator._classification_context_hashes.call_args.args[-1]
+    coordinator._run_apply.assert_not_awaited()

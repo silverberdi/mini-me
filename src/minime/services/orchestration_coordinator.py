@@ -53,6 +53,7 @@ from minime.services.agent_runner import (
     ResolvedWorkflow,
 )
 from minime.services.pr_preparer_service import PrPreparationInput, PrPreparerService
+from minime.services.proposal_feasibility import ProposalFeasibilityEvaluator
 from minime.services.remote_request_intake import RemoteRequestIntakeService
 from minime.services.request_normalization import (
     NormalizedRequest,
@@ -230,10 +231,31 @@ class ComplexityAssessment:
     output_truncated: bool = False
     structured_output_missing: bool = False
     structured_output_too_large: bool = False
+    feasibility_status: str | None = None
+    task_feasibility: tuple[dict[str, Any], ...] = ()
+    scenario_coverage: tuple[dict[str, Any], ...] = ()
+    feasibility_blockers: tuple[str, ...] = ()
+    feasibility_actions: tuple[str, ...] = ()
 
     @property
     def is_valid(self) -> bool:
-        return self.status == "VALID" and self.complexity is not None and bool(self.evidence)
+        return (
+            self.status == "VALID"
+            and bool(self.evidence)
+            and (self.complexity is not None or self.feasibility_status == "BLOCKED")
+        )
+
+    @property
+    def has_feasibility_assessment(self) -> bool:
+        return self.feasibility_status in {"EXECUTABLE", "BLOCKED"}
+
+    @property
+    def is_executable(self) -> bool:
+        return (
+            self.is_valid
+            and self.has_feasibility_assessment
+            and self.feasibility_status == "EXECUTABLE"
+        )
 
 
 class GitOperationError(RuntimeError):
@@ -272,6 +294,9 @@ class NativeOrchestrationCoordinator:
         self.worktree_manager = worktree_manager
         self.agent_runner = agent_runner
         self.openspec_adapter = openspec_adapter or OpenSpecAdapter()
+        self.proposal_feasibility = ProposalFeasibilityEvaluator(
+            self.openspec_adapter, self.agent_runner
+        )
         self.pr_preparer = pr_preparer or PrPreparerService()
         self.semantic_pr_agent = semantic_pr_agent
         self.max_correction_attempts = max_correction_attempts
@@ -1447,9 +1472,14 @@ class NativeOrchestrationCoordinator:
             # Propose on re-entry. Normalization is a durable, immutable
             # checkpoint for the accepted Request.
             normalized = active_details.get("request_normalization")
+            request_revision = active_details.get("request_revision_source")
             normalized_body = (
-                normalized.get("normalized_body") if isinstance(normalized, dict) else None
+                request_revision.get("body")
+                if isinstance(request_revision, dict)
+                else (normalized.get("normalized_body") if isinstance(normalized, dict) else None)
             )
+            if isinstance(request_revision, dict) and isinstance(request_revision.get("title"), str):
+                issue_title = request_revision["title"]
             if isinstance(normalized_body, str) and normalized_body.strip():
                 issue_body = normalized_body
             elif getattr(selected.get("run"), "current_stage", None) in (
@@ -1583,6 +1613,93 @@ class NativeOrchestrationCoordinator:
             change_name=change_name,
         )
         worktree_path = worktree_info.path
+
+        feasibility_gate = pending_gate if isinstance(pending_gate, dict) else {}
+        prior_feasibility = (active_run.stop_details or {}).get("complexity_assessment")
+        legacy_feasibility_missing = (
+            active_run.current_stage
+            in {OrchestrationStage.READY_TO_APPLY, OrchestrationStage.IMPLEMENTING}
+            and (
+                not isinstance(prior_feasibility, dict)
+                or prior_feasibility.get("feasibility_status") != "EXECUTABLE"
+            )
+        )
+        proposal_feasibility_reentry = (
+            active_run.current_stage == OrchestrationStage.VALIDATING
+            and gate_pending
+            and accepted_response
+            and feasibility_gate.get("gate") == "proposal_feasibility"
+        )
+        if proposal_feasibility_reentry or legacy_feasibility_missing:
+            observed_issue = self.github_adapter.get_issue(repository, issue_number)
+            latest_issue = (
+                observed_issue.data
+                if isinstance(observed_issue, ExternalActionResult)
+                and observed_issue.outcome is ExternalOutcome.SUCCESS
+                and isinstance(observed_issue.data, dict)
+                else None
+            )
+            latest_body = latest_issue.get("body") if latest_issue else None
+            if (
+                not latest_issue
+                or latest_issue.get("number", issue_number) != issue_number
+                or not isinstance(latest_issue.get("title"), str)
+                or not isinstance(latest_body, str)
+                or not latest_body.strip()
+            ):
+                return OrchestrationCoordinationResult(
+                    status="PAUSED",
+                    run_id=active_run.run_id,
+                    current_stage=OrchestrationStage.VALIDATING,
+                    message="The authoritative GitHub Request could not be re-read; feasibility reassessment is blocked.",
+                )
+            details = dict(active_run.stop_details or {})
+            prior_revision_source = details.get("request_revision_source")
+            prior_normalization = details.get("request_normalization")
+            prior_title = (
+                prior_revision_source.get("title")
+                if isinstance(prior_revision_source, dict)
+                else details.get("issue_title")
+            )
+            prior_body = (
+                prior_revision_source.get("body")
+                if isinstance(prior_revision_source, dict)
+                else (
+                    prior_normalization.get("original_body")
+                    if isinstance(prior_normalization, dict)
+                    else None
+                )
+            )
+            if latest_issue["title"] != prior_title or latest_body != prior_body:
+                source_sha = hashlib.sha256(
+                    json.dumps(
+                        {"title": latest_issue["title"], "body": latest_body},
+                        ensure_ascii=False,
+                        sort_keys=True,
+                    ).encode("utf-8")
+                ).hexdigest()
+                details["request_revision_source"] = {
+                    "issue_number": issue_number,
+                    "title": latest_issue["title"],
+                    "body": latest_body,
+                    "source_sha256": source_sha,
+                    "observed_at": utc_now().isoformat(),
+                }
+                details["pending_proposal_revision"] = {
+                    "clarification": (
+                        f"The authoritative GitHub Request #{issue_number} changed. Use the installed native "
+                        "OpenSpec Update workflow to reconcile the existing proposal with the current title "
+                        f"and body. Source SHA-256: {source_sha}. Preserve the same Change and scope."
+                    ),
+                    "findings": [],
+                    "source_sha256": source_sha,
+                }
+                details["issue_title"] = latest_issue["title"]
+                self._persist_run_stop_details(active_run, details)
+                issue_title = latest_issue["title"]
+                issue_body = latest_body
+                self._clear_current_human_gate(uow, active_run, response_text=operator_clarification)
+                self._update_stage(uow, active_run, OrchestrationStage.PROPOSING)
 
         # Step 4: Request normalization must complete before Explore while
         # retaining the same durable Run and authorized Worktree.
@@ -1824,6 +1941,19 @@ class NativeOrchestrationCoordinator:
                 )
             self._clear_current_human_gate(uow, active_run, response_text=operator_clarification)
 
+        # Legacy Runs that reached Apply before feasibility became mandatory must
+        # pass the new gate before another Apply dispatch. Re-enter the existing
+        # native validation/assessment path on the same Run and worktree.
+        if active_run.current_stage in {
+            OrchestrationStage.READY_TO_APPLY,
+            OrchestrationStage.IMPLEMENTING,
+        }:
+            stored_feasibility = (active_run.stop_details or {}).get("complexity_assessment")
+            if not isinstance(stored_feasibility, dict) or stored_feasibility.get(
+                "feasibility_status"
+            ) != "EXECUTABLE":
+                self._update_stage(uow, active_run, OrchestrationStage.VALIDATING)
+
         # Step 6: Propose and Strict Validation Loop
         if active_run.current_stage in (
             OrchestrationStage.EXPLORING,
@@ -2021,16 +2151,56 @@ class NativeOrchestrationCoordinator:
             context_hashes = self._classification_context_hashes(
                 active_run, issue_number, issue_title, issue_body
             )
+            project_record = uow.projects.get_by_id(project_id) if hasattr(uow, "projects") else None
+            candidate_sha = await self._get_git_head_sha(worktree_path)
+            candidate_status = await self._git_run(
+                worktree_path, ["status", "--porcelain", "--untracked-files=all"]
+            )
+            candidate_clean = (
+                candidate_status.returncode == 0 and not candidate_status.stdout.strip()
+            )
+            feasibility_inputs = self.proposal_feasibility.collect_inputs(
+                worktree_path=worktree_path,
+                change_name=change_name,
+                project=project_record,
+                candidate_sha=candidate_sha,
+                candidate_clean=candidate_clean,
+                preview_sessions=getattr(uow, "preview_sessions", None),
+                thinker_provider=thinker_provider,
+                implementer_provider=implementer_provider,
+            )
+            capability_fingerprint = json.dumps(
+                {
+                    "candidate_sha": candidate_sha,
+                    "capabilities": feasibility_inputs.get("capabilities"),
+                    "task_ids": [item.get("task_id") for item in feasibility_inputs.get("tasks", [])],
+                    "scenario_ids": [item.get("scenario_id") for item in feasibility_inputs.get("scenarios", [])],
+                },
+                sort_keys=True,
+                separators=(",", ":"),
+            )
+            context_hashes["capabilities"] = hashlib.sha256(
+                capability_fingerprint.encode()
+            ).hexdigest()
             complexity_result = self._stored_complexity_assessment(
                 active_run, artifact_hashes, context_hashes
             )
             if complexity_result is None:
-                if (active_run.stop_details or {}).get("complexity_attempts"):
+                previous_assessment = (active_run.stop_details or {}).get("complexity_assessment")
+                previous_context = (
+                    previous_assessment.get("context_hashes")
+                    if isinstance(previous_assessment, dict)
+                    else None
+                )
+                if (
+                    (active_run.stop_details or {}).get("complexity_attempts")
+                    and previous_context == context_hashes
+                ):
                     return OrchestrationCoordinationResult(
                         status="PAUSED",
                         run_id=active_run.run_id,
                         current_stage=OrchestrationStage.VALIDATING,
-                        message="A previous complexity attempt exists; explicit authorization is required before a new invocation.",
+                        message="The same proposal and capability evidence were already assessed; no duplicate agent call was made.",
                     )
                 attempt_id = str(uuid4())
                 in_progress = ComplexityAssessment(
@@ -2047,7 +2217,14 @@ class NativeOrchestrationCoordinator:
                 uow.orchestration_runs.save(active_run)
                 uow.commit()
                 complexity_result = await self._assess_complexity(
-                    worktree_path, thinker_provider, issue_title, issue_body, project_id, attempt_id
+                    worktree_path,
+                    thinker_provider,
+                    issue_title,
+                    issue_body,
+                    project_id,
+                    attempt_id,
+                    change_name=change_name,
+                    feasibility_inputs=feasibility_inputs,
                 )
                 self._persist_complexity_assessment(
                     active_run,
@@ -2067,6 +2244,38 @@ class NativeOrchestrationCoordinator:
                     run_id=active_run.run_id,
                     current_stage=OrchestrationStage.VALIDATING,
                     message=f"Thinking agent complexity assessment failed: {complexity_result.reason or complexity_result.status}.",
+                )
+            if not complexity_result.is_executable:
+                blockers = list(complexity_result.feasibility_blockers) or [
+                    "The feasibility report did not establish an executable path for every task and scenario."
+                ]
+                question = (
+                    "La propuesta sigue sin aceptarse: hay tareas sin una ruta ejecutable verificada. "
+                    "Actualiza la solicitud o aporta evidencia de capacidad verificable; una respuesta de texto no omite este bloqueo. "
+                    + "Bloqueos: "
+                    + "; ".join(blockers)
+                )
+                payload = self._record_current_human_gate(
+                    uow,
+                    active_run,
+                    gate="proposal_feasibility",
+                    question=question,
+                    options=list(complexity_result.feasibility_actions),
+                    payload={
+                        "blockers": blockers,
+                        "candidate_sha": candidate_sha,
+                        "task_feasibility": list(complexity_result.task_feasibility),
+                        "scenario_coverage": list(complexity_result.scenario_coverage),
+                        "artifact_hashes": artifact_hashes,
+                        "context_hashes": context_hashes,
+                    },
+                )
+                return OrchestrationCoordinationResult(
+                    status="HUMAN_REQUIRED",
+                    run_id=active_run.run_id,
+                    current_stage=OrchestrationStage.VALIDATING,
+                    message=question,
+                    human_payload=payload,
                 )
             complexity = complexity_result.complexity
             active_run.stop_details["complexity"] = complexity
@@ -4307,7 +4516,7 @@ class NativeOrchestrationCoordinator:
             return None
         if context_hashes is not None and payload.get("context_hashes") != context_hashes:
             return None
-        return ComplexityAssessment(
+        assessment = ComplexityAssessment(
             status=str(payload.get("status")),
             complexity=payload.get("complexity"),
             evidence=payload.get("evidence"),
@@ -4321,7 +4530,13 @@ class NativeOrchestrationCoordinator:
             output_truncated=bool(payload.get("output_truncated")),
             structured_output_missing=bool(payload.get("structured_output_missing")),
             structured_output_too_large=bool(payload.get("structured_output_too_large")),
+            feasibility_status=payload.get("feasibility_status"),
+            task_feasibility=tuple(payload.get("task_feasibility") or ()),
+            scenario_coverage=tuple(payload.get("scenario_coverage") or ()),
+            feasibility_blockers=tuple(payload.get("feasibility_blockers") or ()),
+            feasibility_actions=tuple(payload.get("feasibility_actions") or ()),
         )
+        return assessment if assessment.has_feasibility_assessment else None
 
     @staticmethod
     def _persist_complexity_assessment(
@@ -4352,6 +4567,11 @@ class NativeOrchestrationCoordinator:
             "output_truncated": assessment.output_truncated,
             "structured_output_missing": assessment.structured_output_missing,
             "structured_output_too_large": assessment.structured_output_too_large,
+            "feasibility_status": assessment.feasibility_status,
+            "task_feasibility": list(assessment.task_feasibility),
+            "scenario_coverage": list(assessment.scenario_coverage),
+            "feasibility_blockers": list(assessment.feasibility_blockers),
+            "feasibility_actions": list(assessment.feasibility_actions),
         }
         details = dict(run.stop_details or {})
         attempts = list(details.get("complexity_attempts") or [])
@@ -4488,31 +4708,49 @@ class NativeOrchestrationCoordinator:
         body: str,
         project_id: str | None,
         attempt_id: str | None = None,
+        *,
+        change_name: str | None = None,
+        feasibility_inputs: dict[str, Any] | None = None,
     ) -> ComplexityAssessment:
         wf = self.agent_runner.resolve_workflow(
             worktree_path=worktree_path,
             provider=provider,
             operation="propose",
-            change_name="complexity-assessment",
+            change_name=change_name or "complexity-assessment",
         )
         response_path = (
             worktree_path / ".minime" / "classification-attempts" / attempt_id / "last-message.json"
             if attempt_id
             else None
         )
-        result = await self.agent_runner.run(
-            worktree_path=worktree_path,
-            prompt_context=(
-                "Assess this Request's implementation complexity using the configured thinking agent. "
-                'Return exactly one JSON object: {"complexity": "low|moderate|high", '
-                '"evidence": "brief concrete rationale"}. Do not infer from keywords alone.\n'
-                f"Title: {title}\nBody:\n{body}"
-            ),
-            project_id=project_id,
-            role="thinker",
-            provider=provider,
-            workflow=wf,
-            output_schema={
+        structured_schema: dict[str, Any] | None = None
+        prompt_context = (
+            "Assess this Request's implementation complexity using the configured thinking agent. "
+            'Return exactly one JSON object: {"complexity": "low|moderate|high", '
+            '"evidence": "brief concrete rationale"}. Do not infer from keywords alone.\n'
+            f"Title: {title}\nBody:\n{body}"
+        )
+        if feasibility_inputs is not None:
+            task_ids = [str(task.get("task_id")) for task in feasibility_inputs.get("tasks", [])]
+            scenario_ids = [
+                str(scenario.get("scenario_id")) for scenario in feasibility_inputs.get("scenarios", [])
+            ]
+            prompt_context = (
+                "First assess whether the exact native OpenSpec Change can be completed with currently "
+                "verified capabilities. This is a read-only feasibility assessment; do not create or edit "
+                "OpenSpec artifacts and do not start Apply. Use only the supplied task, scenario, and "
+                "capability evidence. Unknown capabilities and unconfirmed preconditions are blockers. "
+                "Every task and scenario ID must appear exactly once. For blocked feasibility, set complexity "
+                "to null and do not classify complexity. Only if all tasks are executable may you classify "
+                "complexity. Return exactly the required JSON schema.\n"
+                f"Change: {change_name}\nRequest title: {title}\nRequest body:\n{body}\n"
+                f"Verified assessment inputs:\n{json.dumps(feasibility_inputs, ensure_ascii=False, sort_keys=True)}\n"
+                f"Exact required task IDs: {json.dumps(task_ids)}\n"
+                f"Exact required scenario IDs: {json.dumps(scenario_ids)}"
+            )
+            structured_schema = ProposalFeasibilityEvaluator.output_schema()
+        else:
+            structured_schema = {
                 "type": "object",
                 "properties": {
                     "complexity": {"type": "string", "enum": ["low", "moderate", "high"]},
@@ -4521,8 +4759,14 @@ class NativeOrchestrationCoordinator:
                 "required": ["complexity", "evidence"],
                 "additionalProperties": False,
             }
-            if response_path
-            else None,
+        result = await self.agent_runner.run(
+            worktree_path=worktree_path,
+            prompt_context=prompt_context,
+            project_id=project_id,
+            role="thinker",
+            provider=provider,
+            workflow=wf,
+            output_schema=structured_schema if response_path else None,
             output_last_message_path=response_path,
         )
         output = redact_secrets(getattr(result, "full_output", ""))[:4000]
@@ -4575,7 +4819,10 @@ class NativeOrchestrationCoordinator:
                 structured_output_missing=structured_output_missing,
             )
         payload = self._parse_json_object(structured_output_raw)
-        if not payload or payload.get("complexity") not in {"low", "moderate", "high"}:
+        if not payload or (
+            payload.get("complexity") not in {"low", "moderate", "high"}
+            and not (feasibility_inputs is not None and payload.get("complexity") is None)
+        ):
             return ComplexityAssessment(
                 status="INVALID_OUTPUT",
                 reason="exactly one structured complexity object was not returned",
@@ -4593,14 +4840,48 @@ class NativeOrchestrationCoordinator:
                 structured_output=structured_output,
                 diagnostic_output=diagnostic_output,
             )
+        feasibility_status = None
+        task_feasibility: tuple[dict[str, Any], ...] = ()
+        scenario_coverage: tuple[dict[str, Any], ...] = ()
+        feasibility_blockers: tuple[str, ...] = ()
+        feasibility_actions: tuple[str, ...] = ()
+        if feasibility_inputs is not None:
+            feasibility_status, task_feasibility, scenario_coverage, feasibility_blockers, feasibility_actions = (
+                self.proposal_feasibility.validate_report(
+                    payload.get("feasibility"), feasibility_inputs, worktree_path
+                )
+            )
+            if feasibility_status == "BLOCKED" and not feasibility_actions:
+                feasibility_actions = (
+                    "Actualizar la solicitud mediante el flujo nativo OpenSpec Update y validarla de nuevo",
+                    "Aportar evidencia verificable de la capacidad o precondición que falta",
+                )
+            if feasibility_status == "EXECUTABLE" and payload.get("complexity") not in {
+                "low", "moderate", "high"
+            }:
+                return ComplexityAssessment(
+                    status="INVALID_OUTPUT",
+                    reason="feasible proposal omitted a valid complexity verdict",
+                    exit_code=result.exit_code,
+                    output=output,
+                    structured_output=structured_output,
+                    diagnostic_output=diagnostic_output,
+                )
         return ComplexityAssessment(
             status="VALID",
-            complexity=payload["complexity"],
+            complexity=(
+                payload["complexity"] if feasibility_status != "BLOCKED" else None
+            ),
             evidence=redact_secrets(payload["evidence"].strip())[:1000],
             exit_code=result.exit_code,
             output=output,
             structured_output=structured_output,
             diagnostic_output=diagnostic_output,
+            feasibility_status=feasibility_status,
+            task_feasibility=task_feasibility,
+            scenario_coverage=scenario_coverage,
+            feasibility_blockers=feasibility_blockers,
+            feasibility_actions=feasibility_actions,
         )
 
     async def _run_explore(
