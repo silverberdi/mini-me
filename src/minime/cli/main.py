@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 import asyncio
+import getpass
 import json
 from pathlib import Path
+from uuid import uuid4
 
 import typer
 import uvicorn
@@ -21,6 +23,7 @@ from minime.services.project_catalog_service import ProjectCatalogService
 from minime.services.project_connection_service import ProjectConnectionService
 from minime.services.project_service import ProjectService
 from minime.services.provider_health_service import ProviderHealthService
+from minime.services.run_cancellation_service import RunCancellationError, RunCancellationService
 from minime.services.status_service import StatusService
 
 discover_and_load_env_file()
@@ -607,6 +610,42 @@ def request_complete_cmd(
             }))
         else:
             typer.echo(f"Run {run.run_id} ({run.change_name}) closed as COMPLETED.")
+
+
+@request_app.command("cancel")
+def request_cancel_cmd(
+    project_id: str = typer.Argument(..., help="Target project ID"),
+    run_id: str = typer.Option(..., "--run-id", help="Exact active Run ID to cancel"),
+    reason: str = typer.Option(..., "--reason", help="Why the operator is cancelling this Run"),
+    idempotency_key: str | None = typer.Option(
+        None, "--idempotency-key", help="Stable key to safely repeat the same cancellation"
+    ),
+    json_output: bool = typer.Option(False, "--json", help="Emit output as JSON"),
+) -> None:
+    """Cancel a settled human-gated Run without changing request-complete semantics."""
+    try:
+        with db_manager.session() as session:
+            result = asyncio.run(
+                RunCancellationService(PostgresPersistenceUnitOfWork(session)).cancel(
+                    project_id=project_id,
+                    run_id=run_id,
+                    reason=reason,
+                    actor_identity=getpass.getuser(),
+                    source_interface="cli",
+                    idempotency_key=idempotency_key or str(uuid4()),
+                )
+            )
+    except RunCancellationError as exc:
+        typer.echo(f"Run cancellation rejected: {exc}", err=True)
+        raise typer.Exit(code=1) from exc
+    except Exception as exc:
+        typer.echo(f"Run cancellation failed: {type(exc).__name__}", err=True)
+        raise typer.Exit(code=1) from exc
+
+    if json_output:
+        typer.echo(json.dumps(result, indent=2))
+    else:
+        typer.echo(f"Run {run_id} cancelled. Workspace cleanup: {result['workspace_cleanup']}.")
 
 
 @scheduler_app.command("run")

@@ -49,6 +49,12 @@ const STAGE_ILLUSTRATION_PATHS: Readonly<Record<string, string>> = Object.freeze
         </div>
       </div>
 
+      <div *ngIf="cancellationMessage()" class="p-4 rounded-xl text-sm"
+           [ngClass]="cancellationSuccess() ? 'bg-emerald-500/10 border border-emerald-500/30 text-emerald-200' : 'bg-rose-500/10 border border-rose-500/30 text-rose-200'"
+           role="status" aria-live="polite" data-testid="run-cancellation-result">
+        {{ cancellationMessage() }}
+      </div>
+
       <!-- No Run Available State -->
       <div *ngIf="!targetRun()" class="bg-slate-800/30 rounded-2xl border border-slate-700/40 p-12 text-center">
         <div class="w-12 h-12 rounded-full bg-slate-800 flex items-center justify-center mx-auto mb-4 text-slate-500 text-xl">
@@ -268,6 +274,21 @@ const STAGE_ILLUSTRATION_PATHS: Readonly<Record<string, string>> = Object.freeze
               {{ submissionMessage() }}
             </div>
           </form>
+
+          <section *ngIf="canCancelHumanRun()" class="pt-3 border-t border-amber-500/20 space-y-3" aria-label="Cancelar Run">
+            <p class="text-xs text-slate-300">Cancelar termina este Run y libera el espacio del proyecto. No reanuda Apply ni marca el Issue como completado.</p>
+            <label for="runCancellationReason" class="block text-xs font-medium text-slate-300">Motivo de cancelación:</label>
+            <input id="runCancellationReason" type="text" maxlength="500"
+                   [ngModel]="cancellationReason()" (ngModelChange)="cancellationReason.set($event)"
+                   name="cancellationReason" class="w-full bg-slate-950 border border-slate-700 rounded-xl p-3 text-sm text-slate-100"
+                   placeholder="Explica por qué se detiene este Run" />
+            <button type="button" data-testid="cancel-run"
+                    (click)="cancelHumanRun()"
+                    [disabled]="isCancelling() || !cancellationReason().trim()"
+                    class="px-4 py-2 rounded-xl border border-rose-500/40 text-rose-200 hover:bg-rose-500/10 disabled:opacity-50 text-xs font-semibold">
+              {{ isCancelling() ? 'Cancelando…' : 'Cancelar Run' }}
+            </button>
+          </section>
         </div>
 
         <!-- Normal State Gate Banner (when not human required) -->
@@ -398,6 +419,10 @@ export class TrabajoActualComponent {
   readonly isRecoveringProposalReview = signal<boolean>(false);
   readonly proposalReviewRecoveryMessage = signal<string | null>(null);
   readonly proposalReviewRecoverySuccess = signal<boolean>(false);
+  readonly cancellationReason = signal<string>('');
+  readonly isCancelling = signal<boolean>(false);
+  readonly cancellationMessage = signal<string | null>(null);
+  readonly cancellationSuccess = signal<boolean>(false);
 
   readonly pipelineStages: PipelineStage[] = [
     { key: 'ADMITTED', label: 'Admisión' },
@@ -502,6 +527,49 @@ export class TrabajoActualComponent {
     if (!run) return false;
     if (this.isGateResponsePending()) return false;
     return this.hasHumanGate(run);
+  }
+
+  canCancelHumanRun(): boolean {
+    const run = this.targetRun();
+    return !!run && !!run.is_active && this.isHumanRequired() && !run.active_job_id;
+  }
+
+  async cancelHumanRun(): Promise<void> {
+    const run = this.targetRun();
+    const reason = this.cancellationReason().trim();
+    if (!run || !this.canCancelHumanRun() || !reason || this.isCancelling()) return;
+    const confirmed = window.confirm(
+      `¿Cancelar el Run ${run.run_id}? Se liberará el proyecto; el Run no se completará.`
+    );
+    if (!confirmed) return;
+
+    this.isCancelling.set(true);
+    this.cancellationSuccess.set(false);
+    this.cancellationMessage.set('Cancelando Run…');
+    try {
+      const response = await this.api.post<any>(
+        `/api/v1/projects/${encodeURIComponent(run.project_id)}/runs/${encodeURIComponent(run.run_id)}/cancel`,
+        {
+          reason,
+          idempotency_key: `cancel-run-${crypto.randomUUID()}`,
+        }
+      );
+      if (!response.ok || !response.data) {
+        this.cancellationMessage.set(`No se canceló el Run: ${response.error || 'respuesta inválida del servidor'}`);
+        return;
+      }
+      this.cancellationSuccess.set(true);
+      this.cancellationMessage.set(
+        response.data.workspace_cleanup === 'PENDING'
+          ? 'Run cancelado y proyecto liberado. La limpieza del worktree quedó pendiente de verificación.'
+          : 'Run cancelado y proyecto liberado.'
+      );
+      await this.refresh.read();
+    } catch (error: any) {
+      this.cancellationMessage.set(`No se canceló el Run: ${error?.message || 'error de comunicación'}`);
+    } finally {
+      this.isCancelling.set(false);
+    }
   }
 
   private codeReviewDetails(): Record<string, any> | null {

@@ -89,6 +89,7 @@ from minime.services.provider_registry import (
     reject_secret_payload,
 )
 from minime.services.quota_telemetry import quota_telemetry
+from minime.services.run_cancellation_service import RunCancellationError, RunCancellationService
 from minime.services.run_recovery import RunRecoveryService
 from minime.services.status_service import StatusService
 from minime.services.web_push_service import web_push_service
@@ -1169,6 +1170,19 @@ class ProjectRequestRunPayload(BaseModel):
     reviewer_provider: str | None = None
 
 
+class RunCancellationPayload(BaseModel):
+    reason: str = Field(min_length=1, max_length=500)
+    idempotency_key: str = Field(min_length=1, max_length=128)
+
+    @field_validator("reason", "idempotency_key")
+    @classmethod
+    def require_non_whitespace(cls, value: str) -> str:
+        cleaned = value.strip()
+        if not cleaned:
+            raise ValueError("Value must not be blank.")
+        return cleaned
+
+
 async def _execute_request_in_fresh_session(
     project_id: str,
     body: ProjectRequestRunPayload,
@@ -1732,6 +1746,36 @@ async def run_project_request(
         "run_id": None,
         "message": "Run accepted for bounded background execution.",
     }
+
+
+@app.post("/api/v1/projects/{project_id}/runs/{run_id}/cancel", tags=["orchestration"])
+async def cancel_orchestration_run(
+    project_id: str,
+    run_id: str,
+    payload: RunCancellationPayload,
+    operator: AuthenticatedOperatorDep,
+    uow: UowDep,
+) -> dict[str, Any]:
+    """Cancel a settled human-gated Run through the durable operator path."""
+    try:
+        result = await RunCancellationService(uow).cancel(
+            project_id=project_id,
+            run_id=run_id,
+            reason=payload.reason,
+            actor_identity=operator.email,
+            source_interface="api",
+            idempotency_key=payload.idempotency_key,
+        )
+    except RunCancellationError as exc:
+        message = str(exc)
+        code = (
+            status.HTTP_404_NOT_FOUND
+            if message.startswith("Run not found")
+            else status.HTTP_409_CONFLICT
+        )
+        raise HTTPException(status_code=code, detail=message) from exc
+    await event_broker.publish("run.cancelled", result)
+    return result
 
 
 @app.get("/api/v1/events", tags=["events"])
@@ -2443,6 +2487,12 @@ def list_orchestration_runs(
         if is_human_required:
             d["status"] = "HUMAN_REQUIRED"
             d["human_gate"] = "HUMAN_REQUIRED"
+        elif stop_outcome == "CANCELLED":
+            d["status"] = "CANCELLED"
+            d["human_gate"] = None
+        elif stop_outcome == "FAILED":
+            d["status"] = "FAILED"
+            d["human_gate"] = None
         else:
             d["status"] = "RUNNING" if r.is_active else "COMPLETED"
             if r.is_active and not active_payload:

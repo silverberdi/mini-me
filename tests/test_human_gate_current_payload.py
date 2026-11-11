@@ -308,16 +308,16 @@ def _get_runs_client(uow):
 
 
 @pytest.mark.parametrize(
-    ("stage", "stop_outcome"),
+    ("stage", "stop_outcome", "expected_status"),
     [
-        (OrchestrationStage.COMPLETED, OrchestrationStopOutcome.COMPLETED),
-        (OrchestrationStage.ADMITTED, OrchestrationStopOutcome.FAILED),
-        (OrchestrationStage.ADMITTED, OrchestrationStopOutcome.CANCELLED),
-        (OrchestrationStage.COMPLETED, OrchestrationStopOutcome.NEEDS_HUMAN),
+        (OrchestrationStage.COMPLETED, OrchestrationStopOutcome.COMPLETED, "COMPLETED"),
+        (OrchestrationStage.ADMITTED, OrchestrationStopOutcome.FAILED, "FAILED"),
+        (OrchestrationStage.ADMITTED, OrchestrationStopOutcome.CANCELLED, "CANCELLED"),
+        (OrchestrationStage.COMPLETED, OrchestrationStopOutcome.NEEDS_HUMAN, "COMPLETED"),
     ],
 )
 def test_terminal_run_projection_ignores_stale_human_gate(
-    in_memory_uow, stage, stop_outcome
+    in_memory_uow, stage, stop_outcome, expected_status
 ):
     run = _run(
         stage,
@@ -342,7 +342,7 @@ def test_terminal_run_projection_ignores_stale_human_gate(
         app.dependency_overrides.clear()
 
     assert response.status_code == 200
-    assert projected["status"] == "COMPLETED"
+    assert projected["status"] == expected_status
     assert projected["status"] != "HUMAN_REQUIRED"
 
 
@@ -433,7 +433,7 @@ def test_inactive_run_with_residual_human_gate_projects_completed(in_memory_uow)
     assert response.status_code == 200
     assert projected["is_active"] is False
     assert projected["stage"] == OrchestrationStage.VERIFYING.value
-    assert projected["status"] == "COMPLETED"
+    assert projected["status"] == "CANCELLED"
     assert projected["stop_details"]["apply_total_attempts"] == 3
     assert "apply_cycle" not in projected
     assert projected["status"] != "HUMAN_REQUIRED"
