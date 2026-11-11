@@ -197,7 +197,7 @@ The system SHALL detect an invocation whose worker lease expired and record it a
 - **THEN** it records the attempt as ambiguous and stops for operator intervention without redispatch
 
 ### Requirement: Authorized Apply-gate decisions update the active Change before continuation
-When an operator's accepted response to an Apply human gate explicitly changes the disposition of an existing Change criterion, the system SHALL preserve the original response and gate identity and SHALL coordinate the configured thinking agent to apply that decision through the native OpenSpec `update` workflow before dispatching another Apply invocation. mini me SHALL NOT author or directly edit the semantic OpenSpec artifacts. The update and its validation result SHALL be durably associated with the same Run, Change, branch, and worktree. A response that does not authorize a material criterion change SHALL continue through the existing gate-resolution behavior. The validated Update checkpoint SHALL also identify the task dispositions it changed and the candidate identity against which those changes were validated, so Apply recovery can reconcile only those dispositions without weakening unrelated regression checks.
+When an operator's accepted response to an Apply human gate explicitly changes the disposition of an existing Change criterion, the system SHALL preserve the original response and gate identity and SHALL coordinate the configured thinking agent to apply that decision through the native OpenSpec `update` workflow before dispatching another Apply invocation. mini me SHALL NOT author or directly edit the semantic OpenSpec artifacts. The update and its validation result SHALL be durably associated with the same Run, Change, branch, and worktree. A response that does not authorize a material criterion change SHALL continue through the existing gate-resolution behavior. The validated Update checkpoint SHALL also identify the task dispositions it changed and the candidate identity against which those changes were validated, so Apply recovery can reconcile only those dispositions without weakening unrelated regression checks. A later continuation-only Apply response SHALL reuse this validated checkpoint and SHALL NOT dispatch a no-op Update that overwrites it.
 
 #### Scenario: Explicit deferral is applied through native OpenSpec Update
 - **GIVEN** a Run is blocked at an Apply gate and the operator explicitly directs that an existing validation criterion be deferred or reclassified
@@ -233,3 +233,10 @@ When an operator's accepted response to an Apply human gate explicitly changes t
 - **THEN** it records the explicit task disposition changes and the Run, Change, branch, worktree, and candidate identity
 - **AND** Apply recovery can use that checkpoint only for the changed task dispositions
 - **AND** replaying the same operator action does not broaden the set of reconciled tasks.
+
+#### Scenario: Continuation-only Apply response preserves the validated checkpoint
+- **GIVEN** a validated Update checkpoint from an earlier accepted operator action remains bound to the current Run, Change, branch, worktree, and candidate
+- **AND** the current Apply gate response authorizes continuation without changing criteria
+- **WHEN** the coordinator processes the response
+- **THEN** it reuses the existing validated checkpoint and retains its original operator-action identity
+- **AND** it dispatches no no-op Update and does not replace the checkpoint with an empty disposition set.
