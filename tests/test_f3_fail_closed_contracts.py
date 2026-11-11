@@ -466,7 +466,7 @@ def test_validated_update_ignores_only_exact_task_reclassification_losses():
     )
     ignored = NativeOrchestrationCoordinator._validated_apply_reclassifications(
         checkpoint, operator_action_id="action-1", prior=prior, run_id="run-1",
-        change_name="change-1",
+        generation=1, change_name="change-1",
     )
     assert ignored == {"1.1"}
     assert not NativeOrchestrationCoordinator._apply_regressed(
@@ -482,7 +482,12 @@ def test_validated_update_ignores_only_exact_task_reclassification_losses():
     )
     assert NativeOrchestrationCoordinator._validated_apply_reclassifications(
         {**checkpoint, "after": {**checkpoint["after"], "candidate_sha": "other-sha"}},
-        operator_action_id="action-1", prior=prior, run_id="run-1", change_name="change-1",
+        operator_action_id="action-1", prior=prior, run_id="run-1", generation=1,
+        change_name="change-1",
+    ) == set()
+    assert NativeOrchestrationCoordinator._validated_apply_reclassifications(
+        checkpoint, operator_action_id="action-1", prior=prior, run_id="run-1",
+        generation=2, change_name="change-1",
     ) == set()
 
 

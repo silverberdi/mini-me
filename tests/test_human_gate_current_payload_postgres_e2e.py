@@ -210,8 +210,8 @@ def test_persisted_current_gate_reaches_operator_response_api(monkeypatch, tmp_p
         engine.dispose()
 
 
-def test_postgres_apply_gate_response_starts_one_simulated_cycle(monkeypatch, tmp_path):
-    """PostgreSQL/API/coordinator E2E with simulated Update and Apply agents."""
+def test_postgres_apply_gate_continuation_reuses_validated_disposition(monkeypatch, tmp_path):
+    """PostgreSQL/API/coordinator E2E with a simulated Apply agent."""
     engine = create_engine(DATABASE_URL, pool_pre_ping=True)
     with engine.connect() as connection:
         database_name = connection.execute(text("select current_database()")).scalar_one()
@@ -234,6 +234,15 @@ def test_postgres_apply_gate_response_starts_one_simulated_cycle(monkeypatch, tm
         / "2026-11-10-req-378-human-directed-validation-deferral"
     )
     shutil.copytree(source_change, change_dir)
+    tasks_path = change_dir / "tasks.md"
+    tasks_text = tasks_path.read_text(encoding="utf-8")
+    tasks_path.write_text(
+        tasks_text.replace(
+            "- [x] 1.1 Trace the accepted gate response",
+            "- [ ] 1.1 Trace the accepted gate response [DEFERRED] Operator supplied published-version evidence; candidate-specific evidence remains pending.",
+        ),
+        encoding="utf-8",
+    )
     subprocess.run(["git", "-C", str(candidate), "add", "."], check=True)
     subprocess.run(["git", "-C", str(candidate), "commit", "-qm", "seed candidate"], check=True)
     candidate_sha = subprocess.check_output(
@@ -264,6 +273,24 @@ def test_postgres_apply_gate_response_starts_one_simulated_cycle(monkeypatch, tm
                 "branch": "feature/issue-375", "worktree": str(candidate.resolve()),
                 "completed": ["1.1"], "pending": ["1.3"],
                 "files": [], "tests_passed": None,
+            },
+            "apply_gate_update": {
+                "status": "VALIDATED",
+                "operator_action_id": "prior-disposition-action",
+                "change_name": change_name,
+                "before": {
+                    "run_id": run_id, "candidate_sha": candidate_sha,
+                    "branch": "feature/issue-375", "worktree": str(candidate.resolve()),
+                    "generation": 1,
+                },
+                "after": {
+                    "run_id": run_id, "candidate_sha": candidate_sha,
+                    "branch": "feature/issue-375", "worktree": str(candidate.resolve()),
+                    "generation": 1,
+                },
+                "reclassified_tasks": ["1.1"],
+                "task_dispositions_before": {"1.1": "completed"},
+                "task_dispositions_after": {"1.1": "deferred"},
             },
             "human_payload": {
                 "gate_id": "gate-apply-375",
@@ -335,31 +362,8 @@ def test_postgres_apply_gate_response_starts_one_simulated_cycle(monkeypatch, tm
                 path=candidate, branch_name="feature/issue-375", base_sha="base-sha"
             )
         )
-        async def simulated_update_with_task_reclassification(**kwargs):
-            tasks_path = change_dir / "tasks.md"
-            tasks_text = tasks_path.read_text(encoding="utf-8")
-            tasks_path.write_text(
-                tasks_text.replace(
-                    "- [x] 1.1 Trace the accepted gate response",
-                    "- [ ] 1.1 Trace the accepted gate response [DEFERRED] Operator supplied published-version evidence; candidate-specific evidence remains pending.",
-                ),
-                encoding="utf-8",
-            )
-            return simulated_update
-
-        simulated_update = MagicMock(
-            exit_code=0,
-            timed_out=False,
-            preflight_error=None,
-            environment_error=False,
-            structured_output_missing=False,
-            structured_output_too_large=False,
-            workflow_handoff_required=False,
-            final_response_status="COMPLETE",
-            response_output="Deterministic simulated authorized task reclassification.",
-        )
         coordinator.agent_runner.resolve_workflow = MagicMock(return_value=MagicMock())
-        coordinator.agent_runner.run = AsyncMock(side_effect=simulated_update_with_task_reclassification)
+        coordinator.agent_runner.run = AsyncMock()
         coordinator._run_apply = AsyncMock(return_value=ApplyOutcome(
             status="FAILED", completed_tasks=(), pending_tasks=("Simulated pending task",),
             candidate_sha=candidate_sha, changed_files=(), diff_fingerprint=None,
@@ -388,22 +392,15 @@ def test_postgres_apply_gate_response_starts_one_simulated_cycle(monkeypatch, tm
         assert persisted.stop_details["apply_total_attempts"] == 1
         assert persisted.stop_details["apply_cycle_started_by_action_id"] == action_id
         assert persisted.stop_details["apply_snapshot"]["sha"] == candidate_sha
-        assert persisted.stop_details["apply_gate_update"]["status"] == "VALIDATED"
-        assert persisted.stop_details["apply_gate_update"]["validation"]["status"] == "PASS"
+        assert persisted.stop_details["apply_gate_update"]["operator_action_id"] == "prior-disposition-action"
         assert persisted.stop_details["apply_gate_update"]["reclassified_tasks"] == ["1.1"]
         assert persisted.stop_details["apply_snapshot"]["pending"] == ["Simulated pending task"]
         assert persisted.stop_details["apply_snapshot"]["completed"] == []
-        assert coordinator.agent_runner.resolve_workflow.call_args.kwargs["operation"] == "update"
-        assert coordinator.agent_runner.run.await_args.kwargs["role"] == "thinker"
         update_starts = [event for event in starts if ":UPDATE:" in event.evidence_references["claim_key"]]
         apply_starts = [event for event in starts if ":APPLY:" in event.evidence_references["claim_key"]]
-        assert len(update_starts) == len(apply_starts) == 1
-        assert len(finishes) == 2
-        assert any(
-            event.event_type == "STAGE_INVOCATION_COMPLETED"
-            and ":UPDATE:" in event.evidence_references["claim_key"]
-            for event in finishes
-        )
+        assert len(update_starts) == 0
+        assert len(apply_starts) == 1
+        assert len(finishes) == 1
         assert any(
             event.event_type == "STAGE_INVOCATION_FAILED"
             and ":APPLY:" in event.evidence_references["claim_key"]

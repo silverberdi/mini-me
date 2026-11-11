@@ -1325,6 +1325,33 @@ async def test_simulated_accepted_apply_gate_response_starts_new_cycle_on_same_c
     candidate_sha = subprocess.check_output(
         ["git", "-C", str(candidate_worktree), "rev-parse", "HEAD"], text=True
     ).strip()
+    candidate_branch = subprocess.check_output(
+        ["git", "-C", str(candidate_worktree), "branch", "--show-current"], text=True
+    ).strip()
+    candidate_path = str(candidate_worktree.resolve())
+    disposition_checkpoint = {
+        "status": "VALIDATED",
+        "operator_action_id": "prior-disposition-action",
+        "change_name": "gacela-05-ui-self-hosted",
+        "before": {
+            "run_id": run.run_id, "candidate_sha": candidate_sha,
+            "branch": candidate_branch, "worktree": candidate_path, "generation": 1,
+        },
+        "after": {
+            "run_id": run.run_id, "candidate_sha": candidate_sha,
+            "branch": candidate_branch, "worktree": candidate_path, "generation": 1,
+        },
+        "reclassified_tasks": ["Task 1"],
+        "task_dispositions_before": {"Task 1": "completed"},
+        "task_dispositions_after": {"Task 1": "deferred"},
+    }
+    run.stop_details["apply_snapshot"] = {
+        "run_id": run.run_id, "sha": candidate_sha,
+        "branch": candidate_branch, "worktree": candidate_path,
+        "completed": ["Task 1"], "pending": [],
+    }
+    run.stop_details["apply_gate_update"] = disposition_checkpoint
+    uow.orchestration_runs.save(run)
     stage_order = []
     async def apply_after_update(*args, **kwargs):
         stage_order.append("APPLY")
@@ -1332,6 +1359,7 @@ async def test_simulated_accepted_apply_gate_response_starts_new_cycle_on_same_c
         status="FAILED", completed_tasks=(), pending_tasks=("Task 1",),
         candidate_sha=candidate_sha, changed_files=(), diff_fingerprint=None,
         tests_passed=None, test_evidence="", error="simulated failure",
+        branch=candidate_branch, worktree=candidate_path, run_id=run.run_id,
         )
 
     async def update_before_apply(**kwargs):
@@ -1351,15 +1379,15 @@ async def test_simulated_accepted_apply_gate_response_starts_new_cycle_on_same_c
     updated = uow.orchestration_runs.get_by_id(run.run_id)
     assert result.status == "HUMAN_REQUIRED"
     assert result.run_id == run.run_id
-    coordinator._run_apply_gate_update.assert_awaited_once()
-    assert coordinator._run_apply_gate_update.await_args.kwargs["operator_response"] == "Continue Apply recovery"
-    assert stage_order == ["UPDATE", "APPLY"]
+    coordinator._run_apply_gate_update.assert_not_awaited()
+    assert stage_order == ["APPLY"]
     assert coordinator._run_apply.await_count == 1
     assert coordinator._run_apply.await_args.kwargs["operator_response"] == "Continue Apply recovery"
     assert updated.stop_details["apply_total_attempts"] == 1
     assert updated.stop_details["apply_cycle_started_by_action_id"] == action_id
     assert updated.stop_details["apply_no_progress"] == 1
     assert updated.stop_details["apply_snapshot"]["sha"] == candidate_sha
+    assert updated.stop_details["apply_gate_update"] == disposition_checkpoint
     resolved = updated.stop_details["resolved_human_gates"]
     assert any(item["gate_id"] == "gate-apply-cycle-reset" for item in resolved)
     events = uow.orchestration_stage_events.list_by_run(run.run_id)
