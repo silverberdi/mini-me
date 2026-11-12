@@ -7,11 +7,14 @@ export const E2E_SESSION_TOKEN = 'e2e-session-token-32-chars-long-xxx';
 /**
  * Ensures the browser context has the valid E2E session cookie installed.
  */
-export async function setupAuthSession(context: BrowserContext): Promise<void> {
+export async function setupAuthSession(
+  context: BrowserContext,
+  token = E2E_SESSION_TOKEN,
+): Promise<void> {
   await context.addCookies([
     {
       name: 'minime_session',
-      value: E2E_SESSION_TOKEN,
+      value: token,
       domain: '127.0.0.1',
       path: '/',
       httpOnly: false,

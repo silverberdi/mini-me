@@ -79,6 +79,7 @@ from minime.services.project_catalog_service import ProjectCatalogService
 from minime.services.project_connection_service import ProjectConnectionService
 from minime.services.project_service import ProjectService
 from minime.services.provider_health_service import ProviderHealthService
+from minime.services.postgres_run_event_listener import PostgresRunEventListener
 from minime.services.provider_registry import (
     CanonicalProfileResolver,
     CustomModelRequest,
@@ -237,7 +238,20 @@ async def lifespan(app: FastAPI):
     finally:
         if sess:
             sess.close()
-    yield
+    listener = None
+    try:
+        database_url = db_manager.engine.url.set(drivername="postgresql").render_as_string(
+            hide_password=False
+        )
+        listener = PostgresRunEventListener(database_url, event_broker.publish)
+        await listener.start()
+    except Exception as exc:
+        logger.warning("PostgreSQL Run event listener could not start: %s", type(exc).__name__)
+    try:
+        yield
+    finally:
+        if listener is not None:
+            await listener.stop()
 
 
 app = FastAPI(

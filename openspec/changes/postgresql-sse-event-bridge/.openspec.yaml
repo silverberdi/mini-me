@@ -1,0 +1,6 @@
+schema: spec-driven
+created: 2026-11-11
+goal: Transmit scheduler-emitted Run stage transitions from the scheduler
+  process to the API process using PostgreSQL LISTEN/NOTIFY, then broadcast via
+  the existing authenticated SSE endpoint so the UI updates without manual
+  reload or periodic polling.

@@ -17,6 +17,9 @@ test('new SSE events trigger targeted updates while quota handling functions wit
   }
   assert.match(refresh, /addEventListener\('project\.pause_changed', handleProjectEvent\)/);
   assert.match(refresh, /addEventListener\('quota\.update', \(event: MessageEvent\)/);
+  assert.match(refresh, /addEventListener\('run\.resync', handleRunEvent\)/);
+  assert.match(refresh, /this\.events\.onopen = \(\) => \{\s*void this\.refreshRuns\(\)/);
+  assert.match(refresh, /if \(!runsRes\.ok \|\| !Array\.isArray\(runsRes\.data\)\) \{\s*this\.stale\.set\(true\);\s*return;/);
   assert.doesNotMatch(refresh, /setInterval\(/);
 });
 
