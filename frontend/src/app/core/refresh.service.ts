@@ -194,20 +194,24 @@ export class RefreshService implements OnDestroy {
     const query = activeId ? `?project_id=${encodeURIComponent(activeId)}` : "";
 
     try {
-      const [runsRes, reqsRes] = await Promise.all([
-        this.api.get<OrchestrationRun[]>(`/api/v1/orchestration/runs${query}`),
-        activeId ? this.api.get<RequestItem[]>(`/api/v1/projects/${encodeURIComponent(activeId)}/requests`) : Promise.resolve(null),
-      ]);
-
-      if (runsRes.ok && Array.isArray(runsRes.data)) {
-        this.runs.set(runsRes.data);
+      const runsRes = await this.api.get<OrchestrationRun[]>(`/api/v1/orchestration/runs${query}`);
+      if (!runsRes.ok || !Array.isArray(runsRes.data)) {
+        this.stale.set(true);
+        return;
       }
-
-      if (reqsRes && reqsRes.ok && reqsRes.data) {
-        this.applyRequestsPayload(reqsRes.data);
-      }
+      this.runs.set(runsRes.data);
       this.lastUpdated.set(new Date());
       this.isConnected.set(true);
+      this.stale.set(false);
+
+      if (activeId) {
+        const reqsRes = await this.api.get<RequestItem[]>(
+          `/api/v1/projects/${encodeURIComponent(activeId)}/requests`
+        );
+        if (reqsRes.ok && reqsRes.data) {
+          this.applyRequestsPayload(reqsRes.data);
+        }
+      }
     } catch {
       // Background targeted refresh failure does not overwrite healthy state
     }
@@ -270,6 +274,7 @@ export class RefreshService implements OnDestroy {
     const handleProjectEvent = () => void this.refreshProjects();
 
     this.events.addEventListener('run.transition', handleRunEvent);
+    this.events.addEventListener('run.resync', handleRunEvent);
     this.events.addEventListener('run.accepted', handleRunEvent);
     this.events.addEventListener('run.failed', handleRunEvent);
     this.events.addEventListener('run.gate_acknowledged', handleRunEvent);
@@ -289,8 +294,11 @@ export class RefreshService implements OnDestroy {
     });
 
     this.events.onopen = () => {
-      this.isConnected.set(true);
-      this.stale.set(false);
+      void this.refreshRuns().then(() => {
+        if (this.events?.readyState === EventSource.OPEN) {
+          this.isConnected.set(true);
+        }
+      });
     };
 
     this.events.onerror = () => {

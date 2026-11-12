@@ -11,8 +11,14 @@ from typing import Any
 class EventBroker:
     """Fan out bounded operational events without becoming durable state."""
 
-    def __init__(self, max_subscribers: int = 128, queue_size: int = 64, keepalive_seconds: float = 15.0) -> None:
+    def __init__(
+        self,
+        max_subscribers: int = 128,
+        queue_size: int = 64,
+        keepalive_seconds: float = 15.0,
+    ) -> None:
         self._subscribers: set[asyncio.Queue[dict[str, Any]]] = set()
+        self._reconnect_required: set[asyncio.Queue[dict[str, Any]]] = set()
         self._max_subscribers = max_subscribers
         self._queue_size = queue_size
         self._keepalive_seconds = keepalive_seconds
@@ -29,11 +35,14 @@ class EventBroker:
                 try:
                     event = await asyncio.wait_for(queue.get(), timeout=self._keepalive_seconds)
                     yield f"event: {event['type']}\ndata: {json.dumps(event['data'], separators=(',', ':'))}\n\n"
+                    if queue in self._reconnect_required:
+                        return
                 except asyncio.TimeoutError:
                     yield ": keepalive\n\n"
         finally:
             async with self._lock:
                 self._subscribers.discard(queue)
+                self._reconnect_required.discard(queue)
 
     async def publish(self, event_type: str, data: dict[str, Any]) -> None:
         event = {"type": event_type, "data": data}
@@ -43,8 +52,8 @@ class EventBroker:
             try:
                 queue.put_nowait(event)
             except asyncio.QueueFull:
-                # A slow browser must not block lifecycle work. It will recover via polling.
-                pass
+                if event_type == "run.transition":
+                    self._reconnect_required.add(queue)
 
 
 event_broker = EventBroker()

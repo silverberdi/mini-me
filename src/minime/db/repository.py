@@ -59,6 +59,7 @@ from minime.db.models import (
     ReviewModel,
     TaskClassificationSnapshotModel,
 )
+from minime.db.notifications import notify_run_transition
 from minime.domain.enums import (
     PRIMARY_PROVIDERS,
     READ_ONLY_REVIEW_PROVIDERS,
@@ -2870,6 +2871,7 @@ class PostgresOrchestrationRunRepository(OrchestrationRunRepositoryInterface):
     def save(self, run: OrchestrationRun) -> None:
         existing = self.session.get(OrchestrationRunModel, run.run_id)
         if existing:
+            stage_changed = existing.current_stage != run.current_stage.value
             existing.project_id = run.project_id
             existing.change_name = run.change_name
             existing.base_sha = run.base_sha
@@ -2887,6 +2889,13 @@ class PostgresOrchestrationRunRepository(OrchestrationRunRepositoryInterface):
             existing.current_candidate_sha = run.current_candidate_sha
             existing.is_active = run.is_active
             existing.updated_at = utc_now()
+            if stage_changed:
+                notify_run_transition(
+                    self.session,
+                    project_id=run.project_id,
+                    run_id=run.run_id,
+                    stage=run.current_stage.value,
+                )
         else:
             self.session.add(
                 OrchestrationRunModel(
