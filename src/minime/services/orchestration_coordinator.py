@@ -5201,22 +5201,24 @@ class NativeOrchestrationCoordinator:
             if findings:
                 reason = (
                     "La revisión independiente sigue bloqueando la propuesta y se agotaron los "
-                    "intentos. Revisa el hallazgo y elige la sugerencia o escribe otra instrucción. "
+                    "intentos. Revisa los hallazgos y elige una sugerencia disponible o escribe "
+                    "la instrucción de corrección. "
                     "El mismo Run reanudará Propose y la propuesta deberá pasar otra revisión "
                     "independiente; tu respuesta no la aprueba."
                 )
-                review_options = result.get("options") or [
-                    {
-                        "id": "request_correction_and_rereview",
-                        "label": "Pedir corrección y nueva revisión",
-                        "description": (
-                            "El mismo Run reanudará Propose con este hallazgo; después, el "
-                            "revisor independiente deberá evaluar de nuevo la propuesta."
-                        ),
-                        "source": "system_generated",
-                    }
-                ]
-                options_source = "native" if result.get("options") else "system_generated"
+                native_options = result.get("options") or []
+                review_options = list(native_options) if isinstance(native_options, (list, tuple)) else []
+                correction_option = self._proposal_review_correction_option(findings)
+                if correction_option:
+                    review_options.append(correction_option)
+                if native_options and correction_option:
+                    options_source = "mixed"
+                elif native_options:
+                    options_source = "native"
+                elif correction_option:
+                    options_source = "system_generated"
+                else:
+                    options_source = "free_text"
             else:
                 reason = (
                     self._review_pause_message("proposal", result)
@@ -5322,6 +5324,41 @@ class NativeOrchestrationCoordinator:
                 "native OpenSpec correction completed and a second independent review is pending."
             ),
         )
+
+    @staticmethod
+    def _proposal_review_correction_option(findings: Any) -> dict[str, str] | None:
+        """Build a complete operator directive only when every finding is actionable."""
+        if not isinstance(findings, list) or not findings:
+            return None
+
+        corrections: list[str] = []
+        for index, finding in enumerate(findings, start=1):
+            if not isinstance(finding, dict):
+                return None
+            correction = str(finding.get("expected_correction") or "").strip()
+            if not correction:
+                return None
+            raw_severity = finding.get("severity")
+            severity = str(getattr(raw_severity, "value", raw_severity) or "").strip()
+            location = str(finding.get("location") or "").strip()
+            requirement = str(finding.get("violated_requirement") or "").strip()
+            context = [value for value in (severity, location, requirement) if value]
+            context_label = " — ".join(context) if context else "sin ubicación o requisito indicado"
+            corrections.append(f"{index}. Hallazgo ({context_label}): {correction}")
+
+        directive = (
+            "Corrige la propuesta atendiendo todos los hallazgos de la revisión independiente, "
+            "en el orden indicado. Conserva el alcance autorizado y no consideres esta instrucción "
+            "como aprobación; la propuesta revisada debe volver a pasar la revisión independiente.\n"
+            + "\n".join(corrections)
+        )
+        return {
+            "id": "apply_all_proposal_review_corrections",
+            "label": "Sugerencia del sistema: aplicar todas las correcciones",
+            "description": directive,
+            "response_text": directive,
+            "source": "system_generated",
+        }
 
     @staticmethod
     def _classify_review_reentry(

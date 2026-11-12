@@ -48,6 +48,14 @@ test('proposal-review options identify system suggestions and retain free-text r
   assert.match(component, /Respuesta explícita del operador/);
 });
 
+test('selecting a generated correction places its complete response text in the clarification', () => {
+  assert.match(component, /selectHumanGateOption\(opt\)/);
+  assert.match(component, /option\?\.response_text/);
+  assert.match(component, /this\.operatorResponse\.set\(responseText \|\| option\?\.label \|\| option\?\.id/);
+  assert.match(component, /opt\.source === 'system_generated'/);
+  assert.match(component, /opt\.description/);
+});
+
 test('Trabajo actual fallback never selects an inactive historical run', () => {
   const targetRun = component.match(/readonly targetRun = computed\(\(\) => \{([\s\S]*?)\n  \}\);/);
   assert.ok(targetRun, 'targetRun computed selector should exist');
