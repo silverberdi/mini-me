@@ -231,9 +231,10 @@ const STAGE_ILLUSTRATION_PATHS: Readonly<Record<string, string>> = Object.freeze
             <div class="grid grid-cols-1 sm:grid-cols-2 gap-2">
               <button *ngFor="let opt of humanGateOptions()"
                       type="button"
-                      (click)="operatorResponse.set(opt.label || opt.id || opt)"
+                      (click)="selectHumanGateOption(opt)"
                       class="p-3 text-left rounded-xl bg-slate-900/60 hover:bg-slate-800 border border-slate-700 hover:border-sky-500 transition-colors cursor-pointer group">
                 <div class="text-xs font-bold text-white group-hover:text-sky-300">{{ opt.label || opt.id || opt }}</div>
+                <div *ngIf="opt.source === 'system_generated'" class="text-[10px] uppercase tracking-wide text-sky-300 mt-1">Sugerencia del sistema</div>
                 <div *ngIf="opt.description" class="text-[11px] text-slate-400 mt-0.5">{{ opt.description }}</div>
               </button>
             </div>
@@ -702,6 +703,11 @@ export class TrabajoActualComponent {
     if (!run) return [];
     const payload = run.stop_details?.['human_payload'];
     return Array.isArray(payload?.options) ? payload.options : [];
+  }
+
+  selectHumanGateOption(option: any): void {
+    const responseText = typeof option?.response_text === 'string' ? option.response_text : '';
+    this.operatorResponse.set(responseText || option?.label || option?.id || option || '');
   }
 
   humanGateFindings(): any[] {

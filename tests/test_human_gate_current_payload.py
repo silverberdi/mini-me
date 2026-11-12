@@ -101,17 +101,12 @@ async def test_proposal_review_escalation_replaces_and_persists_payload(in_memor
     ]
     assert result.human_payload["reviewer_summary"].startswith("Material gap")
     assert result.human_payload["options_source"] == "system_generated"
-    assert result.human_payload["options"] == [
-        {
-            "id": "request_correction_and_rereview",
-            "label": "Pedir corrección y nueva revisión",
-            "description": (
-                "El mismo Run reanudará Propose con este hallazgo; después, el "
-                "revisor independiente deberá evaluar de nuevo la propuesta."
-            ),
-            "source": "system_generated",
-        }
-    ]
+    option = result.human_payload["options"][0]
+    assert option["id"] == "apply_all_proposal_review_corrections"
+    assert option["source"] == "system_generated"
+    assert "include provider aggregates for null or unrecognized model entries" in option["description"]
+    assert option["response_text"] == option["description"]
+    assert "Pedir corrección y nueva revisión" not in option["label"]
     assert stored.human_gate == HumanGate.NEEDS_HUMAN
     assert stored.stop_outcome == OrchestrationStopOutcome.NEEDS_HUMAN
 
@@ -153,6 +148,7 @@ async def test_proposal_review_escalation_omits_absent_optional_finding_fields(i
     assert result.human_payload["review_findings"][0]["location"] is None
     assert result.human_payload["reviewer_summary"] == "A finding has no location."
     assert result.human_payload["options_source"] == "system_generated"
+    assert result.human_payload["options"][0]["response_text"]
 
 
 @pytest.mark.asyncio
@@ -188,8 +184,72 @@ async def test_proposal_review_escalation_preserves_supplied_options(in_memory_u
         change_name=run.change_name,
     )
 
+    assert result.human_payload["options"][:1] == native_options
+    assert result.human_payload["options_source"] == "mixed"
+    generated = result.human_payload["options"][1]
+    assert generated["source"] == "system_generated"
+    assert generated["response_text"] == generated["description"]
+
+
+@pytest.mark.asyncio
+async def test_proposal_review_correction_directive_includes_all_findings_in_order(in_memory_uow):
+    run = _run(OrchestrationStage.PROPOSAL_REVIEW)
+    in_memory_uow.orchestration_runs.save(run)
+    in_memory_uow.projects.save(Project(
+        project_id=run.project_id,
+        display_name="Human gate test",
+        repository="org/human-gate-test",
+        execution_policy={"max_review_rounds": 1},
+    ))
+    findings = [
+        {"severity": "BLOCKER", "location": "proposal.md", "violated_requirement": "scope", "expected_correction": "Keep the approved scope."},
+        {"severity": "MAJOR", "location": "spec.md", "violated_requirement": "coverage", "expected_correction": "Add the missing failure scenario."},
+    ]
+
+    result = await _coordinator(in_memory_uow)._route_proposal_changes_required(
+        uow=in_memory_uow, project_id=run.project_id, run=run,
+        result={"status": "changes_required", "findings": findings},
+        worktree_path=Path("/tmp/human-gate-test"), thinker_provider="codex", change_name=run.change_name,
+    )
+
+    directive = result.human_payload["options"][0]["response_text"]
+    assert directive.index("Keep the approved scope.") < directive.index("Add the missing failure scenario.")
+    assert "proposal.md" in directive and "scope" in directive
+    assert "spec.md" in directive and "coverage" in directive
+    assert "no consideres esta instrucción como aprobación" in directive
+    revision_prompt = NativeOrchestrationCoordinator._proposal_revision_prompt({
+        "clarification": directive, "findings": findings
+    })
+    assert f"Operator guidance: {directive}" in revision_prompt
+
+
+@pytest.mark.asyncio
+async def test_incomplete_proposal_corrections_keep_native_options_without_generated_instruction(in_memory_uow):
+    run = _run(OrchestrationStage.PROPOSAL_REVIEW)
+    in_memory_uow.orchestration_runs.save(run)
+    in_memory_uow.projects.save(Project(
+        project_id=run.project_id,
+        display_name="Human gate test",
+        repository="org/human-gate-test",
+        execution_policy={"max_review_rounds": 1},
+    ))
+    native_options = [{"id": "revise", "label": "Revisar el cambio"}]
+
+    result = await _coordinator(in_memory_uow)._route_proposal_changes_required(
+        uow=in_memory_uow, project_id=run.project_id, run=run,
+        result={"status": "changes_required", "options": native_options, "findings": [
+            {"severity": "MAJOR", "location": "spec.md", "expected_correction": "Add the missing case."},
+            {"severity": "BLOCKER", "location": "design.md", "expected_correction": " "},
+        ]},
+        worktree_path=Path("/tmp/human-gate-test"), thinker_provider="codex", change_name=run.change_name,
+    )
+
     assert result.human_payload["options"] == native_options
     assert result.human_payload["options_source"] == "native"
+    assert "escribe la instrucción de corrección" in result.human_payload["question"]
+    assert NativeOrchestrationCoordinator._proposal_revision_prompt({
+        "clarification": "Exact accepted directive", "findings": []
+    }) .endswith("Operator guidance: Exact accepted directive")
 
 
 def test_code_review_escalation_replaces_and_persists_payload(in_memory_uow):
