@@ -363,6 +363,12 @@ class OpenSpecAdapter(OpenSpecAdapterInterface):
             "pending": pending,
         }
 
+    def show_change(self, change_name: str, project_root: str | Path) -> dict[str, Any] | None:
+        """Read a Change through the installed OpenSpec CLI's native JSON view."""
+        return self._run_cli(
+            ["show", change_name, "--type", "change"], Path(project_root).resolve()
+        )
+
     def validate_change_strict(self, change_name: str, project_root: str | Path) -> dict[str, Any]:
         """Return raw, truthful evidence for canonical strict change validation."""
         try:

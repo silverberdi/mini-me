@@ -1,14 +1,16 @@
 """Focused regression coverage for the F3 audit corrections."""
 
+import json
 import subprocess
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
 from minime.services.agent_runner import AgentExecutionResult
 from minime.services.orchestration_coordinator import ApplyOutcome, NativeOrchestrationCoordinator
+from minime.services.proposal_feasibility import ProposalFeasibilityEvaluator
 
 
 class ScriptedRunner:
@@ -86,6 +88,248 @@ async def test_complexity_rejects_multiple_or_prose_objects(tmp_path: Path):
     assert result.is_valid is False
 
 
+def test_feasibility_requires_exact_native_task_and_scenario_coverage(tmp_path: Path):
+    inputs = {
+        "status": "READY",
+        "candidate_sha": "a" * 40,
+        "tasks": [{"task_id": "1.1", "text": "Run focused verification"}],
+        "scenarios": [{"scenario_id": "capability:req-1:1", "text": "A feasible path exists"}],
+        "capabilities": [
+            {"ref": "profile:execution", "available": True},
+            {"ref": "workflow:execution:apply", "available": True},
+        ],
+    }
+    report = {
+        "tasks": [
+            {
+                "task_id": "1.1",
+                "actor": "execution",
+                "capability_evidence_refs": ["profile:execution", "workflow:execution:apply"],
+                "preconditions": [],
+                "completion_evidence": "Focused test command exits zero",
+            }
+        ],
+        "scenario_coverage": [
+            {"scenario_id": "capability:req-1:1", "task_ids": ["1.1"]}
+        ],
+        "blockers": [],
+        "resolution_options": [],
+    }
+    result = ProposalFeasibilityEvaluator.validate_report(
+        report, inputs, tmp_path
+    )
+    assert result[0] == "EXECUTABLE"
+
+    report["tasks"].append(dict(report["tasks"][0], task_id="extra"))
+    blocked = ProposalFeasibilityEvaluator.validate_report(
+        report, inputs, tmp_path
+    )
+    assert blocked[0] == "BLOCKED"
+    assert any("unknown or duplicate ID" in reason for reason in blocked[3])
+
+
+def test_feasibility_blocks_unavailable_preview_and_unconfirmed_human(tmp_path: Path):
+    inputs = {
+        "status": "READY",
+        "candidate_sha": "b" * 40,
+        "tasks": [{"task_id": "2.1", "text": "Validate the candidate on a phone"}],
+        "scenarios": [{"scenario_id": "mobile:req-1:1", "text": "The mobile flow works"}],
+        "capabilities": [
+            {"ref": "profile:execution", "available": True},
+            {"ref": "workflow:execution:apply", "available": True},
+            {"ref": f"preview:{'b' * 40}", "available": False},
+        ],
+    }
+    report = {
+        "tasks": [
+            {
+                "task_id": "2.1",
+                "actor": "project_ci_cd",
+                "capability_evidence_refs": [f"preview:{'b' * 40}"],
+                "preconditions": [{"satisfied": False, "evidence_refs": []}],
+                "completion_evidence": "Observed result from the exact candidate SHA",
+            }
+        ],
+        "scenario_coverage": [
+            {"scenario_id": "mobile:req-1:1", "task_ids": ["2.1"]}
+        ],
+        "blockers": [],
+        "resolution_options": ["Provide an exact-SHA preview"],
+    }
+    result = ProposalFeasibilityEvaluator.validate_report(
+        report, inputs, tmp_path
+    )
+    assert result[0] == "BLOCKED"
+    assert any("unavailable capability evidence" in reason for reason in result[3])
+    assert any("unmet or unknown precondition" in reason for reason in result[3])
+
+
+@pytest.mark.asyncio
+async def test_structured_assessment_only_passes_when_all_capabilities_are_verified(tmp_path: Path):
+    skill = tmp_path / ".agents" / "skills" / "openspec-propose"
+    skill.mkdir(parents=True)
+    (skill / "SKILL.md").write_text("native propose")
+    feasibility = {
+        "status": "READY",
+        "candidate_sha": "c" * 40,
+        "tasks": [{"task_id": "1.1", "text": "Run focused tests"}],
+        "scenarios": [{"scenario_id": "change:req-1:1", "text": "The Change is verifiable"}],
+        "capabilities": [
+            {"ref": "profile:execution", "available": True},
+            {"ref": "workflow:execution:apply", "available": True},
+        ],
+    }
+    output = {
+        "complexity": "moderate",
+        "evidence": "One bounded workflow change.",
+        "feasibility": {
+            "tasks": [{
+                "task_id": "1.1",
+                "actor": "execution",
+                "capability_evidence_refs": ["profile:execution", "workflow:execution:apply"],
+                "preconditions": [],
+                "completion_evidence": "Focused test command exits zero",
+            }],
+            "scenario_coverage": [{"scenario_id": "change:req-1:1", "task_ids": ["1.1"]}],
+            "blockers": [],
+            "resolution_options": [],
+        },
+    }
+    runner = ScriptedRunner(json.dumps(output))
+    result = await coordinator(tmp_path, runner)._assess_complexity(
+        tmp_path,
+        "codex",
+        "title",
+        "request",
+        "project",
+        change_name="change",
+        feasibility_inputs=feasibility,
+    )
+    assert result.status == "VALID"
+    assert result.is_executable
+    assert result.feasibility_status == "EXECUTABLE"
+
+    feasibility["capabilities"] = []
+    blocked = await coordinator(tmp_path, runner)._assess_complexity(
+        tmp_path,
+        "codex",
+        "title",
+        "request",
+        "project",
+        change_name="change",
+        feasibility_inputs=feasibility,
+    )
+    assert blocked.is_valid
+    assert blocked.feasibility_status == "BLOCKED"
+    assert not blocked.is_executable
+
+
+def test_feasibility_inventory_rejects_unknown_candidate_sha(tmp_path: Path):
+    runner = ScriptedRunner("unused")
+    c = coordinator(tmp_path, runner)
+    result = c.proposal_feasibility.collect_inputs(
+        worktree_path=tmp_path,
+        change_name="change",
+        project=None,
+        candidate_sha="unknown",
+        candidate_clean=False,
+        preview_sessions=None,
+        thinker_provider="codex",
+        implementer_provider="codex",
+    )
+    assert result["status"] == "UNKNOWN"
+    assert "SHA" in result["reason"]
+
+
+def test_feasibility_inventory_blocks_unconfigured_agent_and_missing_preview(tmp_path: Path):
+    change_dir = tmp_path / "openspec" / "changes" / "change"
+    change_dir.mkdir(parents=True)
+    (change_dir / "tasks.md").write_text("## Checks\n- [ ] 1.1 Verify candidate", encoding="utf-8")
+    adapter = SimpleNamespace(
+        show_change=MagicMock(
+            return_value={
+                "deltas": [
+                    {
+                        "spec": "feature",
+                        "requirements": [
+                            {
+                                "id": "1",
+                                "scenarios": [{"rawText": "WHEN validated THEN evidence exists"}],
+                            }
+                        ],
+                    }
+                ]
+            }
+        )
+    )
+    runner = SimpleNamespace(resolve_workflow=MagicMock(side_effect=AssertionError("no profile")))
+    project = SimpleNamespace(project_id="project", openspec_path="openspec", agent_profiles={})
+    preview_sessions = SimpleNamespace(get_latest_for_candidate=MagicMock(return_value=None))
+
+    inputs = ProposalFeasibilityEvaluator(adapter, runner).collect_inputs(
+        worktree_path=tmp_path,
+        change_name="change",
+        project=project,
+        candidate_sha="d" * 40,
+        candidate_clean=True,
+        preview_sessions=preview_sessions,
+        thinker_provider="codex",
+        implementer_provider="codex",
+    )
+
+    assert inputs["status"] == "READY"
+    assert any("profile:thinking" in blocker for blocker in inputs["mandatory_blockers"])
+    assert any("workflow:execution:apply" in blocker for blocker in inputs["mandatory_blockers"])
+    assert {item["ref"] for item in inputs["capabilities"] if item["available"]} == set()
+    runner.resolve_workflow.assert_not_called()
+    preview_sessions.get_latest_for_candidate.assert_called_once_with(
+        "project", "change", "d" * 40
+    )
+
+
+@pytest.mark.parametrize(
+    ("head_sha", "candidate_clean", "expected"),
+    [("e" * 40, True, True), ("f" * 40, True, False), ("e" * 40, False, False)],
+)
+def test_preview_capability_requires_exact_clean_candidate(
+    tmp_path: Path, head_sha: str, candidate_clean: bool, expected: bool
+):
+    change_dir = tmp_path / "openspec" / "changes" / "change"
+    change_dir.mkdir(parents=True)
+    (change_dir / "tasks.md").write_text("## Checks\n- [ ] 1.1 Validate preview", encoding="utf-8")
+    adapter = SimpleNamespace(
+        show_change=lambda *_: {
+            "deltas": [
+                {
+                    "spec": "feature",
+                    "requirements": [
+                        {"id": "1", "scenarios": [{"rawText": "WHEN previewed THEN pass"}]}
+                    ],
+                }
+            ]
+        }
+    )
+    preview = SimpleNamespace(
+        status=SimpleNamespace(value="READY"),
+        head_sha=head_sha,
+        preview_url="https://preview.example.test",
+        preview_id="preview-1",
+    )
+    preview_sessions = SimpleNamespace(get_latest_for_candidate=lambda *_: preview)
+    inputs = ProposalFeasibilityEvaluator(adapter, SimpleNamespace()).collect_inputs(
+        worktree_path=tmp_path,
+        change_name="change",
+        project=SimpleNamespace(project_id="project", openspec_path="openspec", agent_profiles={}),
+        candidate_sha="e" * 40,
+        candidate_clean=candidate_clean,
+        preview_sessions=preview_sessions,
+        thinker_provider="codex",
+        implementer_provider="codex",
+    )
+    preview_capability = next(item for item in inputs["capabilities"] if item["kind"] == "candidate_sha_matched_preview")
+    assert preview_capability["available"] is expected
+
+
 @pytest.mark.asyncio
 async def test_explore_failure_blocks_propose(tmp_path: Path):
     runner = ScriptedRunner("READY_TO_PROPOSE")
@@ -99,6 +343,33 @@ async def test_explore_failure_blocks_propose(tmp_path: Path):
     runner.exit_code = 2
     result = await c._run_explore(tmp_path, "codex", 5, "title", "body", project_id="p1")
     assert result["status"] == "FAILED"
+
+
+@pytest.mark.asyncio
+async def test_request_revision_dispatches_installed_openspec_update(tmp_path: Path):
+    runner = ScriptedRunner("updated planning artifacts")
+    c = coordinator(tmp_path, runner)
+    c.openspec_adapter.planning_status = MagicMock(
+        return_value={"status": "PASS", "pending": []}
+    )
+
+    result = await c._run_propose(
+        worktree_path=tmp_path,
+        provider="codex",
+        change_name="req-388-reject-unexecutable-proposals",
+        issue_number=388,
+        issue_title="Reject unexecutable proposals",
+        issue_body="Use the current authoritative Request.",
+        project_id="minime",
+        continue_existing=True,
+        pending_revision=True,
+        operator_clarification="Reconcile using native OpenSpec Update.",
+    )
+
+    assert result["status"] == "READY_TO_VALIDATE"
+    assert "Execute official OpenSpec Update" in runner.calls[0]
+    assert "native-update" in runner.calls[0]
+    assert "Use the current authoritative Request." in runner.calls[0]
 
 
 @pytest.mark.asyncio

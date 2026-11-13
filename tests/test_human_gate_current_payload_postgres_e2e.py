@@ -20,11 +20,16 @@ from minime.db.repository import PostgresPersistenceUnitOfWork
 from minime.domain.enums import HumanGate, OrchestrationStage, OrchestrationStopOutcome
 from minime.domain.models import (
     AuthorizedOperator,
+    ExternalActionResult,
     OrchestrationRun,
     Project,
     ProjectManagedRepositoryBinding,
 )
-from minime.services.orchestration_coordinator import ApplyOutcome, NativeOrchestrationCoordinator
+from minime.services.orchestration_coordinator import (
+    ApplyOutcome,
+    ComplexityAssessment,
+    NativeOrchestrationCoordinator,
+)
 from minime.services.worktree_manager import WorktreeInfo
 
 DATABASE_URL = os.environ.get("MINIME_TEST_DATABASE_URL")
@@ -210,6 +215,234 @@ def test_persisted_current_gate_reaches_operator_response_api(monkeypatch, tmp_p
         engine.dispose()
 
 
+@pytest.mark.asyncio
+async def test_blocked_proposal_feasibility_reassesses_changed_capabilities_in_postgres_api(tmp_path):
+    engine = create_engine(DATABASE_URL, pool_pre_ping=True)
+    project_id = str(uuid4())
+    run_id = str(uuid4())
+    run_uow = None
+    repo_path = tmp_path / "candidate"
+    repo_path.mkdir()
+    subprocess.run(["git", "init", "-q", str(repo_path)], check=True)
+    subprocess.run(["git", "-C", str(repo_path), "config", "user.email", "test@example.com"], check=True)
+    subprocess.run(["git", "-C", str(repo_path), "config", "user.name", "Test"], check=True)
+    (repo_path / "seed.txt").write_text("seed")
+    subprocess.run(["git", "-C", str(repo_path), "add", "seed.txt"], check=True)
+    subprocess.run(["git", "-C", str(repo_path), "commit", "-qm", "seed"], check=True)
+    change_name = "req-101-add-caching-layer"
+    change_dir = repo_path / "openspec" / "changes" / change_name
+    (change_dir / "specs" / "feature").mkdir(parents=True)
+    (change_dir / "proposal.md").write_text("# Proposal\nBounded cache behavior.")
+    (change_dir / "design.md").write_text("# Design\nUse the existing cache boundary.")
+    (change_dir / "tasks.md").write_text("## Verification\n- [ ] 1.1 Validate candidate behavior")
+    (change_dir / "specs" / "feature" / "spec.md").write_text(
+        "## Requirement: Cache behavior\n### Scenario: Candidate is verifiable\n- WHEN checked\n- THEN evidence is recorded"
+    )
+    try:
+        with engine.connect() as connection:
+            database_name = connection.execute(text("select current_database()")).scalar_one()
+            assert "test" in database_name.lower(), "Refusing to write outside a test database"
+        session_factory = sessionmaker(bind=engine, autoflush=False, expire_on_commit=False)
+        run_uow = PostgresPersistenceUnitOfWork(session_factory())
+        project = Project(
+            project_id=project_id,
+            display_name="Proposal feasibility gate E2E",
+            repository="org/proposal-feasibility-test",
+        )
+        binding = ProjectManagedRepositoryBinding(
+            project_id=project_id,
+            canonical_repository_identity="github.com/org/proposal-feasibility-test",
+            managed_repository_root=str(repo_path),
+            worktree_parent_dir=str(tmp_path / "worktrees"),
+        )
+        run = OrchestrationRun(
+            run_id=run_id,
+            project_id=project_id,
+            change_name=change_name,
+            base_sha=subprocess.run(
+                ["git", "-C", str(repo_path), "rev-parse", "HEAD"],
+                check=True,
+                capture_output=True,
+                text=True,
+            ).stdout.strip(),
+            current_stage=OrchestrationStage.VALIDATING,
+            resumable_stage=OrchestrationStage.VALIDATING,
+            is_active=True,
+            stop_details={
+                "issue_number": 101,
+                "issue_title": "Add caching layer",
+                "request_normalization": {
+                    "normalized_body": "We need redis caching layer",
+                    "original_body": "We need redis caching layer",
+                },
+                "propose_attempt": {"attempt_id": "propose-1", "status": "COMPLETE"},
+            },
+        )
+        run_uow.projects.save(project)
+        run_uow.project_managed_repository_bindings.save(binding)
+        run_uow.orchestration_runs.save(run)
+        run_uow.commit()
+
+        github = MagicMock()
+        from minime.domain.enums import ExternalOutcome, ExternalReasonCode, RetrySafety
+
+        issue = {
+            "number": 101,
+            "title": "Add caching layer",
+            "body": "We need redis caching layer",
+            "labels": [],
+            "created_at": "2026-11-10T10:00:00Z",
+            "updated_at": "2026-11-10T10:00:00Z",
+            "html_url": "https://github.com/org/proposal-feasibility-test/issues/101",
+        }
+        github.list_issues.return_value = ExternalActionResult(
+            outcome=ExternalOutcome.SUCCESS,
+            source_adapter="github",
+            reason_code=ExternalReasonCode.EXECUTION_SUCCESS,
+            retry_safety=RetrySafety.SAFE,
+            data=[issue],
+        )
+        github.get_issue.return_value = ExternalActionResult(
+            outcome=ExternalOutcome.SUCCESS,
+            source_adapter="github",
+            reason_code=ExternalReasonCode.EXECUTION_SUCCESS,
+            retry_safety=RetrySafety.SAFE,
+            data=issue,
+        )
+        worktree_manager = MagicMock()
+        worktree_manager.create_request_worktree = AsyncMock(
+            return_value=WorktreeInfo(
+                path=repo_path,
+                branch_name="request-101-add-caching-layer",
+                base_sha=run.base_sha,
+            )
+        )
+        coordinator = NativeOrchestrationCoordinator(
+            uow_factory=lambda: run_uow,
+            github_adapter=github,
+            worktree_manager=worktree_manager,
+            agent_runner=MagicMock(),
+        )
+        artifact_hashes = {"proposal.md": "artifact-sha"}
+        context_hashes = {"request": "request-sha", "capabilities": "old-capability-sha"}
+        assessment = ComplexityAssessment(
+            status="VALID",
+            evidence="Preview capability is unavailable for this candidate.",
+            feasibility_status="BLOCKED",
+            feasibility_blockers=("No candidate-SHA-matched preview is available.",),
+            feasibility_actions=("Provide verified preview evidence or revise the Request.",),
+        )
+        coordinator._persist_complexity_assessment(
+            run,
+            assessment,
+            attempt_id="assessment-1",
+            model_identity="thinking-profile",
+            artifact_hashes=artifact_hashes,
+            context_hashes=context_hashes,
+        )
+        gate_payload = coordinator._record_current_human_gate(
+            run_uow,
+            run,
+            gate="proposal_feasibility",
+            question="The proposal needs verified candidate preview evidence.",
+            options=list(assessment.feasibility_actions),
+            payload={
+                "blockers": list(assessment.feasibility_blockers),
+                "artifact_hashes": artifact_hashes,
+                "context_hashes": context_hashes,
+            },
+        )
+        assert gate_payload["gate"] == "proposal_feasibility"
+
+        persisted = run_uow.orchestration_runs.get_by_id(run_id)
+        assert persisted is not None
+        rehydrated = coordinator._stored_complexity_assessment(
+            persisted, artifact_hashes, context_hashes
+        )
+        assert rehydrated is not None and rehydrated.feasibility_status == "BLOCKED"
+        assert coordinator._stored_complexity_assessment(
+            persisted,
+            artifact_hashes,
+            {"request": "request-sha", "capabilities": "new-capability-sha"},
+        ) is None
+
+        coordinator.openspec_adapter.planning_status = MagicMock(
+            return_value={"status": "PASS", "pending": []}
+        )
+        coordinator.openspec_adapter.validate_change_strict = MagicMock(
+            return_value={"status": "PASS"}
+        )
+        coordinator._proposal_artifact_hashes = MagicMock(return_value=artifact_hashes)
+        coordinator._classification_context_hashes = MagicMock(
+            return_value={"request": "request-sha"}
+        )
+        updated_inputs = {
+            "status": "READY",
+            "candidate_sha": "a" * 40,
+            "tasks": [{"task_id": "1.1", "text": "Validate candidate behavior"}],
+            "scenarios": [{"scenario_id": "feature:1:1", "text": "Candidate is verifiable"}],
+            "capabilities": [{"ref": "preview:new-sha", "available": True}],
+            "mandatory_blockers": [],
+        }
+        coordinator.proposal_feasibility.collect_inputs = MagicMock(return_value=updated_inputs)
+        coordinator._assess_complexity = AsyncMock(
+            return_value=ComplexityAssessment(
+                status="VALID",
+                evidence="Updated capability evidence was reassessed.",
+                feasibility_status="BLOCKED",
+                feasibility_blockers=("A task precondition remains unverified.",),
+                feasibility_actions=("Provide the missing candidate evidence.",),
+            )
+        )
+        coordinator._run_apply = AsyncMock(side_effect=AssertionError("Apply must remain blocked"))
+
+        result = await coordinator.execute_project_request(
+            project_id,
+            operator_clarification="A preview is now available for the candidate.",
+            thinker_provider="antigravity",
+            implementer_provider="antigravity",
+            reviewer_provider="antigravity",
+        )
+        assert result.status == "HUMAN_REQUIRED"
+        assert result.current_stage == OrchestrationStage.VALIDATING
+        coordinator._assess_complexity.assert_awaited_once()
+        assert coordinator._assess_complexity.await_args.kwargs["feasibility_inputs"] == updated_inputs
+        coordinator._run_apply.assert_not_awaited()
+
+        persisted = run_uow.orchestration_runs.get_by_id(run_id)
+        assert persisted is not None
+        assert "apply_total_attempts" not in persisted.stop_details
+
+        app.dependency_overrides[get_uow] = lambda: run_uow
+        with TestClient(app) as client:
+            response = client.get(
+                "/api/v1/orchestration/runs",
+                params={"project_id": project_id, "is_active": "true"},
+            )
+        assert response.status_code == 200
+        projected = next(row for row in response.json() if row["run_id"] == run_id)
+        assert projected["status"] == "HUMAN_REQUIRED"
+        assert projected["stop_details"]["human_payload"]["gate"] == "proposal_feasibility"
+        assert projected["stop_details"]["complexity_assessment"]["feasibility_status"] == "BLOCKED"
+        assert "apply_total_attempts" not in projected["stop_details"]
+    finally:
+        app.dependency_overrides.clear()
+        if run_uow is not None:
+            run_uow.session.execute(
+                text("delete from orchestration_runs where id = :run_id"), {"run_id": run_id}
+            )
+            run_uow.session.execute(
+                text("delete from project_managed_repository_bindings where project_id = :project_id"),
+                {"project_id": project_id},
+            )
+            run_uow.session.execute(
+                text("delete from projects where id = :project_id"), {"project_id": project_id}
+            )
+            run_uow.commit()
+            run_uow.session.close()
+        engine.dispose()
+
+
 def test_postgres_apply_gate_continuation_reuses_validated_disposition(monkeypatch, tmp_path):
     """PostgreSQL/API/coordinator E2E with a simulated Apply agent."""
     engine = create_engine(DATABASE_URL, pool_pre_ping=True)
@@ -265,6 +498,16 @@ def test_postgres_apply_gate_continuation_reuses_validated_disposition(monkeypat
             "issue_number": 375,
             "issue_title": "Reset Apply recovery cycle after operator response",
             "request_normalization": {"normalized_body": "Implement the authorized Issue #375 change."},
+            "complexity_assessment": {
+                "status": "VALID",
+                "complexity": "moderate",
+                "evidence": "The proposal tasks have an executable path for this project.",
+                "feasibility_status": "EXECUTABLE",
+                "task_feasibility": [{"task_id": "1.1", "status": "EXECUTABLE"}],
+                "scenario_coverage": [{"scenario_id": "req-375:1", "status": "EXECUTABLE"}],
+                "artifact_hashes": {"proposal.md": "proposal-hash", "tasks.md": "tasks-hash"},
+                "context_hashes": {"request": "request-hash", "capabilities": "capabilities-hash"},
+            },
             "apply_total_attempts": 3,
             "apply_no_progress": 2,
             "apply_limits": {"max_attempts": 3, "max_no_progress": 2},
