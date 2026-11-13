@@ -1,10 +1,9 @@
-"""PostgreSQL adversarial tests for budget policy, provider probe, and retry safety (T08, T09, T15)."""
+"""PostgreSQL adversarial tests for provider probe and retry safety (T09, T15)."""
 
 import os
 import subprocess
 import threading
 import time
-from decimal import Decimal
 from pathlib import Path
 from typing import Generator
 from unittest.mock import MagicMock
@@ -27,15 +26,12 @@ from minime.domain.enums import (
 )
 from minime.domain.models import (
     Job,
-    OpenRouterBudgetPolicy,
-    OpenRouterPricingSnapshot,
     OperatorActionRecord,
     OrchestrationRun,
     Project,
     ProviderHealth,
     RecoveryClaimContext,
 )
-from minime.services.budget_service import BudgetService
 from minime.services.orchestration_coordinator import NativeOrchestrationCoordinator
 from minime.services.provider_health_service import ProviderHealthService
 
@@ -151,88 +147,6 @@ def pg_engine() -> Generator[Engine, None, None]:
 @pytest.fixture
 def pg_session_factory(pg_engine: Engine) -> sessionmaker[Session]:
     return sessionmaker(bind=pg_engine, autoflush=False, expire_on_commit=False)
-
-
-def test_t08_budget_contention_serialization(pg_session_factory: sessionmaker[Session]):
-    """T08: Prove row locking on budget policy serializes concurrent reservations and prevents oversubscription."""
-    project_id = "t08-proj"
-    with pg_session_factory() as session:
-        uow = PostgresPersistenceUnitOfWork(session)
-        proj = Project(project_id=project_id, display_name="T08", repository="o/r", base_branch="main")
-        uow.projects.save(proj)
-        uow.commit()
-        uow.jobs.save(Job(job_id="j1", project_id=project_id, change_name="c1", implementer_role="PRIMARY"))
-        uow.jobs.save(Job(job_id="j2", project_id=project_id, change_name="c2", implementer_role="PRIMARY"))
-
-        policy = OpenRouterBudgetPolicy(
-            project_id=project_id,
-            enabled=True,
-            daily_cap_usd=Decimal("1.00"),
-            monthly_cap_usd=Decimal("100.00"),
-            currency="USD",
-        )
-        uow.budget_policies.save(policy)
-
-        snapshot = OpenRouterPricingSnapshot(
-            snapshot_id="snap-t08",
-            canonical_model_identity="m1",
-            routed_model_identity="m1",
-            prompt_price_per_token=Decimal("0.001"),
-            output_price_per_token=Decimal("0.002"),
-            additional_cost_per_request=Decimal("0.45"),
-            currency="USD",
-            source="openrouter_catalog_api",
-        )
-        uow.pricing_snapshots.save(snapshot)
-        uow.commit()
-
-    res_a, res_b = None, None
-
-    def worker_a():
-        nonlocal res_a
-        with pg_session_factory() as session:
-            uow = PostgresPersistenceUnitOfWork(session)
-            srv = BudgetService(uow)
-            res_a, _, _ = srv.reserve_budget(
-                project_id=project_id,
-                job_id="j1",
-                change_id="c1",
-                role="implementer",
-                canonical_model_identity="m1",
-                pricing_snapshot=snapshot,
-                prompt_token_upper_bound=100,
-                max_output_tokens=100,
-            )
-            uow.commit()
-
-    def worker_b():
-        nonlocal res_b
-        with pg_session_factory() as session:
-            uow = PostgresPersistenceUnitOfWork(session)
-            srv = BudgetService(uow)
-            res_b, _, _ = srv.reserve_budget(
-                project_id=project_id,
-                job_id="j2",
-                change_id="c2",
-                role="implementer",
-                canonical_model_identity="m1",
-                pricing_snapshot=snapshot,
-                prompt_token_upper_bound=100,
-                max_output_tokens=100,
-            )
-            uow.commit()
-
-    t1 = threading.Thread(target=worker_a)
-    t2 = threading.Thread(target=worker_b)
-
-    t1.start()
-    t2.start()
-    t1.join()
-    t2.join()
-
-    # Under $1.00 daily cap and $0.75 per reservation, exactly 1 succeeds and 1 is denied
-    successes = [r for r in (res_a, res_b) if r is not None]
-    assert len(successes) == 1
 
 
 class _ExpensiveAdapter(FakeProviderAdapter):

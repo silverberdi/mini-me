@@ -342,10 +342,35 @@ class ProviderQuotaStrategy:
                 )
 
             payload = resp.json().get("data", {})
-            total_credits = float(payload.get("total_credits", 0.0))
-            total_usage = float(payload.get("total_usage", 0.0))
-            balance = max(0.0, total_credits - total_usage)
-            rem_pct = round((balance / total_credits) * 100.0, 1) if total_credits > 0 else 0.0
+            try:
+                total_credits = Decimal(str(payload["total_credits"]))
+                total_usage = Decimal(str(payload["total_usage"]))
+            except (KeyError, TypeError, ValueError, ArithmeticError):
+                return QuotaObservation(
+                    provider=self.provider,
+                    state="UNKNOWN",
+                    observed_at=now,
+                    source="openrouter_credits",
+                    status_label="UNKNOWN",
+                    reason="missing_or_invalid_credit_totals",
+                )
+            if (
+                not total_credits.is_finite()
+                or not total_usage.is_finite()
+                or total_credits <= 0
+                or total_usage < 0
+            ):
+                return QuotaObservation(
+                    provider=self.provider,
+                    state="UNKNOWN",
+                    observed_at=now,
+                    source="openrouter_credits",
+                    status_label="UNKNOWN",
+                    reason="missing_or_invalid_credit_totals",
+                )
+
+            balance = max(Decimal("0"), total_credits - total_usage)
+            rem_pct = round(float((balance / total_credits) * Decimal("100")), 1)
 
             state = "AVAILABLE" if balance > 0 else "EXHAUSTED"
             status_lbl = "Normal"
@@ -360,7 +385,7 @@ class ProviderQuotaStrategy:
                 observed_at=now,
                 source="openrouter_credits",
                 remaining_percent=rem_pct,
-                balance=round(balance, 2),
+                balance=round(float(balance), 2),
                 currency="USD",
                 reset_at=None,
                 window=None,

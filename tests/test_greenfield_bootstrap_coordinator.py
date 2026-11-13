@@ -71,9 +71,7 @@ def _configuration() -> ProjectConfigurationInput:
         repository="example/greenfield",
         provider_connections={"tickets": connection, "git_pr": connection},
         agent_profiles=profiles,
-        execution_policy=ProjectExecutionPolicy(
-            fallback_daily_cap_usd=Decimal("0"), fallback_monthly_cap_usd=Decimal("0")
-        ),
+        execution_policy=ProjectExecutionPolicy(),
     )
 
 

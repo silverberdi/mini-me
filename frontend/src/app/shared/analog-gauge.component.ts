@@ -42,7 +42,7 @@ import { CommonModule } from '@angular/common';
 
         <!-- Centered Value Display -->
         <div class="absolute inset-0 flex flex-col items-center justify-center pointer-events-none">
-          <span class="text-2xl font-bold tracking-tight text-white">{{ value }}{{ unit }}</span>
+          <span class="text-2xl font-bold tracking-tight text-white">{{ value === null ? '—' : value }}{{ value === null ? '' : unit }}</span>
         </div>
       </div>
 
@@ -56,12 +56,13 @@ import { CommonModule } from '@angular/common';
 export class AnalogGaugeComponent {
   @Input() label: string = '';
   @Input() sublabel?: string = '';
-  @Input() value: number = 0;
+  @Input() value: number | null = null;
   @Input() max: number = 100;
   @Input() unit: string = '%';
   @Input() color: 'sky' | 'emerald' | 'amber' | 'rose' = 'sky';
 
   get percent(): number {
+    if (this.value === null) return 0;
     if (this.max <= 0) return 0;
     const p = (this.value / this.max) * 100;
     return Math.min(100, Math.max(0, p));

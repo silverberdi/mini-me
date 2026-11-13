@@ -12,19 +12,14 @@ from minime.adapters.provider_adapter import (
 from minime.config import ProbeConfig
 from minime.domain.enums import (
     CapacitySignalSource,
-    JobStatus,
     ProviderHealthStatus,
     ProviderResultClass,
-    SchedulerMode,
 )
 from minime.domain.models import (
-    Job,
     NormalizedProviderResult,
+    OrchestrationRun,
     Project,
-)
-from minime.services.openrouter_eligibility import (
-    OpenRouterEligibilityEvaluator,
-    is_material_execution_started,
+    ProviderHealth,
 )
 from minime.services.provider_health_service import ProviderHealthService
 
@@ -101,110 +96,89 @@ async def test_operator_reported_reset(in_memory_uow):
     assert latest.source_signal == CapacitySignalSource.OPERATOR_REPORTED
 
 
-def test_drain_eligibility_requires_material_execution():
-    """Verify that drain fallback is strictly denied for BACKLOG/READY work without material execution."""
-    evaluator = OpenRouterEligibilityEvaluator()
+def test_capacity_lifecycle_selects_fallback_for_apply_without_reviewer_exhaustion(in_memory_uow):
+    from datetime import timedelta
 
+    from minime.domain.enums import OrchestrationStage
+    from minime.domain.models import utc_now
+    from minime.services.capacity_lifecycle_service import CapacityLifecycleService
+
+    now = utc_now()
     project = Project(
         project_id="test-proj",
         display_name="Test",
         repository="owner/repo",
-        openrouter_drain_allowed=True,
+        implementer="codex",
+        reviewer="antigravity",
+        agent_profiles={
+            "fallback": {
+                "harness_id": "opencode",
+                "provider_id": "openrouter",
+                "model_id": "openrouter/deepseek/deepseek-chat",
+            }
+        },
     )
-
-    # 1. Job with 0 attempts and no candidate (NOT materially started)
-    not_started_job = Job(
-        project_id="test-proj",
-        change_name="new-feature",
-        status=JobStatus.RUNNING,
-        implementer_role="codex",
-        attempt_count=0,
-        candidate_sha=None,
-    )
-    assert not is_material_execution_started(not_started_job)
-
-    res = evaluator.evaluate_10_points(
-        scheduler_mode=SchedulerMode.DRAIN,
-        job=not_started_job,
-        role="implementer",
-        is_new_ready_change=False,
-        primary_health_records=[],
-        project=project,
-        policy=None,
-        headroom=None,
-    )
-    assert res.eligible is False
-
-    # 2. In-flight job with material execution started (attempt_count = 1)
-    started_job = Job(
-        project_id="test-proj",
-        change_name="in-flight-feature",
-        status=JobStatus.RUNNING,
-        implementer_role="codex",
-        attempt_count=1,
-        candidate_sha=None,
-    )
-    assert is_material_execution_started(started_job)
-
-
-def test_drain_denied_for_new_ready_change():
-    """Verify that drain fallback is rejected when is_new_ready_change is True."""
-    evaluator = OpenRouterEligibilityEvaluator()
-    project = Project(
-        project_id="test-proj",
-        display_name="Test",
-        repository="owner/repo",
-        openrouter_drain_allowed=True,
-    )
-    job = Job(
-        project_id="test-proj",
-        change_name="ready-feature",
-        status=JobStatus.RUNNING,
-        implementer_role="codex",
-        attempt_count=1,
-    )
-
-    res = evaluator.evaluate_10_points(
-        scheduler_mode=SchedulerMode.DRAIN,
-        job=job,
-        role="implementer",
-        is_new_ready_change=True,
-        primary_health_records=[],
-        project=project,
-        policy=None,
-        headroom=None,
-    )
-    assert res.eligible is False
-    assert "Cannot admit new READY" in (res.denial_reason or "")
-
-
-def test_openrouter_drain_never_accepts_reviewer_role():
-    evaluator = OpenRouterEligibilityEvaluator()
-    job = Job(
-        project_id="test-proj",
-        change_name="in-flight-feature",
-        status=JobStatus.RUNNING,
-        implementer_role="codex",
-        attempt_count=1,
-        candidate_sha="candidate-sha",
-    )
-    result = evaluator.evaluate_10_points(
-        scheduler_mode=SchedulerMode.DRAIN,
-        job=job,
-        role="reviewer",
-        is_new_ready_change=False,
-        primary_health_records=[],
-        project=Project(
+    in_memory_uow.projects.save(project)
+    in_memory_uow.orchestration_runs.save(
+        OrchestrationRun(
+            run_id="run-1",
             project_id="test-proj",
-            display_name="Test",
-            repository="owner/repo",
-            openrouter_drain_allowed=True,
-        ),
-        policy=None,
-        headroom=None,
+            change_name="change-1",
+            base_sha="base-sha",
+            current_stage=OrchestrationStage.IMPLEMENTING,
+            current_candidate_sha="candidate-sha",
+            is_active=True,
+        )
     )
-    assert not result.eligible
-    assert any("executor rescue" in reason for reason in result.reasons)
+    for provider, status, result_class in (
+        ("codex", ProviderHealthStatus.EXHAUSTED, ProviderResultClass.QUOTA_LIMIT),
+        ("antigravity", ProviderHealthStatus.AVAILABLE, ProviderResultClass.SUCCESS),
+    ):
+        in_memory_uow.provider_health.save(
+            ProviderHealth(
+                provider=provider,
+                status=status,
+                last_result_class=result_class,
+                last_failure_at=(now - timedelta(seconds=10)) if status == ProviderHealthStatus.EXHAUSTED else None,
+                last_success_at=now if status == ProviderHealthStatus.AVAILABLE else None,
+                updated_at=now,
+            )
+        )
+
+    service = CapacityLifecycleService(in_memory_uow)
+    # Apply's execution provider is exhausted; a healthy independent reviewer
+    # must not prevent the configured fallback from continuing Apply.
+    assert service.fallback_provider_for_inflight_apply("test-proj", "run-1", "codex") == "opencode"
+    assert service.fallback_provider_for_inflight_apply("test-proj", "missing-run", "codex") is None
+
+    in_memory_uow.projects.save(project.model_copy(update={"agent_profiles": {}}))
+    assert service.fallback_provider_for_inflight_apply("test-proj", "run-1", "codex") is None
+    in_memory_uow.projects.save(project)
+
+    in_memory_uow.provider_health.save(
+        ProviderHealth(
+            provider="codex",
+            status=ProviderHealthStatus.AVAILABLE,
+            last_result_class=ProviderResultClass.SUCCESS,
+            last_success_at=now,
+            updated_at=now,
+        )
+    )
+    assert service.can_execute_inflight_apply("test-proj", "run-1", "codex") is True
+    assert service.fallback_provider_for_inflight_apply("test-proj", "run-1", "codex") is None
+
+    in_memory_uow.provider_health.save(
+        ProviderHealth(
+            provider="antigravity",
+            status=ProviderHealthStatus.EXHAUSTED,
+            last_result_class=ProviderResultClass.QUOTA_LIMIT,
+            last_failure_at=now - timedelta(seconds=10),
+            updated_at=now,
+        )
+    )
+    # Healthy Apply still stays on the configured execution provider even if
+    # the reviewer provider is exhausted.
+    assert service.fallback_provider_for_inflight_apply("test-proj", "run-1", "codex") is None
 
 
 @pytest.mark.asyncio

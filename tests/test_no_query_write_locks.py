@@ -46,14 +46,6 @@ def lock_monitoring_client(in_memory_uow, tmp_path):
 
     uow.provider_health.get_by_provider_for_update = spy_ph_for_update
 
-    orig_budget_for_update = uow.budget_policies.get_for_update
-
-    def spy_budget_for_update(project_id: str):
-        for_update_queries.append(f"budget_policies.get_for_update({project_id})")
-        return orig_budget_for_update(project_id)
-
-    uow.budget_policies.get_for_update = spy_budget_for_update
-
     orig_saga_for_update = uow.durable_sagas.get_for_update
 
     def spy_saga_for_update(saga_id: str):

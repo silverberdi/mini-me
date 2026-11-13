@@ -419,18 +419,19 @@ def providers_health_cmd(json_output: bool = typer.Option(False, "--json")) -> N
 
 @budget_app.command("status")
 def budget_status_cmd(project_id: str | None = typer.Option(None, "--project-id")) -> None:
-    """Inspect retained budget records without reserving or spending."""
+    """Inspect retained provider usage evidence without reserving or spending."""
     try:
         with db_manager.session() as session:
             uow = PostgresPersistenceUnitOfWork(session)
             projects = uow.projects.list_all()
             resolved_project_id = project_id or (projects[0].project_id if projects else "")
-            policy = uow.budget_policies.get_by_project_id(resolved_project_id) if resolved_project_id else None
-            headroom = BudgetService(uow)._compute_headroom(resolved_project_id, policy) if policy else None
+            ledger = uow.budget_ledger.list_by_project(resolved_project_id) if resolved_project_id else []
+            reservations = uow.budget_reservations.list_by_project(resolved_project_id) if resolved_project_id else []
+            usage = BudgetService(uow).get_token_usage_breakdown(resolved_project_id) if resolved_project_id else {}
     except Exception as exc:
         typer.echo(f"budget diagnostics unavailable: {exc}", err=True)
         raise typer.Exit(code=1) from exc
-    typer.echo(json.dumps({"project_id": resolved_project_id, "policy": policy.model_dump() if policy else None, "headroom": headroom.__dict__ if headroom else None}, default=str))
+    typer.echo(json.dumps({"project_id": resolved_project_id, "usage_records": [row.model_dump() for row in ledger], "reservations": [row.model_dump() for row in reservations], "token_usage_by_model": usage}, default=str))
 
 
 @request_app.command("run")
@@ -481,7 +482,6 @@ def request_run_cmd(
                 agent_runner = CliAgentRunner.for_project_profiles(
                     proj.agent_profiles,
                     capacity_service=CapacityLifecycleService(uow),
-                    budget_service=BudgetService(uow),
                 )
             except (ValueError, OSError) as exc:
                 typer.echo(f"Verified F2 agent profiles unavailable: {exc}", err=True)
@@ -724,7 +724,6 @@ def scheduler_run_cmd(
                         agent_runner = CliAgentRunner.for_project_profiles(
                             proj.agent_profiles,
                             capacity_service=CapacityLifecycleService(uow),
-                            budget_service=BudgetService(uow),
                         )
                     except Exception as err:
                         typer.echo(f"[{project_id}] Agent profiles error: {err}")

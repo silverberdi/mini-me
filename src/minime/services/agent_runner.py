@@ -31,7 +31,7 @@ _SKILL_VERSION_RE = re.compile(r"(?m)^\s+version:\s*['\"]?([A-Za-z0-9._-]+)['\"]
 
 
 class CapacityExhaustedError(RuntimeError):
-    """Raised when provider capacity, rate-limit, or budget headroom is exhausted."""
+    """Raised when configured provider capacity cannot safely admit the invocation."""
 
     def __init__(self, provider_id: str, message: str) -> None:
         super().__init__(message)
@@ -112,6 +112,9 @@ class AgentExecutionResult:
     final_response_source: str | None = None
     workflow_handoff: AgentWorkflowHandoff | None = None
     workflow_handoff_required: bool = False
+    provider_used: str | None = None
+    profile_used: str | None = None
+    model_used: str | None = None
 
     @property
     def full_output(self) -> str:
@@ -233,7 +236,6 @@ class CliAgentRunner:
         self,
         invocation: CliInvocationProfile | list[str] | None = None,
         capacity_service: Any | None = None,
-        budget_service: Any | None = None,
         profiles: dict[tuple[str, str], CliInvocationProfile] | None = None,
     ) -> None:
         if isinstance(invocation, CliInvocationProfile):
@@ -248,7 +250,6 @@ class CliAgentRunner:
             self.profile = None
             self.command = []
         self.capacity_service = capacity_service
-        self.budget_service = budget_service
         self.profiles = profiles or {}
 
     @classmethod
@@ -258,7 +259,6 @@ class CliAgentRunner:
         *,
         config: AppConfig | None = None,
         capacity_service: Any | None = None,
-        budget_service: Any | None = None,
     ) -> "CliAgentRunner":
         """Build verified CLI invocations from the persisted F2 profile selection."""
         if not isinstance(project_profiles, dict):
@@ -299,7 +299,6 @@ class CliAgentRunner:
             resolved[(profile_name, provider)] = profile
         return cls(
             capacity_service=capacity_service,
-            budget_service=budget_service,
             profiles=resolved,
         )
 
@@ -471,9 +470,38 @@ class CliAgentRunner:
         project_id: str | None,
         provider_id: str,
         role: str,
-    ) -> None:
-        """Preflight provider capacity, quota, and budget limits before agent dispatch."""
+        *,
+        run_id: str | None = None,
+        workflow: ResolvedWorkflow | None = None,
+    ) -> tuple[str, str | None]:
+        """Preflight provider capacity and quota before agent dispatch."""
         if self.capacity_service is not None and project_id:
+            if (
+                role in {"implementer", "execution"}
+                and run_id
+                and workflow
+                and workflow.operation == "apply"
+                and callable(getattr(self.capacity_service, "can_execute_inflight_apply", None))
+                and callable(
+                    getattr(self.capacity_service, "fallback_provider_for_inflight_apply", None)
+                )
+            ):
+                if self.capacity_service.can_execute_inflight_apply(project_id, run_id, provider_id):
+                    return provider_id, None
+                fallback_provider = self.capacity_service.fallback_provider_for_inflight_apply(
+                    project_id, run_id, provider_id
+                )
+                if fallback_provider:
+                    if self._profile_for(role, fallback_provider, profile_name="fallback") is None:
+                        raise CapacityExhaustedError(
+                            provider_id=provider_id,
+                            message="The configured fallback has no verified executor profile.",
+                        )
+                    return fallback_provider, "fallback"
+                raise CapacityExhaustedError(
+                    provider_id=provider_id,
+                    message=f"No eligible configured fallback is available for in-flight Apply on '{project_id}'.",
+                )
             # Check capacity if method available
             if hasattr(self.capacity_service, "can_admit_change"):
                 decision = self.capacity_service.can_admit_change(project_id)
@@ -483,42 +511,21 @@ class CliAgentRunner:
                         provider_id=provider_id,
                         message=f"Capacity service rejected admission for project '{project_id}'.",
                     )
+        return provider_id, None
 
-        # BudgetService is exclusively an OpenRouter fallback authority.
-        # Subscription-based Codex/Antigravity dispatch must not depend on
-        # an OpenRouter policy row, even when the row is absent or enabled.
-        # Provider capacity and per-role authorization are enforced separately.
-        if (
-            self.budget_service is not None
-            and project_id
-            and str(provider_id).strip().lower() == "openrouter"
-        ):
-            budget_result = self.budget_service.get_headroom(project_id)
-            if isinstance(budget_result, tuple):
-                policy, headroom = budget_result
-            else:
-                policy, headroom = None, budget_result
-            if policy is None or not getattr(policy, "enabled", False) or headroom is None:
-                raise CapacityExhaustedError(
-                    provider_id=provider_id,
-                    message=f"OpenRouter budget policy/headroom is unavailable or disabled for project '{project_id}'.",
-                )
-            daily = getattr(headroom, "daily_headroom_usd", headroom)
-            monthly = getattr(headroom, "monthly_headroom_usd", daily)
-            if daily <= 0 or monthly <= 0:
-                raise CapacityExhaustedError(
-                    provider_id=provider_id,
-                    message=f"Budget headroom exhausted for provider '{provider_id}' on project '{project_id}'.",
-                )
-
-    def _profile_for(self, role: str, provider: str) -> CliInvocationProfile | None:
+    def _profile_for(
+        self, role: str, provider: str, *, profile_name: str | None = None
+    ) -> CliInvocationProfile | None:
         normalized_provider = "antigravity" if provider.lower() == "agy" else provider.lower()
-        profile_name = {
+        selected_profile = profile_name or {
             "thinker": "thinking",
             "implementer": "execution",
             "reviewer": "independent_review",
         }.get(role, role)
-        return self.profiles.get((profile_name, normalized_provider)) or self.profile
+        profile = self.profiles.get((selected_profile, normalized_provider))
+        if profile_name is not None:
+            return profile
+        return profile or self.profile
 
     def provider_for_role(self, role: str) -> str:
         """Return the provider selected by the verified persisted F2 profile."""
@@ -591,10 +598,27 @@ class CliAgentRunner:
         candidate_author: str | None = None,
         reviewer_identity: str | None = None,
         process_start_observer: Any = None,
+        run_id: str | None = None,
     ) -> AgentExecutionResult:
         """Execute agent under confinement with capacity preflight."""
         # 1. Capacity preflight
-        self.check_capacity_preflight(project_id, provider, role)
+        provider, selected_profile_name = self.check_capacity_preflight(
+            project_id, provider, role, run_id=run_id, workflow=workflow
+        )
+        invocation_profile = self._profile_for(role, provider, profile_name=selected_profile_name)
+        provider_evidence = (
+            (invocation_profile.canonical_provider_id or provider)
+            if selected_profile_name and invocation_profile
+            else (provider if selected_profile_name else None)
+        )
+        model_evidence = invocation_profile.model if selected_profile_name and invocation_profile else None
+        if selected_profile_name == "fallback" and workflow is not None:
+            workflow = self.resolve_workflow(
+                worktree_path=worktree_path,
+                provider=provider,
+                operation=workflow.operation,
+                change_name=workflow.change_name,
+            )
 
         # 2. Confinement check
         confinement = AgentProcessConfinement(allowed_worktree_path=str(worktree_path))
@@ -612,6 +636,9 @@ class CliAgentRunner:
                 preflight_error=preflight_check.error_message,
                 environment_error=env_err,
                 workflow=workflow,
+                provider_used=provider_evidence,
+                profile_used=selected_profile_name,
+                model_used=model_evidence,
             )
 
         if provider.lower() == "opencode":
@@ -645,14 +672,35 @@ class CliAgentRunner:
                     workflow=workflow,
                 )
 
-            if not opencode_cfg.enabled:
+            if selected_profile_name == "fallback" or not opencode_cfg.enabled:
                 if opencode_role == "thinking":
                     profile_key = "thinking"
                 elif opencode_role == "independent_review":
                     profile_key = "independent_review"
                 else:
-                    profile_key = "execution"
-                p = self.profiles.get((profile_key, "opencode")) if hasattr(self, "profiles") and self.profiles else None
+                    profile_key = selected_profile_name or "execution"
+                p = (
+                    invocation_profile
+                    if selected_profile_name == "fallback"
+                    else (
+                        self.profiles.get((profile_key, "opencode"))
+                        if hasattr(self, "profiles") and self.profiles
+                        else None
+                    )
+                )
+                if selected_profile_name == "fallback" and p is None:
+                    return AgentExecutionResult(
+                        exit_code=-2,
+                        timed_out=False,
+                        stdout=[],
+                        stderr=["The configured fallback profile is unavailable for OpenCode."],
+                        duration_ms=0,
+                        environment_error=True,
+                        workflow=workflow,
+                        provider_used=provider_evidence,
+                        profile_used=selected_profile_name,
+                        model_used=model_evidence,
+                    )
                 if p:
                     # Canonical OpenCode model identity, e.g. deepseek/deepseek-v4-pro
                     # or openrouter/deepseek/...; legacy bare ids are normalized below.
@@ -660,7 +708,11 @@ class CliAgentRunner:
                     model_val = OPENCODE_DEEPSEEK_MODEL_ALIASES.get(model_val, model_val)
                     # Route by transport prefix, not by the mere presence of a "/":
                     # deepseek/* is the direct DeepSeek API, openrouter/* is OpenRouter.
-                    is_openrouter = model_val.lower().startswith("openrouter/")
+                    canonical_provider = (p.canonical_provider_id or "").strip().lower()
+                    is_openrouter = (
+                        canonical_provider == "openrouter"
+                        or model_val.lower().startswith("openrouter/")
+                    )
                     if not is_openrouter and model_val not in OPENCODE_DEEPSEEK_MODELS:
                         # Fail closed instead of dispatching an invalid --model.
                         return AgentExecutionResult(
@@ -677,12 +729,17 @@ class CliAgentRunner:
                         )
                     opencode_cfg = OpenCodeCapabilityConfig(
                         enabled=True,
-                        executable=p.executable or "opencode",
+                        executable=p.executable or opencode_cfg.executable or "opencode",
                         provider="openrouter" if is_openrouter else "deepseek",
                         model=model_val,
                         api_key_env="OPENROUTER_API_KEY" if is_openrouter else "DEEPSEEK_API_KEY",
-                        roles=["thinking", "execution", "independent_review"],
-                        args=[],
+                        roles=(
+                            opencode_cfg.roles
+                            if opencode_cfg.enabled
+                            else ["thinking", "execution", "independent_review"]
+                        ),
+                        args=opencode_cfg.args if opencode_cfg.enabled else [],
+                        timeout_seconds=opencode_cfg.timeout_seconds,
                     )
 
             # Pass the resolved operation through unchanged so the adapter's
@@ -775,9 +832,12 @@ class CliAgentRunner:
                 final_response=candidate_json if candidate_json else (outcome.evidence.stdout[-1] if outcome.evidence.stdout else None),
                 final_response_status="COMPLETE" if outcome.accepted else "MISSING",
                 final_response_source="structured_file" if output_last_message_path else "stdout",
+                provider_used=provider_evidence,
+                profile_used=selected_profile_name,
+                model_used=model_evidence,
             )
 
-        profile = self._profile_for(role, provider)
+        profile = self._profile_for(role, provider, profile_name=selected_profile_name)
         if profile is None:
             return AgentExecutionResult(
                 exit_code=-1,
@@ -789,6 +849,9 @@ class CliAgentRunner:
                 duration_ms=0,
                 preflight_error="missing_verified_executor",
                 workflow=workflow,
+                provider_used=provider_evidence,
+                profile_used=selected_profile_name,
+                model_used=model_evidence,
             )
 
         response_path = (
@@ -1034,6 +1097,9 @@ class CliAgentRunner:
                     else None
                 ),
                 workflow_handoff_required=handoff_required,
+                provider_used=provider_evidence,
+                profile_used=selected_profile_name,
+                model_used=model_evidence,
             )
         finally:
             cleanup_structured_output()

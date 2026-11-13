@@ -103,7 +103,6 @@ class ProjectModel(Base):
     external_providers_allowed: Mapped[list[str]] = mapped_column(
         JSON, default=lambda: ["codex", "antigravity", "deepseek"], nullable=False
     )
-    openrouter_drain_allowed: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
     independent_audit_required: Mapped[bool] = mapped_column(
         Boolean, default=False, server_default="false", nullable=False
     )
@@ -711,23 +710,6 @@ class AuditFindingModel(Base):
     )
 
     audit: Mapped[AuditModel] = relationship("AuditModel", back_populates="findings")
-
-
-class OpenRouterBudgetPolicyModel(Base):
-    __tablename__ = "openrouter_budget_policies"
-
-    project_id: Mapped[str] = mapped_column(
-        String(64), ForeignKey("projects.id", ondelete="CASCADE"), primary_key=True
-    )
-    enabled: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
-    daily_cap_usd: Mapped[Decimal] = mapped_column(Numeric(10, 6), nullable=False)
-    monthly_cap_usd: Mapped[Decimal] = mapped_column(Numeric(10, 6), nullable=False)
-    currency: Mapped[str] = mapped_column(String(3), default="USD", nullable=False)
-    policy_version: Mapped[int] = mapped_column(Integer, default=1, nullable=False)
-    is_breached: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
-    updated_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), default=utc_now, onupdate=utc_now, nullable=False
-    )
 
 
 class OpenRouterPricingSnapshotModel(Base):

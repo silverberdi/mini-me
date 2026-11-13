@@ -3,26 +3,21 @@
 from __future__ import annotations
 
 import logging
+from datetime import timedelta
 
 from minime.domain.enums import (
     EventType,
     JobStatus,
+    OrchestrationStage,
     ProviderHealthStatus,
+    ProviderResultClass,
     SchedulerMode,
 )
-from minime.domain.interfaces import FallbackPolicyInterface, PersistenceUnitOfWork
+from minime.domain.interfaces import PersistenceUnitOfWork
 from minime.domain.models import Event, Job, SchedulerStatus, utc_now
 from minime.services.provider_health_service import ProviderHealthService
 
 logger = logging.getLogger(__name__)
-
-
-class DefaultFallbackPolicy(FallbackPolicyInterface):
-    """Default fallback policy seam for 005 (returns False until 006 OpenRouter fallback)."""
-
-    def is_fallback_eligible(self, project_id: str, job: Job, role: str) -> bool:
-        del project_id, job, role
-        return False
 
 
 class CapacityLifecycleService:
@@ -32,11 +27,9 @@ class CapacityLifecycleService:
         self,
         uow: PersistenceUnitOfWork,
         health_service: ProviderHealthService | None = None,
-        fallback_policy: FallbackPolicyInterface | None = None,
     ):
         self.uow = uow
         self.health_service = health_service or ProviderHealthService(uow)
-        self.fallback_policy = fallback_policy or DefaultFallbackPolicy()
         self._last_mode: SchedulerMode | None = None
 
     def get_scheduler_status_pure(self, project_id: str | None = None) -> SchedulerStatus:
@@ -155,3 +148,91 @@ class CapacityLifecycleService:
                 f"Scheduler is in {status.mode.value} mode: admission of new READY work is blocked ({status.reason}).",
             )
         return True, None
+
+    def can_execute_inflight_apply(
+        self, project_id: str, run_id: str, primary_provider: str
+    ) -> bool:
+        """Allow an existing Apply to use a healthy primary despite its peer's outage."""
+        run = self.uow.orchestration_runs.get_by_id(run_id)
+        if (
+            run is None
+            or run.project_id != project_id
+            or not run.is_active
+            or run.current_stage != OrchestrationStage.IMPLEMENTING
+        ):
+            return False
+        health = self.health_service.get_existing_health(primary_provider)
+        if (
+            health is None
+            or health.status != ProviderHealthStatus.AVAILABLE
+            or health.last_result_class != ProviderResultClass.SUCCESS
+            or health.last_success_at is None
+        ):
+            return False
+        now = utc_now()
+        last_success = health.last_success_at
+        if last_success.tzinfo is None:
+            last_success = last_success.replace(tzinfo=now.tzinfo)
+        age = now - last_success
+        return timedelta(seconds=-5) <= age <= timedelta(seconds=60)
+
+    def fallback_provider_for_inflight_apply(
+        self, project_id: str, run_id: str, primary_provider: str
+    ) -> str | None:
+        """Return the configured rescue provider when this Apply's primary is exhausted."""
+        run = self.uow.orchestration_runs.get_by_id(run_id)
+        project = self.uow.projects.get_by_id(project_id)
+        if (
+            run is None
+            or project is None
+            or run.project_id != project_id
+            or not run.is_active
+            or run.current_stage != OrchestrationStage.IMPLEMENTING
+        ):
+            return None
+
+        def normalize_provider(value: str) -> str:
+            normalized = value.strip().lower()
+            return "antigravity" if normalized == "agy" else normalized
+
+        implementer_provider = normalize_provider(project.implementer)
+        primary_providers = {
+            implementer_provider,
+            normalize_provider(project.reviewer),
+        }
+        if normalize_provider(primary_provider) != implementer_provider:
+            return None
+        now = utc_now()
+        health = self.health_service.get_existing_health(implementer_provider)
+        if health is None or health.status not in {
+            ProviderHealthStatus.EXHAUSTED,
+            ProviderHealthStatus.TEMPORARILY_UNAVAILABLE,
+        }:
+            return None
+        if health.last_result_class not in {
+            ProviderResultClass.QUOTA_LIMIT,
+            ProviderResultClass.RATE_LIMIT,
+        }:
+            return None
+        failed_at = health.last_failure_at
+        if failed_at is None:
+            return None
+        if failed_at.tzinfo is None:
+            failed_at = failed_at.replace(tzinfo=now.tzinfo)
+        age = now - failed_at
+        if age > timedelta(minutes=5) or age < timedelta(seconds=-5):
+            return None
+
+        profile = project.agent_profiles.get("fallback")
+        if hasattr(profile, "model_dump"):
+            profile = profile.model_dump()
+        if not isinstance(profile, dict):
+            return None
+        provider = str(
+            profile.get("harness_id") or profile.get("agent_id") or profile.get("provider_id") or ""
+        ).strip().lower()
+        if provider in {"agy", "antigravity"}:
+            provider = "antigravity"
+        if not provider or provider in primary_providers:
+            return None
+        return provider

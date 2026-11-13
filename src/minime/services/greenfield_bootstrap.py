@@ -1272,22 +1272,13 @@ class GreenfieldBootstrapCoordinator:
 
     @staticmethod
     def _selected_profiles(project: Project) -> dict[str, Any]:
-        profiles = project.agent_profiles
-        if project.execution_policy.get("fallback_authorized", False):
-            return dict(profiles)
-        return {role: value for role, value in profiles.items() if role != "fallback"}
+        return dict(project.agent_profiles)
 
     @staticmethod
     def _selected_agents(project: Project, *, roles: tuple[str, ...] | None = None) -> list[str]:
         profiles = project.agent_profiles
         if roles is not None:
             profiles = {role: profiles[role] for role in roles}
-        elif not project.execution_policy.get("fallback_authorized", False):
-            profiles = {
-                role: value
-                for role, value in profiles.items()
-                if role != "fallback"
-            }
         return sorted({str(value.get("agent_id", "")).lower() for value in profiles.values() if isinstance(value, dict) and value.get("agent_id")})
 
     def _configured_root(self, project: Project) -> str | None:

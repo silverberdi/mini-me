@@ -38,7 +38,6 @@ from minime.db.models import (
     JobHandoffModel,
     JobLogModel,
     JobModel,
-    OpenRouterBudgetPolicyModel,
     OpenRouterPricingSnapshotModel,
     OperatorActionRecordModel,
     OrchestrationCandidateModel,
@@ -136,7 +135,6 @@ from minime.domain.interfaces import (
     JobLogRepositoryInterface,
     JobRepositoryInterface,
     MetricFactRepositoryInterface,
-    OpenRouterBudgetPolicyRepositoryInterface,
     OpenRouterPricingSnapshotRepositoryInterface,
     OperatorActionRepositoryInterface,
     OrchestrationCandidateRepositoryInterface,
@@ -191,7 +189,6 @@ from minime.domain.models import (
     JobHandoff,
     JobLog,
     MetricFact,
-    OpenRouterBudgetPolicy,
     OpenRouterPricingSnapshot,
     OperatorActionRecord,
     OrchestrationCandidate,
@@ -242,7 +239,6 @@ def project_model_to_domain(model: ProjectModel) -> Project:
         reviewer=model.reviewer,
         checks=model.checks or [],
         external_providers_allowed=model.external_providers_allowed or [],
-        openrouter_drain_allowed=model.openrouter_drain_allowed,
         independent_audit_required=getattr(model, "independent_audit_required", False),
         strict_validation_required=getattr(model, "strict_validation_required", True),
         verify_gate_required=getattr(model, "verify_gate_required", True),
@@ -630,19 +626,6 @@ def audit_model_to_domain(model: AuditModel) -> AuditRecord:
     )
 
 
-def budget_policy_model_to_domain(model: OpenRouterBudgetPolicyModel) -> OpenRouterBudgetPolicy:
-    return OpenRouterBudgetPolicy(
-        project_id=model.project_id,
-        enabled=model.enabled,
-        daily_cap_usd=_to_decimal(model.daily_cap_usd),
-        monthly_cap_usd=_to_decimal(model.monthly_cap_usd),
-        currency=model.currency,
-        policy_version=model.policy_version,
-        is_breached=model.is_breached,
-        updated_at=model.updated_at,
-    )
-
-
 def pricing_snapshot_model_to_domain(
     model: OpenRouterPricingSnapshotModel,
 ) -> OpenRouterPricingSnapshot:
@@ -915,7 +898,6 @@ class PostgresProjectRepository(ProjectRepositoryInterface):
             existing.reviewer = project.reviewer
             existing.checks = project.checks
             existing.external_providers_allowed = project.external_providers_allowed
-            existing.openrouter_drain_allowed = project.openrouter_drain_allowed
             existing.independent_audit_required = project.independent_audit_required
             existing.strict_validation_required = project.strict_validation_required
             existing.verify_gate_required = project.verify_gate_required
@@ -943,7 +925,6 @@ class PostgresProjectRepository(ProjectRepositoryInterface):
                 reviewer=project.reviewer,
                 checks=project.checks,
                 external_providers_allowed=project.external_providers_allowed,
-                openrouter_drain_allowed=project.openrouter_drain_allowed,
                 independent_audit_required=project.independent_audit_required,
                 strict_validation_required=project.strict_validation_required,
                 verify_gate_required=project.verify_gate_required,
@@ -2316,51 +2297,6 @@ class PostgresGitOperationRepository(GitOperationRepositoryInterface):
         if completed_at:
             model.completed_at = completed_at
         return git_operation_model_to_domain(model)
-
-
-class PostgresOpenRouterBudgetPolicyRepository(OpenRouterBudgetPolicyRepositoryInterface):
-    def __init__(self, session: Session):
-        self.session = session
-
-    def get_by_project_id(self, project_id: str) -> OpenRouterBudgetPolicy | None:
-        model = self.session.get(OpenRouterBudgetPolicyModel, project_id)
-        return budget_policy_model_to_domain(model) if model else None
-
-    def get_for_update(self, project_id: str) -> OpenRouterBudgetPolicy | None:
-        model = self.session.scalars(
-            select(OpenRouterBudgetPolicyModel)
-            .where(OpenRouterBudgetPolicyModel.project_id == project_id)
-            .with_for_update()
-        ).first()
-        return budget_policy_model_to_domain(model) if model else None
-
-    def save(self, policy: OpenRouterBudgetPolicy) -> None:
-        existing = self.session.get(OpenRouterBudgetPolicyModel, policy.project_id)
-        if existing:
-            existing.enabled = policy.enabled
-            existing.daily_cap_usd = policy.daily_cap_usd
-            existing.monthly_cap_usd = policy.monthly_cap_usd
-            existing.currency = policy.currency
-            existing.policy_version = policy.policy_version
-            existing.is_breached = policy.is_breached
-            existing.updated_at = policy.updated_at
-            return
-        self.session.add(
-            OpenRouterBudgetPolicyModel(
-                project_id=policy.project_id,
-                enabled=policy.enabled,
-                daily_cap_usd=policy.daily_cap_usd,
-                monthly_cap_usd=policy.monthly_cap_usd,
-                currency=policy.currency,
-                policy_version=policy.policy_version,
-                is_breached=policy.is_breached,
-                updated_at=policy.updated_at,
-            )
-        )
-
-    def get_by_project(self, project_id: str) -> OpenRouterBudgetPolicy | None:
-        model = self.session.get(OpenRouterBudgetPolicyModel, project_id)
-        return budget_policy_model_to_domain(model) if model else None
 
 
 class PostgresOpenRouterPricingSnapshotRepository(OpenRouterPricingSnapshotRepositoryInterface):
@@ -5431,7 +5367,6 @@ class PostgresPersistenceUnitOfWork(PersistenceUnitOfWork):
         self.provider_health = PostgresProviderHealthRepository(session)
         self.capacity_windows = PostgresCapacityWindowRepository(session)
         self.git_operations = PostgresGitOperationRepository(session)
-        self.budget_policies = PostgresOpenRouterBudgetPolicyRepository(session)
         self.pricing_snapshots = PostgresOpenRouterPricingSnapshotRepository(session)
         self.budget_reservations = PostgresBudgetReservationRepository(session)
         self.budget_ledger = PostgresBudgetLedgerRepository(session)

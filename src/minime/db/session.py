@@ -24,7 +24,7 @@ class SchemaInvariantResult:
     reason: str | None = None
 
 
-EXPECTED_ALEMBIC_HEAD = "poda01_retire_orphaned_persistence"
+EXPECTED_ALEMBIC_HEAD = "req374_remove_artificial_budget_caps"
 
 
 def verify_physical_schema_invariants(engine: Engine) -> SchemaInvariantResult:
