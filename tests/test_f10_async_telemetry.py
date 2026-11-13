@@ -1,4 +1,5 @@
 import asyncio
+from types import SimpleNamespace
 
 import pytest
 
@@ -6,6 +7,7 @@ from minime.services.event_broker import EventBroker
 from minime.services.quota_telemetry import (
     QuotaObservation,
     QuotaTelemetryService,
+    ProviderQuotaStrategy,
     parse_five_hour_usage,
 )
 
@@ -59,6 +61,68 @@ async def test_quota_api_does_not_invent_provider_balances_or_percentages(monkey
     assert response["providers"] == observed
     assert "openrouter" not in response
     assert "deepseek" not in response
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "data",
+    [
+        {"total_usage": 1.0},
+        {"total_credits": 0.0, "total_usage": 0.0},
+        {"total_credits": 10.0},
+    ],
+)
+async def test_openrouter_missing_or_zero_credit_totals_are_unknown(monkeypatch, data):
+    class Client:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_args):
+            return None
+
+        async def get(self, *_args, **_kwargs):
+            return SimpleNamespace(status_code=200, json=lambda: {"data": data})
+
+    monkeypatch.setattr("minime.services.quota_telemetry.httpx.AsyncClient", lambda **_kwargs: Client())
+    adapter = SimpleNamespace(_api_key=lambda: "test-key", _base_url="https://openrouter.test")
+
+    observation = await ProviderQuotaStrategy("openrouter")._observe_openrouter(
+        adapter, "2026-11-12T12:00:00+00:00"
+    )
+
+    assert observation.state == "UNKNOWN"
+    assert observation.balance is None
+    assert observation.remaining_percent is None
+    assert observation.reason == "missing_or_invalid_credit_totals"
+
+
+@pytest.mark.asyncio
+async def test_openrouter_reports_percent_only_from_valid_provider_totals(monkeypatch):
+    class Client:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_args):
+            return None
+
+        async def get(self, *_args, **_kwargs):
+            return SimpleNamespace(
+                status_code=200,
+                json=lambda: {"data": {"total_credits": 20.0, "total_usage": 5.0}},
+            )
+
+    monkeypatch.setattr("minime.services.quota_telemetry.httpx.AsyncClient", lambda **_kwargs: Client())
+    adapter = SimpleNamespace(_api_key=lambda: "test-key", _base_url="https://openrouter.test")
+
+    observation = await ProviderQuotaStrategy("openrouter")._observe_openrouter(
+        adapter, "2026-11-12T12:00:00+00:00"
+    )
+
+    assert observation.state == "AVAILABLE"
+    assert observation.balance == 15.0
+    assert observation.remaining_percent == 75.0
+    assert observation.source == "openrouter_credits"
+    assert observation.observed_at == "2026-11-12T12:00:00+00:00"
 
 
 @pytest.mark.asyncio

@@ -5,7 +5,7 @@ Mini Me can block configured provider use because of a legacy project budget row
 ## What Changes
 
 - Remove mandatory Mini Me daily/monthly caps, per-project OpenRouter budget authorization rows, and their breach/headroom checks as prerequisites for configured provider dispatch.
-- Treat the operator-configured provider role/profile as the ordinary provider selection; preserve the OpenRouter rescue eligibility and pipeline safeguards defined by the rector contract, including in-flight-only use, verified exhaustion of both primary providers, and no reviewer or new-work bypass.
+- Treat the operator-configured provider role/profile as the ordinary provider selection; preserve the OpenRouter rescue eligibility and pipeline safeguards defined by the rector contract, including in-flight-only use, verified exhaustion of the provider assigned to the blocked execution stage, exact fallback profile identity, and no reviewer or new-work bypass.
 - On actual provider quota, balance, rate-limit, credential, or model failures, report the observed provider outcome and preserve the in-flight work; do not disguise a local artificial cap as a provider failure or silently substitute another provider.
 - Preserve provider-reported usage, cost, source, and observation time as durable evidence; retain unresolved outcomes and historical ledger data without using them as invented daily/monthly admission limits.
 - Remove obsolete budget controls and projections from active specs, configuration, APIs, CLI, UI, and persistence where no remaining consumer needs them; preserve history and any separate explicitly configured reviewer controls required by the rector contract.

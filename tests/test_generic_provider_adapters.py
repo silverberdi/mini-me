@@ -96,9 +96,7 @@ async def test_operator_reported_reset(in_memory_uow):
     assert latest.source_signal == CapacitySignalSource.OPERATOR_REPORTED
 
 
-def test_capacity_lifecycle_selects_fallback_only_for_active_apply_and_dual_exhaustion(
-    in_memory_uow,
-):
+def test_capacity_lifecycle_selects_fallback_for_apply_without_reviewer_exhaustion(in_memory_uow):
     from datetime import timedelta
 
     from minime.domain.enums import OrchestrationStage
@@ -132,18 +130,24 @@ def test_capacity_lifecycle_selects_fallback_only_for_active_apply_and_dual_exha
             is_active=True,
         )
     )
-    for provider in ("codex", "antigravity"):
+    for provider, status, result_class in (
+        ("codex", ProviderHealthStatus.EXHAUSTED, ProviderResultClass.QUOTA_LIMIT),
+        ("antigravity", ProviderHealthStatus.AVAILABLE, ProviderResultClass.SUCCESS),
+    ):
         in_memory_uow.provider_health.save(
             ProviderHealth(
                 provider=provider,
-                status=ProviderHealthStatus.EXHAUSTED,
-                last_result_class=ProviderResultClass.QUOTA_LIMIT,
-                last_failure_at=now - timedelta(seconds=10),
+                status=status,
+                last_result_class=result_class,
+                last_failure_at=(now - timedelta(seconds=10)) if status == ProviderHealthStatus.EXHAUSTED else None,
+                last_success_at=now if status == ProviderHealthStatus.AVAILABLE else None,
                 updated_at=now,
             )
         )
 
     service = CapacityLifecycleService(in_memory_uow)
+    # Apply's execution provider is exhausted; a healthy independent reviewer
+    # must not prevent the configured fallback from continuing Apply.
     assert service.fallback_provider_for_inflight_apply("test-proj", "run-1", "codex") == "opencode"
     assert service.fallback_provider_for_inflight_apply("test-proj", "missing-run", "codex") is None
 
@@ -166,12 +170,14 @@ def test_capacity_lifecycle_selects_fallback_only_for_active_apply_and_dual_exha
     in_memory_uow.provider_health.save(
         ProviderHealth(
             provider="antigravity",
-            status=ProviderHealthStatus.AVAILABLE,
-            last_result_class=ProviderResultClass.SUCCESS,
-            last_success_at=now,
+            status=ProviderHealthStatus.EXHAUSTED,
+            last_result_class=ProviderResultClass.QUOTA_LIMIT,
+            last_failure_at=now - timedelta(seconds=10),
             updated_at=now,
         )
     )
+    # Healthy Apply still stays on the configured execution provider even if
+    # the reviewer provider is exhausted.
     assert service.fallback_provider_for_inflight_apply("test-proj", "run-1", "codex") is None
 
 

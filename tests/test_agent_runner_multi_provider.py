@@ -48,7 +48,9 @@ def test_resolve_workflow_supports_antigravity(tmp_path: Path):
 
 
 @pytest.mark.asyncio
-async def test_inflight_apply_uses_configured_fallback_profile_and_native_workflow(tmp_path: Path):
+async def test_inflight_apply_uses_configured_fallback_profile_and_native_workflow(
+    tmp_path: Path, monkeypatch
+):
     skill = tmp_path / ".agents" / "skills" / "openspec-apply-change" / "SKILL.md"
     skill.parent.mkdir(parents=True)
     skill.write_text("# Native Apply workflow\n")
@@ -75,6 +77,23 @@ async def test_inflight_apply_uses_configured_fallback_profile_and_native_workfl
         canonical_provider_id="openrouter",
         harness_id="opencode",
     )
+    from minime.config import AppConfig, OpenCodeCapabilityConfig, ProjectConfig
+
+    app_config = AppConfig(
+        projects={
+            "p1": ProjectConfig(
+                repository="org/repo",
+                opencode=OpenCodeCapabilityConfig(
+                    enabled=True,
+                    provider="deepseek",
+                    model="deepseek/deepseek-flash",
+                    api_key_env="DEEPSEEK_API_KEY",
+                    roles=["execution"],
+                ),
+            )
+        }
+    )
+    monkeypatch.setattr("minime.services.agent_runner.load_config", lambda: app_config)
     runner = CliAgentRunner(
         capacity_service=Capacity(),
         profiles={("fallback", "opencode"): fallback},

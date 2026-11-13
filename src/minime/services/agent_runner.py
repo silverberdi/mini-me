@@ -672,14 +672,35 @@ class CliAgentRunner:
                     workflow=workflow,
                 )
 
-            if not opencode_cfg.enabled:
+            if selected_profile_name == "fallback" or not opencode_cfg.enabled:
                 if opencode_role == "thinking":
                     profile_key = "thinking"
                 elif opencode_role == "independent_review":
                     profile_key = "independent_review"
                 else:
                     profile_key = selected_profile_name or "execution"
-                p = self.profiles.get((profile_key, "opencode")) if hasattr(self, "profiles") and self.profiles else None
+                p = (
+                    invocation_profile
+                    if selected_profile_name == "fallback"
+                    else (
+                        self.profiles.get((profile_key, "opencode"))
+                        if hasattr(self, "profiles") and self.profiles
+                        else None
+                    )
+                )
+                if selected_profile_name == "fallback" and p is None:
+                    return AgentExecutionResult(
+                        exit_code=-2,
+                        timed_out=False,
+                        stdout=[],
+                        stderr=["The configured fallback profile is unavailable for OpenCode."],
+                        duration_ms=0,
+                        environment_error=True,
+                        workflow=workflow,
+                        provider_used=provider_evidence,
+                        profile_used=selected_profile_name,
+                        model_used=model_evidence,
+                    )
                 if p:
                     # Canonical OpenCode model identity, e.g. deepseek/deepseek-v4-pro
                     # or openrouter/deepseek/...; legacy bare ids are normalized below.
@@ -687,7 +708,11 @@ class CliAgentRunner:
                     model_val = OPENCODE_DEEPSEEK_MODEL_ALIASES.get(model_val, model_val)
                     # Route by transport prefix, not by the mere presence of a "/":
                     # deepseek/* is the direct DeepSeek API, openrouter/* is OpenRouter.
-                    is_openrouter = model_val.lower().startswith("openrouter/")
+                    canonical_provider = (p.canonical_provider_id or "").strip().lower()
+                    is_openrouter = (
+                        canonical_provider == "openrouter"
+                        or model_val.lower().startswith("openrouter/")
+                    )
                     if not is_openrouter and model_val not in OPENCODE_DEEPSEEK_MODELS:
                         # Fail closed instead of dispatching an invalid --model.
                         return AgentExecutionResult(
@@ -704,12 +729,17 @@ class CliAgentRunner:
                         )
                     opencode_cfg = OpenCodeCapabilityConfig(
                         enabled=True,
-                        executable=p.executable or "opencode",
+                        executable=p.executable or opencode_cfg.executable or "opencode",
                         provider="openrouter" if is_openrouter else "deepseek",
                         model=model_val,
                         api_key_env="OPENROUTER_API_KEY" if is_openrouter else "DEEPSEEK_API_KEY",
-                        roles=["thinking", "execution", "independent_review"],
-                        args=[],
+                        roles=(
+                            opencode_cfg.roles
+                            if opencode_cfg.enabled
+                            else ["thinking", "execution", "independent_review"]
+                        ),
+                        args=opencode_cfg.args if opencode_cfg.enabled else [],
+                        timeout_seconds=opencode_cfg.timeout_seconds,
                     )
 
             # Pass the resolved operation through unchanged so the adapter's

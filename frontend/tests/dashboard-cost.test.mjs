@@ -16,6 +16,11 @@ test('dashboard renders ledger costs by provider/model and has an explicit no-da
   assert.doesNotMatch(dashboard, /displayVal = 'CLI'/);
 });
 
+test('provider quota labels preserve observation source and timestamp', () => {
+  assert.match(dashboard, /fuente \$\{quota\.source\}; observado \$\{quota\.observed_at\}/);
+  assert.match(dashboard, /this\.observationDetails\(q\)/);
+});
+
 test('the dashboard cost chart maps API series to the SVG view model', async () => {
   const source = await readFile(
     new URL('../src/app/features/dashboard/dashboard-cost-chart.ts', import.meta.url),

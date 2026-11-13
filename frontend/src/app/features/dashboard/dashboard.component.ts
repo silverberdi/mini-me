@@ -4,6 +4,7 @@ import { RouterModule } from '@angular/router';
 import { RefreshService } from '../../core/refresh.service';
 import { AnalogGaugeComponent } from '../../shared/analog-gauge.component';
 import { toDashboardCostChartPoints } from './dashboard-cost-chart';
+import type { QuotaObservation } from '../../core/models';
 
 @Component({
   selector: 'app-dashboard',
@@ -276,6 +277,10 @@ export class DashboardComponent {
     return this.refresh.quotas().find(q => q.provider.toLowerCase() === provider.toLowerCase());
   }
 
+  private observationDetails(quota: QuotaObservation): string {
+    return `fuente ${quota.source}; observado ${quota.observed_at}`;
+  }
+
   get codexValue(): number | null {
     const q = this.getQuota('codex');
     return q?.remaining_percent ?? null;
@@ -283,9 +288,9 @@ export class DashboardComponent {
 
   get codexSublabel(): string {
     const q = this.getQuota('codex');
-    if (!q || q.remaining_percent == null) return q ? `Estado observado: ${q.state}; porcentaje no disponible` : 'No disponible (sin telemetría)';
+    if (!q || q.remaining_percent == null) return q ? `Estado observado: ${q.state}; porcentaje no disponible; ${this.observationDetails(q)}` : 'No disponible (sin telemetría)';
     const model = q.model_id || 'Codex';
-    return `${model} (${q.remaining_percent}% disponible; fuente ${q.source})`;
+    return `${model} (${q.remaining_percent}% disponible; ${this.observationDetails(q)})`;
   }
 
   get antigravityValue(): number | null {
@@ -295,9 +300,9 @@ export class DashboardComponent {
 
   get antigravitySublabel(): string {
     const q = this.getQuota('antigravity');
-    if (!q || q.remaining_percent == null) return q ? `Estado observado: ${q.state}; porcentaje no disponible` : 'No disponible (sin telemetría)';
+    if (!q || q.remaining_percent == null) return q ? `Estado observado: ${q.state}; porcentaje no disponible; ${this.observationDetails(q)}` : 'No disponible (sin telemetría)';
     const model = q.model_id || 'Antigravity';
-    return `${model} (${q.remaining_percent}% disponible; fuente ${q.source})`;
+    return `${model} (${q.remaining_percent}% disponible; ${this.observationDetails(q)})`;
   }
 
   get deepseekValue(): number | null {
@@ -308,9 +313,9 @@ export class DashboardComponent {
   get deepseekSublabel(): string {
     const q = this.getQuota('deepseek');
     if (q?.balance !== null && q?.balance !== undefined) {
-      return `$${q.balance.toFixed(2)} ${q.currency || 'USD'} observado; porcentaje no disponible`;
+      return `$${q.balance.toFixed(2)} ${q.currency || 'USD'} observado; porcentaje no disponible; ${this.observationDetails(q)}`;
     }
-    return q ? `Estado observado: ${q.state}; saldo no disponible` : 'No disponible (sin telemetría)';
+    return q ? `Estado observado: ${q.state}; saldo no disponible; ${this.observationDetails(q)}` : 'No disponible (sin telemetría)';
   }
 
   get openrouterValue(): number | null {
@@ -321,9 +326,9 @@ export class DashboardComponent {
   get openrouterSublabel(): string {
     const q = this.getQuota('openrouter');
     if (q?.balance !== null && q?.balance !== undefined) {
-      return `$${q.balance.toFixed(2)} ${q.currency || 'USD'} observado; porcentaje no disponible`;
+      return `$${q.balance.toFixed(2)} ${q.currency || 'USD'} observado; porcentaje no disponible; ${this.observationDetails(q)}`;
     }
-    return q ? `Estado observado: ${q.state}; saldo no disponible` : 'No disponible (sin telemetría)';
+    return q ? `Estado observado: ${q.state}; saldo no disponible; ${this.observationDetails(q)}` : 'No disponible (sin telemetría)';
   }
 
   get currentDimensionTitle(): string {

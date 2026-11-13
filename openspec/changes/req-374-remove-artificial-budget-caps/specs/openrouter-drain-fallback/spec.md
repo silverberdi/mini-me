@@ -21,6 +21,10 @@ The system SHALL use the configured fallback profile for eligible in-flight work
 - **WHEN** an in-flight execution is eligible under the configured provider-capacity and pipeline policy and the fallback profile is configured
 - **THEN** Mini Me invokes that configured profile without a legacy budget-policy/headroom check and records the provider result
 
+#### Scenario: Apply fallback is independent of reviewer-provider health
+- **WHEN** the primary provider assigned to an active Apply is quota-limited, the independent reviewer provider remains available, and the configured fallback profile supports Apply
+- **THEN** Mini Me invokes the configured fallback for Apply with its exact provider and model, without changing or bypassing the independent reviewer role
+
 #### Scenario: Missing or unavailable fallback profile
 - **WHEN** in-flight work is eligible but the fallback profile or its required credentials are not configured
 - **THEN** Mini Me does not dispatch and reports the precise configuration/capability gap

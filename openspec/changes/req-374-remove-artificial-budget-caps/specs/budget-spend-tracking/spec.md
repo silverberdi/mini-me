@@ -40,3 +40,11 @@ The system SHALL record provider-reported cost and usage with provider identity,
 #### Scenario: Unobserved provider balance is not fabricated
 - **WHEN** a provider does not report a balance or remaining percentage
 - **THEN** Mini Me reports the value as unavailable in its API and dashboard instead of substituting a fixed balance, total, model, or percentage
+
+#### Scenario: Missing or zero credit denominator remains unknown
+- **WHEN** a provider credit response omits `total_credits`, reports it as zero, or omits the usage needed to calculate the balance
+- **THEN** Mini Me reports the balance and percentage as unavailable with an unknown state, and SHALL NOT classify the provider as exhausted from missing data
+
+#### Scenario: Dashboard identifies provider observation provenance
+- **WHEN** the dashboard displays a provider balance or percentage
+- **THEN** it displays the observation source and observation time alongside the value

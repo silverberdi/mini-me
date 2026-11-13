@@ -179,7 +179,7 @@ class CapacityLifecycleService:
     def fallback_provider_for_inflight_apply(
         self, project_id: str, run_id: str, primary_provider: str
     ) -> str | None:
-        """Return the configured rescue provider only for a verified dual-primary outage."""
+        """Return the configured rescue provider when this Apply's primary is exhausted."""
         run = self.uow.orchestration_runs.get_by_id(run_id)
         project = self.uow.projects.get_by_id(project_id)
         if (
@@ -191,34 +191,37 @@ class CapacityLifecycleService:
         ):
             return None
 
-        primary_providers = {project.implementer, project.reviewer}
-        if len(primary_providers) < 2:
-            return None
-        if primary_provider == "agy":
-            primary_provider = "antigravity"
-        if primary_provider not in primary_providers:
+        def normalize_provider(value: str) -> str:
+            normalized = value.strip().lower()
+            return "antigravity" if normalized == "agy" else normalized
+
+        implementer_provider = normalize_provider(project.implementer)
+        primary_providers = {
+            implementer_provider,
+            normalize_provider(project.reviewer),
+        }
+        if normalize_provider(primary_provider) != implementer_provider:
             return None
         now = utc_now()
-        for provider in primary_providers:
-            health = self.health_service.get_existing_health(provider)
-            if health is None or health.status not in {
-                ProviderHealthStatus.EXHAUSTED,
-                ProviderHealthStatus.TEMPORARILY_UNAVAILABLE,
-            }:
-                return None
-            if health.last_result_class not in {
-                ProviderResultClass.QUOTA_LIMIT,
-                ProviderResultClass.RATE_LIMIT,
-            }:
-                return None
-            failed_at = health.last_failure_at
-            if failed_at is None:
-                return None
-            if failed_at.tzinfo is None:
-                failed_at = failed_at.replace(tzinfo=now.tzinfo)
-            age = now - failed_at
-            if age > timedelta(minutes=5) or age < timedelta(seconds=-5):
-                return None
+        health = self.health_service.get_existing_health(implementer_provider)
+        if health is None or health.status not in {
+            ProviderHealthStatus.EXHAUSTED,
+            ProviderHealthStatus.TEMPORARILY_UNAVAILABLE,
+        }:
+            return None
+        if health.last_result_class not in {
+            ProviderResultClass.QUOTA_LIMIT,
+            ProviderResultClass.RATE_LIMIT,
+        }:
+            return None
+        failed_at = health.last_failure_at
+        if failed_at is None:
+            return None
+        if failed_at.tzinfo is None:
+            failed_at = failed_at.replace(tzinfo=now.tzinfo)
+        age = now - failed_at
+        if age > timedelta(minutes=5) or age < timedelta(seconds=-5):
+            return None
 
         profile = project.agent_profiles.get("fallback")
         if hasattr(profile, "model_dump"):
