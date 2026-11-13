@@ -41,8 +41,10 @@ from minime.db.session import db_manager
 from minime.domain.enums import (
     AuthEventType,
     EventType,
+    HumanGate,
     OperatorActionType,
     OperatorAuthDecision,
+    OrchestrationStopOutcome,
     ProjectType,
 )
 from minime.domain.interfaces import PersistenceUnitOfWork
@@ -60,6 +62,16 @@ from minime.domain.models import (
     get_active_human_payload,
 )
 from minime.logging import redact_secrets
+from minime.services.apply_checkpoint_recovery import (
+    PRESERVE_RESPONSE as APPLY_RECOVERY_PRESERVE_RESPONSE,
+)
+from minime.services.apply_checkpoint_recovery import (
+    REBASELINE_RESPONSE as APPLY_RECOVERY_REBASELINE_RESPONSE,
+)
+from minime.services.apply_checkpoint_recovery import (
+    diagnose_lost_apply_checkpoint,
+    recovery_gate_payload,
+)
 from minime.services.auth_service import (
     AuthorizedOperatorService,
     GoogleOidcService,
@@ -75,11 +87,11 @@ from minime.services.greenfield_bootstrap import (
     GreenfieldBootstrapCoordinator,
     GreenfieldBootstrapError,
 )
+from minime.services.postgres_run_event_listener import PostgresRunEventListener
 from minime.services.project_catalog_service import ProjectCatalogService
 from minime.services.project_connection_service import ProjectConnectionService
 from minime.services.project_service import ProjectService
 from minime.services.provider_health_service import ProviderHealthService
-from minime.services.postgres_run_event_listener import PostgresRunEventListener
 from minime.services.provider_registry import (
     CanonicalProfileResolver,
     CustomModelRequest,
@@ -1184,6 +1196,45 @@ class ProjectRequestRunPayload(BaseModel):
     reviewer_provider: str | None = None
 
 
+def _diagnose_apply_checkpoint_recovery(uow: Any, run: Any) -> dict[str, Any] | None:
+    """Project only the persisted legacy no-op Update sequence; never infer task state."""
+    stage = getattr(getattr(run, "current_stage", None), "value", getattr(run, "current_stage", None))
+    details = getattr(run, "stop_details", None) or {}
+    gate = details.get("human_payload") or {}
+    checkpoint = details.get("apply_gate_update") or {}
+    persisted = details.get("apply_checkpoint_recovery") or {}
+    if persisted.get("status") == "BLOCKED":
+        return dict(persisted)
+    if (
+        not getattr(run, "is_active", False)
+        or stage != "IMPLEMENTING"
+        or gate.get("gate") not in {"apply_escalation", "apply_checkpoint_recovery"}
+        or checkpoint.get("status") != "VALIDATED"
+        or checkpoint.get("changed") is not False
+        or checkpoint.get("reclassified_tasks") != []
+    ):
+        return None
+    actions_repo = getattr(uow, "operator_actions", None)
+    events_repo = getattr(uow, "orchestration_stage_events", None)
+    actions = actions_repo.list_by_run(run.run_id) if actions_repo is not None else []
+    events = events_repo.list_by_run(run.run_id) if events_repo is not None else []
+    return diagnose_lost_apply_checkpoint(run, actions, events)
+
+
+def _persist_projected_human_gate(
+    uow: Any, run: Any, payload: dict[str, Any], *, commit: bool = True
+) -> None:
+    details = dict(run.stop_details or {})
+    details["human_payload"] = payload
+    run.stop_details = details
+    run.human_gate = HumanGate.NEEDS_HUMAN
+    run.stop_outcome = OrchestrationStopOutcome.NEEDS_HUMAN
+    run.stop_reason = payload.get("question")
+    uow.orchestration_runs.save(run)
+    if commit:
+        uow.commit()
+
+
 class RunCancellationPayload(BaseModel):
     reason: str = Field(min_length=1, max_length=500)
     idempotency_key: str = Field(min_length=1, max_length=128)
@@ -1655,6 +1706,32 @@ async def run_project_request(
         if active_run is None or not active_run.is_active:
             raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="The active run changed before the gate response was accepted")
         active_payload = get_active_human_payload(active_run)
+        recovery_diagnosis = _diagnose_apply_checkpoint_recovery(uow, active_run)
+        if recovery_diagnosis is not None:
+            active_payload = recovery_gate_payload(active_run, recovery_diagnosis)
+            if (
+                recovery_diagnosis.get("status") != "RECOVERABLE"
+                or response_text.strip() not in {
+                    APPLY_RECOVERY_REBASELINE_RESPONSE,
+                    APPLY_RECOVERY_PRESERVE_RESPONSE,
+                }
+            ):
+                _persist_projected_human_gate(uow, active_run, active_payload)
+                return {
+                    "status": "HUMAN_REQUIRED",
+                    "run_id": active_run.run_id,
+                    "human_payload": active_payload,
+                    "message": active_payload["question"],
+                }
+            if response_text.strip() == APPLY_RECOVERY_PRESERVE_RESPONSE:
+                _persist_projected_human_gate(uow, active_run, active_payload)
+                return {
+                    "status": "HUMAN_REQUIRED",
+                    "run_id": active_run.run_id,
+                    "human_payload": active_payload,
+                    "message": "El Run sigue detenido y el worktree se conserva.",
+                }
+            _persist_projected_human_gate(uow, active_run, active_payload)
         if not isinstance(active_payload, dict):
             raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="There is no current human gate to answer")
         gate_fingerprint = hashlib.sha256(json.dumps({
@@ -2337,6 +2414,9 @@ def list_orchestration_runs(
         stop_details = d.get("stop_details") or {}
         current_stage = getattr(r.current_stage, "value", r.current_stage)
         active_payload = get_active_human_payload(r)
+        recovery_diagnosis = _diagnose_apply_checkpoint_recovery(uow, r)
+        if recovery_diagnosis is not None:
+            active_payload = recovery_gate_payload(r, recovery_diagnosis)
         if active_payload is not None:
             stop_details["human_payload"] = active_payload
         else:
