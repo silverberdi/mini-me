@@ -1617,8 +1617,7 @@ class NativeOrchestrationCoordinator:
         feasibility_gate = pending_gate if isinstance(pending_gate, dict) else {}
         prior_feasibility = (active_run.stop_details or {}).get("complexity_assessment")
         legacy_feasibility_missing = (
-            active_run.current_stage
-            in {OrchestrationStage.READY_TO_APPLY, OrchestrationStage.IMPLEMENTING}
+            active_run.current_stage == OrchestrationStage.READY_TO_APPLY
             and (
                 not isinstance(prior_feasibility, dict)
                 or prior_feasibility.get("feasibility_status") != "EXECUTABLE"
