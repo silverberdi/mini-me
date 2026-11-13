@@ -52,6 +52,13 @@ from minime.services.agent_runner import (
     NativeOpenSpecWorkflowUnavailable,
     ResolvedWorkflow,
 )
+from minime.services.apply_checkpoint_recovery import (
+    REBASELINE_RESPONSE,
+    RECOVERY_GATE,
+    diagnose_lost_apply_checkpoint,
+    human_gate_fingerprint,
+    recovery_gate_payload,
+)
 from minime.services.pr_preparer_service import PrPreparationInput, PrPreparerService
 from minime.services.proposal_feasibility import ProposalFeasibilityEvaluator
 from minime.services.remote_request_intake import RemoteRequestIntakeService
@@ -385,7 +392,8 @@ class NativeOrchestrationCoordinator:
 
     @staticmethod
     def _clear_current_human_gate(
-        uow: Any, run: OrchestrationRun, *, response_text: str | None = None
+        uow: Any, run: OrchestrationRun, *, response_text: str | None = None,
+        commit: bool = True,
     ) -> None:
         """Clear an active gate only after its existing flow confirms resolution."""
         details = dict(run.stop_details or {})
@@ -439,7 +447,7 @@ class NativeOrchestrationCoordinator:
             )
         elif runs is not None:
             runs.save(run)
-        if hasattr(uow, "commit"):
+        if commit and hasattr(uow, "commit"):
             uow.commit()
 
     def _record_pr1_acknowledgement_gate(
@@ -1590,6 +1598,35 @@ class NativeOrchestrationCoordinator:
             active_run.human_gate == HumanGate.NEEDS_HUMAN
             or active_run.stop_outcome == OrchestrationStopOutcome.NEEDS_HUMAN
         )
+        recovery = (active_run.stop_details or {}).get("apply_checkpoint_recovery") or {}
+        if (
+            operator_action_id
+            and recovery.get("status") == "AUTHORIZED"
+            and recovery.get("operator_action_id") == operator_action_id
+            and hasattr(uow, "orchestration_stage_events")
+        ):
+            replayed_apply = any(
+                event.event_type == "STAGE_INVOCATION_STARTED"
+                and ":APPLY:" in str((event.evidence_references or {}).get("claim_key") or "")
+                and (event.evidence_references or {}).get("operator_action_id") == operator_action_id
+                for event in uow.orchestration_stage_events.list_by_run(active_run.run_id)
+            )
+            if replayed_apply:
+                return OrchestrationCoordinationResult(
+                    status="HUMAN_REQUIRED" if gate_pending else "PAUSED",
+                    run_id=active_run.run_id,
+                    current_stage=active_run.current_stage,
+                    message=(
+                        str(pending_gate.get("question") or "La recuperación ya fue ejecutada.")
+                        if gate_pending and isinstance(pending_gate, dict)
+                        else "Esta autorización ya inició su Apply; no se vuelve a despachar."
+                    ),
+                    human_payload=(
+                        self._safe_human_payload(pending_gate)
+                        if gate_pending and isinstance(pending_gate, dict)
+                        else None
+                    ),
+                )
         accepted_response = operator_clarification and operator_clarification.strip()
         if gate_pending and not accepted_response and not operator_ack:
             if isinstance(pending_gate, dict):
@@ -1616,6 +1653,56 @@ class NativeOrchestrationCoordinator:
             change_name=change_name,
         )
         worktree_path = worktree_info.path
+
+        accepted_checkpoint_recovery_response = False
+        if entry_stage == OrchestrationStage.IMPLEMENTING and gate_pending:
+            recovery_diagnosis = self._diagnose_apply_checkpoint_recovery(uow, active_run)
+            current_gate = get_active_human_payload(active_run) or {}
+            if recovery_diagnosis is not None:
+                recovery_gate = recovery_gate_payload(active_run, recovery_diagnosis)
+                if current_gate.get("gate") != RECOVERY_GATE:
+                    payload = self._record_current_human_gate(
+                        uow, active_run, gate=RECOVERY_GATE,
+                        question=recovery_gate["question"],
+                        options=recovery_gate["options"],
+                        payload={key: value for key, value in recovery_gate.items()
+                                 if key not in {"gate_id", "gate", "stage", "run_id", "question", "options"}},
+                    )
+                    return OrchestrationCoordinationResult(
+                        status="HUMAN_REQUIRED", run_id=active_run.run_id,
+                        current_stage=OrchestrationStage.IMPLEMENTING,
+                        message=payload["question"], human_payload=payload,
+                    )
+                if (
+                    recovery_diagnosis.get("status") != "RECOVERABLE"
+                    or (operator_clarification or "").strip() != REBASELINE_RESPONSE
+                ):
+                    return OrchestrationCoordinationResult(
+                        status="HUMAN_REQUIRED", run_id=active_run.run_id,
+                        current_stage=OrchestrationStage.IMPLEMENTING,
+                        message=current_gate.get("question", recovery_gate["question"]),
+                        human_payload=current_gate,
+                    )
+                authorized, blocked_result = await self._authorize_apply_checkpoint_recovery(
+                    uow=uow,
+                    run=active_run,
+                    worktree_path=worktree_path,
+                    change_name=change_name,
+                    diagnosis=recovery_diagnosis,
+                    gate_payload=current_gate,
+                    operator_action_id=operator_action_id,
+                    operator_response=operator_clarification,
+                )
+                if not authorized:
+                    return blocked_result
+                accepted_checkpoint_recovery_response = True
+            elif current_gate.get("gate") == RECOVERY_GATE:
+                return OrchestrationCoordinationResult(
+                    status="HUMAN_REQUIRED", run_id=active_run.run_id,
+                    current_stage=OrchestrationStage.IMPLEMENTING,
+                    message="La evidencia del checkpoint dejó de ser verificable; el Run permanece detenido.",
+                    human_payload=current_gate,
+                )
 
         feasibility_gate = pending_gate if isinstance(pending_gate, dict) else {}
         prior_feasibility = (active_run.stop_details or {}).get("complexity_assessment")
@@ -2557,14 +2644,17 @@ class NativeOrchestrationCoordinator:
             self._update_stage(uow, active_run, OrchestrationStage.IMPLEMENTING)
             current_gate = get_active_human_payload(active_run)
             accepted_apply_gate_response = (
-                entry_stage == OrchestrationStage.IMPLEMENTING
-                and gate_pending
-                and accepted_response
-                and operator_action_id
-                and isinstance(current_gate, dict)
-                and current_gate.get("gate") == "apply_escalation"
-                and isinstance(current_gate.get("attempts"), int)
-                and isinstance(current_gate.get("hard_limit"), int)
+                accepted_checkpoint_recovery_response
+                or (
+                    entry_stage == OrchestrationStage.IMPLEMENTING
+                    and gate_pending
+                    and accepted_response
+                    and operator_action_id
+                    and isinstance(current_gate, dict)
+                    and current_gate.get("gate") == "apply_escalation"
+                    and isinstance(current_gate.get("attempts"), int)
+                    and isinstance(current_gate.get("hard_limit"), int)
+                )
             )
             accepted_update_gate_response = (
                 entry_stage == OrchestrationStage.IMPLEMENTING
@@ -2600,6 +2690,12 @@ class NativeOrchestrationCoordinator:
                 (active_run.stop_details or {}).get("pending_corrections") or []
             )
             prior = (active_run.stop_details or {}).get("apply_snapshot")
+            if accepted_checkpoint_recovery_response:
+                prior = (
+                    (active_run.stop_details or {})
+                    .get("apply_checkpoint_recovery", {})
+                    .get("apply_baseline")
+                )
             attempts = int((active_run.stop_details or {}).get("apply_total_attempts", self._apply_attempts(active_run)))
             no_progress = int((active_run.stop_details or {}).get("apply_no_progress", 0))
             outcome = None
@@ -2720,7 +2816,15 @@ class NativeOrchestrationCoordinator:
                 )
             else:
                 authorized_reclassifications = set()
-            while attempts < hard_limit:
+            attempt_limit = min(hard_limit, attempts + 1) if accepted_checkpoint_recovery_response else hard_limit
+            recovery_context = self._apply_recovery_context(prior)
+            if accepted_checkpoint_recovery_response:
+                recovery_context += (
+                    "\nThis is the one authorized Apply continuation for the recovered checkpoint. "
+                    "Do not start deployment or a live Run. Preserve every [DEFERRED] task as unchecked, "
+                    "and do not mark pending/deferred validation complete without evidence for this candidate."
+                )
+            while attempts < attempt_limit:
                 invocation = await self._begin_stage_invocation(
                     uow, active_run, worktree_path, "APPLY",
                     allow_human_resume=bool(operator_clarification),
@@ -2738,7 +2842,7 @@ class NativeOrchestrationCoordinator:
                         lambda: self._run_apply(
                             worktree_path, implementer_provider, change_name,
                             project_id=project_id, corrections=pending_corrections,
-                            recovery_context=self._apply_recovery_context(prior),
+                            recovery_context=recovery_context,
                             run_id=active_run.run_id, base_branch=base_branch,
                             operator_response=operator_clarification,
                             process_start_observer=self._observe_stage_process(
@@ -5435,6 +5539,187 @@ class NativeOrchestrationCoordinator:
             checkpoint.get("operator_action_id") == operator_action_id
             and checkpoint.get("status") != "VALIDATED"
         )
+
+    def _diagnose_apply_checkpoint_recovery(
+        self, uow: Any, run: OrchestrationRun
+    ) -> dict[str, Any] | None:
+        actions = getattr(uow, "operator_actions", None)
+        events = getattr(uow, "orchestration_stage_events", None)
+        if actions is None or events is None:
+            return None
+        return diagnose_lost_apply_checkpoint(
+            run,
+            actions.list_by_run(run.run_id),
+            events.list_by_run(run.run_id),
+        )
+
+    async def _authorize_apply_checkpoint_recovery(
+        self,
+        *,
+        uow: Any,
+        run: OrchestrationRun,
+        worktree_path: Path,
+        change_name: str,
+        diagnosis: dict[str, Any],
+        gate_payload: dict[str, Any],
+        operator_action_id: str | None,
+        operator_response: str,
+    ) -> tuple[bool, OrchestrationCoordinationResult | None]:
+        """Atomically consume explicit recovery authorization and persist its new baseline."""
+        details = dict(run.stop_details or {})
+        action = (
+            uow.operator_actions.get_by_request_id(operator_action_id)
+            if operator_action_id and getattr(uow, "operator_actions", None) is not None
+            else None
+        )
+
+        async def block(reason: str) -> tuple[bool, OrchestrationCoordinationResult]:
+            blocked = {
+                "status": "BLOCKED",
+                "identity": diagnosis.get("identity") or {},
+                "reason": reason,
+                "prior_snapshot": diagnosis.get("prior_snapshot"),
+                "current_dispositions": diagnosis.get("current_dispositions"),
+                "prior_update": diagnosis.get("prior_update"),
+                "no_op_update": diagnosis.get("no_op_update"),
+                "prior_action_id": diagnosis.get("prior_action_id"),
+                "no_op_action_id": diagnosis.get("no_op_action_id"),
+            }
+            details["apply_checkpoint_recovery"] = blocked
+            run.stop_details = details
+            projected = recovery_gate_payload(run, blocked)
+            payload = self._record_current_human_gate(
+                uow, run, gate=RECOVERY_GATE, question=projected["question"],
+                options=projected["options"],
+                payload={key: value for key, value in projected.items()
+                         if key not in {"gate_id", "gate", "stage", "run_id", "question", "options"}},
+            )
+            return False, OrchestrationCoordinationResult(
+                status="HUMAN_REQUIRED", run_id=run.run_id,
+                current_stage=OrchestrationStage.IMPLEMENTING,
+                message=payload["question"], human_payload=payload,
+            )
+
+        if diagnosis.get("status") != "RECOVERABLE":
+            return await block(diagnosis.get("reason") or "La secuencia no es recuperable.")
+        if (
+            not operator_action_id
+            or not isinstance(action, OperatorActionRecord)
+            or action.status != OperatorActionStatus.ACCEPTED
+            or action.action_type != OperatorActionType.RESOLVE_GATE
+            or action.run_id != run.run_id
+            or action.change_name != change_name
+            or action.precondition_gate != RECOVERY_GATE
+            or (action.parameters_json or {}).get("accepted_response") != REBASELINE_RESPONSE
+            or (action.parameters_json or {}).get("gate_fingerprint")
+            != human_gate_fingerprint(run.run_id, run.current_stage, gate_payload)
+            or (action.parameters_json or {}).get("response_fingerprint")
+            != hashlib.sha256(operator_response.strip().encode()).hexdigest()
+        ):
+            return await block("La autorización no corresponde al gate vigente o no es de un solo uso.")
+
+        identity = await self._stage_candidate_identity(run, worktree_path, "UPDATE")
+        expected = diagnosis.get("identity") or {}
+        if (
+            any(identity.get(key) != expected.get(key) for key in
+                ("run_id", "branch", "worktree", "generation", "candidate_sha"))
+            or identity.get("candidate_fingerprint") != diagnosis.get("candidate_fingerprint")
+            or (run.current_candidate_sha and identity.get("candidate_sha") != run.current_candidate_sha)
+        ):
+            return await block("La identidad o huella actual del candidato no coincide con la evidencia.")
+
+        tasks_path = worktree_path / "openspec" / "changes" / change_name / "tasks.md"
+        if not tasks_path.is_file():
+            return await block("No se encontró tasks.md en el Change del mismo worktree.")
+        tasks_text = tasks_path.read_text(encoding="utf-8", errors="replace")
+        dispositions = self._task_dispositions(tasks_text)
+        if (
+            dispositions != diagnosis.get("current_dispositions")
+            or not dispositions
+            or self._invalid_published_evidence_completions(tasks_text, identity.get("candidate_sha"))
+        ):
+            return await block("Las disposiciones actuales o la procedencia SHA no coinciden con el checkpoint.")
+        try:
+            validation = self.openspec_adapter.validate_change_strict(change_name, worktree_path)
+        except Exception as exc:
+            return await block(f"La validación estricta de OpenSpec no pudo ejecutarse: {redact_secrets(str(exc))[:400]}.")
+        if validation.get("status") != "PASS":
+            return await block("La validación estricta del Change no pasó.")
+
+        transition_key = f"apply-checkpoint-recovery:{run.run_id}:{operator_action_id}"
+        if uow.orchestration_stage_events.get_by_transition_key(transition_key) is not None:
+            return await block("Esta autorización ya tiene una transición de recuperación registrada.")
+        consumed = uow.operator_actions.consume_single_use(
+            operator_action_id,
+            run_id=run.run_id,
+            action_type=OperatorActionType.RESOLVE_GATE,
+            expected_parameters={
+                "gate_fingerprint": (action.parameters_json or {}).get("gate_fingerprint"),
+                "response_fingerprint": (action.parameters_json or {}).get("response_fingerprint"),
+            },
+        )
+        if consumed is None:
+            return await block("La autorización ya fue consumida o no coincide con este Run.")
+        self._clear_current_human_gate(
+            uow, run, response_text=operator_response, commit=False
+        )
+        details = dict(run.stop_details or {})
+        baseline = {
+            "status": "AUTHORIZED",
+            "operator_action_id": operator_action_id,
+            "identity": identity,
+            "candidate_fingerprint": identity["candidate_fingerprint"],
+            "task_dispositions": dispositions,
+            "apply_baseline": {
+                "run_id": identity["run_id"],
+                "sha": identity["candidate_sha"],
+                "branch": identity["branch"],
+                "worktree": identity["worktree"],
+                "completed": sorted(
+                    task_id for task_id, state in dispositions.items() if state == "completed"
+                ),
+                "pending": sorted(
+                    task_id for task_id, state in dispositions.items() if state != "completed"
+                ),
+                "files": [],
+                "fingerprint": None,
+                "tests_passed": None,
+                "test_evidence": "",
+            },
+            "tasks_sha256": hashlib.sha256(tasks_text.encode()).hexdigest(),
+            "strict_validation": {
+                "status": validation.get("status"),
+                "returncode": validation.get("returncode"),
+                "stdout": redact_secrets(validation.get("stdout", ""))[-2000:],
+                "stderr": redact_secrets(validation.get("stderr", ""))[-2000:],
+            },
+            "recovered_evidence": diagnosis,
+            "authorized_at": utc_now().isoformat(),
+        }
+        details["apply_checkpoint_recovery"] = baseline
+        run.stop_details = details
+        uow.orchestration_runs.save(run)
+        uow.orchestration_stage_events.save(OrchestrationStageEvent(
+            run_id=run.run_id,
+            from_stage=run.current_stage,
+            to_stage=run.current_stage,
+            event_type="APPLY_CHECKPOINT_REBASELINED",
+            transition_key=transition_key,
+            actor=consumed.actor_identity,
+            evidence_references={
+                "operator_action_id": operator_action_id,
+                "change_name": change_name,
+                "identity": identity,
+                "task_dispositions": dispositions,
+                "tasks_sha256": baseline["tasks_sha256"],
+                "prior_snapshot": diagnosis["prior_snapshot"],
+                "prior_update": diagnosis["prior_update"],
+                "no_op_update": diagnosis["no_op_update"],
+                "strict_validation": baseline["strict_validation"],
+            },
+        ))
+        uow.commit()
+        return True, None
 
     async def _run_propose_correction(
         self,
