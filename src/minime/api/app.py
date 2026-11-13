@@ -1225,7 +1225,6 @@ async def _execute_request_in_fresh_session(
             runner = CliAgentRunner.for_project_profiles(
                 project.agent_profiles,
                 capacity_service=CapacityLifecycleService(worker_uow),
-                budget_service=BudgetService(worker_uow),
             )
             result = await NativeOrchestrationCoordinator(
                 uow_factory=lambda: worker_uow,
@@ -1806,72 +1805,7 @@ async def stream_events(_operator: AuthenticatedOperatorDep) -> StreamingRespons
 async def get_provider_quotas(_operator: AuthenticatedOperatorDep) -> dict[str, Any]:
     snapshot = await quota_telemetry.snapshot()
     await event_broker.publish("quota.update", {"providers": snapshot})
-
-    # Extract observed values from telemetry snapshot
-    codex_pct = 100.0
-    antigravity_pct = 100.0
-    deepseek_bal = 21.56
-    deepseek_max = 20.0
-    openrouter_bal = 18.43
-    openrouter_total = 30.0
-
-    for item in snapshot:
-        p_name = item.get("provider")
-        if p_name == "codex":
-            rem = item.get("remaining_percent")
-            if rem is not None:
-                codex_pct = float(rem)
-        elif p_name == "antigravity":
-            rem = item.get("remaining_percent")
-            if rem is not None:
-                antigravity_pct = float(rem)
-        elif p_name == "deepseek":
-            bal = item.get("balance")
-            if bal is not None:
-                deepseek_bal = float(bal)
-        elif p_name == "openrouter":
-            bal = item.get("balance")
-            if bal is not None:
-                openrouter_bal = float(bal)
-            rem = item.get("remaining_percent")
-            if rem is not None:
-                openrouter_pct = float(rem)
-
-    deepseek_pct = round((deepseek_bal / deepseek_max) * 100, 1)
-    openrouter_pct = round((openrouter_bal / openrouter_total) * 100, 1) if openrouter_total > 0 else 0.0
-
-    return {
-        "observed_at": datetime.now(UTC).isoformat(),
-        "providers": snapshot,
-        "codex": {
-            "provider": "codex",
-            "model": "gpt-5.6-luna",
-            "quota_percent": codex_pct,
-            "sublabel": f"gpt-5.6-luna ({codex_pct}% disponible - ventana 5h)",
-        },
-        "antigravity": {
-            "provider": "antigravity",
-            "model": "gemini-3.8-flash-medium",
-            "quota_percent": antigravity_pct,
-            "sublabel": f"gemini-3.8-flash ({antigravity_pct}% disponible - ventana 5h)",
-        },
-        "deepseek": {
-            "provider": "deepseek",
-            "model": "deepseek-chat",
-            "balance_usd": deepseek_bal,
-            "max_balance_usd": deepseek_max,
-            "quota_percent": deepseek_pct,
-            "sublabel": f"${deepseek_bal:.2f} de ${deepseek_max:.2f} USD ({deepseek_pct}% disponible)",
-        },
-        "openrouter": {
-            "provider": "openrouter",
-            "model": "auto / fallback",
-            "balance_usd": openrouter_bal,
-            "max_balance_usd": openrouter_total,
-            "quota_percent": openrouter_pct,
-            "sublabel": f"${openrouter_bal:.2f} de ${openrouter_total:.2f} USD ({openrouter_pct}% disponible)",
-        },
-    }
+    return {"observed_at": datetime.now(UTC).isoformat(), "providers": snapshot}
 
 
 class ExploreRecoveryAuthorizationPayload(BaseModel):
@@ -2266,26 +2200,11 @@ def get_budget_usage(uow: UowDep, project_id: str | None = None) -> dict[str, An
     if not project_id:
         projects = uow.projects.list_all()
         project_id = projects[0].project_id if projects else ""
-    policy = uow.budget_policies.get_by_project_id(project_id) if project_id else None
-    if not policy:
-        return {
-            "project_id": project_id,
-            "policy": None,
-            "headroom": None,
-            "reservations": [],
-            "ledger": [],
-            "token_usage_by_model": {},
-        }
-    headroom = service._compute_headroom(project_id, policy)
     reservations = [r.model_dump() for r in uow.budget_reservations.list_by_project(project_id)]
     ledger = [e.model_dump() for e in uow.budget_ledger.list_by_project(project_id)]
     token_usage = service.get_token_usage_breakdown(project_id)
     return {
         "project_id": project_id,
-        "policy": policy.model_dump(),
-        "headroom": headroom.__dict__,
-        "unresolved_settlements_count": headroom.unresolved_count,
-        "unresolved_settlements_usd": headroom.unresolved_usd,
         "reservations": reservations,
         "ledger": ledger,
         "token_usage_by_model": token_usage,
@@ -2294,45 +2213,14 @@ def get_budget_usage(uow: UowDep, project_id: str | None = None) -> dict[str, An
 
 @app.get("/providers/openrouter/status")
 def get_openrouter_status(uow: UowDep, project_id: str | None = None) -> dict[str, Any]:
-    service = BudgetService(uow)
     if not project_id:
         projects = uow.projects.list_all()
         project_id = projects[0].project_id if projects else ""
-    policy = uow.budget_policies.get_by_project_id(project_id) if project_id else None
-    if not policy:
-        return {
-            "project_id": project_id,
-            "enabled": False,
-            "is_breached": False,
-            "policy": None,
-            "headroom": None,
-            "allowed_models": {
-                "implementer": ["anthropic/claude-3.5-sonnet", "qwen/qwen-2.5-coder-32b-instruct"],
-                "reviewer": [
-                    "openai/gpt-4o",
-                    "meta-llama/llama-3.3-70b-instruct",
-                    "mistralai/mistral-large",
-                ],
-            },
-        }
-    headroom = service._compute_headroom(project_id, policy)
+    configured = load_config().providers.get("openrouter")
     return {
         "project_id": project_id,
-        "enabled": policy.enabled,
-        "is_breached": policy.is_breached,
-        "daily_cap_usd": policy.daily_cap_usd,
-        "monthly_cap_usd": policy.monthly_cap_usd,
-        "currency": policy.currency,
-        "policy_version": policy.policy_version,
-        "headroom": headroom.__dict__,
-        "allowed_models": {
-            "implementer": ["anthropic/claude-3.5-sonnet", "qwen/qwen-2.5-coder-32b-instruct"],
-            "reviewer": [
-                "openai/gpt-4o",
-                "meta-llama/llama-3.3-70b-instruct",
-                "mistralai/mistral-large",
-            ],
-        },
+        "provider": "openrouter",
+        "configured": bool(configured and configured.enabled),
     }
 
 

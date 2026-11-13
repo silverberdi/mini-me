@@ -2,12 +2,13 @@
 
 import json
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
 import pytest
 
 from minime.config import CliInvocationProfile
-from minime.services.agent_runner import CliAgentRunner, ResolvedWorkflow
+from minime.services.agent_runner import CapacityExhaustedError, CliAgentRunner, ResolvedWorkflow
 
 
 def test_resolve_workflow_supports_opencode(tmp_path: Path):
@@ -44,6 +45,130 @@ def test_resolve_workflow_supports_antigravity(tmp_path: Path):
     assert wf.provider == "antigravity"
     assert wf.operation == "verify"
     assert wf.dispatch_command == "/opsx-verify test-change"
+
+
+@pytest.mark.asyncio
+async def test_inflight_apply_uses_configured_fallback_profile_and_native_workflow(tmp_path: Path):
+    skill = tmp_path / ".agents" / "skills" / "openspec-apply-change" / "SKILL.md"
+    skill.parent.mkdir(parents=True)
+    skill.write_text("# Native Apply workflow\n")
+
+    class Capacity:
+        def can_execute_inflight_apply(self, project_id, run_id, provider):
+            assert (project_id, run_id, provider) == ("p1", "r1", "codex")
+            return False
+
+        def fallback_provider_for_inflight_apply(self, project_id, run_id, provider):
+            assert (project_id, run_id, provider) == ("p1", "r1", "codex")
+            return "opencode"
+
+        def can_admit_change(self, project_id):
+            raise AssertionError("An in-flight Apply must use the stage-specific capacity decision")
+
+    fallback = CliInvocationProfile(
+        provider="opencode",
+        role="implementer",
+        executable="opencode",
+        args=(),
+        prompt_transport="stdin",
+        model="openrouter/deepseek/deepseek-chat",
+        canonical_provider_id="openrouter",
+        harness_id="opencode",
+    )
+    runner = CliAgentRunner(
+        capacity_service=Capacity(),
+        profiles={("fallback", "opencode"): fallback},
+    )
+    primary_workflow = runner.resolve_workflow(
+        tmp_path, "codex", "apply", "change-1"
+    )
+
+    class FakeConfinement:
+        def __init__(self, allowed_worktree_path=None):
+            pass
+
+        def validate_command_preflight(self, cwd=None):
+            from minime.services.agent_confinement import ExternalActionResult, ExternalOutcome
+            return ExternalActionResult(
+                source_adapter="confinement", action="preflight", outcome=ExternalOutcome.SUCCESS, payload=True
+            )
+
+        def is_local_environment_preflight_error(self, err):
+            return False
+
+    class FakeOpenCodeAdapter:
+        def __init__(self, config, **kwargs):
+            self.config = config
+
+        async def dispatch(self, request):
+            assert request.operation == "apply"
+            assert request.role == "execution"
+            assert self.config.provider == "openrouter"
+            assert self.config.model == "openrouter/deepseek/deepseek-chat"
+            return SimpleNamespace(
+                accepted=True,
+                evidence=SimpleNamespace(
+                    exit_code=0,
+                    timed_out=False,
+                    failure_reason=None,
+                    stdout=["Apply finished"],
+                    stderr=[],
+                ),
+            )
+
+    with (
+        patch("minime.services.agent_runner.AgentProcessConfinement", FakeConfinement),
+        patch("minime.services.opencode_adapter.OpenCodeAdapter", FakeOpenCodeAdapter),
+    ):
+        result = await runner.run(
+            worktree_path=tmp_path,
+            prompt_context="Continue the same Change",
+            project_id="p1",
+            run_id="r1",
+            role="implementer",
+            provider="codex",
+            workflow=primary_workflow,
+        )
+
+    assert result.exit_code == 0
+    assert result.workflow.provider == "opencode"
+    assert result.provider_used == "openrouter"
+    assert result.profile_used == "fallback"
+    assert result.model_used == "openrouter/deepseek/deepseek-chat"
+
+
+def test_inflight_fallback_is_never_used_for_independent_review():
+    class Capacity:
+        fallback_calls = 0
+
+        def can_admit_change(self, project_id):
+            return False, "primary capacity unavailable"
+
+        def fallback_provider_for_inflight_apply(self, project_id, run_id, provider):
+            self.fallback_calls += 1
+            return "opencode"
+
+        def can_execute_inflight_apply(self, project_id, run_id, provider):
+            self.fallback_calls += 1
+            return False
+
+    capacity = Capacity()
+    runner = CliAgentRunner(capacity_service=capacity)
+    workflow = ResolvedWorkflow(
+        provider="codex",
+        operation="apply",
+        workflow_name="openspec-apply-change",
+        workflow_path=".agents/skills/openspec-apply-change/SKILL.md",
+        workflow_sha256="workflow-sha",
+        change_name="change-1",
+        dispatch_command="$openspec-apply-change change-1",
+    )
+
+    with pytest.raises(CapacityExhaustedError):
+        runner.check_capacity_preflight(
+            "p1", "codex", "reviewer", run_id="r1", workflow=workflow
+        )
+    assert capacity.fallback_calls == 0
 
 
 @pytest.mark.asyncio

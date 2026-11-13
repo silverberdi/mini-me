@@ -113,7 +113,6 @@ from minime.domain.models import (
     JobHandoff,
     JobLog,
     MetricFact,
-    OpenRouterBudgetPolicy,
     OpenRouterPricingSnapshot,
     OperatorActionRecord,
     OrchestrationCandidate,
@@ -1148,21 +1147,6 @@ class InMemoryGitOperationRepository(GitOperationRepositoryInterface):
         updated = op.model_copy(update={"status": status, "completed_at": completed_at})
         self._store[operation_id] = updated
         return updated.model_copy(deep=True)
-
-
-class InMemoryOpenRouterBudgetPolicyRepository:
-    def __init__(self):
-        self._store: dict[str, OpenRouterBudgetPolicy] = {}
-
-    def get_by_project_id(self, project_id: str) -> OpenRouterBudgetPolicy | None:
-        policy = self._store.get(project_id)
-        return policy.model_copy(deep=True) if policy else None
-
-    def get_for_update(self, project_id: str) -> OpenRouterBudgetPolicy | None:
-        return self.get_by_project_id(project_id)
-
-    def save(self, policy: OpenRouterBudgetPolicy) -> None:
-        self._store[policy.project_id] = policy.model_copy(deep=True)
 
 
 class InMemoryOpenRouterPricingSnapshotRepository:
@@ -2577,7 +2561,6 @@ class InMemoryPersistenceUnitOfWork(PersistenceUnitOfWork):
         self.provider_efficiency = InMemoryProviderEfficiencyMetricsRepository()
         self.capacity_windows = InMemoryCapacityWindowRepository()
         self.git_operations = InMemoryGitOperationRepository()
-        self.budget_policies = InMemoryOpenRouterBudgetPolicyRepository()
         self.pricing_snapshots = InMemoryOpenRouterPricingSnapshotRepository()
         self.budget_reservations = InMemoryBudgetReservationRepository()
         self.budget_ledger = InMemoryBudgetLedgerRepository()

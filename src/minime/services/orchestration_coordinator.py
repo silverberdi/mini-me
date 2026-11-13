@@ -176,6 +176,9 @@ class ApplyOutcome:
     branch: str | None = None
     worktree: str | None = None
     run_id: str | None = None
+    provider_used: str | None = None
+    profile_used: str | None = None
+    model_used: str | None = None
 
     def __bool__(self) -> bool:
         return self.status == "COMPLETE"
@@ -2547,6 +2550,9 @@ class NativeOrchestrationCoordinator:
                             "error": outcome.error,
                             "human_question": outcome.human_question,
                             "human_options": list(outcome.human_options),
+                            "provider_used": outcome.provider_used or implementer_provider,
+                            "profile_used": outcome.profile_used,
+                            "model_used": outcome.model_used,
                         },
                     )
                 except Exception as exc:
@@ -5618,6 +5624,7 @@ class NativeOrchestrationCoordinator:
             provider=provider,
             workflow=wf,
             process_start_observer=process_start_observer,
+            run_id=run_id,
         )
         tasks_path = worktree_path / "openspec" / "changes" / change_name / "tasks.md"
         if not tasks_path.is_file():
@@ -5684,14 +5691,20 @@ class NativeOrchestrationCoordinator:
             return ApplyOutcome("HUMAN_REQUIRED", completed_ids, tuple(pending), sha_text.strip() if getattr(sha, "ok", True) else None,
                                 changed_files, digest, tests_passed, test_evidence,
                                 human_question=handoff.summary, human_options=handoff.pending,
-                                branch=branch_text.strip(), worktree=str(worktree_path), run_id=run_id)
+                                branch=branch_text.strip(), worktree=str(worktree_path), run_id=run_id,
+                                provider_used=getattr(result, "provider_used", None) or provider,
+                                profile_used=getattr(result, "profile_used", None),
+                                model_used=getattr(result, "model_used", None))
         successful = self._execution_is_successful(result)
         ready = successful and not automated_pending
         status = "COMPLETE" if ready else ("PARTIAL" if successful else "FAILED")
         error = None if successful else self._review_failure_error(result)
         return ApplyOutcome(status, completed_ids, tuple(pending), sha_text.strip() if getattr(sha, "ok", True) else None,
                             changed_files, digest, tests_passed, test_evidence, error=error,
-                            branch=branch_text.strip(), worktree=str(worktree_path), run_id=run_id)
+                            branch=branch_text.strip(), worktree=str(worktree_path), run_id=run_id,
+                            provider_used=getattr(result, "provider_used", None) or provider,
+                            profile_used=getattr(result, "profile_used", None),
+                            model_used=getattr(result, "model_used", None))
 
     async def _git_changed_paths_for_tests(
         self, worktree_path: Path, base_branch: str

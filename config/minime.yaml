@@ -96,9 +96,6 @@ providers:
     api_key_env: OPENROUTER_API_KEY
     paid: true
     mode: drain-only
-    budget:
-      daily_usd: 0
-      monthly_usd: 0
     drain:
       implementer_models:
         - qwen/qwen3-coder
@@ -115,7 +112,6 @@ github:
 security:
   redact_secrets: true
   autonomous_merge: false
-  allow_paid_fallback_by_default: false
 
 projects:
   mini-me:
@@ -131,7 +127,6 @@ projects:
       - name: test
         command: pytest
     external_providers_allowed: [codex, antigravity, deepseek]
-    openrouter_drain_allowed: false
     stage_profiles:
       CONTRACT_REVIEW:
         provider: deepseek

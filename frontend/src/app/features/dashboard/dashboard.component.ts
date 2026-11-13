@@ -276,68 +276,54 @@ export class DashboardComponent {
     return this.refresh.quotas().find(q => q.provider.toLowerCase() === provider.toLowerCase());
   }
 
-  get codexValue(): number {
+  get codexValue(): number | null {
     const q = this.getQuota('codex');
-    return q?.remaining_percent ?? 0;
+    return q?.remaining_percent ?? null;
   }
 
   get codexSublabel(): string {
     const q = this.getQuota('codex');
-    if (!q) return 'No disponible (sin telemetría)';
-    const model = q.model_id || 'gpt-5.6-luna';
-    const win = q.window || '5h';
-    return `${model} (${this.codexValue}% disponible - ventana ${win})`;
+    if (!q || q.remaining_percent == null) return q ? `Estado observado: ${q.state}; porcentaje no disponible` : 'No disponible (sin telemetría)';
+    const model = q.model_id || 'Codex';
+    return `${model} (${q.remaining_percent}% disponible; fuente ${q.source})`;
   }
 
-  get antigravityValue(): number {
+  get antigravityValue(): number | null {
     const q = this.getQuota('antigravity');
-    return q?.remaining_percent ?? 0;
+    return q?.remaining_percent ?? null;
   }
 
   get antigravitySublabel(): string {
     const q = this.getQuota('antigravity');
-    if (!q) return 'No disponible (sin telemetría)';
-    const model = q.model_id || 'gemini-3.8-flash';
-    const win = q.window || '5h';
-    return `${model} (${this.antigravityValue}% disponible - ventana ${win})`;
+    if (!q || q.remaining_percent == null) return q ? `Estado observado: ${q.state}; porcentaje no disponible` : 'No disponible (sin telemetría)';
+    const model = q.model_id || 'Antigravity';
+    return `${model} (${q.remaining_percent}% disponible; fuente ${q.source})`;
   }
 
-  get deepseekValue(): number {
+  get deepseekValue(): number | null {
     const q = this.getQuota('deepseek');
-    if (q?.remaining_percent !== null && q?.remaining_percent !== undefined) {
-      return q.remaining_percent;
-    }
-    if (q?.balance !== null && q?.balance !== undefined) {
-      return Math.min(100, Math.round((q.balance / 20.0) * 100));
-    }
-    return 0;
+    return q?.remaining_percent ?? null;
   }
 
   get deepseekSublabel(): string {
     const q = this.getQuota('deepseek');
     if (q?.balance !== null && q?.balance !== undefined) {
-      return `$${q.balance.toFixed(2)} USD saldo disponible (${this.deepseekValue}%)`;
+      return `$${q.balance.toFixed(2)} ${q.currency || 'USD'} observado; porcentaje no disponible`;
     }
-    return 'No disponible (sin telemetría)';
+    return q ? `Estado observado: ${q.state}; saldo no disponible` : 'No disponible (sin telemetría)';
   }
 
-  get openrouterValue(): number {
+  get openrouterValue(): number | null {
     const q = this.getQuota('openrouter');
-    if (q?.remaining_percent !== null && q?.remaining_percent !== undefined) {
-      return q.remaining_percent;
-    }
-    if (q?.balance !== null && q?.balance !== undefined) {
-      return Math.min(100, Math.round((q.balance / 30.0) * 100));
-    }
-    return 0;
+    return q?.remaining_percent ?? null;
   }
 
   get openrouterSublabel(): string {
     const q = this.getQuota('openrouter');
     if (q?.balance !== null && q?.balance !== undefined) {
-      return `$${q.balance.toFixed(2)} de $30.00 USD (${this.openrouterValue}% disponible)`;
+      return `$${q.balance.toFixed(2)} ${q.currency || 'USD'} observado; porcentaje no disponible`;
     }
-    return 'No disponible (sin telemetría)';
+    return q ? `Estado observado: ${q.state}; saldo no disponible` : 'No disponible (sin telemetría)';
   }
 
   get currentDimensionTitle(): string {

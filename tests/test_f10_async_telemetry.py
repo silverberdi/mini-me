@@ -37,6 +37,31 @@ async def test_quota_telemetry_caches_observation_for_ttl(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_quota_api_does_not_invent_provider_balances_or_percentages(monkeypatch):
+    from minime.api.app import get_provider_quotas
+
+    observed = [
+        {
+            "provider": "openrouter",
+            "state": "UNKNOWN",
+            "observed_at": "2026-11-12T12:00:00+00:00",
+            "source": "openrouter_credits",
+            "balance": None,
+            "remaining_percent": None,
+        }
+    ]
+
+    async def snapshot():
+        return observed
+
+    monkeypatch.setattr("minime.api.app.quota_telemetry.snapshot", snapshot)
+    response = await get_provider_quotas(_operator=object())
+    assert response["providers"] == observed
+    assert "openrouter" not in response
+    assert "deepseek" not in response
+
+
+@pytest.mark.asyncio
 async def test_event_broker_broadcasts_sse_and_drops_slow_subscriber():
     broker = EventBroker(queue_size=1)
     stream = broker.subscribe()

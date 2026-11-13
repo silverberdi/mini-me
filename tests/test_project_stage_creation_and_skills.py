@@ -44,7 +44,6 @@ def _test_configuration(repo="owner/my-project"):
                 "max_review_rounds": 2,
                 "max_correction_attempts": 1,
                 "code_review_policy": "risk_based",
-                "fallback_authorized": False,
             },
         }
     )

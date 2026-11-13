@@ -129,7 +129,6 @@ class Project(BaseModel):
     external_providers_allowed: list[str] = Field(
         default_factory=lambda: ["codex", "antigravity", "deepseek"]
     )
-    openrouter_drain_allowed: bool = False
     independent_audit_required: bool = False
     strict_validation_required: bool = True
     verify_gate_required: bool = True
@@ -185,24 +184,13 @@ class ProjectAgentProfile(BaseModel):
 
 
 class ProjectExecutionPolicy(BaseModel):
-    """Finite per-project review, correction, and fallback authorization limits."""
+    """Finite per-project review and correction limits."""
 
     model_config = ConfigDict(extra="forbid")
 
     max_review_rounds: int = Field(default=2, ge=1, le=3)
     max_correction_attempts: int = Field(default=1, ge=0, le=3)
     code_review_policy: str = Field(default="risk_based", pattern="^(required|risk_based|disabled)$")
-    fallback_authorized: bool = False
-    fallback_daily_cap_usd: Decimal = Field(default=Decimal("0"), ge=0, max_digits=8, decimal_places=2)
-    fallback_monthly_cap_usd: Decimal = Field(default=Decimal("0"), ge=0, max_digits=8, decimal_places=2)
-
-    @model_validator(mode="after")
-    def require_fallback_budget(self) -> "ProjectExecutionPolicy":
-        if self.fallback_authorized and (
-            self.fallback_daily_cap_usd <= 0 or self.fallback_monthly_cap_usd <= 0
-        ):
-            raise ValueError("authorized fallback requires positive finite daily and monthly caps")
-        return self
 
 
 class ProjectGitHubAppCredentials(BaseModel):
@@ -678,17 +666,6 @@ class EvidenceDiagnostic(BaseModel):
     reason: str | None = None
     evidence_reference: dict[str, Any] = Field(default_factory=dict)
     created_at: datetime = Field(default_factory=utc_now)
-
-
-class OpenRouterBudgetPolicy(BaseModel):
-    project_id: str
-    enabled: bool = False
-    daily_cap_usd: Decimal = Field(default_factory=lambda: Decimal("0.0"))
-    monthly_cap_usd: Decimal = Field(default_factory=lambda: Decimal("0.0"))
-    currency: str = "USD"
-    policy_version: int = 1
-    is_breached: bool = False
-    updated_at: datetime = Field(default_factory=utc_now)
 
 
 AUTHORITATIVE_PRICING_SOURCES: frozenset[str] = frozenset(

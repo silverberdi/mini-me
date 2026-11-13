@@ -1,5 +1,4 @@
 from pathlib import Path
-from types import SimpleNamespace
 from unittest.mock import MagicMock
 
 import pytest
@@ -10,7 +9,6 @@ from minime.services.agent_runner import (
     CliAgentRunner,
     NativeOpenSpecWorkflowUnavailable,
 )
-from minime.services.budget_service import BudgetService
 from minime.services.worktree_manager import WorktreeInfo, WorktreeManager
 
 
@@ -119,102 +117,18 @@ def test_agent_runner_dynamic_workflow_missing_fails_closed(tmp_path: Path):
 def test_agent_runner_capacity_preflight_gating():
     capacity_service = MagicMock()
     capacity_service.can_admit_change.return_value = False
-
-    budget_service = MagicMock()
-    budget_service.get_headroom.return_value = (
-        SimpleNamespace(enabled=True),
-        SimpleNamespace(daily_headroom_usd=0, monthly_headroom_usd=0),
-    )
-
-    runner = CliAgentRunner(
-        capacity_service=capacity_service,
-        budget_service=budget_service,
-    )
-
+    runner = CliAgentRunner(capacity_service=capacity_service)
     with pytest.raises(CapacityExhaustedError, match="Capacity service rejected admission"):
         runner.check_capacity_preflight(project_id="proj-1", provider_id="codex", role="thinker")
 
     capacity_service.can_admit_change.return_value = True
-    with pytest.raises(CapacityExhaustedError, match="Budget headroom exhausted"):
-        runner.check_capacity_preflight(
-            project_id="proj-1", provider_id="openrouter", role="thinker"
-        )
+    runner.check_capacity_preflight(project_id="proj-1", provider_id="openrouter", role="implementer")
 
 
-def test_agent_runner_allows_direct_provider_when_openrouter_budget_disabled():
-    capacity_service = MagicMock()
-    capacity_service.can_admit_change.return_value = True
-    budget_service = MagicMock()
-    budget_service.get_headroom.return_value = (
-        SimpleNamespace(enabled=False),
-        SimpleNamespace(daily_headroom_usd=0, monthly_headroom_usd=0),
-    )
-
-    CliAgentRunner(
-        capacity_service=capacity_service,
-        budget_service=budget_service,
-    ).check_capacity_preflight(project_id="proj-1", provider_id="codex", role="thinker")
-    budget_service.get_headroom.assert_not_called()
-
-
-@pytest.mark.parametrize("provider", ["codex", "antigravity"])
-def test_direct_subscription_provider_is_independent_of_openrouter_policy(provider: str):
+@pytest.mark.parametrize("provider", ["codex", "antigravity", "openrouter"])
+def test_configured_provider_preflight_is_not_tied_to_a_budget_service(provider: str):
     capacity_service = MagicMock()
     capacity_service.can_admit_change.return_value = (True, None)
-    budget_service = MagicMock()
-    budget_service.get_headroom.return_value = (None, None)
-
-    CliAgentRunner(
-        capacity_service=capacity_service,
-        budget_service=budget_service,
-    ).check_capacity_preflight(project_id="mini-me", provider_id=provider, role="thinker")
+    runner = CliAgentRunner(capacity_service=capacity_service)
+    runner.check_capacity_preflight(project_id="mini-me", provider_id=provider, role="implementer")
     capacity_service.can_admit_change.assert_called_once_with("mini-me")
-    budget_service.get_headroom.assert_not_called()
-
-
-@pytest.mark.parametrize(
-    "policy,headroom",
-    [
-        (None, None),
-        (
-            SimpleNamespace(enabled=False),
-            SimpleNamespace(daily_headroom_usd=0, monthly_headroom_usd=0),
-        ),
-    ],
-)
-def test_openrouter_remains_denied_without_enabled_policy(policy, headroom):
-    budget_service = MagicMock()
-    budget_service.get_headroom.return_value = (policy, headroom)
-    runner = CliAgentRunner(budget_service=budget_service)
-    with pytest.raises(CapacityExhaustedError, match="OpenRouter budget policy"):
-        runner.check_capacity_preflight("mini-me", "openrouter", "implementer")
-    budget_service.get_headroom.assert_called_once_with("mini-me")
-
-
-def test_openrouter_requires_positive_budget_and_capacity():
-    capacity_service = MagicMock()
-    capacity_service.can_admit_change.return_value = (True, None)
-    budget_service = MagicMock()
-    budget_service.get_headroom.return_value = (
-        SimpleNamespace(enabled=True),
-        SimpleNamespace(daily_headroom_usd=1, monthly_headroom_usd=1),
-    )
-    CliAgentRunner(
-        capacity_service=capacity_service,
-        budget_service=budget_service,
-    ).check_capacity_preflight("mini-me", "openrouter", "implementer")
-    budget_service.get_headroom.assert_called_once_with("mini-me")
-
-
-def test_codex_preflight_with_real_budget_service_and_no_openrouter_policy():
-    """Regression for the exact missing policy row that paused F5 Run #173."""
-    uow = InMemoryPersistenceUnitOfWork()
-    budget_service = BudgetService(uow)
-    assert budget_service.get_headroom("mini-me") == (None, None)
-
-    runner = CliAgentRunner(budget_service=budget_service)
-    runner.check_capacity_preflight("mini-me", "codex", "thinker")
-    runner.check_capacity_preflight("mini-me", "antigravity", "reviewer")
-
-    with pytest.raises(CapacityExhaustedError, match="OpenRouter budget policy"):
-        runner.check_capacity_preflight("mini-me", "openrouter", "implementer")

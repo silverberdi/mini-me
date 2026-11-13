@@ -110,7 +110,6 @@ def persistent_api_client(monkeypatch, tmp_path):
             reviewer="antigravity",
             checks=[],
             external_providers_allowed=[],
-            openrouter_drain_allowed=False,
             independent_audit_required=False,
             strict_validation_required=True,
             verify_gate_required=True,

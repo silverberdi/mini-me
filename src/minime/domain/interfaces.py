@@ -46,7 +46,6 @@ from minime.domain.models import (
     JobHandoff,
     JobLog,
     MetricFact,
-    OpenRouterBudgetPolicy,
     OpenRouterPricingSnapshot,
     OperatorActionRecord,
     OrchestrationCandidate,
@@ -423,17 +422,6 @@ class GitOperationRepositoryInterface(ABC):
     ) -> GitOperation | None: ...
 
 
-class OpenRouterBudgetPolicyRepositoryInterface(ABC):
-    @abstractmethod
-    def get_by_project_id(self, project_id: str) -> OpenRouterBudgetPolicy | None: ...
-
-    @abstractmethod
-    def get_for_update(self, project_id: str) -> OpenRouterBudgetPolicy | None: ...
-
-    @abstractmethod
-    def save(self, policy: OpenRouterBudgetPolicy) -> None: ...
-
-
 class OpenRouterPricingSnapshotRepositoryInterface(ABC):
     @abstractmethod
     def save(self, snapshot: OpenRouterPricingSnapshot) -> None: ...
@@ -465,13 +453,6 @@ class BudgetLedgerRepositoryInterface(ABC):
 
     @abstractmethod
     def list_by_project(self, project_id: str) -> list[BudgetLedgerEntry]: ...
-
-
-class FallbackPolicyInterface(ABC):
-    """Abstract fallback policy seam for future drain provider execution (006)."""
-
-    @abstractmethod
-    def is_fallback_eligible(self, project_id: str, job: Job, role: str) -> bool: ...
 
 
 class JobAttemptRepositoryInterface(ABC):
@@ -836,7 +817,6 @@ class PersistenceUnitOfWork(ABC):
     provider_health: ProviderHealthRepositoryInterface
     capacity_windows: CapacityWindowRepositoryInterface
     git_operations: GitOperationRepositoryInterface
-    budget_policies: OpenRouterBudgetPolicyRepositoryInterface
     pricing_snapshots: OpenRouterPricingSnapshotRepositoryInterface
     budget_reservations: BudgetReservationRepositoryInterface
     budget_ledger: BudgetLedgerRepositoryInterface

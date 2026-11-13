@@ -30,7 +30,7 @@ def test_models_metadata_tables():
     assert "provider_health" in tables
     assert "capacity_windows" in tables
     assert "git_operations" in tables
-    assert "openrouter_budget_policies" in tables
+    assert "openrouter_budget_policies" not in tables
     assert "openrouter_pricing_snapshots" in tables
     assert "budget_reservations" in tables
     assert "budget_ledger" in tables
@@ -39,11 +39,13 @@ def test_models_metadata_tables():
         "auto_prepare",
         "auto_admit",
         "max_concurrent_jobs",
+        "openrouter_drain_allowed",
     } & project_columns
     assert not {
         "auto_prepare",
         "auto_admit",
         "max_concurrent_jobs",
+        "openrouter_drain_allowed",
     } & set(Project.model_fields)
     # Verify uniqueness constraint on project_bindings (project_id, openspec_change_name)
     pb_table = tables["project_bindings"]
@@ -79,6 +81,10 @@ def test_alembic_offline_postgres_migration():
     assert "CREATE TABLE capacity_windows" in sql
     assert "CREATE TABLE git_operations" in sql
     assert "CREATE TABLE openrouter_budget_policies" in sql
+    assert "DROP TABLE openrouter_budget_policies" in sql
+    assert sql.index("CREATE TABLE openrouter_budget_policies") < sql.index(
+        "DROP TABLE openrouter_budget_policies"
+    )
     assert "CREATE TABLE openrouter_pricing_snapshots" in sql
     assert "CREATE TABLE budget_reservations" in sql
     assert "CREATE TABLE budget_ledger" in sql

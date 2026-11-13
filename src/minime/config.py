@@ -271,21 +271,12 @@ class ProviderConfig(BaseModel):
     probe: ProbeConfig = Field(default_factory=ProbeConfig)
 
 
-class BudgetConfig(BaseModel):
-    enabled: bool = False
-    daily_cap_usd: Decimal = Field(default_factory=lambda: Decimal("0.0"))
-    monthly_cap_usd: Decimal = Field(default_factory=lambda: Decimal("0.0"))
-    currency: str = "USD"
-    policy_version: int = 1
-
-
 class OpenRouterConfig(BaseModel):
     enabled: bool = False
     api_key_env: str = "OPENROUTER_API_KEY"
     base_url: str = "https://openrouter.ai/api/v1"
     model: str | None = None
     fallback_models: list[str] = Field(default_factory=list)
-    budget: BudgetConfig = Field(default_factory=BudgetConfig)
 
 
 class GitHubConfig(BaseModel):
@@ -299,7 +290,6 @@ class GitHubConfig(BaseModel):
 class SecurityConfig(BaseModel):
     redact_secrets: bool = True
     autonomous_merge: bool = False
-    allow_paid_fallback_by_default: bool = False
 
 
 class AuthConfig(BaseModel):
@@ -373,7 +363,6 @@ class ProjectConfig(BaseModel):
     external_providers_allowed: list[str] = Field(
         default_factory=lambda: ["codex", "antigravity", "deepseek"]
     )
-    openrouter_drain_allowed: bool = False
     opencode: OpenCodeCapabilityConfig = Field(default_factory=OpenCodeCapabilityConfig)
     deployment: ProjectDeploymentConfig = Field(default_factory=ProjectDeploymentConfig)
     stage_profiles: dict[str, StageProfileConfig] = Field(default_factory=dict)
