@@ -523,7 +523,11 @@ class ProposalFeasibilityEvaluator:
                                     "task_id": {"type": "string"},
                                     "actor": {"type": "string", "enum": ["thinking", "execution", "operator", "project_ci_cd", "external"]},
                                     "execution_stage": {"type": "string", "enum": list(ProposalFeasibilityEvaluator.STAGE_ORDER)},
-                                    "capability_evidence_refs": {"type": "array", "items": {"type": "string"}},
+                                    "capability_evidence_refs": {
+                                        "type": "array",
+                                        "description": "Exact ref values from the supplied capabilities inventory; do not use descriptive prose or unprefixed paths.",
+                                        "items": {"type": "string"},
+                                    },
                                     "depends_on_task_ids": {"type": "array", "items": {"type": "string"}},
                                     "preconditions": {
                                         "type": "array",
@@ -532,7 +536,11 @@ class ProposalFeasibilityEvaluator:
                                             "properties": {
                                                 "required_before_stage": {"type": "string", "enum": list(ProposalFeasibilityEvaluator.STAGE_ORDER)},
                                                 "satisfied": {"type": "boolean"},
-                                                "evidence_refs": {"type": "array", "items": {"type": "string"}},
+                                                "evidence_refs": {
+                                                    "type": "array",
+                                                    "description": "Use exact capability refs from the supplied inventory or path:<repo-relative-path> for an existing candidate file. Never cite outputs created by Apply as preconditions.",
+                                                    "items": {"type": "string"},
+                                                },
                                             },
                                             "required": ["required_before_stage", "satisfied", "evidence_refs"],
                                             "additionalProperties": False,
