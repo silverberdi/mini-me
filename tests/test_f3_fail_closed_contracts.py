@@ -219,6 +219,53 @@ def test_unmet_apply_precondition_still_blocks_apply(tmp_path: Path):
     assert any("required before Apply" in reason for reason in result[3])
 
 
+def test_precondition_evidence_requires_exact_capability_or_prefixed_candidate_path(tmp_path: Path):
+    gameplay = tmp_path / "docs" / "GAMEPLAY.md"
+    gameplay.parent.mkdir()
+    gameplay.write_text("Verified game rules")
+    inputs = {
+        "status": "READY",
+        "candidate_sha": "c" * 40,
+        "tasks": [{"task_id": "2.1", "text": "Implement the documented rules"}],
+        "scenarios": [{"scenario_id": "game:req-1:1", "text": "Rules are applied"}],
+        "capabilities": [
+            {"ref": "profile:execution", "available": True},
+            {"ref": "workflow:execution:apply", "available": True},
+        ],
+    }
+    task = {
+        "task_id": "2.1",
+        "actor": "execution",
+        "execution_stage": "apply",
+        "capability_evidence_refs": ["profile:execution", "workflow:execution:apply"],
+        "depends_on_task_ids": [],
+        "preconditions": [{
+            "required_before_stage": "apply",
+            "satisfied": True,
+            "evidence_refs": ["docs/GAMEPLAY.md"],
+        }],
+        "completion_evidence": "Focused rule tests pass",
+    }
+    report = {
+        "tasks": [task],
+        "scenario_coverage": [{
+            "scenario_id": "game:req-1:1",
+            "task_ids": ["2.1"],
+            "evidence_stage": "apply",
+        }],
+        "blockers": [],
+        "resolution_options": [],
+    }
+
+    unprefixed = ProposalFeasibilityEvaluator.validate_report(report, inputs, tmp_path)
+    assert unprefixed[0] == "BLOCKED"
+    assert any("unverified precondition evidence" in reason for reason in unprefixed[3])
+
+    task["preconditions"][0]["evidence_refs"] = ["path:docs/GAMEPLAY.md"]
+    prefixed = ProposalFeasibilityEvaluator.validate_report(report, inputs, tmp_path)
+    assert prefixed[0] == "EXECUTABLE"
+
+
 def test_apply_output_dependency_is_not_a_precondition_for_starting_apply(tmp_path: Path):
     inputs = {
         "status": "READY",
@@ -430,6 +477,8 @@ async def test_structured_assessment_only_passes_when_all_capabilities_are_verif
     assert result.status == "VALID"
     assert result.is_executable
     assert result.feasibility_status == "EXECUTABLE"
+    assert "path:<repo-relative-path>" in runner.calls[0]
+    assert "Never use unprefixed paths" in runner.calls[0]
 
     feasibility["capabilities"] = []
     blocked = await coordinator(tmp_path, runner)._assess_complexity(
