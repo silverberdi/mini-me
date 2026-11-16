@@ -102,6 +102,84 @@ async def test_human_required_blocks_reentry_until_operator_response(tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_proven_preflight_failure_closes_claim_and_allows_one_linked_retry(tmp_path):
+    uow = InMemoryPersistenceUnitOfWork()
+    run = OrchestrationRun(
+        project_id="project-stage-test", change_name="stage-lifecycle", base_sha="main",
+        current_stage=OrchestrationStage.IMPLEMENTING,
+    )
+    uow.orchestration_runs.save(run)
+    candidate = tmp_path / "candidate"
+    _git_candidate(candidate)
+    coordinator = _coordinator(uow)
+
+    first = await coordinator._begin_stage_invocation(uow, run, candidate, "APPLY")
+    assert first is not None
+    await coordinator._finish_stage_invocation(
+        uow, run, first, "FAILED", {
+            "failure_kind": "capacity_preflight",
+            "preflight_failure_proven": True,
+            "recovery_count": 0,
+        },
+    )
+    closed_claim = uow.claims.get_by_key(first.claim_key)
+    assert closed_claim is None or not closed_claim.is_active
+
+    retry = await coordinator._begin_stage_invocation(uow, run, candidate, "APPLY")
+    assert retry is not None
+    assert retry.candidate == first.candidate
+    assert retry.recovery_count == 1
+    assert retry.recovered_from_attempt_id == first.attempt_id
+
+    await coordinator._finish_stage_invocation(
+        uow, run, retry, "FAILED", {
+            "failure_kind": "capacity_preflight",
+            "preflight_failure_proven": True,
+            "recovery_count": 1,
+        },
+    )
+    assert await coordinator._begin_stage_invocation(
+        uow, run, candidate, "APPLY"
+    ) is None
+    events = uow.orchestration_stage_events.list_by_run(run.run_id)
+    assert [event.event_type for event in events] == [
+        "STAGE_INVOCATION_STARTED",
+        "STAGE_INVOCATION_FAILED",
+        "STAGE_INVOCATION_STARTED",
+        "STAGE_INVOCATION_FAILED",
+    ]
+    assert events[2].evidence_references["recovered_from_attempt_id"] == first.attempt_id
+    assert events[2].evidence_references["recovery_reason"] == "known_preflight_failure"
+
+
+@pytest.mark.asyncio
+async def test_preflight_retry_fails_closed_for_changed_candidate_or_unproven_failure(tmp_path):
+    for proven in (False, True):
+        uow = InMemoryPersistenceUnitOfWork()
+        run = OrchestrationRun(
+            project_id="project-stage-test", change_name="stage-lifecycle", base_sha="main",
+            current_stage=OrchestrationStage.IMPLEMENTING,
+        )
+        uow.orchestration_runs.save(run)
+        candidate = tmp_path / f"candidate-{proven}"
+        _git_candidate(candidate)
+        coordinator = _coordinator(uow)
+        first = await coordinator._begin_stage_invocation(uow, run, candidate, "APPLY")
+        assert first is not None
+        await coordinator._finish_stage_invocation(
+            uow, run, first, "FAILED", {
+                "failure_kind": "capacity_preflight" if proven else "unknown",
+                "preflight_failure_proven": proven,
+            },
+        )
+        if proven:
+            (candidate / "README.md").write_text("changed candidate\n")
+        assert await coordinator._begin_stage_invocation(
+            uow, run, candidate, "APPLY"
+        ) is None
+
+
+@pytest.mark.asyncio
 async def test_stale_fence_cannot_record_terminal_invocation(tmp_path):
     uow = InMemoryPersistenceUnitOfWork()
     run = OrchestrationRun(

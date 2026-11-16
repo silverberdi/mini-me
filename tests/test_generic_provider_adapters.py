@@ -181,6 +181,71 @@ def test_capacity_lifecycle_selects_fallback_for_apply_without_reviewer_exhausti
     assert service.fallback_provider_for_inflight_apply("test-proj", "run-1", "codex") is None
 
 
+def test_inflight_apply_capacity_uses_idle_age_only_for_drain_recovery(in_memory_uow):
+    from datetime import timedelta
+
+    from minime.domain.enums import JobStatus, OrchestrationStage
+    from minime.domain.models import Job, utc_now
+    from minime.services.capacity_lifecycle_service import CapacityLifecycleService
+
+    now = utc_now()
+    project = Project(
+        project_id="capacity-mode-test", display_name="Test", repository="owner/repo",
+        implementer="codex", reviewer="antigravity",
+    )
+    run = OrchestrationRun(
+        run_id="capacity-mode-run", project_id=project.project_id,
+        change_name="test-change", base_sha="base",
+        current_stage=OrchestrationStage.IMPLEMENTING, is_active=True,
+    )
+    in_memory_uow.projects.save(project)
+    in_memory_uow.orchestration_runs.save(run)
+    in_memory_uow.jobs.save(Job(
+        job_id="capacity-mode-job", project_id=project.project_id,
+        change_name=run.change_name, status=JobStatus.RUNNING,
+        implementer_role="execution",
+    ))
+
+    def save_health(provider, status, *, last_success_at=None, result=ProviderResultClass.SUCCESS,
+                    failures=0):
+        in_memory_uow.provider_health.save(ProviderHealth(
+            provider=provider, status=status, last_result_class=result,
+            last_success_at=last_success_at, consecutive_failures=failures, updated_at=now,
+        ))
+
+    service = CapacityLifecycleService(in_memory_uow)
+    old_success = now - timedelta(days=20)
+    save_health("codex", ProviderHealthStatus.AVAILABLE, last_success_at=old_success)
+    save_health("antigravity", ProviderHealthStatus.AVAILABLE, last_success_at=old_success)
+    assert service.can_execute_inflight_apply(
+        project.project_id, run.run_id, "codex"
+    ) is True
+
+    # RUN still blocks contradictory active failure evidence on the primary.
+    save_health(
+        "codex", ProviderHealthStatus.AVAILABLE, last_success_at=old_success,
+        result=ProviderResultClass.TRANSIENT_ERROR, failures=1,
+    )
+    assert service.can_execute_inflight_apply(
+        project.project_id, run.run_id, "codex"
+    ) is False
+    save_health("codex", ProviderHealthStatus.EXHAUSTED, last_success_at=old_success)
+    assert service.can_execute_inflight_apply(
+        project.project_id, run.run_id, "codex"
+    ) is False
+
+    # DRAIN's peer-outage exception remains limited to a recent primary success.
+    save_health("codex", ProviderHealthStatus.AVAILABLE, last_success_at=now)
+    save_health("antigravity", ProviderHealthStatus.TEMPORARILY_UNAVAILABLE)
+    assert service.can_execute_inflight_apply(
+        project.project_id, run.run_id, "codex"
+    ) is True
+    save_health("codex", ProviderHealthStatus.AVAILABLE, last_success_at=old_success)
+    assert service.can_execute_inflight_apply(
+        project.project_id, run.run_id, "codex"
+    ) is False
+
+
 @pytest.mark.asyncio
 async def test_opencode_adapter_classifies_model_routes():
     """OpenCode model identities are classified by transport namespace."""

@@ -47,6 +47,7 @@ from minime.services.agent_confinement import (
     process_identity_state,
 )
 from minime.services.agent_runner import (
+    CapacityExhaustedError,
     CliAgentRunner,
     NativeOpenSpecWorkflowUnavailable,
     ResolvedWorkflow,
@@ -211,6 +212,7 @@ class StageInvocation:
     candidate: dict[str, Any]
     recovery_count: int
     started_monotonic: float
+    recovered_from_attempt_id: str | None = None
 
 
 class NativeStageHumanRequired(RuntimeError):
@@ -711,6 +713,7 @@ class NativeOrchestrationCoordinator:
         starts: dict[str, dict[str, Any]] = {}
         terminal: set[str] = set()
         terminal_status: dict[str, str] = {}
+        terminal_evidence: dict[str, dict[str, Any]] = {}
         for event in all_stage_events:
             evidence = event.evidence_references or {}
             attempt_id = str(evidence.get("attempt_id") or "")
@@ -722,6 +725,24 @@ class NativeOrchestrationCoordinator:
             }:
                 terminal.add(attempt_id)
                 terminal_status[attempt_id] = str(evidence.get("status") or "")
+                terminal_evidence[attempt_id] = evidence
+        recovery_count = 0
+        recovered_from_attempt_id: str | None = None
+        latest_terminal_attempt_id = next(
+            (
+                attempt_id for attempt_id in reversed(list(starts))
+                if attempt_id in terminal
+            ),
+            None,
+        )
+        latest_terminal_evidence = terminal_evidence.get(latest_terminal_attempt_id or "", {})
+        latest_terminal_result = latest_terminal_evidence.get("result") or {}
+        if (
+            stage == "APPLY"
+            and latest_terminal_result.get("preflight_failure_proven") is True
+            and starts.get(latest_terminal_attempt_id or "", {}).get("candidate") != candidate
+        ):
+            return None
         prior_finished = [
             terminal_status.get(attempt_id, "") for attempt_id in starts
             if attempt_id in terminal
@@ -738,9 +759,37 @@ class NativeOrchestrationCoordinator:
                 or allow_human_resume
                 or (stage == "APPLY" and last_status == "PARTIAL")
             ):
-                return None
+                previous_attempt_id = next(
+                    (
+                        attempt_id for attempt_id, start in reversed(list(starts.items()))
+                        if start.get("candidate") == candidate
+                        and terminal_status.get(attempt_id) == last_status
+                    ),
+                    None,
+                )
+                previous_start = starts.get(previous_attempt_id or "", {})
+                previous_terminal = terminal_evidence.get(previous_attempt_id or "", {})
+                previous_result = previous_terminal.get("result") or {}
+                process_was_observed = any(
+                    event.event_type == "STAGE_INVOCATION_PROCESS_STARTED"
+                    and (event.evidence_references or {}).get("attempt_id") == previous_attempt_id
+                    for event in stage_events
+                )
+                safe_preflight_retry = (
+                    stage == "APPLY"
+                    and last_status == "FAILED"
+                    and previous_result.get("preflight_failure_proven") is True
+                    and previous_result.get("failure_kind") == "capacity_preflight"
+                    and previous_start.get("candidate") == candidate
+                    and int(previous_start.get("recovery_count", 0)) == 0
+                    and not process_was_observed
+                    and previous_attempt_id is not None
+                )
+                if not safe_preflight_retry:
+                    return None
+                recovery_count = 1
+                recovered_from_attempt_id = previous_attempt_id
         incomplete = [item for key, item in starts.items() if key not in terminal]
-        recovery_count = 0
         abandoned_attempt: dict[str, Any] | None = None
         if prior_claim is not None and prior_claim.is_active:
             return None
@@ -792,6 +841,7 @@ class NativeOrchestrationCoordinator:
             attempt_id=str(uuid4()), claim=context, claim_key=claim_key,
             candidate=candidate, recovery_count=recovery_count,
             started_monotonic=asyncio.get_running_loop().time(),
+            recovered_from_attempt_id=recovered_from_attempt_id,
         )
         try:
             coordinator_identity = process_identity()
@@ -822,7 +872,13 @@ class NativeOrchestrationCoordinator:
                     "recovery_count": recovery_count,
                     "operator_action_id": operator_action_id,
                     "recovered_from_attempt_id": (
-                        abandoned_attempt.get("attempt_id") if abandoned_attempt else None
+                        abandoned_attempt.get("attempt_id")
+                        if abandoned_attempt else invocation.recovered_from_attempt_id
+                    ),
+                    "recovery_reason": (
+                        "expired_process_proven_absent" if abandoned_attempt
+                        else "known_preflight_failure" if invocation.recovered_from_attempt_id
+                        else None
                     ),
                 },
             )
@@ -873,6 +929,33 @@ class NativeOrchestrationCoordinator:
         )
         uow.claims.release_claim(claim)
         uow.commit()
+
+    async def _close_preflight_failed_invocation(
+        self,
+        uow: Any,
+        run: OrchestrationRun,
+        invocation: StageInvocation,
+        error: CapacityExhaustedError,
+    ) -> bool:
+        """Persist a known pre-dispatch capacity failure and release its claim."""
+        try:
+            await self._finish_stage_invocation(
+                uow, run, invocation, "FAILED",
+                {
+                    "failure_kind": "capacity_preflight",
+                    "preflight_failure_proven": True,
+                    "provider_id": error.provider_id,
+                    "error": str(error),
+                    "recovery_count": invocation.recovery_count,
+                },
+            )
+            return True
+        except Exception:
+            logger.warning(
+                "Unable to durably close preflight-failed Apply invocation",
+                exc_info=True,
+            )
+            return False
 
     async def _run_claimed(self, uow: Any, claim: RecoveryClaimContext, operation: Any) -> Any:
         """Keep the durable claim owned by this live worker, or fence the child."""
@@ -3163,6 +3246,24 @@ class NativeOrchestrationCoordinator:
                     )
                 except Exception as exc:
                     logger.warning("Apply invocation failed: %s", exc)
+                    if isinstance(exc, CapacityExhaustedError):
+                        if not await self._close_preflight_failed_invocation(
+                            uow, active_run, invocation, exc
+                        ):
+                            return OrchestrationCoordinationResult(
+                                status="PAUSED", run_id=active_run.run_id,
+                                current_stage=OrchestrationStage.IMPLEMENTING,
+                                message="Apply preflight failed and its terminal event or claim could not be closed; worktree preserved.",
+                            )
+                        return OrchestrationCoordinationResult(
+                            status="WAITING_CAPACITY", run_id=active_run.run_id,
+                            current_stage=OrchestrationStage.IMPLEMENTING,
+                            message=(
+                                "Apply was not dispatched because capacity preflight rejected it. "
+                                "The invocation is durably closed; a later coordinator entry may "
+                                "retry once on the unchanged candidate."
+                            ),
+                        )
                     return OrchestrationCoordinationResult(
                         status="PAUSED", run_id=active_run.run_id,
                         current_stage=OrchestrationStage.IMPLEMENTING,
