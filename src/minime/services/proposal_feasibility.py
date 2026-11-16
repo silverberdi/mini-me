@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import re
 from pathlib import Path
 from typing import Any
@@ -12,6 +13,14 @@ from minime.services.openspec_tasks import OpenSpecTaskTracker
 
 class ProposalFeasibilityEvaluator:
     """Read current capability evidence and validate a thinking-agent report."""
+
+    STAGE_ORDER = {
+        "apply": 0,
+        "verify": 1,
+        "pre_pr": 2,
+        "post_merge": 3,
+        "human_validation": 4,
+    }
 
     def __init__(self, openspec_adapter: Any, agent_runner: Any) -> None:
         self.openspec_adapter = openspec_adapter
@@ -125,6 +134,17 @@ class ProposalFeasibilityEvaluator:
                 }
             )
 
+        # The single-operator installation can present a human gate. This does
+        # not claim that an external participant has been recruited or that
+        # human validation has already happened.
+        capabilities.append(
+            {
+                "ref": "operator:confirmed",
+                "kind": "operator_interaction",
+                "available": True,
+            }
+        )
+
         preview = None
         if preview_sessions:
             try:
@@ -216,6 +236,11 @@ class ProposalFeasibilityEvaluator:
             for item in inputs.get("capabilities", [])
             if isinstance(item, dict) and item.get("available") is True
         }
+        known_refs = {
+            str(item.get("ref"))
+            for item in inputs.get("capabilities", [])
+            if isinstance(item, dict)
+        }
         expected_tasks = {str(item["task_id"]) for item in inputs.get("tasks", [])}
         expected_scenarios = {str(item["scenario_id"]) for item in inputs.get("scenarios", [])}
         task_rows = report.get("tasks") if isinstance(report.get("tasks"), list) else []
@@ -228,7 +253,7 @@ class ProposalFeasibilityEvaluator:
             "thinking": {"profile:thinking", "workflow:thinking:propose"},
             "execution": {"profile:execution", "workflow:execution:apply"},
             "operator": {"operator:confirmed"},
-            "project_ci_cd": {f"preview:{inputs.get('candidate_sha')}"},
+            "project_ci_cd": set(),
             "external": {"external:confirmed"},
         }
         seen_tasks: set[str] = set()
@@ -243,41 +268,120 @@ class ProposalFeasibilityEvaluator:
                 continue
             seen_tasks.add(task_id)
             actor = str(item.get("actor") or "")
+            execution_stage = str(item.get("execution_stage") or "")
+            if execution_stage not in cls.STAGE_ORDER:
+                blockers.append(f"task {task_id} has an unknown or missing execution stage")
+            is_apply_task = execution_stage == "apply"
             refs = [str(ref) for ref in item.get("capability_evidence_refs", [])] if isinstance(item.get("capability_evidence_refs"), list) else []
             task_capability_refs = list(refs)
-            _, unknown_refs = cls.verified_evidence_refs(refs, available_refs, worktree_path)
-            if unknown_refs:
-                blockers.append(f"task {task_id} cites unavailable capability evidence: {', '.join(sorted(unknown_refs))}")
+            verified_refs, unknown_refs = cls.verified_evidence_refs(refs, available_refs, worktree_path)
+            # A known capability that is not available yet may belong to a
+            # later stage. Unknown references and invalid paths remain blockers.
+            unregistered_refs = {ref for ref in unknown_refs if ref not in known_refs}
             if actor not in role_refs:
                 blockers.append(f"task {task_id} names an unsupported responsible actor")
-            elif not role_refs[actor].issubset(set(refs)):
-                blockers.append(f"task {task_id} lacks the required verified capability for actor {actor}")
+            elif actor == "project_ci_cd":
+                workflow_paths = {
+                    ref for ref in verified_refs
+                    if ref.startswith("path:.github/workflows/")
+                }
+                if is_apply_task:
+                    blockers.append(f"task {task_id} assigns Apply work to project CI/CD")
+                elif not workflow_paths:
+                    blockers.append(f"task {task_id} has no verified project CI/CD workflow path")
+            elif actor == "external":
+                if not role_refs[actor].issubset(set(refs)) or not role_refs[actor].issubset(verified_refs):
+                    blockers.append(f"task {task_id} has no confirmed external participant or capability path")
+            elif is_apply_task:
+                if unknown_refs:
+                    blockers.append(f"task {task_id} cites unavailable capability evidence: {', '.join(sorted(unknown_refs))}")
+                if not role_refs[actor].issubset(verified_refs):
+                    blockers.append(f"task {task_id} lacks the required verified capability for actor {actor}")
+            elif actor in {"thinking", "execution", "operator"}:
+                if not role_refs[actor].issubset(available_refs):
+                    blockers.append(f"task {task_id} has no authorized capability path for actor {actor}")
+                if unregistered_refs:
+                    blockers.append(f"task {task_id} cites unknown capability evidence: {', '.join(sorted(unregistered_refs))}")
             preconditions = item.get("preconditions")
             if not isinstance(preconditions, list):
                 blockers.append(f"task {task_id} has no structured precondition assessment")
                 preconditions = []
+            validated_preconditions: list[dict[str, Any]] = []
             for precondition in preconditions:
-                if not isinstance(precondition, dict) or precondition.get("satisfied") is not True:
-                    blockers.append(f"task {task_id} has an unmet or unknown precondition")
+                if not isinstance(precondition, dict):
+                    blockers.append(f"task {task_id} has a malformed precondition assessment")
                     continue
+                required_before_stage = str(precondition.get("required_before_stage") or "")
+                if required_before_stage not in cls.STAGE_ORDER:
+                    blockers.append(f"task {task_id} has a precondition with an unknown required stage")
+                    continue
+                if execution_stage in cls.STAGE_ORDER and cls.STAGE_ORDER[required_before_stage] > cls.STAGE_ORDER[execution_stage]:
+                    blockers.append(f"task {task_id} has a dependency scheduled after its execution stage")
+                required_before_apply = cls.STAGE_ORDER[required_before_stage] <= cls.STAGE_ORDER["apply"]
+                satisfied = precondition.get("satisfied") is True
                 evidence_refs = [str(ref) for ref in precondition.get("evidence_refs", [])] if isinstance(precondition.get("evidence_refs"), list) else []
-                _, unknown_refs = cls.verified_evidence_refs(evidence_refs, available_refs, worktree_path)
-                if not evidence_refs or unknown_refs:
-                    blockers.append(f"task {task_id} has an unverified precondition evidence reference")
+                verified_evidence, unknown_evidence = cls.verified_evidence_refs(
+                    evidence_refs, available_refs, worktree_path
+                )
+                if required_before_apply and not satisfied:
+                    blockers.append(f"task {task_id} has an unmet or unknown precondition required before Apply")
+                if required_before_apply and (not evidence_refs or unknown_evidence):
+                    blockers.append(f"task {task_id} has unverified precondition evidence required before Apply")
+                validated_preconditions.append(
+                    {
+                        "required_before_stage": required_before_stage,
+                        "satisfied": satisfied if required_before_apply else False,
+                        "status": (
+                            "SATISFIED"
+                            if required_before_apply and satisfied and not unknown_evidence
+                            else "PENDING"
+                        ),
+                        "evidence_refs": sorted(evidence_refs),
+                    }
+                )
             completion_evidence = str(item.get("completion_evidence") or "")
             if not completion_evidence.strip():
                 blockers.append(f"task {task_id} has no observable completion evidence")
             validated_tasks.append(
                 {
                     "task_id": task_id,
+                    "source_text_sha256": hashlib.sha256(
+                        str(next(
+                            task.get("text", "")
+                            for task in inputs.get("tasks", [])
+                            if str(task.get("task_id")) == task_id
+                        )).encode("utf-8")
+                    ).hexdigest(),
                     "actor": actor,
+                    "execution_stage": execution_stage,
                     "capability_evidence_refs": task_capability_refs,
-                    "preconditions": preconditions,
+                    "depends_on_task_ids": [str(value) for value in item.get("depends_on_task_ids", [])]
+                    if isinstance(item.get("depends_on_task_ids"), list) else [],
+                    "preconditions": validated_preconditions,
                     "completion_evidence": completion_evidence,
                 }
             )
         if seen_tasks != expected_tasks:
             blockers.append("assessment task IDs do not exactly cover native tasks")
+        task_stages = {
+            str(item.get("task_id")): str(item.get("execution_stage"))
+            for item in validated_tasks
+        }
+        for item in validated_tasks:
+            task_id = str(item.get("task_id"))
+            dependencies = item.get("depends_on_task_ids", [])
+            if len(dependencies) != len(set(dependencies)):
+                blockers.append(f"task {task_id} repeats a task dependency")
+            for dependency_id in dependencies:
+                dependency_stage = task_stages.get(dependency_id)
+                if dependency_id == task_id or dependency_stage is None:
+                    blockers.append(f"task {task_id} depends on an unknown or self-referential task")
+                elif (
+                    dependency_stage in cls.STAGE_ORDER
+                    and item.get("execution_stage") in cls.STAGE_ORDER
+                    and cls.STAGE_ORDER[dependency_stage] > cls.STAGE_ORDER[item["execution_stage"]]
+                ):
+                    blockers.append(f"task {task_id} depends on work scheduled for a later stage")
 
         seen_scenarios: set[str] = set()
         validated_scenarios: list[dict[str, Any]] = []
@@ -287,13 +391,35 @@ class ProposalFeasibilityEvaluator:
                 continue
             scenario_id = str(item.get("scenario_id") or "")
             task_ids = [str(task_id) for task_id in item.get("task_ids", [])] if isinstance(item.get("task_ids"), list) else []
+            evidence_stage = str(item.get("evidence_stage") or "")
             if not scenario_id or scenario_id not in expected_scenarios or scenario_id in seen_scenarios:
                 blockers.append(f"scenario entry has unknown or duplicate ID: {scenario_id or '(empty)'}")
                 continue
             seen_scenarios.add(scenario_id)
+            if evidence_stage not in cls.STAGE_ORDER:
+                blockers.append(f"scenario {scenario_id} has an unknown or missing evidence stage")
             if not task_ids or not set(task_ids).issubset(expected_tasks):
                 blockers.append(f"scenario {scenario_id} maps to no known OpenSpec task")
-            validated_scenarios.append({"scenario_id": scenario_id, "task_ids": task_ids})
+            elif evidence_stage in cls.STAGE_ORDER and any(
+                task_stages.get(task_id) in cls.STAGE_ORDER
+                and cls.STAGE_ORDER[task_stages[task_id]] > cls.STAGE_ORDER[evidence_stage]
+                for task_id in task_ids
+            ):
+                blockers.append(f"scenario {scenario_id} claims evidence before its mapped task stage")
+            validated_scenarios.append(
+                {
+                    "scenario_id": scenario_id,
+                    "source_text_sha256": hashlib.sha256(
+                        str(next(
+                            scenario.get("text", "")
+                            for scenario in inputs.get("scenarios", [])
+                            if str(scenario.get("scenario_id")) == scenario_id
+                        )).encode("utf-8")
+                    ).hexdigest(),
+                    "task_ids": task_ids,
+                    "evidence_stage": evidence_stage,
+                }
+            )
         if seen_scenarios != expected_scenarios:
             blockers.append("assessment scenario IDs do not exactly cover native scenarios")
         for reported in report.get("blockers", []) if isinstance(report.get("blockers"), list) else []:
@@ -318,6 +444,51 @@ class ProposalFeasibilityEvaluator:
             validated_actions,
         )
 
+    @classmethod
+    def blockers_before_stage(
+        cls,
+        task_feasibility: list[dict[str, Any]] | tuple[dict[str, Any], ...],
+        *,
+        stage: str,
+        inputs: dict[str, Any],
+        worktree_path: Path,
+    ) -> tuple[str, ...]:
+        """Check only the deferred prerequisites consumed by this stage."""
+        if stage not in cls.STAGE_ORDER or inputs.get("status") != "READY":
+            return (str(inputs.get("reason") or f"capability evidence for {stage} is unavailable"),)
+        available_refs = {
+            str(item.get("ref"))
+            for item in inputs.get("capabilities", [])
+            if isinstance(item, dict) and item.get("available") is True
+        }
+        current_preview = next(
+            (ref for ref in available_refs if ref.startswith("preview:")), None
+        )
+        blockers: list[str] = []
+        for task in task_feasibility:
+            task_id = str(task.get("task_id") or "unknown")
+            for precondition in task.get("preconditions", []):
+                if not isinstance(precondition, dict) or precondition.get("required_before_stage") != stage:
+                    continue
+                refs = [str(ref) for ref in precondition.get("evidence_refs", [])]
+                if not refs:
+                    blockers.append(f"task {task_id} has no evidence reference for its {stage} dependency")
+                    continue
+                stage_refs: list[str] = []
+                for ref in refs:
+                    # Preview evidence is candidate-specific. The initial
+                    # assessment may contain the pre-Apply SHA; resolve the
+                    # same capability kind against the candidate at this stage.
+                    stage_refs.append(current_preview if ref.startswith("preview:") and current_preview else ref)
+                verified, unknown = cls.verified_evidence_refs(stage_refs, available_refs, worktree_path)
+                if unknown or len(verified) != len(set(stage_refs)):
+                    blockers.append(
+                        f"task {task_id} (actor {task.get('actor') or 'unknown'}) still lacks "
+                        f"verified evidence required before {stage}: "
+                        + ", ".join(sorted(unknown or (set(stage_refs) - verified)))
+                    )
+        return tuple(dict.fromkeys(blockers))
+
     @staticmethod
     def output_schema() -> dict[str, Any]:
         return {
@@ -335,22 +506,25 @@ class ProposalFeasibilityEvaluator:
                                 "properties": {
                                     "task_id": {"type": "string"},
                                     "actor": {"type": "string", "enum": ["thinking", "execution", "operator", "project_ci_cd", "external"]},
+                                    "execution_stage": {"type": "string", "enum": list(ProposalFeasibilityEvaluator.STAGE_ORDER)},
                                     "capability_evidence_refs": {"type": "array", "items": {"type": "string"}},
+                                    "depends_on_task_ids": {"type": "array", "items": {"type": "string"}},
                                     "preconditions": {
                                         "type": "array",
                                         "items": {
                                             "type": "object",
                                             "properties": {
+                                                "required_before_stage": {"type": "string", "enum": list(ProposalFeasibilityEvaluator.STAGE_ORDER)},
                                                 "satisfied": {"type": "boolean"},
                                                 "evidence_refs": {"type": "array", "items": {"type": "string"}},
                                             },
-                                            "required": ["satisfied", "evidence_refs"],
+                                            "required": ["required_before_stage", "satisfied", "evidence_refs"],
                                             "additionalProperties": False,
                                         },
                                     },
                                     "completion_evidence": {"type": "string"},
                                 },
-                                "required": ["task_id", "actor", "capability_evidence_refs", "preconditions", "completion_evidence"],
+                                "required": ["task_id", "actor", "execution_stage", "capability_evidence_refs", "depends_on_task_ids", "preconditions", "completion_evidence"],
                                 "additionalProperties": False,
                             },
                         },
@@ -361,8 +535,9 @@ class ProposalFeasibilityEvaluator:
                                 "properties": {
                                     "scenario_id": {"type": "string"},
                                     "task_ids": {"type": "array", "items": {"type": "string"}},
+                                    "evidence_stage": {"type": "string", "enum": list(ProposalFeasibilityEvaluator.STAGE_ORDER)},
                                 },
-                                "required": ["scenario_id", "task_ids"],
+                                "required": ["scenario_id", "task_ids", "evidence_stage"],
                                 "additionalProperties": False,
                             },
                         },

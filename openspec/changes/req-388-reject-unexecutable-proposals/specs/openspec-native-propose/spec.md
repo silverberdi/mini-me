@@ -16,38 +16,68 @@ Following successful strict validation and a passing task-executability assessme
 ## ADDED Requirements
 
 ### Requirement: Evidence-backed task executability before proposal acceptance
-After native Propose and strict validation, and before complexity evaluation or proposal review, the system SHALL assess every OpenSpec task required for delivery. Each assessment SHALL identify the task, responsible actor, currently available capability, any required external precondition, and observable completion evidence, all tied to repository or project evidence. A proposal SHALL advance only when every task has an executable path using capabilities and preconditions confirmed for that project and workflow. An unknown capability, unconfirmed human participant, unmet external dependency, or missing evidence SHALL keep the proposal unaccepted and prevent Apply from starting or consuming an Apply attempt. A project CI/CD deployment that occurs only after PR merge SHALL NOT count as candidate preview capability before Apply or Verify. The system SHALL NOT add deployment capability to Mini Me, mark tasks complete, or allow free-text authorization to override an unmet precondition. The active gate SHALL explain each blocked task and the evidence needed to re-evaluate it. After the Request or project capability evidence changes, the system SHALL re-run native OpenSpec Update/strict validation as applicable and re-assess executability against the resulting artifacts before advancing.
+After native Propose and strict validation, the system SHALL assess every OpenSpec task required for delivery. Each assessment SHALL identify the task, the stage at which it is performed, its responsible actor, the capability and dependencies needed by that stage, and observable completion evidence, tied to repository or project evidence. Each acceptance scenario SHALL map to one or more tasks and the stage-specific evidence that will satisfy it. The proposal SHALL establish an authorized executable path for every mandatory task across its planned stages. A future-stage capability need not be available before Apply, but its responsible actor and authorized path SHALL be evidenced rather than assumed; the capability and result SHALL be verified before entering the stage that consumes them. The system SHALL evaluate a dependency at the transition that first requires it: a deliverable produced by Apply SHALL NOT be required before Apply, and an unmet dependency for Verify or a later stage SHALL NOT by itself prevent entry to Apply. Later-stage work SHALL remain explicitly pending and SHALL be checked before entering the stage that needs it. A task with no responsible actor or no authorized executable path in any planned stage SHALL keep the proposal unaccepted. Unknown task stage or dependency mapping SHALL keep the assessment incomplete and be reported as a gap, without claiming that a specific external capability is unavailable before Apply. The active gate SHALL identify the blocked transition, affected task, and evidence needed to re-evaluate it. A project CI/CD deployment that occurs only after PR merge SHALL NOT count as candidate preview capability before a stage that explicitly requires pre-merge candidate validation; Mini Me SHALL NOT add deployment capability, mark future tasks complete, or allow free-text authorization to override a real unmet dependency. After the Request, task plan, or project capability evidence changes, the system SHALL re-run native OpenSpec Update/strict validation as applicable and reassess the affected tasks against the resulting artifact and capability evidence.
 
 #### Scenario: All tasks have confirmed executable paths
-- **GIVEN** a strictly validated proposal whose tasks each identify an available actor and capability, satisfied preconditions, and observable evidence
+- **GIVEN** a strictly validated proposal whose tasks each identify an authorized actor, execution stage, stage dependencies, and observable evidence
+- **AND** each acceptance scenario maps to task evidence at its required stage
+- **AND** dependencies required before Apply are currently satisfied
 - **WHEN** executability is assessed before complexity or review
 - **THEN** the assessment is persisted against the exact proposal artifact hashes and project capability evidence
 - **AND** the workflow proceeds to complexity evaluation.
 
-#### Scenario: Candidate validation requires unavailable preview deployment
-- **GIVEN** a task requires testing the candidate in a preview deployment before Apply or Verify
-- **AND** the project repository has no verified preview deployment available before merge for that candidate SHA
-- **WHEN** task executability is assessed
-- **THEN** the proposal remains unaccepted at the current human gate
-- **AND** Apply is not invoked and no Apply attempt is consumed
-- **AND** the gate identifies the deployment dependency and the evidence needed to satisfy it or revise the Request scope.
+#### Scenario: Apply creates an artifact required by a later task
+- **GIVEN** a task creates a package manifest, build script, or other artifact during Apply
+- **AND** a later task consumes that artifact
+- **WHEN** executability is assessed before Apply
+- **THEN** the created artifact is not treated as a precondition to enter Apply
+- **AND** the later task remains pending until the artifact is produced and verified.
+
+#### Scenario: Later-stage preview dependency does not block Apply
+- **GIVEN** a task requires a candidate-SHA-matched preview before Verify or another explicitly later stage
+- **AND** no such preview exists yet
+- **AND** the task has an identified project-owned path for that later stage
+- **WHEN** executability is assessed before Apply
+- **THEN** the proposal may advance to Apply
+- **AND** the preview task remains pending and is checked before entering the stage that requires it
+- **AND** the system does not claim that the preview or validation is complete.
+
+#### Scenario: Required dependency blocks the transition that needs it
+- **GIVEN** a task requires a verified preview before the next transition into Verify
+- **AND** the candidate-SHA-matched preview is unavailable
+- **WHEN** the workflow is about to enter Verify
+- **THEN** that transition is held at the existing human gate
+- **AND** the gate identifies the exact task, missing preview evidence, and responsible actor
+- **AND** no Verify attempt is started or consumed.
 
 #### Scenario: Human-only evidence has no confirmed participant or available candidate
 - **GIVEN** a proposed task requires physical-device testing or an observation session
-- **AND** the candidate is not available to that participant or the responsible participant is not confirmed
-- **WHEN** task executability is assessed
-- **THEN** the proposal remains unaccepted
-- **AND** the system does not treat the task as work an automated Apply agent can complete.
+- **AND** the task is assigned to a later human-validation stage
+- **WHEN** executability is assessed before Apply
+- **THEN** the task remains pending for that later stage and is not represented as automated Apply work
+- **AND** Apply is not blocked solely because the candidate or participant is not yet available.
 
-#### Scenario: Missing or unverifiable capability evidence fails closed
-- **GIVEN** an assessment omits a task, names an unconfigured actor, cites an absent capability, or cannot verify a required precondition
+#### Scenario: Mandatory task has no authorized execution path
+- **GIVEN** a mandatory task has no responsible actor or no authorized capability path in any planned stage
+- **WHEN** task executability is assessed before proposal acceptance
+- **THEN** the proposal remains unaccepted
+- **AND** the gate names the task and the missing decision or capability needed to define a valid path.
+
+#### Scenario: Missing or unverifiable current-stage evidence fails closed
+- **GIVEN** an assessment omits a task or stage, names an unconfigured actor, cites an absent capability needed by the next transition, or cannot verify a dependency required before that transition
 - **WHEN** the assessment is validated
-- **THEN** the proposal remains unaccepted with the exact evidence gap
+- **THEN** the current transition is held with the exact task, stage, and evidence gap
 - **AND** a free-text operator response alone cannot advance it.
 
+#### Scenario: Acceptance scenarios have stage-specific task evidence
+- **GIVEN** a strictly validated proposal with acceptance scenarios spanning multiple workflow stages
+- **WHEN** task executability is assessed
+- **THEN** each scenario maps to one or more tasks and evidence produced at the stage that satisfies it
+- **AND** an unmapped scenario keeps the assessment incomplete without inventing an external dependency.
+
 #### Scenario: Updated Request or capability evidence allows reassessment
-- **GIVEN** a proposal is held because a required precondition is unavailable
+- **GIVEN** a transition is held because a dependency required by that stage is unavailable
 - **AND** the original Request or project capability evidence is updated and verified
 - **WHEN** the native proposal artifacts are updated and strictly validated
-- **THEN** the system re-assesses every task against the new artifact and capability evidence hashes
-- **AND** advances only if every required task now has a confirmed executable path.
+- **THEN** the system re-assesses affected tasks against the new artifact and capability evidence hashes
+- **AND** advances only if dependencies required by the next transition now have a confirmed path.

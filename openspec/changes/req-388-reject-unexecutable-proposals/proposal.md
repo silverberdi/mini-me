@@ -5,8 +5,8 @@ Mini Me can accept a strictly valid OpenSpec proposal whose tasks cannot be comp
 ## What Changes
 
 - Add an execution-feasibility decision after native Propose and strict validation, before proposal acceptance and Apply.
-- Require evidence for every task that identifies its responsible actor, available capability, required preconditions, and observable completion evidence.
-- Keep the proposal unaccepted and fail closed when any task depends on an unavailable deployment, physical test, external participant, or other unconfirmed capability; show the specific blocker and what must change before re-evaluation.
+- Require evidence for every task that identifies its execution stage, responsible actor, capability, dependencies needed before that stage, and observable completion evidence.
+- Evaluate blockers at the transition that needs them: do not require Apply outputs before Apply, and do not block Apply on dependencies for Verify or later stages. Keep later work pending and fail closed before the stage that needs a missing dependency; reject proposals whose mandatory work has no authorized path in any stage.
 - Preserve the boundary that deployment belongs to project CI/CD; do not add a deployment mechanism to Mini Me or infer that a deployment will happen.
 
 ## Capabilities

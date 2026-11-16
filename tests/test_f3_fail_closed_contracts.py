@@ -104,13 +104,15 @@ def test_feasibility_requires_exact_native_task_and_scenario_coverage(tmp_path: 
             {
                 "task_id": "1.1",
                 "actor": "execution",
+                "execution_stage": "apply",
                 "capability_evidence_refs": ["profile:execution", "workflow:execution:apply"],
+                "depends_on_task_ids": [],
                 "preconditions": [],
                 "completion_evidence": "Focused test command exits zero",
             }
         ],
         "scenario_coverage": [
-            {"scenario_id": "capability:req-1:1", "task_ids": ["1.1"]}
+            {"scenario_id": "capability:req-1:1", "task_ids": ["1.1"], "evidence_stage": "apply"}
         ],
         "blockers": [],
         "resolution_options": [],
@@ -119,6 +121,11 @@ def test_feasibility_requires_exact_native_task_and_scenario_coverage(tmp_path: 
         report, inputs, tmp_path
     )
     assert result[0] == "EXECUTABLE"
+    original_task_fingerprint = result[1][0]["source_text_sha256"]
+    inputs["tasks"][0]["text"] = "Run focused verification against the exact candidate"
+    revised = ProposalFeasibilityEvaluator.validate_report(report, inputs, tmp_path)
+    assert revised[0] == "EXECUTABLE"
+    assert revised[1][0]["source_text_sha256"] != original_task_fingerprint
 
     report["tasks"].append(dict(report["tasks"][0], task_id="extra"))
     blocked = ProposalFeasibilityEvaluator.validate_report(
@@ -128,7 +135,10 @@ def test_feasibility_requires_exact_native_task_and_scenario_coverage(tmp_path: 
     assert any("unknown or duplicate ID" in reason for reason in blocked[3])
 
 
-def test_feasibility_blocks_unavailable_preview_and_unconfirmed_human(tmp_path: Path):
+def test_later_stage_preview_does_not_block_apply_and_remains_pending(tmp_path: Path):
+    workflow = tmp_path / ".github" / "workflows" / "deploy.yml"
+    workflow.parent.mkdir(parents=True)
+    workflow.write_text("name: candidate preview\n")
     inputs = {
         "status": "READY",
         "candidate_sha": "b" * 40,
@@ -145,13 +155,19 @@ def test_feasibility_blocks_unavailable_preview_and_unconfirmed_human(tmp_path: 
             {
                 "task_id": "2.1",
                 "actor": "project_ci_cd",
-                "capability_evidence_refs": [f"preview:{'b' * 40}"],
-                "preconditions": [{"satisfied": False, "evidence_refs": []}],
+                "execution_stage": "verify",
+                "capability_evidence_refs": ["path:.github/workflows/deploy.yml", f"preview:{'b' * 40}"],
+                "depends_on_task_ids": [],
+                "preconditions": [{
+                    "required_before_stage": "verify",
+                    "satisfied": False,
+                    "evidence_refs": [f"preview:{'b' * 40}"],
+                }],
                 "completion_evidence": "Observed result from the exact candidate SHA",
             }
         ],
         "scenario_coverage": [
-            {"scenario_id": "mobile:req-1:1", "task_ids": ["2.1"]}
+            {"scenario_id": "mobile:req-1:1", "task_ids": ["2.1"], "evidence_stage": "verify"}
         ],
         "blockers": [],
         "resolution_options": ["Provide an exact-SHA preview"],
@@ -159,9 +175,127 @@ def test_feasibility_blocks_unavailable_preview_and_unconfirmed_human(tmp_path: 
     result = ProposalFeasibilityEvaluator.validate_report(
         report, inputs, tmp_path
     )
+    assert result[0] == "EXECUTABLE"
+    assert result[1][0]["preconditions"][0]["status"] == "PENDING"
+
+
+def test_unmet_apply_precondition_still_blocks_apply(tmp_path: Path):
+    inputs = {
+        "status": "READY",
+        "candidate_sha": "c" * 40,
+        "tasks": [{"task_id": "1.1", "text": "Build the workspace"}],
+        "scenarios": [{"scenario_id": "build:req-1:1", "text": "Build succeeds"}],
+        "capabilities": [
+            {"ref": "profile:execution", "available": True},
+            {"ref": "workflow:execution:apply", "available": True},
+            {"ref": "required:credential", "available": False},
+        ],
+    }
+    report = {
+        "tasks": [{
+            "task_id": "1.1",
+            "actor": "execution",
+            "execution_stage": "apply",
+            "capability_evidence_refs": ["profile:execution", "workflow:execution:apply"],
+            "depends_on_task_ids": [],
+            "preconditions": [{
+                "required_before_stage": "apply",
+                "satisfied": False,
+                "evidence_refs": ["required:credential"],
+            }],
+            "completion_evidence": "Build command exits successfully",
+        }],
+        "scenario_coverage": [{
+            "scenario_id": "build:req-1:1",
+            "task_ids": ["1.1"],
+            "evidence_stage": "apply",
+        }],
+        "blockers": [],
+        "resolution_options": ["Provide the required credential"],
+    }
+    result = ProposalFeasibilityEvaluator.validate_report(report, inputs, tmp_path)
     assert result[0] == "BLOCKED"
-    assert any("unavailable capability evidence" in reason for reason in result[3])
-    assert any("unmet or unknown precondition" in reason for reason in result[3])
+    assert any("required before Apply" in reason for reason in result[3])
+
+
+def test_apply_output_dependency_is_not_a_precondition_for_starting_apply(tmp_path: Path):
+    inputs = {
+        "status": "READY",
+        "candidate_sha": "d" * 40,
+        "tasks": [
+            {"task_id": "1.2", "text": "Create the package manifest"},
+            {"task_id": "4.1", "text": "Run the package build"},
+        ],
+        "scenarios": [{"scenario_id": "workspace:req-1:1", "text": "All workspaces build"}],
+        "capabilities": [
+            {"ref": "profile:execution", "available": True},
+            {"ref": "workflow:execution:apply", "available": True},
+        ],
+    }
+    report = {
+        "tasks": [
+            {
+                "task_id": "1.2",
+                "actor": "execution",
+                "execution_stage": "apply",
+                "capability_evidence_refs": ["profile:execution", "workflow:execution:apply"],
+                "depends_on_task_ids": [],
+                "preconditions": [],
+                "completion_evidence": "Package manifest exists in the candidate diff",
+            },
+            {
+                "task_id": "4.1",
+                "actor": "execution",
+                "execution_stage": "apply",
+                "capability_evidence_refs": ["profile:execution", "workflow:execution:apply"],
+                "depends_on_task_ids": ["1.2"],
+                "preconditions": [],
+                "completion_evidence": "Build command exits successfully",
+            },
+        ],
+        "scenario_coverage": [{
+            "scenario_id": "workspace:req-1:1",
+            "task_ids": ["1.2", "4.1"],
+            "evidence_stage": "apply",
+        }],
+        "blockers": [],
+        "resolution_options": [],
+    }
+    result = ProposalFeasibilityEvaluator.validate_report(report, inputs, tmp_path)
+    assert result[0] == "EXECUTABLE"
+    assert result[1][1]["depends_on_task_ids"] == ["1.2"]
+
+
+def test_verify_transition_checks_deferred_preview_against_current_candidate(tmp_path: Path):
+    task_feasibility = [{
+        "task_id": "4.1",
+        "execution_stage": "verify",
+        "preconditions": [{
+            "required_before_stage": "verify",
+            "satisfied": False,
+            "status": "PENDING",
+            "evidence_refs": ["preview:old-candidate"],
+        }],
+    }]
+    inputs = {
+        "status": "READY",
+        "candidate_sha": "e" * 40,
+        "capabilities": [{
+            "ref": f"preview:{'e' * 40}",
+            "available": False,
+        }],
+    }
+    blocked = ProposalFeasibilityEvaluator.blockers_before_stage(
+        task_feasibility, stage="verify", inputs=inputs, worktree_path=tmp_path
+    )
+    assert blocked
+    assert "task 4.1" in blocked[0]
+
+    inputs["capabilities"][0]["available"] = True
+    passed = ProposalFeasibilityEvaluator.blockers_before_stage(
+        task_feasibility, stage="verify", inputs=inputs, worktree_path=tmp_path
+    )
+    assert passed == ()
 
 
 @pytest.mark.asyncio
@@ -186,11 +320,13 @@ async def test_structured_assessment_only_passes_when_all_capabilities_are_verif
             "tasks": [{
                 "task_id": "1.1",
                 "actor": "execution",
+            "execution_stage": "apply",
                 "capability_evidence_refs": ["profile:execution", "workflow:execution:apply"],
+            "depends_on_task_ids": [],
                 "preconditions": [],
                 "completion_evidence": "Focused test command exits zero",
             }],
-            "scenario_coverage": [{"scenario_id": "change:req-1:1", "task_ids": ["1.1"]}],
+            "scenario_coverage": [{"scenario_id": "change:req-1:1", "task_ids": ["1.1"], "evidence_stage": "apply"}],
             "blockers": [],
             "resolution_options": [],
         },
@@ -280,7 +416,9 @@ def test_feasibility_inventory_blocks_unconfigured_agent_and_missing_preview(tmp
     assert inputs["status"] == "READY"
     assert any("profile:thinking" in blocker for blocker in inputs["mandatory_blockers"])
     assert any("workflow:execution:apply" in blocker for blocker in inputs["mandatory_blockers"])
-    assert {item["ref"] for item in inputs["capabilities"] if item["available"]} == set()
+    assert {item["ref"] for item in inputs["capabilities"] if item["available"]} == {
+        "operator:confirmed"
+    }
     runner.resolve_workflow.assert_not_called()
     preview_sessions.get_latest_for_candidate.assert_called_once_with(
         "project", "change", "d" * 40
