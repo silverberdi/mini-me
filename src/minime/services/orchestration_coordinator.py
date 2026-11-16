@@ -1918,6 +1918,50 @@ class NativeOrchestrationCoordinator:
                 self._clear_current_human_gate(uow, active_run, response_text=operator_clarification)
                 self._update_stage(uow, active_run, OrchestrationStage.PROPOSING)
 
+            selected_update_option = self._selected_feasibility_update_option(
+                feasibility_gate, operator_clarification
+            )
+            if (
+                feasibility_gate.get("gate") == "proposal_feasibility"
+                and selected_update_option
+            ):
+                details = dict(active_run.stop_details or {})
+                revision = details.get("pending_proposal_revision")
+                if not isinstance(revision, dict):
+                    revision = {"findings": []}
+                existing_guidance = str(revision.get("clarification") or "").strip()
+                blockers = feasibility_gate.get("blockers")
+                if not isinstance(blockers, list):
+                    assessment = details.get("complexity_assessment")
+                    blockers = (
+                        assessment.get("feasibility_blockers", [])
+                        if isinstance(assessment, dict)
+                        else []
+                    )
+                blocker_context = json.dumps(
+                    [str(item) for item in blockers if isinstance(item, str)],
+                    ensure_ascii=False,
+                )
+                update_guidance = (
+                    "The operator explicitly selected the proposal-feasibility gate option for native OpenSpec Update. "
+                    f"Use the installed OpenSpec Update workflow on this same Run and Change to reconcile the existing "
+                    f"planning artifacts with these persisted feasibility blockers: {blocker_context}. Preserve the "
+                    "authorized Request scope. Do not treat this selection or the blocker list as evidence that a "
+                    "precondition is satisfied; use only verifiable repository/capability references, then let strict "
+                    "validation and a fresh feasibility assessment decide whether the gate can clear."
+                )
+                revision["clarification"] = "\n".join(
+                    part for part in (existing_guidance, update_guidance) if part
+                )
+                revision["findings"] = revision.get("findings") or []
+                revision["authorized_option"] = selected_update_option
+                details["pending_proposal_revision"] = revision
+                self._persist_run_stop_details(active_run, details)
+                self._clear_current_human_gate(
+                    uow, active_run, response_text=operator_clarification
+                )
+                self._update_stage(uow, active_run, OrchestrationStage.PROPOSING)
+
         # Step 4: Request normalization must complete before Explore while
         # retaining the same durable Run and authorized Worktree.
         if active_run.current_stage in (
@@ -5350,6 +5394,25 @@ class NativeOrchestrationCoordinator:
             )
         return "\n".join(parts)
 
+    @staticmethod
+    def _selected_feasibility_update_option(
+        gate: dict[str, Any], response: str | None
+    ) -> str | None:
+        """Return only an exact, explicit native-Update option selected at this gate."""
+        if not isinstance(response, str) or not response.strip():
+            return None
+        options = gate.get("options") if isinstance(gate, dict) else None
+        if not isinstance(options, list):
+            return None
+        for option in options:
+            if (
+                isinstance(option, str)
+                and option.strip() == response.strip()
+                and re.search(r"\bOpenSpec\s+Update\b", option, re.IGNORECASE)
+            ):
+                return option.strip()
+        return None
+
     async def _run_propose(
         self,
         worktree_path: Path,
@@ -5384,7 +5447,7 @@ class NativeOrchestrationCoordinator:
                 f"Workflow dispatch command: {wf.dispatch_command}\n\n"
                 f"Remote Request #{issue_number}: {issue_title}\n"
                 f"Description:\n{issue_body}\n"
-                f"Update the existing planning artifacts under openspec/changes/{change_name}/ to address the independent review findings:\n"
+                f"Update the existing planning artifacts under openspec/changes/{change_name}/ to address the operator-authorized revision guidance:\n"
                 f"{operator_clarification or ''}\n"
             )
         else:
