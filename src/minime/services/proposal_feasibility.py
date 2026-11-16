@@ -467,6 +467,22 @@ class ProposalFeasibilityEvaluator:
         blockers: list[str] = []
         for task in task_feasibility:
             task_id = str(task.get("task_id") or "unknown")
+            actor = str(task.get("actor") or "unknown")
+            if task.get("execution_stage") == stage:
+                capability_refs = [
+                    str(ref) for ref in task.get("capability_evidence_refs", [])
+                ]
+                verified_capabilities, unknown_capabilities = cls.verified_evidence_refs(
+                    capability_refs, available_refs, worktree_path
+                )
+                missing_capabilities = unknown_capabilities | (
+                    set(capability_refs) - verified_capabilities
+                )
+                if missing_capabilities:
+                    blockers.append(
+                        f"task {task_id} (actor {actor}) lacks verified stage capability before {stage}: "
+                        + ", ".join(sorted(missing_capabilities))
+                    )
             for precondition in task.get("preconditions", []):
                 if not isinstance(precondition, dict) or precondition.get("required_before_stage") != stage:
                     continue
@@ -483,7 +499,7 @@ class ProposalFeasibilityEvaluator:
                 verified, unknown = cls.verified_evidence_refs(stage_refs, available_refs, worktree_path)
                 if unknown or len(verified) != len(set(stage_refs)):
                     blockers.append(
-                        f"task {task_id} (actor {task.get('actor') or 'unknown'}) still lacks "
+                        f"task {task_id} (actor {actor}) still lacks "
                         f"verified evidence required before {stage}: "
                         + ", ".join(sorted(unknown or (set(stage_refs) - verified)))
                     )

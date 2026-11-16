@@ -1,5 +1,6 @@
 """Focused regression coverage for the F3 audit corrections."""
 
+import hashlib
 import json
 import subprocess
 from pathlib import Path
@@ -296,6 +297,91 @@ def test_verify_transition_checks_deferred_preview_against_current_candidate(tmp
         task_feasibility, stage="verify", inputs=inputs, worktree_path=tmp_path
     )
     assert passed == ()
+
+
+@pytest.mark.parametrize("stage", ["pre_pr", "post_merge", "human_validation"])
+def test_deferred_stage_requires_its_declared_capability(stage: str, tmp_path: Path):
+    task_feasibility = [{
+        "task_id": "5.2",
+        "actor": "human_operator",
+        "execution_stage": stage,
+        "capability_evidence_refs": ["operator:confirmed"],
+        "preconditions": [],
+    }]
+    inputs = {"status": "READY", "candidate_sha": "a" * 40, "capabilities": []}
+
+    blocked = ProposalFeasibilityEvaluator.blockers_before_stage(
+        task_feasibility, stage=stage, inputs=inputs, worktree_path=tmp_path
+    )
+    assert blocked
+    assert "task 5.2" in blocked[0]
+    assert "human_operator" in blocked[0]
+
+    inputs["capabilities"] = [{"ref": "operator:confirmed", "available": True}]
+    assert ProposalFeasibilityEvaluator.blockers_before_stage(
+        task_feasibility, stage=stage, inputs=inputs, worktree_path=tmp_path
+    ) == ()
+
+
+@pytest.mark.asyncio
+async def test_coordinator_holds_transition_until_stage_evidence_exists(tmp_path: Path):
+    c = coordinator(tmp_path, ScriptedRunner("unused"))
+    task_text = "Validate the exact candidate in the project preview"
+    task_hash = hashlib.sha256(task_text.encode()).hexdigest()
+    scenario_text = "The candidate is available for validation"
+    scenario_hash = hashlib.sha256(scenario_text.encode()).hexdigest()
+    task = {
+        "task_id": "4.2",
+        "actor": "human_operator",
+        "execution_stage": "pre_pr",
+        "capability_evidence_refs": [],
+        "preconditions": [{
+            "required_before_stage": "pre_pr",
+            "satisfied": False,
+            "evidence_refs": ["preview:prior-candidate"],
+        }],
+        "source_text_sha256": task_hash,
+    }
+    assessment = {
+        "task_feasibility": [task],
+        "scenario_coverage": [{
+            "scenario_id": "change:req-388:1",
+            "source_text_sha256": scenario_hash,
+        }],
+    }
+    run = SimpleNamespace(
+        run_id="run-388",
+        change_name="req-388-reject-unexecutable-proposals",
+        current_stage="PR2_MERGED",
+        stop_details={"complexity_assessment": assessment},
+    )
+    uow = SimpleNamespace(projects=SimpleNamespace(get_by_id=MagicMock(return_value=None)))
+    current_task = {"task_id": "4.2", "text": task_text}
+    current_scenario = {"scenario_id": "change:req-388:1", "text": scenario_text}
+    c.proposal_feasibility.collect_inputs = MagicMock(return_value={
+        "status": "READY",
+        "candidate_sha": "a" * 40,
+        "tasks": [current_task],
+        "scenarios": [current_scenario],
+        "capabilities": [],
+    })
+    gate_payload = {"question": "Evidence required", "gate": "proposal_feasibility"}
+    c._record_current_human_gate = MagicMock(return_value=gate_payload)
+
+    result = await c._check_stage_feasibility(
+        uow,
+        run,
+        project_id="project-1",
+        worktree_path=tmp_path,
+        thinker_provider="codex",
+        implementer_provider="codex",
+        stage="pre_pr",
+    )
+
+    assert result is not None
+    assert result.status == "HUMAN_REQUIRED"
+    assert "pre_pr" in c._record_current_human_gate.call_args.kwargs["question"]
+    assert c._record_current_human_gate.call_args.kwargs["payload"]["blocked_transition"] == "pre_pr"
 
 
 @pytest.mark.asyncio

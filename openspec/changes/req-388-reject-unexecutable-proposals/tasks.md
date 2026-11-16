@@ -14,5 +14,5 @@
 ## 3. Verification
 
 - [x] 3.1 Add unit/coordinator tests for task-stage coverage, Apply-created outputs, later-stage missing capabilities, true current-transition blockers, unknown SHA, and no dispatch past a blocked transition.
-- [x] 3.2 Add PostgreSQL/API E2E proving Apply proceeds when only later-stage work is pending, that the later dependency gates the correct transition, and that changed verified Request/task/capability evidence triggers reassessment without bypassing the gate.
-- [x] 3.3 Run focused and relevant regression suites, lint, and strict OpenSpec validation for the stage-aware behavior; capture integration evidence against the immutable implementation SHA.
+- [ ] 3.2 Add PostgreSQL/API E2E proving Apply proceeds when only later-stage work is pending, that the later dependency gates the correct transition, and that changed verified Request/task/capability evidence triggers reassessment without bypassing the gate.
+- [ ] 3.3 Run focused and relevant regression suites, lint, and strict OpenSpec validation for the stage-aware behavior; capture integration evidence against the immutable implementation SHA.

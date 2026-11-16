@@ -389,6 +389,134 @@ class NativeOrchestrationCoordinator:
             uow.commit()
         return active_payload
 
+    async def _check_stage_feasibility(
+        self,
+        uow: Any,
+        run: OrchestrationRun,
+        *,
+        project_id: str,
+        worktree_path: Path,
+        thinker_provider: str,
+        implementer_provider: str,
+        stage: str,
+    ) -> OrchestrationCoordinationResult | None:
+        """Hold an internal workflow transition until its declared evidence is available."""
+        assessment = (run.stop_details or {}).get("complexity_assessment")
+        saved_tasks = assessment.get("task_feasibility") if isinstance(assessment, dict) else None
+        saved_scenarios = (
+            assessment.get("scenario_coverage") or []
+            if isinstance(assessment, dict)
+            else []
+        )
+        stage_work = [
+            task for task in saved_tasks or ()
+            if isinstance(task, dict)
+            and (
+                task.get("execution_stage") == stage
+                or any(
+                    isinstance(precondition, dict)
+                    and precondition.get("required_before_stage") == stage
+                    for precondition in task.get("preconditions", [])
+                )
+            )
+        ]
+        if not stage_work:
+            return None
+
+        candidate_sha = await self._get_git_head_sha(worktree_path)
+        status_result = await self._git_run(
+            worktree_path, ["status", "--porcelain", "--untracked-files=all"]
+        )
+        project_record = uow.projects.get_by_id(project_id) if hasattr(uow, "projects") else None
+        inputs = self.proposal_feasibility.collect_inputs(
+            worktree_path=worktree_path,
+            change_name=run.change_name,
+            project=project_record,
+            candidate_sha=candidate_sha,
+            candidate_clean=status_result.returncode == 0 and not status_result.stdout.strip(),
+            preview_sessions=getattr(uow, "preview_sessions", None),
+            thinker_provider=thinker_provider,
+            implementer_provider=implementer_provider,
+        )
+        blockers = list(
+            self.proposal_feasibility.blockers_before_stage(
+                saved_tasks,
+                stage=stage,
+                inputs=inputs,
+                worktree_path=worktree_path,
+            )
+        )
+        current_tasks = inputs.get("tasks", [])
+        current_task_hashes = {
+            str(item.get("task_id")): hashlib.sha256(
+                str(item.get("text") or "").encode("utf-8")
+            ).hexdigest()
+            for item in current_tasks if isinstance(item, dict)
+        }
+        saved_task_hashes = {
+            str(item.get("task_id")): str(item.get("source_text_sha256") or "")
+            for item in saved_tasks or () if isinstance(item, dict)
+        }
+        current_scenario_hashes = {
+            str(item.get("scenario_id")): hashlib.sha256(
+                str(item.get("text") or "").encode("utf-8")
+            ).hexdigest()
+            for item in inputs.get("scenarios", []) if isinstance(item, dict)
+        }
+        saved_scenario_hashes = {
+            str(item.get("scenario_id")): str(item.get("source_text_sha256") or "")
+            for item in saved_scenarios if isinstance(item, dict)
+        }
+        if {str(item.get("task_id")) for item in current_tasks if isinstance(item, dict)} != set(saved_task_hashes):
+            blockers.append(
+                "The OpenSpec task inventory changed after assessment; native OpenSpec Update and strict validation are required."
+            )
+        elif current_task_hashes != saved_task_hashes:
+            blockers.append(
+                "OpenSpec task descriptions changed after assessment; native OpenSpec Update and strict validation are required."
+            )
+        if current_scenario_hashes != saved_scenario_hashes:
+            blockers.append(
+                "OpenSpec acceptance scenarios changed after assessment; native OpenSpec Update and strict validation are required."
+            )
+
+        active_gate = get_active_human_payload(run)
+        if blockers:
+            question = (
+                f"La transición {stage} está detenida por evidencia pendiente: "
+                + "; ".join(dict.fromkeys(blockers))
+            )
+            payload = self._record_current_human_gate(
+                uow,
+                run,
+                gate="proposal_feasibility",
+                question=question,
+                options=[
+                    f"Aportar evidencia verificable para {stage}",
+                    "Actualizar el Change con OpenSpec Update y validarlo estrictamente",
+                ],
+                payload={
+                    "blocked_transition": stage,
+                    "candidate_sha": candidate_sha,
+                    "blockers": list(dict.fromkeys(blockers)),
+                    "task_feasibility": saved_tasks,
+                },
+            )
+            return OrchestrationCoordinationResult(
+                status="HUMAN_REQUIRED",
+                run_id=run.run_id,
+                current_stage=run.current_stage,
+                message=payload["question"],
+                human_payload=payload,
+            )
+        if (
+            isinstance(active_gate, dict)
+            and active_gate.get("gate") == "proposal_feasibility"
+            and active_gate.get("blocked_transition") == stage
+        ):
+            self._clear_current_human_gate(uow, run)
+        return None
+
     @staticmethod
     def _clear_current_human_gate(
         uow: Any, run: OrchestrationRun, *, response_text: str | None = None,
@@ -2970,130 +3098,17 @@ class NativeOrchestrationCoordinator:
             self._update_stage(uow, active_run, OrchestrationStage.VERIFYING)
 
         if active_run.current_stage == OrchestrationStage.VERIFYING:
-            saved_assessment = (active_run.stop_details or {}).get("complexity_assessment")
-            saved_task_feasibility = (
-                saved_assessment.get("task_feasibility")
-                if isinstance(saved_assessment, dict)
-                else None
+            feasibility_gate = await self._check_stage_feasibility(
+                uow,
+                active_run,
+                project_id=project_id,
+                worktree_path=worktree_path,
+                thinker_provider=thinker_provider,
+                implementer_provider=implementer_provider,
+                stage="verify",
             )
-            verify_dependencies = [
-                precondition
-                for task in saved_task_feasibility or ()
-                if isinstance(task, dict)
-                for precondition in task.get("preconditions", [])
-                if isinstance(precondition, dict)
-                and precondition.get("required_before_stage") == "verify"
-            ]
-            if verify_dependencies:
-                current_sha = await self._get_git_head_sha(worktree_path)
-                status_result = await self._git_run(
-                    worktree_path, ["status", "--porcelain", "--untracked-files=all"]
-                )
-                project_record = uow.projects.get_by_id(project_id) if hasattr(uow, "projects") else None
-                verify_inputs = self.proposal_feasibility.collect_inputs(
-                    worktree_path=worktree_path,
-                    change_name=change_name,
-                    project=project_record,
-                    candidate_sha=current_sha,
-                    candidate_clean=status_result.returncode == 0 and not status_result.stdout.strip(),
-                    preview_sessions=getattr(uow, "preview_sessions", None),
-                    thinker_provider=thinker_provider,
-                    implementer_provider=implementer_provider,
-                )
-                current_task_ids = {
-                    str(item.get("task_id")) for item in verify_inputs.get("tasks", [])
-                }
-                assessed_task_ids = {
-                    str(item.get("task_id")) for item in saved_task_feasibility or ()
-                    if isinstance(item, dict)
-                }
-                current_task_hashes = {
-                    str(item.get("task_id")): hashlib.sha256(
-                        str(item.get("text") or "").encode("utf-8")
-                    ).hexdigest()
-                    for item in verify_inputs.get("tasks", [])
-                    if isinstance(item, dict)
-                }
-                assessed_task_hashes = {
-                    str(item.get("task_id")): str(item.get("source_text_sha256") or "")
-                    for item in saved_task_feasibility or ()
-                    if isinstance(item, dict)
-                }
-                saved_scenario_coverage = (
-                    saved_assessment.get("scenario_coverage", [])
-                    if isinstance(saved_assessment, dict)
-                    else []
-                )
-                current_scenario_hashes = {
-                    str(item.get("scenario_id")): hashlib.sha256(
-                        str(item.get("text") or "").encode("utf-8")
-                    ).hexdigest()
-                    for item in verify_inputs.get("scenarios", [])
-                    if isinstance(item, dict)
-                }
-                assessed_scenario_hashes = {
-                    str(item.get("scenario_id")): str(item.get("source_text_sha256") or "")
-                    for item in saved_scenario_coverage
-                    if isinstance(item, dict)
-                }
-                gate_blockers = list(
-                    self.proposal_feasibility.blockers_before_stage(
-                        saved_task_feasibility,
-                        stage="verify",
-                        inputs=verify_inputs,
-                        worktree_path=worktree_path,
-                    )
-                )
-                if current_task_ids != assessed_task_ids:
-                    gate_blockers.append(
-                        "The OpenSpec task inventory changed after assessment; native OpenSpec Update "
-                        "and strict validation are required before Verify."
-                    )
-                elif current_task_hashes != assessed_task_hashes:
-                    gate_blockers.append(
-                        "OpenSpec task descriptions changed after assessment; native OpenSpec Update "
-                        "and strict validation are required before Verify."
-                    )
-                if current_scenario_hashes != assessed_scenario_hashes:
-                    gate_blockers.append(
-                        "OpenSpec acceptance scenarios changed after assessment; native OpenSpec Update "
-                        "and strict validation are required before Verify."
-                    )
-                if gate_blockers:
-                    question = (
-                        "Verify está detenido por dependencias requeridas en esta etapa: "
-                        + "; ".join(gate_blockers)
-                    )
-                    payload = self._record_current_human_gate(
-                        uow,
-                        active_run,
-                        gate="proposal_feasibility",
-                        question=question,
-                        options=[
-                            "Aportar evidencia verificable para la etapa Verify",
-                            "Actualizar el Change con OpenSpec Update y volver a validar",
-                        ],
-                        payload={
-                            "blocked_transition": "verify",
-                            "candidate_sha": current_sha,
-                            "blockers": gate_blockers,
-                            "task_feasibility": saved_task_feasibility,
-                        },
-                    )
-                    return OrchestrationCoordinationResult(
-                        status="HUMAN_REQUIRED",
-                        run_id=active_run.run_id,
-                        current_stage=OrchestrationStage.VERIFYING,
-                        message=question,
-                        human_payload=payload,
-                    )
-                active_gate = get_active_human_payload(active_run)
-                if (
-                    isinstance(active_gate, dict)
-                    and active_gate.get("gate") == "proposal_feasibility"
-                    and active_gate.get("stage") == "verify"
-                ):
-                    self._clear_current_human_gate(uow, active_run)
+            if feasibility_gate is not None:
+                return feasibility_gate
             # Step 8: Verify Stage (Executed by implementer)
             invocation = await self._begin_stage_invocation(
                 uow, active_run, worktree_path, "VERIFY",
@@ -3443,6 +3458,18 @@ class NativeOrchestrationCoordinator:
                         message=f"Unable to publish PR1 branch: {exc}. Worktree preserved.",
                     )
 
+                feasibility_gate = await self._check_stage_feasibility(
+                    uow,
+                    active_run,
+                    project_id=project_id,
+                    worktree_path=worktree_path,
+                    thinker_provider=thinker_provider,
+                    implementer_provider=implementer_provider,
+                    stage="pre_pr",
+                )
+                if feasibility_gate is not None:
+                    return feasibility_gate
+
                 # Open PR via GitHubAdapter
                 opened_pr_call = (
                     self.github_adapter.create_pull_request(
@@ -3574,6 +3601,22 @@ class NativeOrchestrationCoordinator:
                 current_stage=active_run.current_stage,
                 message=f"Documentation closing cannot start from stage {active_run.current_stage.value}. Worktree preserved.",
             )
+
+        if active_run.current_stage in (
+            OrchestrationStage.PR1_MERGED,
+            OrchestrationStage.DOC_CLOSING,
+        ):
+            feasibility_gate = await self._check_stage_feasibility(
+                uow,
+                active_run,
+                project_id=project_id,
+                worktree_path=worktree_path,
+                thinker_provider=thinker_provider,
+                implementer_provider=implementer_provider,
+                stage="post_merge",
+            )
+            if feasibility_gate is not None:
+                return feasibility_gate
 
         pr2_number = active_run.stop_details.get("pr2_number")
         pr2_url = active_run.stop_details.get("pr2_url")
