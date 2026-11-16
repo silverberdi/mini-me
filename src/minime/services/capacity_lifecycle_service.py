@@ -14,7 +14,7 @@ from minime.domain.enums import (
     SchedulerMode,
 )
 from minime.domain.interfaces import PersistenceUnitOfWork
-from minime.domain.models import Event, Job, SchedulerStatus, utc_now
+from minime.domain.models import Event, SchedulerStatus, utc_now
 from minime.services.provider_health_service import ProviderHealthService
 
 logger = logging.getLogger(__name__)
@@ -152,22 +152,59 @@ class CapacityLifecycleService:
     def can_execute_inflight_apply(
         self, project_id: str, run_id: str, primary_provider: str
     ) -> bool:
-        """Allow an existing Apply to use a healthy primary despite its peer's outage."""
+        """Check normal Apply eligibility separately from peer-outage recovery."""
         run = self.uow.orchestration_runs.get_by_id(run_id)
+        project = self.uow.projects.get_by_id(project_id)
         if (
             run is None
+            or project is None
             or run.project_id != project_id
             or not run.is_active
             or run.current_stage != OrchestrationStage.IMPLEMENTING
         ):
             return False
-        health = self.health_service.get_existing_health(primary_provider)
-        if (
-            health is None
-            or health.status != ProviderHealthStatus.AVAILABLE
-            or health.last_result_class != ProviderResultClass.SUCCESS
-            or health.last_success_at is None
-        ):
+
+        def normalize_provider(provider: str) -> str:
+            normalized = provider.strip().lower()
+            return "antigravity" if normalized == "agy" else normalized
+
+        implementer = normalize_provider(project.implementer)
+        selected = normalize_provider(primary_provider)
+        if selected != implementer:
+            return False
+
+        def health_without_active_failure(provider: str):
+            health = self.health_service.get_existing_health(provider)
+            if not (
+                health is not None
+                and health.status == ProviderHealthStatus.AVAILABLE
+                and health.consecutive_failures == 0
+                and health.last_result_class in {
+                    None,
+                    ProviderResultClass.SUCCESS,
+                }
+            ):
+                return None
+            return health
+
+        # In normal RUN operation, a persisted AVAILABLE primary with no active
+        # failure is eligible. An old successful execution is not itself a failure.
+        primary_health = health_without_active_failure(implementer)
+        if primary_health is None:
+            return False
+        scheduler_mode = self.get_scheduler_status_pure(project_id).mode
+        if scheduler_mode == SchedulerMode.RUN:
+            return True
+        if scheduler_mode != SchedulerMode.DRAIN:
+            return False
+
+        # The only remaining eligible case is an in-flight Apply on its healthy
+        # primary while its peer is unavailable (DRAIN). Preserve the stricter
+        # recent-success exception exclusively for this degraded-peer recovery.
+        health = primary_health
+        if health.last_result_class != ProviderResultClass.SUCCESS:
+            return False
+        if health.last_success_at is None:
             return False
         now = utc_now()
         last_success = health.last_success_at
