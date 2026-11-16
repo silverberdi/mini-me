@@ -1596,3 +1596,148 @@ def test_feasibility_update_selection_requires_exact_offered_option():
     assert NativeOrchestrationCoordinator._selected_feasibility_update_option(
         gate, "Please do an OpenSpec Update"
     ) is None
+
+
+@pytest.mark.asyncio
+async def test_stored_blocked_feasibility_revalidated_to_executable_without_new_agent_call(mock_env):
+    import json
+
+    from minime.domain.enums import ExternalOutcome, ExternalReasonCode, RetrySafety
+    coordinator, uow, github, repo_dir = mock_env
+    change_name = "req-101-add-caching-layer"
+    change_dir = repo_dir / "openspec" / "changes" / change_name
+    (change_dir / "specs" / "feature").mkdir(parents=True)
+    (change_dir / "proposal.md").write_text("# Proposal\nBounded cache behavior.")
+    (change_dir / "design.md").write_text("# Design\nUse the existing cache boundary.")
+    (change_dir / "tasks.md").write_text("## Verification\n- [ ] 1.1 Validate candidate behavior")
+    (change_dir / "specs" / "feature" / "spec.md").write_text(
+        "## Requirement: Cache behavior\n### Scenario: Candidate is verifiable\n- WHEN checked\n- THEN evidence is recorded"
+    )
+
+    artifact_hashes = coordinator._proposal_artifact_hashes(repo_dir, change_name)
+    context_hashes = coordinator._classification_context_hashes(
+        MagicMock(run_id="run-1", project_id="proj-1", change_name=change_name, base_sha="abc1234"),
+        101,
+        "Add caching layer",
+        "We need redis caching layer",
+    )
+    # The stored report from the previous thinking agent invocation
+    structured_payload = {
+        "complexity": "moderate",
+        "evidence": "Valid candidate proposal.",
+        "feasibility": {
+            "tasks": [
+                {
+                    "task_id": "1.1",
+                    "actor": "execution",
+                    "execution_stage": "apply",
+                    "capability_evidence_refs": ["profile:execution", "workflow:execution:apply"],
+                    "depends_on_task_ids": [],
+                    "preconditions": [
+                        {
+                            "required_before_stage": "apply",
+                            "satisfied": True,
+                            "evidence_refs": ["operator:confirmed", "workflow:execution:apply"],
+                        }
+                    ],
+                    "completion_evidence": "Candidate behavior verified.",
+                }
+            ],
+            "scenario_coverage": [
+                {"scenario_id": "feature:1:1", "task_ids": ["1.1"], "evidence_stage": "apply"}
+            ],
+            "blockers": [],
+            "resolution_options": [],
+        },
+    }
+    raw_structured = json.dumps(structured_payload)
+
+    run = OrchestrationRun(
+        project_id="proj-1",
+        change_name=change_name,
+        base_sha="abc1234",
+        current_stage=OrchestrationStage.VALIDATING,
+        resumable_stage=OrchestrationStage.VALIDATING,
+        human_gate="NEEDS_HUMAN",
+        stop_outcome="NEEDS_HUMAN",
+        stop_reason="La propuesta sigue sin aceptarse: hay tareas sin una ruta ejecutable verificada.",
+        stop_details={
+            "issue_number": 101,
+            "issue_title": "Add caching layer",
+            "request_normalization": {
+                "original_body": "We need redis caching layer",
+                "normalized_body": "We need redis caching layer",
+            },
+            "propose_attempt": {"attempt_id": "attempt-1", "status": "COMPLETE"},
+            "complexity_attempts": [{"attempt_id": "assessment-1", "status": "VALID"}],
+            "complexity_assessment": {
+                "status": "VALID",
+                "complexity": "moderate",
+                "evidence": "Prior attempt had unverified precondition.",
+                "feasibility_status": "BLOCKED",
+                "feasibility_blockers": ["task 1.1 has unverified precondition evidence"],
+                "feasibility_actions": ["Aportar evidencia verificable"],
+                "structured_output": raw_structured,
+                "artifact_hashes": artifact_hashes,
+                "context_hashes": context_hashes,
+            },
+            "human_payload": {
+                "gate": "proposal_feasibility",
+                "question": "La propuesta sigue sin aceptarse: hay tareas sin una ruta ejecutable verificada.",
+                "options": ["Aportar evidencia verificable"],
+            },
+        },
+    )
+    uow.orchestration_runs.save(run)
+
+    github.get_issue.return_value = ExternalActionResult(
+        outcome=ExternalOutcome.SUCCESS,
+        source_adapter="github",
+        reason_code=ExternalReasonCode.EXECUTION_SUCCESS,
+        retry_safety=RetrySafety.SAFE,
+        data={"number": 101, "title": "Add caching layer", "body": "We need redis caching layer"},
+    )
+    coordinator.openspec_adapter.planning_status = MagicMock(
+        return_value={"status": "PASS", "pending": []}
+    )
+    coordinator.openspec_adapter.validate_change_strict = MagicMock(
+        return_value={"status": "PASS"}
+    )
+    coordinator._assess_complexity = AsyncMock(
+        side_effect=AssertionError("Must NOT call thinking agent when stored assessment revalidates!")
+    )
+    coordinator._run_apply = AsyncMock(
+        return_value=MagicMock(success=True, tests_passed=True, test_evidence="ok")
+    )
+
+    feasibility_inputs = {
+        "status": "READY",
+        "candidate_sha": "a" * 40,
+        "change_name": change_name,
+        "openspec_path": "openspec",
+        "tasks": [{"task_id": "1.1", "text": "Validate candidate behavior"}],
+        "scenarios": [{"scenario_id": "feature:1:1", "text": "Candidate is verifiable"}],
+        "capabilities": [
+            {"ref": "profile:execution", "kind": "configured_profile", "available": True},
+            {"ref": "workflow:execution:apply", "kind": "executable_workflow", "available": True},
+            {"ref": "operator:confirmed", "kind": "operator_authorization", "available": True},
+        ],
+        "mandatory_blockers": [],
+    }
+    coordinator.proposal_feasibility.collect_inputs = MagicMock(return_value=feasibility_inputs)
+
+    result = await coordinator.execute_project_request(
+        "proj-1",
+        operator_clarification="Re-evaluate feasibility.",
+        thinker_provider="antigravity",
+        implementer_provider="antigravity",
+        reviewer_provider="antigravity",
+    )
+
+    coordinator._assess_complexity.assert_not_awaited()
+    assert coordinator._run_apply.await_count >= 1
+    assert result.current_stage != OrchestrationStage.VALIDATING
+    persisted = uow.orchestration_runs.get_by_id(run.run_id)
+    assert persisted is not None
+    assert persisted.stop_details.get("complexity") == "moderate"
+    assert persisted.stop_details["complexity_assessment"]["feasibility_status"] == "EXECUTABLE"
