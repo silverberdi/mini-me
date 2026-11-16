@@ -2471,6 +2471,60 @@ class NativeOrchestrationCoordinator:
             complexity_result = self._stored_complexity_assessment(
                 active_run, artifact_hashes, context_hashes
             )
+            if (
+                complexity_result is not None
+                and not complexity_result.is_executable
+                and feasibility_inputs is not None
+            ):
+                stored_payload = self._parse_json_object(complexity_result.structured_output)
+                if isinstance(stored_payload, dict) and "feasibility" in stored_payload:
+                    reval_status, reval_tasks, reval_scenarios, reval_blockers, reval_actions = (
+                        self.proposal_feasibility.validate_report(
+                            stored_payload.get("feasibility"), feasibility_inputs, worktree_path
+                        )
+                    )
+                    if not reval_actions and reval_status == "BLOCKED":
+                        reval_actions = (
+                            "Actualizar la solicitud mediante el flujo nativo OpenSpec Update y validarla de nuevo",
+                            "Aportar evidencia verificable de la capacidad o precondición que falta",
+                        )
+                    if (
+                        reval_status != complexity_result.feasibility_status
+                        or reval_blockers != complexity_result.feasibility_blockers
+                    ):
+                        complexity_result = ComplexityAssessment(
+                            status=complexity_result.status,
+                            complexity=stored_payload.get("complexity") or complexity_result.complexity,
+                            evidence=complexity_result.evidence,
+                            reason=complexity_result.reason,
+                            exit_code=complexity_result.exit_code,
+                            timed_out=complexity_result.timed_out,
+                            preflight_error=complexity_result.preflight_error,
+                            output=complexity_result.output,
+                            structured_output=complexity_result.structured_output,
+                            diagnostic_output=complexity_result.diagnostic_output,
+                            output_truncated=complexity_result.output_truncated,
+                            structured_output_missing=complexity_result.structured_output_missing,
+                            structured_output_too_large=complexity_result.structured_output_too_large,
+                            feasibility_status=reval_status,
+                            task_feasibility=reval_tasks,
+                            scenario_coverage=reval_scenarios,
+                            feasibility_blockers=reval_blockers,
+                            feasibility_actions=reval_actions,
+                        )
+                        self._persist_complexity_assessment(
+                            active_run,
+                            complexity_result,
+                            attempt_id=str(uuid4()),
+                            model_identity=self._configured_model(uow, project_id, "thinking"),
+                            artifact_hashes=artifact_hashes,
+                            context_hashes=context_hashes,
+                        )
+                        if hasattr(uow, "orchestration_runs"):
+                            uow.orchestration_runs.save(active_run)
+                            if hasattr(uow, "commit"):
+                                uow.commit()
+
             if complexity_result is None:
                 previous_assessment = (active_run.stop_details or {}).get("complexity_assessment")
                 previous_context = (
@@ -2478,8 +2532,51 @@ class NativeOrchestrationCoordinator:
                     if isinstance(previous_assessment, dict)
                     else None
                 )
+                prev_artifacts = (
+                    previous_assessment.get("artifact_hashes")
+                    if isinstance(previous_assessment, dict)
+                    else None
+                )
+                if isinstance(previous_assessment, dict) and feasibility_inputs is not None and prev_artifacts == artifact_hashes:
+                    stored_so = previous_assessment.get("structured_output")
+                    stored_payload = self._parse_json_object(stored_so) if stored_so else None
+                    if isinstance(stored_payload, dict) and "feasibility" in stored_payload:
+                        reval_status, reval_tasks, reval_scenarios, reval_blockers, reval_actions = (
+                            self.proposal_feasibility.validate_report(
+                                stored_payload.get("feasibility"), feasibility_inputs, worktree_path
+                            )
+                        )
+                        if reval_status == "EXECUTABLE":
+                            complexity_result = ComplexityAssessment(
+                                status="VALID",
+                                complexity=stored_payload.get("complexity") or "moderate",
+                                evidence=str(stored_payload.get("evidence") or "Re-validated stored assessment"),
+                                reason=None,
+                                output=previous_assessment.get("output", ""),
+                                structured_output=stored_so,
+                                diagnostic_output=previous_assessment.get("diagnostic_output", ""),
+                                feasibility_status=reval_status,
+                                task_feasibility=reval_tasks,
+                                scenario_coverage=reval_scenarios,
+                                feasibility_blockers=reval_blockers,
+                                feasibility_actions=reval_actions,
+                            )
+                            self._persist_complexity_assessment(
+                                active_run,
+                                complexity_result,
+                                attempt_id=str(uuid4()),
+                                model_identity=self._configured_model(uow, project_id, "thinking"),
+                                artifact_hashes=artifact_hashes,
+                                context_hashes=context_hashes,
+                            )
+                            if hasattr(uow, "orchestration_runs"):
+                                uow.orchestration_runs.save(active_run)
+                                if hasattr(uow, "commit"):
+                                    uow.commit()
+
                 if (
-                    (active_run.stop_details or {}).get("complexity_attempts")
+                    complexity_result is None
+                    and (active_run.stop_details or {}).get("complexity_attempts")
                     and previous_context == context_hashes
                 ):
                     return OrchestrationCoordinationResult(
@@ -2488,38 +2585,39 @@ class NativeOrchestrationCoordinator:
                         current_stage=OrchestrationStage.VALIDATING,
                         message="The same proposal and capability evidence were already assessed; no duplicate agent call was made.",
                     )
-                attempt_id = str(uuid4())
-                in_progress = ComplexityAssessment(
-                    status="IN_PROGRESS", reason="classification invocation started"
-                )
-                self._persist_complexity_assessment(
-                    active_run,
-                    in_progress,
-                    attempt_id=attempt_id,
-                    model_identity=self._configured_model(uow, project_id, "thinking"),
-                    artifact_hashes=artifact_hashes,
-                    context_hashes=context_hashes,
-                )
-                uow.orchestration_runs.save(active_run)
-                uow.commit()
-                complexity_result = await self._assess_complexity(
-                    worktree_path,
-                    thinker_provider,
-                    issue_title,
-                    issue_body,
-                    project_id,
-                    attempt_id,
-                    change_name=change_name,
-                    feasibility_inputs=feasibility_inputs,
-                )
-                self._persist_complexity_assessment(
-                    active_run,
-                    complexity_result,
-                    attempt_id=attempt_id,
-                    model_identity=self._configured_model(uow, project_id, "thinking"),
-                    artifact_hashes=artifact_hashes,
-                    context_hashes=context_hashes,
-                )
+                if complexity_result is None:
+                    attempt_id = str(uuid4())
+                    in_progress = ComplexityAssessment(
+                        status="IN_PROGRESS", reason="classification invocation started"
+                    )
+                    self._persist_complexity_assessment(
+                        active_run,
+                        in_progress,
+                        attempt_id=attempt_id,
+                        model_identity=self._configured_model(uow, project_id, "thinking"),
+                        artifact_hashes=artifact_hashes,
+                        context_hashes=context_hashes,
+                    )
+                    uow.orchestration_runs.save(active_run)
+                    uow.commit()
+                    complexity_result = await self._assess_complexity(
+                        worktree_path,
+                        thinker_provider,
+                        issue_title,
+                        issue_body,
+                        project_id,
+                        attempt_id,
+                        change_name=change_name,
+                        feasibility_inputs=feasibility_inputs,
+                    )
+                    self._persist_complexity_assessment(
+                        active_run,
+                        complexity_result,
+                        attempt_id=attempt_id,
+                        model_identity=self._configured_model(uow, project_id, "thinking"),
+                        artifact_hashes=artifact_hashes,
+                        context_hashes=context_hashes,
+                    )
             if not complexity_result.is_valid:
                 if hasattr(uow, "orchestration_runs"):
                     uow.orchestration_runs.save(active_run)
@@ -2563,6 +2661,7 @@ class NativeOrchestrationCoordinator:
                     message=question,
                     human_payload=payload,
                 )
+            self._clear_current_human_gate(uow, active_run)
             complexity = complexity_result.complexity
             active_run.stop_details["complexity"] = complexity
             active_run.stop_details["complexity_evidence"] = complexity_result.evidence
