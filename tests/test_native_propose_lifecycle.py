@@ -1425,3 +1425,139 @@ async def test_changed_authoritative_request_uses_native_update_then_reassesses(
     coordinator._assess_complexity.assert_awaited_once()
     assert new_body in coordinator._classification_context_hashes.call_args.args[-1]
     coordinator._run_apply.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_selected_feasibility_update_option_dispatches_native_update(mock_env):
+    from minime.domain.enums import (
+        ExternalOutcome,
+        ExternalReasonCode,
+        HumanGate,
+        OrchestrationStopOutcome,
+        RetrySafety,
+    )
+
+    coordinator, uow, github, repo_dir = mock_env
+    change_name = "req-101-add-caching-layer"
+    change_dir = repo_dir / "openspec" / "changes" / change_name
+    (change_dir / "specs" / "feature").mkdir(parents=True)
+    (change_dir / "proposal.md").write_text("# Proposal\nBounded cache behavior.")
+    (change_dir / "design.md").write_text("# Design\nUse the existing cache boundary.")
+    (change_dir / "tasks.md").write_text("## Implementation\n- [ ] 1.1 Add cache")
+    (change_dir / "specs" / "feature" / "spec.md").write_text(
+        "## Requirement: Cache behavior\n### Scenario: Candidate is verifiable\n- WHEN checked\n- THEN evidence is recorded"
+    )
+    request_body = "Add bounded in-memory caching."
+    selected_option = "Actualizar la solicitud mediante el flujo nativo OpenSpec Update y validarla de nuevo"
+    blockers = ["task 1.1 has unverified precondition evidence required before Apply"]
+    run = OrchestrationRun(
+        project_id="proj-1",
+        change_name=change_name,
+        base_sha="abc1234",
+        current_stage=OrchestrationStage.VALIDATING,
+        resumable_stage=OrchestrationStage.VALIDATING,
+        human_gate=HumanGate.NEEDS_HUMAN,
+        stop_outcome=OrchestrationStopOutcome.NEEDS_HUMAN,
+        stop_details={
+            "issue_number": 101,
+            "issue_title": "Add caching layer",
+            "request_normalization": {"normalized_body": request_body, "original_body": request_body},
+            "propose_attempt": {"attempt_id": "attempt-1", "status": "COMPLETE"},
+            "complexity_attempts": [{"attempt_id": "assessment-1", "status": "VALID"}],
+            "complexity_assessment": {
+                "status": "VALID",
+                "complexity": None,
+                "evidence": "The task evidence references were not verifiable.",
+                "feasibility_status": "BLOCKED",
+                "artifact_hashes": {"proposal.md": "old-artifact"},
+                "context_hashes": {"request": "same-request", "capabilities": "old-capability"},
+                "feasibility_blockers": blockers,
+            },
+            "human_payload": {
+                "gate": "proposal_feasibility",
+                "question": "The proposal has unverified preconditions.",
+                "options": [selected_option, "Aportar evidencia verificable de la capacidad o precondición que falta"],
+                "blockers": blockers,
+            },
+        },
+    )
+    uow.orchestration_runs.save(run)
+    github.get_issue.return_value = ExternalActionResult(
+        outcome=ExternalOutcome.SUCCESS,
+        source_adapter="github",
+        reason_code=ExternalReasonCode.EXECUTION_SUCCESS,
+        retry_safety=RetrySafety.SAFE,
+        data={"number": 101, "title": "Add caching layer", "body": request_body},
+    )
+    coordinator._run_propose = AsyncMock(
+        return_value={"status": "READY_TO_VALIDATE", "message": "Native Update completed."}
+    )
+    coordinator.openspec_adapter.planning_status = MagicMock(
+        return_value={"status": "PASS", "pending": []}
+    )
+    coordinator.openspec_adapter.validate_change_strict = MagicMock(
+        return_value={"status": "PASS"}
+    )
+    coordinator._proposal_artifact_hashes = MagicMock(return_value={"proposal.md": "new-artifact"})
+    coordinator._classification_context_hashes = MagicMock(return_value={"request": "same-request"})
+    feasibility_inputs = {
+        "status": "READY",
+        "candidate_sha": "a" * 40,
+        "tasks": [{"task_id": "1.1", "text": "Add cache"}],
+        "scenarios": [{"scenario_id": "feature:1:1", "text": "Candidate is verifiable"}],
+        "capabilities": [],
+        "mandatory_blockers": [],
+    }
+    coordinator.proposal_feasibility.collect_inputs = MagicMock(return_value=feasibility_inputs)
+    coordinator._assess_complexity = AsyncMock(
+        return_value=ComplexityAssessment(
+            status="VALID",
+            evidence="The updated proposal still needs a verified precondition.",
+            feasibility_status="BLOCKED",
+            feasibility_blockers=("task 1.1 remains unverified",),
+            feasibility_actions=("Provide verified evidence for task 1.1.",),
+        )
+    )
+    coordinator._run_apply = AsyncMock(side_effect=AssertionError("Apply must remain blocked"))
+
+    result = await coordinator.execute_project_request(
+        "proj-1",
+        operator_clarification=selected_option,
+        thinker_provider="antigravity",
+        implementer_provider="antigravity",
+        reviewer_provider="antigravity",
+    )
+
+    assert result.status == "HUMAN_REQUIRED"
+    assert result.current_stage == OrchestrationStage.VALIDATING
+    coordinator._run_propose.assert_awaited_once()
+    assert coordinator._run_propose.await_args.kwargs["pending_revision"] is True
+    assert coordinator._run_propose.await_args.kwargs["continue_existing"] is True
+    assert "native OpenSpec Update" in coordinator._run_propose.await_args.kwargs["operator_clarification"]
+    assert blockers[0] in coordinator._run_propose.await_args.kwargs["operator_clarification"]
+    coordinator.openspec_adapter.validate_change_strict.assert_called_once_with(change_name, repo_dir)
+    coordinator._assess_complexity.assert_awaited_once()
+    coordinator._run_apply.assert_not_awaited()
+
+
+def test_feasibility_update_selection_requires_exact_offered_option():
+    from minime.services.orchestration_coordinator import NativeOrchestrationCoordinator
+
+    gate = {
+        "options": [
+            "Actualizar la solicitud mediante el flujo nativo OpenSpec Update y validarla de nuevo",
+            "Aportar evidencia verificable de la capacidad o precondición que falta",
+        ]
+    }
+    selected_update = gate["options"][0]
+    selected_evidence = gate["options"][1]
+
+    assert NativeOrchestrationCoordinator._selected_feasibility_update_option(
+        gate, selected_update
+    ) == selected_update
+    assert NativeOrchestrationCoordinator._selected_feasibility_update_option(
+        gate, selected_evidence
+    ) is None
+    assert NativeOrchestrationCoordinator._selected_feasibility_update_option(
+        gate, "Please do an OpenSpec Update"
+    ) is None
