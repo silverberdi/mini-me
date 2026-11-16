@@ -8,11 +8,11 @@
 
 - [x] 2.1 Persist the feasibility assessment with the exact Request-context and OpenSpec artifact hashes in existing PostgreSQL Run state.
 - [x] 2.2 Gate only the next transition whose required dependency is unmet; do not require Apply outputs before Apply or later-stage evidence before its consuming stage, and preserve those later tasks as pending.
-- [x] 2.3 Route an explicit operator selection of the feasibility gate's native-Update option through OpenSpec Update on the same Change, strictly validate and reassess; keep evidence-only responses separate and prevent text-only override of unmet prerequisites.
+- [x] 2.3 Route an explicit operator selection of the feasibility gate's native-Update option through OpenSpec Update on the same Change with persisted blockers, structured task/scenario findings, candidate SHA, and artifact/context hashes; strictly validate and reassess; keep evidence-only responses separate and prevent text-only override of unmet prerequisites.
 - [x] 2.4 Preserve the project CI/CD boundary; require candidate-SHA-matched preview evidence only before a stage that explicitly requires pre-merge candidate validation.
 
 ## 3. Verification
 
-- [x] 3.1 Add unit/coordinator tests for task-stage coverage, Apply-created outputs, later-stage missing capabilities, true current-transition blockers, unknown SHA, no dispatch past a blocked transition, and explicit native-Update versus evidence-option gate responses.
+- [x] 3.1 Add unit/coordinator tests for task-stage coverage, Apply-created outputs, later-stage missing capabilities, true current-transition blockers, unknown SHA, no dispatch past a blocked transition, and explicit native-Update versus evidence-option gate responses including delivery of structured feasibility findings to native Update.
 - [ ] 3.2 Add PostgreSQL/API E2E proving Apply proceeds when only later-stage work is pending, that the later dependency gates the correct transition, and that changed verified Request/task/capability evidence triggers reassessment without bypassing the gate.
 - [ ] 3.3 Run focused and relevant regression suites, lint, and strict OpenSpec validation for the stage-aware behavior; capture integration evidence against the immutable implementation SHA.

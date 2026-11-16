@@ -1938,17 +1938,42 @@ class NativeOrchestrationCoordinator:
                         if isinstance(assessment, dict)
                         else []
                     )
+                assessment = details.get("complexity_assessment")
+                if not isinstance(assessment, dict):
+                    assessment = {}
+                feasibility_evidence = {
+                    "candidate_sha": feasibility_gate.get("candidate_sha")
+                    or assessment.get("candidate_sha"),
+                    "artifact_hashes": feasibility_gate.get("artifact_hashes")
+                    or assessment.get("artifact_hashes"),
+                    "context_hashes": feasibility_gate.get("context_hashes")
+                    or assessment.get("context_hashes"),
+                    "task_feasibility": feasibility_gate.get("task_feasibility")
+                    or assessment.get("task_feasibility"),
+                    "scenario_coverage": feasibility_gate.get("scenario_coverage")
+                    or assessment.get("scenario_coverage"),
+                    "feasibility_actions": feasibility_gate.get("options")
+                    or assessment.get("feasibility_actions"),
+                }
                 blocker_context = json.dumps(
-                    [str(item) for item in blockers if isinstance(item, str)],
+                    {
+                        "blockers": [
+                            str(item) for item in blockers if isinstance(item, str)
+                        ],
+                        "assessment_evidence": feasibility_evidence,
+                    },
                     ensure_ascii=False,
+                    sort_keys=True,
                 )
                 update_guidance = (
                     "The operator explicitly selected the proposal-feasibility gate option for native OpenSpec Update. "
                     f"Use the installed OpenSpec Update workflow on this same Run and Change to reconcile the existing "
-                    f"planning artifacts with these persisted feasibility blockers: {blocker_context}. Preserve the "
-                    "authorized Request scope. Do not treat this selection or the blocker list as evidence that a "
-                    "precondition is satisfied; use only verifiable repository/capability references, then let strict "
-                    "validation and a fresh feasibility assessment decide whether the gate can clear."
+                    f"planning artifacts with the complete persisted feasibility findings and evidence: {blocker_context}. "
+                    "Address each cited task/scenario mapping and correct any invalid repository references or duplicate/missing "
+                    "scenario IDs using the authoritative OpenSpec task and scenario inventory. Preserve the authorized Request "
+                    "scope. Do not treat this selection, the blocker list, or the assessment as evidence that a precondition is "
+                    "satisfied; use only verifiable repository/capability references, then let strict validation and a fresh "
+                    "feasibility assessment decide whether the gate can clear."
                 )
                 revision["clarification"] = "\n".join(
                     part for part in (existing_guidance, update_guidance) if part

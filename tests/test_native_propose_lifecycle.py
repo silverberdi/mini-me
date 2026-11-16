@@ -1472,12 +1472,43 @@ async def test_selected_feasibility_update_option_dispatches_native_update(mock_
                 "artifact_hashes": {"proposal.md": "old-artifact"},
                 "context_hashes": {"request": "same-request", "capabilities": "old-capability"},
                 "feasibility_blockers": blockers,
+                "task_feasibility": [
+                    {
+                        "task_id": "1.1",
+                        "status": "BLOCKED",
+                        "execution_stage": "apply",
+                        "preconditions": [
+                            {"reference": "openspec validate: change is valid", "status": "UNVERIFIED"}
+                        ],
+                    }
+                ],
+                "scenario_coverage": [
+                    {"scenario_id": "feature:1:1", "task_ids": ["1.1"]},
+                    {"scenario_id": "feature:1:1", "task_ids": ["1.1"]},
+                ],
             },
             "human_payload": {
                 "gate": "proposal_feasibility",
                 "question": "The proposal has unverified preconditions.",
                 "options": [selected_option, "Aportar evidencia verificable de la capacidad o precondición que falta"],
                 "blockers": blockers,
+                "candidate_sha": "a" * 40,
+                "task_feasibility": [
+                    {
+                        "task_id": "1.1",
+                        "status": "BLOCKED",
+                        "execution_stage": "apply",
+                        "preconditions": [
+                            {"reference": "openspec validate: change is valid", "status": "UNVERIFIED"}
+                        ],
+                    }
+                ],
+                "scenario_coverage": [
+                    {"scenario_id": "feature:1:1", "task_ids": ["1.1"]},
+                    {"scenario_id": "feature:1:1", "task_ids": ["1.1"]},
+                ],
+                "artifact_hashes": {"proposal.md": "old-artifact"},
+                "context_hashes": {"request": "same-request", "capabilities": "old-capability"},
             },
         },
     )
@@ -1535,6 +1566,10 @@ async def test_selected_feasibility_update_option_dispatches_native_update(mock_
     assert coordinator._run_propose.await_args.kwargs["continue_existing"] is True
     assert "native OpenSpec Update" in coordinator._run_propose.await_args.kwargs["operator_clarification"]
     assert blockers[0] in coordinator._run_propose.await_args.kwargs["operator_clarification"]
+    assert '"task_id": "1.1"' in coordinator._run_propose.await_args.kwargs["operator_clarification"]
+    assert '"scenario_id": "feature:1:1"' in coordinator._run_propose.await_args.kwargs["operator_clarification"]
+    assert "old-artifact" in coordinator._run_propose.await_args.kwargs["operator_clarification"]
+    assert "duplicate/missing scenario IDs" in coordinator._run_propose.await_args.kwargs["operator_clarification"]
     coordinator.openspec_adapter.validate_change_strict.assert_called_once_with(change_name, repo_dir)
     coordinator._assess_complexity.assert_awaited_once()
     coordinator._run_apply.assert_not_awaited()
