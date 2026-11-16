@@ -153,6 +153,28 @@ class ProposalFeasibilityEvaluator:
             }
         )
 
+        planning_status = getattr(self.openspec_adapter, "planning_status", None)
+        planning_res = planning_status(change_name, worktree_path) if callable(planning_status) else None
+        planning_complete = isinstance(planning_res, dict) and planning_res.get("status") == "PASS"
+        capabilities.append(
+            {
+                "ref": "openspec:status:planning_complete",
+                "kind": "openspec_planning_status",
+                "available": planning_complete,
+            }
+        )
+
+        validate_strict = getattr(self.openspec_adapter, "validate_change_strict", None)
+        val_res = validate_strict(change_name, worktree_path) if callable(validate_strict) else None
+        validation_valid = isinstance(val_res, dict) and val_res.get("status") == "PASS"
+        capabilities.append(
+            {
+                "ref": "openspec:validate:valid",
+                "kind": "openspec_validation_status",
+                "available": validation_valid,
+            }
+        )
+
         preview = None
         if preview_sessions:
             try:
@@ -225,9 +247,14 @@ class ProposalFeasibilityEvaluator:
                 if safe_relative and not has_symlink and candidate_path.is_file():
                     verified.add(ref)
                     unknown.remove(ref)
-            elif re.match(r"^openspec\s+(status|validate)\b", ref, re.IGNORECASE):
-                verified.add(ref)
-                unknown.remove(ref)
+            elif re.match(r"^openspec\s+status\b", ref, re.IGNORECASE):
+                if "openspec:status:planning_complete" in available_refs:
+                    verified.add(ref)
+                    unknown.remove(ref)
+            elif re.match(r"^openspec\s+validate\b", ref, re.IGNORECASE):
+                if "openspec:validate:valid" in available_refs:
+                    verified.add(ref)
+                    unknown.remove(ref)
         return verified, unknown
 
     @classmethod

@@ -1096,7 +1096,11 @@ def test_boxio_gate_regression_scenarios_and_evidence_are_accepted(tmp_path: Pat
         {"spec": "game-contracts", "requirements": [{"scenarios": [{"rawText": "WHEN semantic THEN match"}]}]},
         {"spec": "local-assets", "requirements": [{"scenarios": [{"rawText": "WHEN assets THEN local"}, {"rawText": "WHEN clean THEN pass"}]}]},
     ]
-    adapter = SimpleNamespace(show_change=lambda *_: {"deltas": deltas})
+    adapter = SimpleNamespace(
+        show_change=lambda *_: {"deltas": deltas},
+        planning_status=lambda *_: {"status": "PASS"},
+        validate_change_strict=lambda *_: {"status": "PASS"},
+    )
     runner = SimpleNamespace(resolve_workflow=MagicMock(return_value=SimpleNamespace(dispatch_command="codex exec")))
     agent_profiles = {
         "thinking": {"agent_id": "codex", "provider_id": "codex"},
@@ -1150,8 +1154,28 @@ def test_boxio_gate_regression_scenarios_and_evidence_are_accepted(tmp_path: Pat
             ],
             "completion_evidence": f"Task {tid} done",
         })
+
+    def map_task_ids(sid: str) -> list[str]:
+        if sid.startswith("foundation-workspace:1"):
+            return ["1.1"]
+        elif sid.startswith("foundation-workspace:2"):
+            return ["1.2"]
+        elif sid.startswith("foundation-workspace:3"):
+            return ["1.3"]
+        elif sid.startswith("game-contracts:1"):
+            return ["2.1"]
+        elif sid.startswith("game-contracts:2"):
+            return ["2.2"]
+        elif sid.startswith("game-contracts:3"):
+            return ["2.3"]
+        elif sid.startswith("game-contracts:4"):
+            return ["2.4"]
+        elif sid.startswith("local-assets"):
+            return ["3.1", "3.2"]
+        return ["1.1"]
+
     scenario_coverage = [
-        {"scenario_id": sid, "task_ids": ["1.1"], "evidence_stage": "apply"}
+        {"scenario_id": sid, "task_ids": map_task_ids(sid), "evidence_stage": "apply"}
         for sid in scenario_ids
     ]
     report = {
@@ -1165,6 +1189,127 @@ def test_boxio_gate_regression_scenarios_and_evidence_are_accepted(tmp_path: Pat
     )
     assert status == "EXECUTABLE"
     assert blockers == ()
+
+
+def test_proposal_feasibility_blocks_when_openspec_cli_fails(tmp_path: Path):
+    """Fail-closed: When OpenSpec CLI validate or status fails, proposal feasibility BLOCKS."""
+    change_dir = tmp_path / "openspec" / "changes" / "change"
+    change_dir.mkdir(parents=True)
+    (change_dir / "tasks.md").write_text("## Tasks\n- [ ] 1.1 Task one\n", encoding="utf-8")
+    deltas = [
+        {"spec": "feature", "requirements": [{"scenarios": [{"rawText": "WHEN run THEN pass"}]}]}
+    ]
+
+    # Case 1: validate_change_strict returns FAIL
+    failing_validate_adapter = SimpleNamespace(
+        show_change=lambda *_: {"deltas": deltas},
+        planning_status=lambda *_: {"status": "PASS"},
+        validate_change_strict=lambda *_: {"status": "FAIL", "error": "schema error in change"},
+    )
+    runner = SimpleNamespace(resolve_workflow=MagicMock(return_value=SimpleNamespace(dispatch_command="codex exec")))
+    agent_profiles = {
+        "thinking": {"agent_id": "codex", "provider_id": "codex"},
+        "execution": {"agent_id": "codex", "provider_id": "codex"},
+    }
+    evaluator = ProposalFeasibilityEvaluator(failing_validate_adapter, runner)
+    inputs = evaluator.collect_inputs(
+        worktree_path=tmp_path,
+        change_name="change",
+        project=SimpleNamespace(project_id="boxio", openspec_path="openspec", agent_profiles=agent_profiles),
+        candidate_sha="c" * 40,
+        candidate_clean=True,
+        preview_sessions=SimpleNamespace(get_latest_for_candidate=lambda *_: None),
+        thinker_provider="codex",
+        implementer_provider="codex",
+    )
+    assert inputs["status"] == "READY"
+    validate_cap = next(c for c in inputs["capabilities"] if c["ref"] == "openspec:validate:valid")
+    assert validate_cap["available"] is False
+
+    report = {
+        "tasks": [
+            {
+                "task_id": "1.1",
+                "actor": "execution",
+                "execution_stage": "apply",
+                "capability_evidence_refs": ["profile:execution", "workflow:execution:apply"],
+                "depends_on_task_ids": [],
+                "preconditions": [
+                    {
+                        "required_before_stage": "apply",
+                        "satisfied": True,
+                        "evidence_refs": [
+                            "openspec validate: change is valid",
+                            "operator:confirmed",
+                            "workflow:execution:apply",
+                        ],
+                    }
+                ],
+                "completion_evidence": "Done",
+            }
+        ],
+        "scenario_coverage": [
+            {"scenario_id": "feature:1:1", "task_ids": ["1.1"], "evidence_stage": "apply"}
+        ],
+        "blockers": [],
+        "resolution_options": [],
+    }
+    status, tasks, scenarios, blockers, actions = ProposalFeasibilityEvaluator.validate_report(
+        report, inputs, tmp_path
+    )
+    assert status == "BLOCKED"
+    assert any("has unverified precondition evidence required before Apply: openspec validate: change is valid" in b for b in blockers)
+
+    # Case 2: planning_status returns INCOMPLETE
+    incomplete_status_adapter = SimpleNamespace(
+        show_change=lambda *_: {"deltas": deltas},
+        planning_status=lambda *_: {"status": "INCOMPLETE", "pending": ["tasks"]},
+        validate_change_strict=lambda *_: {"status": "PASS"},
+    )
+    evaluator_incomplete = ProposalFeasibilityEvaluator(incomplete_status_adapter, runner)
+    inputs_incomplete = evaluator_incomplete.collect_inputs(
+        worktree_path=tmp_path,
+        change_name="change",
+        project=SimpleNamespace(project_id="boxio", openspec_path="openspec", agent_profiles=agent_profiles),
+        candidate_sha="c" * 40,
+        candidate_clean=True,
+        preview_sessions=SimpleNamespace(get_latest_for_candidate=lambda *_: None),
+        thinker_provider="codex",
+        implementer_provider="codex",
+    )
+    report_status = {
+        "tasks": [
+            {
+                "task_id": "1.1",
+                "actor": "execution",
+                "execution_stage": "apply",
+                "capability_evidence_refs": ["profile:execution", "workflow:execution:apply"],
+                "depends_on_task_ids": [],
+                "preconditions": [
+                    {
+                        "required_before_stage": "apply",
+                        "satisfied": True,
+                        "evidence_refs": [
+                            "openspec status: planning artifacts complete",
+                            "operator:confirmed",
+                            "workflow:execution:apply",
+                        ],
+                    }
+                ],
+                "completion_evidence": "Done",
+            }
+        ],
+        "scenario_coverage": [
+            {"scenario_id": "feature:1:1", "task_ids": ["1.1"], "evidence_stage": "apply"}
+        ],
+        "blockers": [],
+        "resolution_options": [],
+    }
+    status2, _, _, blockers2, _ = ProposalFeasibilityEvaluator.validate_report(
+        report_status, inputs_incomplete, tmp_path
+    )
+    assert status2 == "BLOCKED"
+    assert any("has unverified precondition evidence required before Apply: openspec status: planning artifacts complete" in b for b in blockers2)
 
 
 def test_proposal_feasibility_blocks_when_valid_capability_coexists_with_unverified_dependency(tmp_path: Path):
