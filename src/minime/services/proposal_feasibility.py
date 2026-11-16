@@ -52,6 +52,7 @@ class ProposalFeasibilityEvaluator:
         deltas = native_change.get("deltas")
         if not isinstance(deltas, list) or not deltas:
             return {"status": "UNKNOWN", "reason": "native OpenSpec show returned no validated deltas"}
+        spec_requirement_counters: dict[str, int] = {}
         for delta in deltas:
             if not isinstance(delta, dict):
                 continue
@@ -59,10 +60,17 @@ class ProposalFeasibilityEvaluator:
             requirements = delta.get("requirements")
             if not spec_name or not isinstance(requirements, list):
                 continue
-            for requirement_index, requirement in enumerate(requirements, start=1):
+            for requirement in requirements:
                 if not isinstance(requirement, dict):
                     continue
-                requirement_id = str(requirement.get("id") or requirement_index)
+                raw_id = requirement.get("id")
+                if raw_id is not None and str(raw_id).strip():
+                    requirement_id = str(raw_id).strip()
+                else:
+                    spec_requirement_counters[spec_name] = (
+                        spec_requirement_counters.get(spec_name, 0) + 1
+                    )
+                    requirement_id = str(spec_requirement_counters[spec_name])
                 for scenario_index, scenario in enumerate(requirement.get("scenarios") or (), start=1):
                     if isinstance(scenario, dict) and isinstance(scenario.get("rawText"), str):
                         scenarios.append(
@@ -145,6 +153,28 @@ class ProposalFeasibilityEvaluator:
             }
         )
 
+        planning_status = getattr(self.openspec_adapter, "planning_status", None)
+        planning_res = planning_status(change_name, worktree_path) if callable(planning_status) else None
+        planning_complete = isinstance(planning_res, dict) and planning_res.get("status") == "PASS"
+        capabilities.append(
+            {
+                "ref": "openspec:status:planning_complete",
+                "kind": "openspec_planning_status",
+                "available": planning_complete,
+            }
+        )
+
+        validate_strict = getattr(self.openspec_adapter, "validate_change_strict", None)
+        val_res = validate_strict(change_name, worktree_path) if callable(validate_strict) else None
+        validation_valid = isinstance(val_res, dict) and val_res.get("status") == "PASS"
+        capabilities.append(
+            {
+                "ref": "openspec:validate:valid",
+                "kind": "openspec_validation_status",
+                "available": validation_valid,
+            }
+        )
+
         preview = None
         if preview_sessions:
             try:
@@ -202,22 +232,37 @@ class ProposalFeasibilityEvaluator:
         verified = set(refs) & available_refs
         unknown = set(refs) - available_refs
         for ref in tuple(unknown):
-            if not ref.startswith("path:"):
-                continue
-            relative = Path(ref[5:])
-            candidate_path = (worktree_path / relative).resolve()
-            try:
-                candidate_path.relative_to(worktree_path.resolve())
-                safe_relative = not relative.is_absolute() and ".." not in relative.parts
-            except ValueError:
-                safe_relative = False
-            has_symlink = any(
-                (worktree_path / Path(*relative.parts[:index])).is_symlink()
-                for index in range(1, len(relative.parts) + 1)
-            )
-            if safe_relative and not has_symlink and candidate_path.is_file():
-                verified.add(ref)
-                unknown.remove(ref)
+            if ref.startswith("path:"):
+                relative = Path(ref[5:])
+                candidate_path = (worktree_path / relative).resolve()
+                try:
+                    candidate_path.relative_to(worktree_path.resolve())
+                    safe_relative = not relative.is_absolute() and ".." not in relative.parts
+                except ValueError:
+                    safe_relative = False
+                has_symlink = any(
+                    (worktree_path / Path(*relative.parts[:index])).is_symlink()
+                    for index in range(1, len(relative.parts) + 1)
+                )
+                if safe_relative and not has_symlink and candidate_path.is_file():
+                    verified.add(ref)
+                    unknown.remove(ref)
+            elif re.fullmatch(
+                r"^openspec(?:\s+|:)\s*status(?:\s*:\s*|\s+)(?:planning[\s_]+(?:artifacts[\s_]+)?complete)$",
+                ref.strip(),
+                re.IGNORECASE,
+            ):
+                if "openspec:status:planning_complete" in available_refs:
+                    verified.add(ref)
+                    unknown.remove(ref)
+            elif re.fullmatch(
+                r"^openspec(?:\s+|:)\s*validate(?:\s*:\s*|\s+)(?:(?:change[\s_]+is[\s_]+)?valid)$",
+                ref.strip(),
+                re.IGNORECASE,
+            ):
+                if "openspec:validate:valid" in available_refs:
+                    verified.add(ref)
+                    unknown.remove(ref)
         return verified, unknown
 
     @classmethod
@@ -326,7 +371,8 @@ class ProposalFeasibilityEvaluator:
                 if required_before_apply and not satisfied:
                     blockers.append(f"task {task_id} has an unmet or unknown precondition required before Apply")
                 if required_before_apply and (not evidence_refs or unknown_evidence):
-                    blockers.append(f"task {task_id} has unverified precondition evidence required before Apply")
+                    details = f": {', '.join(sorted(unknown_evidence))}" if unknown_evidence else ""
+                    blockers.append(f"task {task_id} has unverified precondition evidence required before Apply{details}")
                 validated_preconditions.append(
                     {
                         "required_before_stage": required_before_stage,
