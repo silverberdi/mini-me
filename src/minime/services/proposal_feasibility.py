@@ -52,6 +52,7 @@ class ProposalFeasibilityEvaluator:
         deltas = native_change.get("deltas")
         if not isinstance(deltas, list) or not deltas:
             return {"status": "UNKNOWN", "reason": "native OpenSpec show returned no validated deltas"}
+        spec_requirement_counters: dict[str, int] = {}
         for delta in deltas:
             if not isinstance(delta, dict):
                 continue
@@ -59,10 +60,17 @@ class ProposalFeasibilityEvaluator:
             requirements = delta.get("requirements")
             if not spec_name or not isinstance(requirements, list):
                 continue
-            for requirement_index, requirement in enumerate(requirements, start=1):
+            for requirement in requirements:
                 if not isinstance(requirement, dict):
                     continue
-                requirement_id = str(requirement.get("id") or requirement_index)
+                raw_id = requirement.get("id")
+                if raw_id is not None and str(raw_id).strip():
+                    requirement_id = str(raw_id).strip()
+                else:
+                    spec_requirement_counters[spec_name] = (
+                        spec_requirement_counters.get(spec_name, 0) + 1
+                    )
+                    requirement_id = str(spec_requirement_counters[spec_name])
                 for scenario_index, scenario in enumerate(requirement.get("scenarios") or (), start=1):
                     if isinstance(scenario, dict) and isinstance(scenario.get("rawText"), str):
                         scenarios.append(
@@ -323,9 +331,14 @@ class ProposalFeasibilityEvaluator:
                 verified_evidence, unknown_evidence = cls.verified_evidence_refs(
                     evidence_refs, available_refs, worktree_path
                 )
+                unverified_formal_refs = {
+                    ref for ref in unknown_evidence
+                    if any(ref.startswith(f"{p}:") for p in ("profile", "workflow", "operator", "external", "preview", "path"))
+                }
+                has_valid_evidence = bool(verified_evidence) and not unverified_formal_refs
                 if required_before_apply and not satisfied:
                     blockers.append(f"task {task_id} has an unmet or unknown precondition required before Apply")
-                if required_before_apply and (not evidence_refs or unknown_evidence):
+                if required_before_apply and not has_valid_evidence:
                     blockers.append(f"task {task_id} has unverified precondition evidence required before Apply")
                 validated_preconditions.append(
                     {
@@ -333,7 +346,7 @@ class ProposalFeasibilityEvaluator:
                         "satisfied": satisfied if required_before_apply else False,
                         "status": (
                             "SATISFIED"
-                            if required_before_apply and satisfied and not unknown_evidence
+                            if required_before_apply and satisfied and has_valid_evidence
                             else "PENDING"
                         ),
                         "evidence_refs": sorted(evidence_refs),

@@ -1066,3 +1066,138 @@ async def test_run_apply_succeeds_when_only_not_verified_remain(tmp_path: Path):
         "## Tasks\n- [x] 1.1 Implement\n- [ ] 2.1 Pending automated work\n"
     )
     assert not await c._run_apply(tmp_path, "codex", "change")
+
+
+def test_collect_inputs_generates_unique_scenario_ids_across_multiple_deltas(tmp_path: Path):
+    """When openspec show outputs multiple deltas for the same spec, scenario IDs must not collide."""
+    change_dir = tmp_path / "openspec" / "changes" / "change"
+    change_dir.mkdir(parents=True)
+    (change_dir / "tasks.md").write_text("## Tasks\n- [ ] 1.1 Task one\n- [ ] 1.2 Task two\n", encoding="utf-8")
+    adapter = SimpleNamespace(
+        show_change=lambda *_: {
+            "deltas": [
+                {
+                    "spec": "foundation-workspace",
+                    "requirements": [
+                        {"scenarios": [{"rawText": "WHEN build THEN pass"}]}
+                    ],
+                },
+                {
+                    "spec": "foundation-workspace",
+                    "requirements": [
+                        {"scenarios": [{"rawText": "WHEN test THEN pass"}]}
+                    ],
+                },
+            ]
+        }
+    )
+    evaluator = ProposalFeasibilityEvaluator(adapter, SimpleNamespace())
+    inputs = evaluator.collect_inputs(
+        worktree_path=tmp_path,
+        change_name="change",
+        project=SimpleNamespace(project_id="boxio", openspec_path="openspec", agent_profiles={}),
+        candidate_sha="a" * 40,
+        candidate_clean=True,
+        preview_sessions=SimpleNamespace(get_latest_for_candidate=lambda *_: None),
+        thinker_provider="codex",
+        implementer_provider="codex",
+    )
+    assert inputs["status"] == "READY"
+    scenario_ids = [s["scenario_id"] for s in inputs["scenarios"]]
+    assert len(scenario_ids) == 2
+    assert len(set(scenario_ids)) == 2
+    assert scenario_ids == ["foundation-workspace:1:1", "foundation-workspace:2:1"]
+
+
+def test_proposal_feasibility_allows_verified_capabilities_with_prose_evidence(tmp_path: Path):
+    """When verified capabilities exist, additional narrative prose does not falsely block Apply."""
+    inputs = {
+        "status": "READY",
+        "tasks": [{"task_id": "1.1", "text": "Setup task"}],
+        "scenarios": [{"scenario_id": "feature:1:1", "text": "WHEN run THEN pass"}],
+        "capabilities": [
+            {"ref": "profile:execution", "kind": "configured_profile", "available": True},
+            {"ref": "workflow:execution:apply", "kind": "executable_workflow", "available": True},
+            {"ref": "operator:confirmed", "kind": "operator_authorization", "available": True},
+        ],
+    }
+    report = {
+        "tasks": [
+            {
+                "task_id": "1.1",
+                "actor": "execution",
+                "execution_stage": "apply",
+                "capability_evidence_refs": ["profile:execution", "workflow:execution:apply"],
+                "depends_on_task_ids": [],
+                "preconditions": [
+                    {
+                        "required_before_stage": "apply",
+                        "satisfied": True,
+                        "evidence_refs": [
+                            "openspec status: planning artifacts complete",
+                            "workflow:execution:apply",
+                            "operator:confirmed",
+                        ],
+                    }
+                ],
+                "completion_evidence": "Setup complete",
+            }
+        ],
+        "scenario_coverage": [
+            {"scenario_id": "feature:1:1", "task_ids": ["1.1"], "evidence_stage": "apply"}
+        ],
+        "blockers": [],
+        "resolution_options": [],
+    }
+    status, tasks, scenarios, blockers, actions = ProposalFeasibilityEvaluator.validate_report(
+        report, inputs, tmp_path
+    )
+    assert status == "EXECUTABLE"
+    assert blockers == ()
+
+
+def test_proposal_feasibility_rejects_pure_prose_without_verified_capability(tmp_path: Path):
+    """When a precondition only provides unverified narrative prose, it remains blocked fail-closed."""
+    inputs = {
+        "status": "READY",
+        "tasks": [{"task_id": "1.1", "text": "Setup task"}],
+        "scenarios": [{"scenario_id": "feature:1:1", "text": "WHEN run THEN pass"}],
+        "capabilities": [
+            {"ref": "profile:execution", "kind": "configured_profile", "available": True},
+            {"ref": "workflow:execution:apply", "kind": "executable_workflow", "available": True},
+        ],
+    }
+    report = {
+        "tasks": [
+            {
+                "task_id": "1.1",
+                "actor": "execution",
+                "execution_stage": "apply",
+                "capability_evidence_refs": ["profile:execution", "workflow:execution:apply"],
+                "depends_on_task_ids": [],
+                "preconditions": [
+                    {
+                        "required_before_stage": "apply",
+                        "satisfied": True,
+                        "evidence_refs": [
+                            "openspec status: planning artifacts complete",
+                        ],
+                    }
+                ],
+                "completion_evidence": "Setup complete",
+            }
+        ],
+        "scenario_coverage": [
+            {"scenario_id": "feature:1:1", "task_ids": ["1.1"], "evidence_stage": "apply"}
+        ],
+        "blockers": [],
+        "resolution_options": [],
+    }
+    status, tasks, scenarios, blockers, actions = ProposalFeasibilityEvaluator.validate_report(
+        report, inputs, tmp_path
+    )
+    assert status == "BLOCKED"
+    assert any("has unverified precondition evidence required before Apply" in b for b in blockers)
+
+
+
