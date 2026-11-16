@@ -210,20 +210,22 @@ class ProposalFeasibilityEvaluator:
         verified = set(refs) & available_refs
         unknown = set(refs) - available_refs
         for ref in tuple(unknown):
-            if not ref.startswith("path:"):
-                continue
-            relative = Path(ref[5:])
-            candidate_path = (worktree_path / relative).resolve()
-            try:
-                candidate_path.relative_to(worktree_path.resolve())
-                safe_relative = not relative.is_absolute() and ".." not in relative.parts
-            except ValueError:
-                safe_relative = False
-            has_symlink = any(
-                (worktree_path / Path(*relative.parts[:index])).is_symlink()
-                for index in range(1, len(relative.parts) + 1)
-            )
-            if safe_relative and not has_symlink and candidate_path.is_file():
+            if ref.startswith("path:"):
+                relative = Path(ref[5:])
+                candidate_path = (worktree_path / relative).resolve()
+                try:
+                    candidate_path.relative_to(worktree_path.resolve())
+                    safe_relative = not relative.is_absolute() and ".." not in relative.parts
+                except ValueError:
+                    safe_relative = False
+                has_symlink = any(
+                    (worktree_path / Path(*relative.parts[:index])).is_symlink()
+                    for index in range(1, len(relative.parts) + 1)
+                )
+                if safe_relative and not has_symlink and candidate_path.is_file():
+                    verified.add(ref)
+                    unknown.remove(ref)
+            elif re.match(r"^openspec\s+(status|validate)\b", ref, re.IGNORECASE):
                 verified.add(ref)
                 unknown.remove(ref)
         return verified, unknown
@@ -331,22 +333,18 @@ class ProposalFeasibilityEvaluator:
                 verified_evidence, unknown_evidence = cls.verified_evidence_refs(
                     evidence_refs, available_refs, worktree_path
                 )
-                unverified_formal_refs = {
-                    ref for ref in unknown_evidence
-                    if any(ref.startswith(f"{p}:") for p in ("profile", "workflow", "operator", "external", "preview", "path"))
-                }
-                has_valid_evidence = bool(verified_evidence) and not unverified_formal_refs
                 if required_before_apply and not satisfied:
                     blockers.append(f"task {task_id} has an unmet or unknown precondition required before Apply")
-                if required_before_apply and not has_valid_evidence:
-                    blockers.append(f"task {task_id} has unverified precondition evidence required before Apply")
+                if required_before_apply and (not evidence_refs or unknown_evidence):
+                    details = f": {', '.join(sorted(unknown_evidence))}" if unknown_evidence else ""
+                    blockers.append(f"task {task_id} has unverified precondition evidence required before Apply{details}")
                 validated_preconditions.append(
                     {
                         "required_before_stage": required_before_stage,
                         "satisfied": satisfied if required_before_apply else False,
                         "status": (
                             "SATISFIED"
-                            if required_before_apply and satisfied and has_valid_evidence
+                            if required_before_apply and satisfied and not unknown_evidence
                             else "PENDING"
                         ),
                         "evidence_refs": sorted(evidence_refs),

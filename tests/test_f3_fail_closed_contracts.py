@@ -1068,35 +1068,46 @@ async def test_run_apply_succeeds_when_only_not_verified_remain(tmp_path: Path):
     assert not await c._run_apply(tmp_path, "codex", "change")
 
 
-def test_collect_inputs_generates_unique_scenario_ids_across_multiple_deltas(tmp_path: Path):
-    """When openspec show outputs multiple deltas for the same spec, scenario IDs must not collide."""
+def test_boxio_gate_regression_scenarios_and_evidence_are_accepted(tmp_path: Path):
+    """Exact regression reproducing Boxio D0 gate: 8 deltas across 3 specs and observed evidence refs."""
     change_dir = tmp_path / "openspec" / "changes" / "change"
     change_dir.mkdir(parents=True)
-    (change_dir / "tasks.md").write_text("## Tasks\n- [ ] 1.1 Task one\n- [ ] 1.2 Task two\n", encoding="utf-8")
-    adapter = SimpleNamespace(
-        show_change=lambda *_: {
-            "deltas": [
-                {
-                    "spec": "foundation-workspace",
-                    "requirements": [
-                        {"scenarios": [{"rawText": "WHEN build THEN pass"}]}
-                    ],
-                },
-                {
-                    "spec": "foundation-workspace",
-                    "requirements": [
-                        {"scenarios": [{"rawText": "WHEN test THEN pass"}]}
-                    ],
-                },
-            ]
-        }
-    )
-    evaluator = ProposalFeasibilityEvaluator(adapter, SimpleNamespace())
+    task_lines = [
+        "- [ ] 1.1 Toolchain y estructura del workspace",
+        "- [ ] 1.2 Monorepo de paquetes web, server y engine",
+        "- [ ] 1.3 Scripts reproducibles de instalacion, build y test",
+        "- [ ] 2.1 Contratos TypeScript de juego",
+        "- [ ] 2.2 Representacion minima y validacion",
+        "- [ ] 2.3 Transicion de turno y puntuacion",
+        "- [ ] 2.4 Pruebas deterministas de engine",
+        "- [ ] 3.1 Integracion de paquetes",
+        "- [ ] 3.2 Assets locales canonicos",
+        "- [ ] 3.3 Comprobacion automatizada de catalogo",
+    ]
+    (change_dir / "tasks.md").write_text("## Tasks\n" + "\n".join(task_lines) + "\n", encoding="utf-8")
+
+    deltas = [
+        {"spec": "foundation-workspace", "requirements": [{"scenarios": [{"rawText": "WHEN build THEN pass"}, {"rawText": "WHEN run THEN no external"}]}]},
+        {"spec": "foundation-workspace", "requirements": [{"scenarios": [{"rawText": "WHEN shapes THEN canonical"}, {"rawText": "WHEN non-square THEN reject"}]}]},
+        {"spec": "foundation-workspace", "requirements": [{"scenarios": [{"rawText": "WHEN tests THEN pass"}, {"rawText": "WHEN toolchain THEN compatible"}]}]},
+        {"spec": "game-contracts", "requirements": [{"scenarios": [{"rawText": "WHEN board THEN valid"}, {"rawText": "WHEN cell THEN square"}]}]},
+        {"spec": "game-contracts", "requirements": [{"scenarios": [{"rawText": "WHEN line THEN toggle"}, {"rawText": "WHEN box THEN score"}]}]},
+        {"spec": "game-contracts", "requirements": [{"scenarios": [{"rawText": "WHEN chain THEN continue"}, {"rawText": "WHEN complete THEN finish"}]}]},
+        {"spec": "game-contracts", "requirements": [{"scenarios": [{"rawText": "WHEN semantic THEN match"}]}]},
+        {"spec": "local-assets", "requirements": [{"scenarios": [{"rawText": "WHEN assets THEN local"}, {"rawText": "WHEN clean THEN pass"}]}]},
+    ]
+    adapter = SimpleNamespace(show_change=lambda *_: {"deltas": deltas})
+    runner = SimpleNamespace(resolve_workflow=MagicMock(return_value=SimpleNamespace(dispatch_command="codex exec")))
+    agent_profiles = {
+        "thinking": {"agent_id": "codex", "provider_id": "codex"},
+        "execution": {"agent_id": "codex", "provider_id": "codex"},
+    }
+    evaluator = ProposalFeasibilityEvaluator(adapter, runner)
     inputs = evaluator.collect_inputs(
         worktree_path=tmp_path,
         change_name="change",
-        project=SimpleNamespace(project_id="boxio", openspec_path="openspec", agent_profiles={}),
-        candidate_sha="a" * 40,
+        project=SimpleNamespace(project_id="boxio", openspec_path="openspec", agent_profiles=agent_profiles),
+        candidate_sha="c" * 40,
         candidate_clean=True,
         preview_sessions=SimpleNamespace(get_latest_for_candidate=lambda *_: None),
         thinker_provider="codex",
@@ -1104,13 +1115,60 @@ def test_collect_inputs_generates_unique_scenario_ids_across_multiple_deltas(tmp
     )
     assert inputs["status"] == "READY"
     scenario_ids = [s["scenario_id"] for s in inputs["scenarios"]]
-    assert len(scenario_ids) == 2
-    assert len(set(scenario_ids)) == 2
-    assert scenario_ids == ["foundation-workspace:1:1", "foundation-workspace:2:1"]
+    assert len(scenario_ids) == 15
+    assert len(set(scenario_ids)) == 15
+    # The four scenarios that previously suffered collision must be distinct and present
+    assert "foundation-workspace:1:1" in scenario_ids
+    assert "foundation-workspace:1:2" in scenario_ids
+    assert "foundation-workspace:2:1" in scenario_ids
+    assert "foundation-workspace:2:2" in scenario_ids
+    assert "game-contracts:1:1" in scenario_ids
+    assert "game-contracts:1:2" in scenario_ids
+    assert "game-contracts:2:1" in scenario_ids
+    assert "game-contracts:2:2" in scenario_ids
+
+    # Construct report matching the exact tasks and evidence observed at Boxio gate
+    report_tasks = []
+    for tid in ["1.1", "1.2", "1.3", "2.1", "2.2", "2.3", "2.4", "3.1", "3.2", "3.3"]:
+        report_tasks.append({
+            "task_id": tid,
+            "actor": "execution",
+            "execution_stage": "apply",
+            "capability_evidence_refs": ["profile:execution", "workflow:execution:apply"],
+            "depends_on_task_ids": [],
+            "preconditions": [
+                {
+                    "required_before_stage": "apply",
+                    "satisfied": True,
+                    "evidence_refs": [
+                        "openspec status: planning artifacts complete",
+                        "openspec validate: change is valid",
+                        "operator:confirmed",
+                        "workflow:execution:apply",
+                    ],
+                }
+            ],
+            "completion_evidence": f"Task {tid} done",
+        })
+    scenario_coverage = [
+        {"scenario_id": sid, "task_ids": ["1.1"], "evidence_stage": "apply"}
+        for sid in scenario_ids
+    ]
+    report = {
+        "tasks": report_tasks,
+        "scenario_coverage": scenario_coverage,
+        "blockers": [],
+        "resolution_options": [],
+    }
+    status, tasks, scenarios, blockers, actions = ProposalFeasibilityEvaluator.validate_report(
+        report, inputs, tmp_path
+    )
+    assert status == "EXECUTABLE"
+    assert blockers == ()
 
 
-def test_proposal_feasibility_allows_verified_capabilities_with_prose_evidence(tmp_path: Path):
-    """When verified capabilities exist, additional narrative prose does not falsely block Apply."""
+def test_proposal_feasibility_blocks_when_valid_capability_coexists_with_unverified_dependency(tmp_path: Path):
+    """Fail-closed: A valid capability ref DOES NOT ignore an unverified dependency in the same precondition."""
     inputs = {
         "status": "READY",
         "tasks": [{"task_id": "1.1", "text": "Setup task"}],
@@ -1134,9 +1192,9 @@ def test_proposal_feasibility_allows_verified_capabilities_with_prose_evidence(t
                         "required_before_stage": "apply",
                         "satisfied": True,
                         "evidence_refs": [
-                            "openspec status: planning artifacts complete",
                             "workflow:execution:apply",
                             "operator:confirmed",
+                            "database migration 003 must be applied in staging",
                         ],
                     }
                 ],
@@ -1152,52 +1210,11 @@ def test_proposal_feasibility_allows_verified_capabilities_with_prose_evidence(t
     status, tasks, scenarios, blockers, actions = ProposalFeasibilityEvaluator.validate_report(
         report, inputs, tmp_path
     )
-    assert status == "EXECUTABLE"
-    assert blockers == ()
-
-
-def test_proposal_feasibility_rejects_pure_prose_without_verified_capability(tmp_path: Path):
-    """When a precondition only provides unverified narrative prose, it remains blocked fail-closed."""
-    inputs = {
-        "status": "READY",
-        "tasks": [{"task_id": "1.1", "text": "Setup task"}],
-        "scenarios": [{"scenario_id": "feature:1:1", "text": "WHEN run THEN pass"}],
-        "capabilities": [
-            {"ref": "profile:execution", "kind": "configured_profile", "available": True},
-            {"ref": "workflow:execution:apply", "kind": "executable_workflow", "available": True},
-        ],
-    }
-    report = {
-        "tasks": [
-            {
-                "task_id": "1.1",
-                "actor": "execution",
-                "execution_stage": "apply",
-                "capability_evidence_refs": ["profile:execution", "workflow:execution:apply"],
-                "depends_on_task_ids": [],
-                "preconditions": [
-                    {
-                        "required_before_stage": "apply",
-                        "satisfied": True,
-                        "evidence_refs": [
-                            "openspec status: planning artifacts complete",
-                        ],
-                    }
-                ],
-                "completion_evidence": "Setup complete",
-            }
-        ],
-        "scenario_coverage": [
-            {"scenario_id": "feature:1:1", "task_ids": ["1.1"], "evidence_stage": "apply"}
-        ],
-        "blockers": [],
-        "resolution_options": [],
-    }
-    status, tasks, scenarios, blockers, actions = ProposalFeasibilityEvaluator.validate_report(
-        report, inputs, tmp_path
-    )
+    # Must remain BLOCKED fail-closed; the unverified dependency is NOT silently ignored
     assert status == "BLOCKED"
     assert any("has unverified precondition evidence required before Apply" in b for b in blockers)
+    assert any("database migration 003 must be applied in staging" in b for b in blockers)
+
 
 
 
