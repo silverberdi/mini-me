@@ -1431,6 +1431,121 @@ def test_proposal_feasibility_rejects_non_canonical_openspec_assertion_even_when
     assert any("openspec validate: external api responsive" in b for b in blockers)
 
 
+def test_proposal_feasibility_accepts_path_evidence_relative_to_change_dir(tmp_path: Path):
+    """Path evidence can resolve relative to the Change dir (openspec/changes/<change>/specs/...)."""
+    change_dir = tmp_path / "openspec" / "changes" / "change"
+    specs_dir = change_dir / "specs" / "game-contracts"
+    specs_dir.mkdir(parents=True)
+    (specs_dir / "spec.md").write_text("# Game Contracts Spec", encoding="utf-8")
+    (change_dir / "tasks.md").write_text("## Tasks\n- [ ] 2.1 Game contracts setup\n", encoding="utf-8")
+
+    inputs = {
+        "status": "READY",
+        "change_name": "change",
+        "openspec_path": "openspec",
+        "tasks": [{"task_id": "2.1", "text": "Game contracts setup"}],
+        "scenarios": [{"scenario_id": "game-contracts:1:1", "text": "WHEN board THEN valid"}],
+        "capabilities": [
+            {"ref": "profile:execution", "kind": "configured_profile", "available": True},
+            {"ref": "workflow:execution:apply", "kind": "executable_workflow", "available": True},
+            {"ref": "operator:confirmed", "kind": "operator_authorization", "available": True},
+        ],
+    }
+    report = {
+        "tasks": [
+            {
+                "task_id": "2.1",
+                "actor": "execution",
+                "execution_stage": "apply",
+                "capability_evidence_refs": ["profile:execution", "workflow:execution:apply"],
+                "depends_on_task_ids": [],
+                "preconditions": [
+                    {
+                        "required_before_stage": "apply",
+                        "satisfied": True,
+                        "evidence_refs": [
+                            "path:specs/game-contracts/spec.md",
+                            "operator:confirmed",
+                            "workflow:execution:apply",
+                        ],
+                    }
+                ],
+                "completion_evidence": "Contracts created",
+            }
+        ],
+        "scenario_coverage": [
+            {"scenario_id": "game-contracts:1:1", "task_ids": ["2.1"], "evidence_stage": "apply"}
+        ],
+        "blockers": [],
+        "resolution_options": [],
+    }
+    status, tasks, scenarios, blockers, actions = ProposalFeasibilityEvaluator.validate_report(
+        report, inputs, tmp_path
+    )
+    assert status == "EXECUTABLE"
+    assert blockers == ()
+
+
+def test_proposal_feasibility_rejects_unsafe_and_missing_path_evidence(tmp_path: Path):
+    """Fail-closed: Path traversal, absolute paths, and nonexistent files are rejected."""
+    change_dir = tmp_path / "openspec" / "changes" / "change"
+    change_dir.mkdir(parents=True)
+    (change_dir / "tasks.md").write_text("## Tasks\n- [ ] 1.1 Task\n", encoding="utf-8")
+
+    inputs = {
+        "status": "READY",
+        "change_name": "change",
+        "openspec_path": "openspec",
+        "tasks": [{"task_id": "1.1", "text": "Task"}],
+        "scenarios": [{"scenario_id": "feature:1:1", "text": "WHEN run THEN pass"}],
+        "capabilities": [
+            {"ref": "profile:execution", "kind": "configured_profile", "available": True},
+            {"ref": "workflow:execution:apply", "kind": "executable_workflow", "available": True},
+            {"ref": "operator:confirmed", "kind": "operator_authorization", "available": True},
+        ],
+    }
+    for unsafe_ref in [
+        "path:../../outside.txt",
+        "path:/etc/passwd",
+        "path:specs/nonexistent/spec.md",
+    ]:
+        report = {
+            "tasks": [
+                {
+                    "task_id": "1.1",
+                    "actor": "execution",
+                    "execution_stage": "apply",
+                    "capability_evidence_refs": ["profile:execution", "workflow:execution:apply"],
+                    "depends_on_task_ids": [],
+                    "preconditions": [
+                        {
+                            "required_before_stage": "apply",
+                            "satisfied": True,
+                            "evidence_refs": [
+                                unsafe_ref,
+                                "operator:confirmed",
+                                "workflow:execution:apply",
+                            ],
+                        }
+                    ],
+                    "completion_evidence": "Done",
+                }
+            ],
+            "scenario_coverage": [
+                {"scenario_id": "feature:1:1", "task_ids": ["1.1"], "evidence_stage": "apply"}
+            ],
+            "blockers": [],
+            "resolution_options": [],
+        }
+        status, _, _, blockers, _ = ProposalFeasibilityEvaluator.validate_report(
+            report, inputs, tmp_path
+        )
+        assert status == "BLOCKED"
+        assert any(unsafe_ref in b for b in blockers)
+
+
+
+
 
 
 

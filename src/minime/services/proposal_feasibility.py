@@ -219,32 +219,60 @@ class ProposalFeasibilityEvaluator:
         return {
             "status": "READY",
             "candidate_sha": candidate_sha,
+            "change_name": change_name,
+            "openspec_path": openspec_path,
             "tasks": [{"task_id": task.task_id, "text": task.text} for task in tasks],
             "scenarios": scenarios,
             "capabilities": capabilities,
             "mandatory_blockers": mandatory_blockers,
         }
 
-    @staticmethod
+    @classmethod
     def verified_evidence_refs(
-        refs: list[str], available_refs: set[str], worktree_path: Path
+        cls,
+        refs: list[str],
+        available_refs: set[str],
+        worktree_path: Path,
+        *,
+        openspec_path: str = "openspec",
+        change_name: str = "",
     ) -> tuple[set[str], set[str]]:
         verified = set(refs) & available_refs
         unknown = set(refs) - available_refs
+        resolved_root = worktree_path.resolve()
         for ref in tuple(unknown):
             if ref.startswith("path:"):
-                relative = Path(ref[5:])
-                candidate_path = (worktree_path / relative).resolve()
-                try:
-                    candidate_path.relative_to(worktree_path.resolve())
-                    safe_relative = not relative.is_absolute() and ".." not in relative.parts
-                except ValueError:
-                    safe_relative = False
-                has_symlink = any(
-                    (worktree_path / Path(*relative.parts[:index])).is_symlink()
-                    for index in range(1, len(relative.parts) + 1)
-                )
-                if safe_relative and not has_symlink and candidate_path.is_file():
+                relative = Path(ref[5:].strip())
+                if relative.is_absolute() or ".." in relative.parts:
+                    continue
+                candidate_paths = [worktree_path / relative]
+                if change_name:
+                    candidate_paths.append(
+                        worktree_path / openspec_path / "changes" / change_name / relative
+                    )
+                if openspec_path:
+                    candidate_paths.append(worktree_path / openspec_path / relative)
+
+                file_found = False
+                for p in candidate_paths:
+                    try:
+                        candidate_path = p.resolve()
+                        candidate_path.relative_to(resolved_root)
+                    except (ValueError, RuntimeError):
+                        continue
+                    try:
+                        rel_to_wt = candidate_path.relative_to(resolved_root)
+                        has_symlink = any(
+                            (resolved_root / Path(*rel_to_wt.parts[:index])).is_symlink()
+                            for index in range(1, len(rel_to_wt.parts) + 1)
+                        )
+                    except Exception:
+                        has_symlink = True
+                    if not has_symlink and candidate_path.is_file():
+                        file_found = True
+                        break
+
+                if file_found:
                     verified.add(ref)
                     unknown.remove(ref)
             elif re.fullmatch(
@@ -288,6 +316,8 @@ class ProposalFeasibilityEvaluator:
         }
         expected_tasks = {str(item["task_id"]) for item in inputs.get("tasks", [])}
         expected_scenarios = {str(item["scenario_id"]) for item in inputs.get("scenarios", [])}
+        openspec_path = str(inputs.get("openspec_path") or "openspec")
+        change_name = str(inputs.get("change_name") or "")
         task_rows = report.get("tasks") if isinstance(report.get("tasks"), list) else []
         scenario_rows = report.get("scenario_coverage") if isinstance(report.get("scenario_coverage"), list) else []
         if not isinstance(report.get("tasks"), list):
@@ -366,7 +396,11 @@ class ProposalFeasibilityEvaluator:
                 satisfied = precondition.get("satisfied") is True
                 evidence_refs = [str(ref) for ref in precondition.get("evidence_refs", [])] if isinstance(precondition.get("evidence_refs"), list) else []
                 verified_evidence, unknown_evidence = cls.verified_evidence_refs(
-                    evidence_refs, available_refs, worktree_path
+                    evidence_refs,
+                    available_refs,
+                    worktree_path,
+                    openspec_path=openspec_path,
+                    change_name=change_name,
                 )
                 if required_before_apply and not satisfied:
                     blockers.append(f"task {task_id} has an unmet or unknown precondition required before Apply")
@@ -510,6 +544,8 @@ class ProposalFeasibilityEvaluator:
         current_preview = next(
             (ref for ref in available_refs if ref.startswith("preview:")), None
         )
+        openspec_path = str(inputs.get("openspec_path") or "openspec")
+        change_name = str(inputs.get("change_name") or "")
         blockers: list[str] = []
         for task in task_feasibility:
             task_id = str(task.get("task_id") or "unknown")
@@ -519,7 +555,11 @@ class ProposalFeasibilityEvaluator:
                     str(ref) for ref in task.get("capability_evidence_refs", [])
                 ]
                 verified_capabilities, unknown_capabilities = cls.verified_evidence_refs(
-                    capability_refs, available_refs, worktree_path
+                    capability_refs,
+                    available_refs,
+                    worktree_path,
+                    openspec_path=openspec_path,
+                    change_name=change_name,
                 )
                 missing_capabilities = unknown_capabilities | (
                     set(capability_refs) - verified_capabilities
@@ -542,7 +582,13 @@ class ProposalFeasibilityEvaluator:
                     # assessment may contain the pre-Apply SHA; resolve the
                     # same capability kind against the candidate at this stage.
                     stage_refs.append(current_preview if ref.startswith("preview:") and current_preview else ref)
-                verified, unknown = cls.verified_evidence_refs(stage_refs, available_refs, worktree_path)
+                verified, unknown = cls.verified_evidence_refs(
+                    stage_refs,
+                    available_refs,
+                    worktree_path,
+                    openspec_path=openspec_path,
+                    change_name=change_name,
+                )
                 if unknown or len(verified) != len(set(stage_refs)):
                     blockers.append(
                         f"task {task_id} (actor {actor}) still lacks "
