@@ -247,11 +247,19 @@ class ProposalFeasibilityEvaluator:
                 if safe_relative and not has_symlink and candidate_path.is_file():
                     verified.add(ref)
                     unknown.remove(ref)
-            elif re.match(r"^openspec\s+status\b", ref, re.IGNORECASE):
+            elif re.fullmatch(
+                r"^openspec(?:\s+|:)\s*status(?:\s*:\s*|\s+)(?:planning[\s_]+(?:artifacts[\s_]+)?complete)$",
+                ref.strip(),
+                re.IGNORECASE,
+            ):
                 if "openspec:status:planning_complete" in available_refs:
                     verified.add(ref)
                     unknown.remove(ref)
-            elif re.match(r"^openspec\s+validate\b", ref, re.IGNORECASE):
+            elif re.fullmatch(
+                r"^openspec(?:\s+|:)\s*validate(?:\s*:\s*|\s+)(?:(?:change[\s_]+is[\s_]+)?valid)$",
+                ref.strip(),
+                re.IGNORECASE,
+            ):
                 if "openspec:validate:valid" in available_refs:
                     verified.add(ref)
                     unknown.remove(ref)

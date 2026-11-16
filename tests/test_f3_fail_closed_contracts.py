@@ -1361,5 +1361,76 @@ def test_proposal_feasibility_blocks_when_valid_capability_coexists_with_unverif
     assert any("database migration 003 must be applied in staging" in b for b in blockers)
 
 
+def test_proposal_feasibility_rejects_non_canonical_openspec_assertion_even_when_cli_passed(tmp_path: Path):
+    """Fail-closed: Arbitrary text starting with 'openspec status' or 'openspec validate' is NOT verified."""
+    change_dir = tmp_path / "openspec" / "changes" / "change"
+    change_dir.mkdir(parents=True)
+    (change_dir / "tasks.md").write_text("## Tasks\n- [ ] 1.1 Task one\n", encoding="utf-8")
+    deltas = [
+        {"spec": "feature", "requirements": [{"scenarios": [{"rawText": "WHEN run THEN pass"}]}]}
+    ]
+
+    adapter = SimpleNamespace(
+        show_change=lambda *_: {"deltas": deltas},
+        planning_status=lambda *_: {"status": "PASS"},
+        validate_change_strict=lambda *_: {"status": "PASS"},
+    )
+    runner = SimpleNamespace(resolve_workflow=MagicMock(return_value=SimpleNamespace(dispatch_command="codex exec")))
+    agent_profiles = {
+        "thinking": {"agent_id": "codex", "provider_id": "codex"},
+        "execution": {"agent_id": "codex", "provider_id": "codex"},
+    }
+    evaluator = ProposalFeasibilityEvaluator(adapter, runner)
+    inputs = evaluator.collect_inputs(
+        worktree_path=tmp_path,
+        change_name="change",
+        project=SimpleNamespace(project_id="boxio", openspec_path="openspec", agent_profiles=agent_profiles),
+        candidate_sha="c" * 40,
+        candidate_clean=True,
+        preview_sessions=SimpleNamespace(get_latest_for_candidate=lambda *_: None),
+        thinker_provider="codex",
+        implementer_provider="codex",
+    )
+    assert inputs["status"] == "READY"
+
+    # The report contains non-canonical assertions disguised with the openspec prefix
+    report = {
+        "tasks": [
+            {
+                "task_id": "1.1",
+                "actor": "execution",
+                "execution_stage": "apply",
+                "capability_evidence_refs": ["profile:execution", "workflow:execution:apply"],
+                "depends_on_task_ids": [],
+                "preconditions": [
+                    {
+                        "required_before_stage": "apply",
+                        "satisfied": True,
+                        "evidence_refs": [
+                            "openspec status: custom database table created",
+                            "openspec validate: external api responsive",
+                            "operator:confirmed",
+                            "workflow:execution:apply",
+                        ],
+                    }
+                ],
+                "completion_evidence": "Done",
+            }
+        ],
+        "scenario_coverage": [
+            {"scenario_id": "feature:1:1", "task_ids": ["1.1"], "evidence_stage": "apply"}
+        ],
+        "blockers": [],
+        "resolution_options": [],
+    }
+    status, tasks, scenarios, blockers, actions = ProposalFeasibilityEvaluator.validate_report(
+        report, inputs, tmp_path
+    )
+    assert status == "BLOCKED"
+    assert any("openspec status: custom database table created" in b for b in blockers)
+    assert any("openspec validate: external api responsive" in b for b in blockers)
+
+
+
 
 
