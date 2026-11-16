@@ -30,6 +30,7 @@ from minime.services.orchestration_coordinator import (
     ComplexityAssessment,
     NativeOrchestrationCoordinator,
 )
+from minime.services.proposal_feasibility import ProposalFeasibilityEvaluator
 from minime.services.worktree_manager import WorktreeInfo
 
 DATABASE_URL = os.environ.get("MINIME_TEST_DATABASE_URL")
@@ -212,6 +213,170 @@ def test_persisted_current_gate_reaches_operator_response_api(monkeypatch, tmp_p
             )
             run_uow.commit()
             run_uow.session.close()
+        engine.dispose()
+
+
+def test_postgres_api_stage_aware_feasibility_gate(tmp_path):
+    """Persist deferred work, then expose the blocker only at its consuming stage."""
+    engine = create_engine(DATABASE_URL, pool_pre_ping=True)
+    project_id = str(uuid4())
+    run_id = str(uuid4())
+    uow = None
+    try:
+        with engine.connect() as connection:
+            database_name = connection.execute(text("select current_database()")).scalar_one()
+            assert "test" in database_name.lower(), "Refusing to write outside a test database"
+
+        session_factory = sessionmaker(bind=engine, autoflush=False, expire_on_commit=False)
+        uow = PostgresPersistenceUnitOfWork(session_factory())
+        project = Project(
+            project_id=project_id,
+            display_name="Stage-aware feasibility integration",
+            repository="org/stage-aware-feasibility-test",
+        )
+        binding = ProjectManagedRepositoryBinding(
+            project_id=project_id,
+            canonical_repository_identity="github.com/org/stage-aware-feasibility-test",
+            managed_repository_root=str(tmp_path / "managed-repo"),
+            worktree_parent_dir=str(tmp_path / "worktrees"),
+        )
+        candidate_sha = "a" * 40
+        task_feasibility = [{
+            "task_id": "2.1",
+            "actor": "project_ci_cd",
+            "execution_stage": "verify",
+            "preconditions": [{
+                "required_before_stage": "verify",
+                "satisfied": False,
+                "status": "PENDING",
+                "evidence_refs": [f"preview:{candidate_sha}"],
+            }],
+        }]
+        run = OrchestrationRun(
+            run_id=run_id,
+            project_id=project_id,
+            change_name="req-388-stage-aware-feasibility",
+            base_sha=candidate_sha,
+            current_candidate_sha=candidate_sha,
+            current_stage=OrchestrationStage.VERIFYING,
+            resumable_stage=OrchestrationStage.VERIFYING,
+            is_active=True,
+            stop_details={
+                "complexity_assessment": {
+                    "feasibility_status": "EXECUTABLE",
+                    "task_feasibility": task_feasibility,
+                    "scenario_coverage": [{
+                        "scenario_id": "mobile:1:1",
+                        "task_ids": ["2.1"],
+                        "evidence_stage": "verify",
+                    }],
+                }
+            },
+        )
+        uow.projects.save(project)
+        uow.project_managed_repository_bindings.save(binding)
+        uow.orchestration_runs.save(run)
+        uow.commit()
+
+        # The same deferred dependency does not make the pre-Apply plan
+        # unexecutable; it is checked at Verify against the current candidate.
+        apply_report = {
+            "tasks": [{
+                "task_id": "2.1",
+                "actor": "project_ci_cd",
+                "execution_stage": "verify",
+                "capability_evidence_refs": ["path:.github/workflows/preview.yml", f"preview:{candidate_sha}"],
+                "depends_on_task_ids": [],
+                "preconditions": [{
+                    "required_before_stage": "verify",
+                    "satisfied": False,
+                    "evidence_refs": [f"preview:{candidate_sha}"],
+                }],
+                "completion_evidence": "Observed validation result for the exact candidate SHA",
+            }],
+            "scenario_coverage": [{
+                "scenario_id": "mobile:1:1",
+                "task_ids": ["2.1"],
+                "evidence_stage": "verify",
+            }],
+            "blockers": [],
+            "resolution_options": [],
+        }
+        (tmp_path / ".github" / "workflows").mkdir(parents=True)
+        (tmp_path / ".github" / "workflows" / "preview.yml").write_text("name: preview\n")
+        apply_inputs = {
+            "status": "READY",
+            "candidate_sha": candidate_sha,
+            "tasks": [{"task_id": "2.1", "text": "Validate on the candidate preview"}],
+            "scenarios": [{"scenario_id": "mobile:1:1", "text": "The mobile flow works"}],
+            "capabilities": [
+                {"ref": "profile:execution", "available": True},
+                {"ref": "workflow:execution:apply", "available": True},
+                {"ref": f"preview:{candidate_sha}", "available": False},
+            ],
+            "mandatory_blockers": [],
+        }
+        assessment = ProposalFeasibilityEvaluator.validate_report(apply_report, apply_inputs, tmp_path)
+        assert assessment[0] == "EXECUTABLE", assessment[3]
+        assert assessment[1][0]["preconditions"][0]["status"] == "PENDING"
+
+        coordinator = NativeOrchestrationCoordinator(
+            uow_factory=lambda: uow,
+            github_adapter=MagicMock(),
+            worktree_manager=MagicMock(),
+            agent_runner=MagicMock(),
+        )
+        verify_inputs = {
+            "status": "READY",
+            "candidate_sha": candidate_sha,
+            "capabilities": [{"ref": f"preview:{candidate_sha}", "available": False}],
+        }
+        blockers = coordinator.proposal_feasibility.blockers_before_stage(
+            task_feasibility, stage="verify", inputs=verify_inputs, worktree_path=tmp_path
+        )
+        assert blockers and "task 2.1" in blockers[0] and "project_ci_cd" in blockers[0]
+        payload = coordinator._record_current_human_gate(
+            uow,
+            run,
+            gate="proposal_feasibility",
+            question="Verify está detenido por evidencia de preview pendiente.",
+            options=["Aportar evidencia de preview del candidato"],
+            payload={"blocked_transition": "verify", "candidate_sha": candidate_sha, "blockers": list(blockers)},
+        )
+        assert payload["stage"] == OrchestrationStage.VERIFYING.value
+        assert payload["blocked_transition"] == "verify"
+
+        operator = AuthorizedOperator(email="operator@example.com", name="Operator", roles=["admin"])
+        app.dependency_overrides[get_uow] = lambda: uow
+        app.dependency_overrides[get_current_operator] = lambda: operator
+        try:
+            with TestClient(app) as client:
+                response = client.get(
+                    "/api/v1/orchestration/runs",
+                    params={"project_id": project_id, "is_active": "true"},
+                )
+        finally:
+            app.dependency_overrides.clear()
+        assert response.status_code == 200
+        projected = next(row for row in response.json() if row["run_id"] == run_id)
+        assert projected["stop_details"]["human_payload"]["blocked_transition"] == "verify"
+        assert projected["stop_details"]["human_payload"]["blockers"] == list(blockers)
+
+        verify_inputs["capabilities"][0]["available"] = True
+        assert coordinator.proposal_feasibility.blockers_before_stage(
+            task_feasibility, stage="verify", inputs=verify_inputs, worktree_path=tmp_path
+        ) == ()
+    finally:
+        app.dependency_overrides.clear()
+        if uow is not None:
+            uow.session.execute(text("delete from orchestration_runs where id = :run_id"), {"run_id": run_id})
+            uow.session.execute(
+                text("delete from project_managed_repository_bindings where project_id = :project_id"),
+                {"project_id": project_id},
+            )
+            uow.session.execute(text("delete from projects where id = :project_id"), {"project_id": project_id})
+            uow.commit()
+            uow.session.close()
         engine.dispose()
 
 
