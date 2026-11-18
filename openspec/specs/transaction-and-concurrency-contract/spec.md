@@ -64,24 +64,6 @@ Durable saga resume operations SHALL use row-level locking (`SELECT ... FOR UPDA
 
 ---
 
-### Requirement: Budget and Provider Probe Lock Preservation
-Budget reservations and provider health probes SHALL preserve row-level lock serialization under concurrent execution.
-
-#### Scenario: Concurrent budget reservation under cap limit
-- **Given** a project budget policy with remaining capacity for 1 reservation
-- **When** two concurrent requests attempt budget reservation in `BudgetService.reserve_budget()`
-- **Then** `OpenRouterBudgetPolicyModel.get_for_update()` SHALL serialize callers
-- **And** exactly one caller SHALL be granted reservation while the second caller is refused without oversubscribing the budget cap
-- **And** the caller transaction SHALL commit the reservation prior to provider dispatch.
-
-#### Scenario: Concurrent provider health probe execution
-- **Given** a provider health probe window requiring refreshed capacity status
-- **When** multiple concurrent requests check provider health
-- **Then** `ProviderHealthModel` row lock `SELECT ... FOR UPDATE` in `ProviderHealthService._try_reserve_expensive_probe()` SHALL ensure exactly one expensive network probe executes and commits its reservation
-- **And** secondary callers SHALL await lock release and consume the resulting status.
-
----
-
 ### Requirement: Monotonic Stage and Job State Transitions
 Stage transitions on `OrchestrationRun` and status transitions on `JobModel` SHALL use row locking or conditional compare-and-swap checks to prevent stale overwrites.
 
@@ -135,3 +117,18 @@ The system SHALL use a durable process-independent atomic claim keyed by run, st
 - **GIVEN** a worker's invocation claim expires and recovery acquires a higher fencing generation
 - **WHEN** the prior worker attempts to persist a result or advance the run
 - **THEN** the stale write is rejected and only the current fenced owner may complete the invocation
+
+### Requirement: Usage evidence remains transactionally consistent
+Writes that record provider usage, reconcile an unresolved provider outcome, or settle retained reviewer reservations SHALL remain transactional and idempotent; they SHALL NOT require a daily/monthly OpenRouter policy row or cap lock.
+
+#### Scenario: Concurrent provider outcomes retain distinct evidence
+- **WHEN** two provider calls for a project complete concurrently with observable usage results
+- **THEN** each result is persisted once with its provider and request identity without a project cap-row lock
+
+#### Scenario: Retried persistence does not duplicate usage evidence
+- **WHEN** a usage persistence command is retried with the same provider request identity
+- **THEN** the existing evidence is reused or deduplicated according to its idempotency key and no duplicate charge record is created
+
+#### Scenario: Reviewer reservation controls remain intact
+- **WHEN** a reviewer path uses a separately configured reviewer-specific spend control
+- **THEN** its existing transactional reservation and concurrency guarantees remain enforced independently of OpenRouter daily/monthly policy
