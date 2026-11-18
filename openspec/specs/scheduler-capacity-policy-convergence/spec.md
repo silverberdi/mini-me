@@ -55,33 +55,6 @@ The scheduler SHALL admit a backlog item (`RUN`) if and only if `SAFE_EXECUTABLE
 - **AND** block condition SHALL be `UNKNOWN_CAPACITY`
 - **AND** `has_deterministic_eta` SHALL be `False`
 
-### Requirement: Strict Drain Fallback Policy
-The system SHALL strictly confine paid drain fallback (OpenRouter, governed by `src/minime/services/openrouter_eligibility.py` and `OpenRouterBudgetPolicy`) to active in-flight execution continuations where material execution has already started (`is_material_execution_started == True`). The scheduler SHALL NEVER admit new `READY` backlog items via drain fallback.
-
-#### Scenario: In-flight attempt continues under drain fallback
-- **WHEN** primary subscriptions are exhausted
-- **AND** an execution attempt is actively in progress (`is_material_execution_started == True`)
-- **AND** drain budget headroom remains available
-- **THEN** the operational decision for the active run SHALL be `DRAIN`
-- **AND** execution continuation SHALL proceed
-
-#### Scenario: New backlog item refused drain admission
-- **WHEN** primary subscriptions are exhausted
-- **AND** a new backlog item in `READY` status is evaluated for admission
-- **AND** drain fallback budget is available
-- **THEN** the operational decision SHALL be `WAIT` (or `NEEDS_HUMAN` if primaries are unconfigured)
-- **AND** the item SHALL NOT be admitted as `RUN` or `DRAIN`
-
-#### Scenario: Drain fallback enforces distinct model identity
-- **WHEN** an in-flight job uses drain fallback for both implementation and review
-- **THEN** the system SHALL enforce distinct model identities for implementer and reviewer
-- **AND** if distinct model identity cannot be satisfied, review step SHALL yield `NEEDS_HUMAN`
-
-#### Scenario: In-flight drain halts when budget exceeded
-- **WHEN** an in-flight drain execution exceeds the configured drain budget cap
-- **THEN** execution SHALL immediately halt
-- **AND** the operational decision SHALL transition to `NEEDS_HUMAN` with block condition `BUDGET_EXCEEDED`
-
 ### Requirement: Pre-Admission vs Post-Execution Separation & Settled Evidence Truth
 The scheduler SHALL distinguish pre-admission observable conditions from post-execution attempt outcomes. Textual/provider success lacking sufficient repository-editing evidence SHALL produce `EVIDENCE_INSUFFICIENT` and require human intervention without automated retry.
 
@@ -148,3 +121,22 @@ All system interfaces (CLI `minime scheduler tick`, REST API `POST /api/v1/sched
 #### Scenario: Background daemon delegates to single authority
 - **WHEN** the background scheduler service runs its tick cycle
 - **THEN** admission SHALL be evaluated via `SchedulerService.evaluate_admission` in `src/minime/services/scheduler_service.py` without private bypasses
+
+### Requirement: In-flight fallback eligibility is independent of internal spend caps
+The scheduler SHALL evaluate configured fallback eligibility using provider role/configuration, actual provider capacity evidence, and in-flight pipeline state; it SHALL NOT require an internal daily/monthly budget cap, budget-policy row, or headroom calculation. It SHALL keep new READY work out of the rescue path and preserve the required DRAIN/WAIT and role-separation rules.
+
+#### Scenario: In-flight execution continues without a legacy cap policy
+- **WHEN** a materially started execution is in the permitted drain state, required primary providers are verified unavailable, and a fallback profile is configured
+- **THEN** the scheduler allows the configured fallback decision without testing local daily/monthly headroom
+
+#### Scenario: New ready work remains excluded
+- **WHEN** a new READY item is evaluated while rescue fallback is available
+- **THEN** the scheduler does not admit that item through the in-flight fallback path
+
+#### Scenario: Provider capacity is unknown
+- **WHEN** required primary-provider capacity cannot be verified
+- **THEN** the scheduler follows the existing fail-safe WAIT or human decision path and does not infer that a spend cap caused the block
+
+#### Scenario: Fallback profile is unavailable
+- **WHEN** the permitted in-flight path is reached but no configured fallback profile or credentials are available
+- **THEN** the scheduler reports that exact provider configuration gap and preserves the in-flight state

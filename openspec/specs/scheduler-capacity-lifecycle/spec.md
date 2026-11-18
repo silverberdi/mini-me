@@ -7,7 +7,7 @@ Manages scheduler capacity lifecycle modes (`RUN`, `DRAIN`, `WAIT`) and enforces
 ## Requirements
 
 ### Requirement: Primary-driven scheduler mode state machine
-The system SHALL operate the scheduler under three explicit modes: `RUN`, `DRAIN`, and `WAIT`, driven strictly by the availability of configured primary execution providers (Codex and Antigravity) with budgeted OpenRouter fallback available exclusively in `DRAIN` during dual-primary exhaustion.
+The system SHALL operate the scheduler under three explicit modes: `RUN`, `DRAIN`, and `WAIT`, driven by configured primary provider capacity. Configured OpenRouter fallback SHALL be available only for eligible in-flight work and only for a stage whose assigned primary provider has verified quota/rate-limit exhaustion. Fallback SHALL NOT depend on an internal budget-policy row, daily/monthly cap, or headroom. Availability of a different role's provider SHALL NOT block fallback for the currently blocked stage.
 
 #### Scenario: Normal RUN mode operation
 - **WHEN** all required primary provider roles for the project's configured pair (implementer AND reviewer) are verified available
@@ -22,11 +22,15 @@ The system SHALL operate the scheduler under three explicit modes: `RUN`, `DRAIN
 - **THEN** the scheduler allows that specific phase to execute with the primary provider and advance until it reaches an unavailable provider phase without invoking OpenRouter.
 
 #### Scenario: In-flight execution during DRAIN mode with OpenRouter fallback
-- **WHEN** the scheduler is in `DRAIN` mode, both primary providers (Codex and Antigravity) are exhausted, an in-flight job is blocked on an execution stage, and OpenRouter fallback is enabled, budgeted, and independently modeled
-- **THEN** the scheduler executes that phase using OpenRouter fallback and advances the candidate.
+- **WHEN** an active Run is in `IMPLEMENTING`, the configured execution provider has recent quota/rate-limit exhaustion, the reviewer provider remains available, and a compatible fallback profile is configured
+- **THEN** the scheduler invokes that exact fallback profile for Apply without a local budget-policy/headroom prerequisite and preserves the reviewer role for any required independent review.
+
+#### Scenario: Available execution primary does not use fallback
+- **WHEN** an active Run is in `IMPLEMENTING` and its configured execution provider has fresh successful capacity evidence
+- **THEN** the scheduler uses that execution provider and does not invoke fallback, regardless of the review provider's capacity state.
 
 #### Scenario: Transition to WAIT when no primary work can progress
-- **WHEN** the scheduler is in `DRAIN` mode and no active in-flight job can make safe progress due to primary provider unavailability (and fallback is unconfigured, exhausted, over budget, breached, or lacking a distinct model)
+- **WHEN** the scheduler is in `DRAIN` mode and no active in-flight job can make safe progress due to primary provider unavailability (and fallback is unconfigured, unavailable, or lacking a distinct model)
 - **THEN** the scheduler transitions to `WAIT`, pauses pipeline polling, and logs a `SCHEDULER_MODE_CHANGED` event.
 
 #### Scenario: Deterministic return to RUN upon verified pair recovery
@@ -57,12 +61,12 @@ The system SHALL admit a new `READY` change ONLY when all required primary roles
 - **THEN** OpenRouter fallback capacity SHALL NOT be counted as provider availability or satisfy primary pair readiness.
 
 ### Requirement: In-flight job preservation and WAITING_CAPACITY
-The system SHALL preserve in-flight jobs and checkpoints, transitioning jobs to `WAITING_CAPACITY` whenever a required primary provider is unavailable and no eligible budgeted fallback can proceed.
+The system SHALL preserve in-flight jobs and checkpoints, transitioning jobs to `WAITING_CAPACITY` whenever a required primary provider is unavailable and no eligible configured fallback can proceed. The scheduler SHALL NOT use artificial budget caps or headroom as fallback eligibility conditions.
 
 #### Scenario: In-flight job pauses in WAITING_CAPACITY without data loss
-- **WHEN** an active job requires an implementer or reviewer whose primary provider is exhausted and OpenRouter fallback is unavailable, exhausted, or over budget
+- **WHEN** an active job requires an implementer or reviewer whose primary provider is exhausted and OpenRouter fallback is unconfigured, unavailable, or ineligible
 - **THEN** the system transitions the job to `WAITING_CAPACITY`, records the blocking provider and reason, and preserves all completed check, diff, review, and audit evidence intact.
 
 #### Scenario: Complementary pairing invariant strictly preserved during capacity shortage
-- **WHEN** an in-flight job requires complementary review, the configured primary reviewer provider is exhausted, and no distinct allowed OpenRouter reviewer model is available
+- **WHEN** an in-flight job requires complementary review, the configured primary reviewer provider is exhausted, and no distinct allowed reviewer model is available
 - **THEN** the system SHALL NOT perform self-review, SHALL NOT substitute an unauthorized provider, and SHALL transition the job to `WAITING_CAPACITY`.

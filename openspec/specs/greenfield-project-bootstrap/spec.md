@@ -6,7 +6,7 @@ Prepare a new Greenfield repository from supplied context through official OpenS
 ## Requirements
 
 ### Requirement: Validate repository, access, branch, workspace, and selected capabilities before mutation
-Before creating a bootstrap branch or invoking an agent, mini me SHALL verify the authenticated operator, repository URL/identity, selected base branch (defaulting to `main` when omitted), configured GitHub connection and required permissions, project/workspace binding, ZIP validity, budget authorization, selected thinking-agent file-edit capability, Node/OpenSpec prerequisites, and the complete official OpenSpec integration available and compatible with the verified CLI version for every selected agent. Validation failure SHALL preserve main and avoid protected side effects.
+Before creating a bootstrap branch or invoking an agent, mini me SHALL verify the authenticated operator, repository URL/identity, selected base branch (defaulting to `main` when omitted), configured GitHub connection and required permissions, project/workspace binding, ZIP validity, selected thinking-agent file-edit capability, Node/OpenSpec prerequisites, and the complete official OpenSpec integration available and compatible with the verified CLI version for every selected agent. Validation failure SHALL preserve main and avoid protected side effects.
 
 #### Scenario: Existing main branch is used
 - **WHEN** the requested main branch exists and repository identity/permissions are verified
@@ -21,7 +21,7 @@ Before creating a bootstrap branch or invoking an agent, mini me SHALL verify th
 - **THEN** onboarding blocks with the observable empty-repository reason and does not invent a README, commit, or product context
 
 #### Scenario: Required permission or prerequisite is missing
-- **WHEN** repository access, write/PR permission, CLI dependency, selected-agent workflow, workspace guard, or authorized budget is absent
+- **WHEN** repository access, write/PR permission, CLI dependency, selected-agent workflow, or workspace guard is absent
 - **THEN** onboarding blocks before bootstrap mutation or paid agent dispatch and reports the exact missing capability
 
 ### Requirement: Install and configure official OpenSpec integrations in the isolated workspace
