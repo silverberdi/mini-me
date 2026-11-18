@@ -1808,10 +1808,10 @@ async def run_project_request(
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Project not found")
 
     body = payload or ProjectRequestRunPayload()
+    client_idempotency_key = body.idempotency_key
     active_runs, accepted_action, early_result = prepare_gate_response(uow, project_id, body)
     if early_result is not None:
         return early_result
-    client_idempotency_key = body.idempotency_key
     binding = None
     if hasattr(uow, "project_managed_repository_bindings"):
         binding = uow.project_managed_repository_bindings.get_by_project_id(project_id)
