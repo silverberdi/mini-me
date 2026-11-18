@@ -13,7 +13,10 @@ function fixture(command: string, projectId: string, runId: string, stage?: stri
   return execFileSync(process.env['PYTHON'] || 'python3', args, {
     cwd: repositoryRoot,
     encoding: 'utf8',
-    env: process.env,
+    env: {
+      ...process.env,
+      PYTHONPATH: [resolve(repositoryRoot, 'src'), process.env['PYTHONPATH']].filter(Boolean).join(':'),
+    },
   }).trim();
 }
 
@@ -44,6 +47,94 @@ async function selectProject(context: BrowserContext, projectId: string): Promis
     localStorage.setItem('minime_selected_project_id', id);
   }, projectId);
 }
+
+test('same-stage human gate arrives through PostgreSQL SSE and stays current until authoritative resolution', async ({ browser }) => {
+  test.skip(!process.env['MINIME_DATABASE_URL'], 'Requires the disposable PostgreSQL E2E database');
+  const projectId = `issue396-${randomUUID()}`;
+  const runId = randomUUID();
+  const setup = JSON.parse(fixture('create', projectId, runId)) as { token: string };
+  const context = await browser.newContext();
+  let page: Page | null = null;
+  try {
+    await Promise.all([
+      setupAuthSession(context, setup.token),
+      selectProject(context, projectId),
+    ]);
+    page = await context.newPage();
+    const observedGates: Array<{ gate_id?: string; question?: string; question_es?: string; options_es?: string[] }> = [];
+    const observedProjections: Array<{ gate_id?: string } | null> = [];
+    const eventStatuses: number[] = [];
+    page.on('response', (response) => {
+      if (new URL(response.url()).pathname === '/api/v1/events') eventStatuses.push(response.status());
+    });
+    page.on('response', async (response) => {
+      const request = response.request();
+      const url = new URL(response.url());
+      if (request.method() !== 'GET' || url.pathname !== '/api/v1/orchestration/runs' || !response.ok()) return;
+      try {
+        const runs = await response.json() as Array<{ run_id: string; stop_details?: { human_payload?: { gate_id?: string; question?: string } } }>;
+        const run = runs.find((item) => item.run_id === runId);
+        if (run) {
+          const payload = run.stop_details?.human_payload;
+          observedProjections.push(payload ? { gate_id: payload.gate_id } : null);
+          if (payload) observedGates.push(payload);
+        }
+      } catch {
+        // An interrupted response is not an authoritative Run projection.
+      }
+    });
+
+    await page.goto('/dashboard');
+    await waitForAppMounted(page);
+    await expect.poll(() => eventStatuses.includes(200)).toBeTruthy();
+    await expect.poll(() => observedProjections.length).toBeGreaterThan(0);
+    await page.goto(`/trabajo-actual?run=${runId}&project=${projectId}`);
+    await waitForAppMounted(page);
+    fixture('gate-create', projectId, runId);
+
+    await expect.poll(
+      () => observedProjections.some((gate) => gate?.gate_id === `${runId}-gate-1`),
+      { timeout: 5000 },
+    ).toBeTruthy();
+    await expect.poll(
+      () => observedGates.some((gate) => gate.question_es === 'Elige CONTINUE_CANDIDATE o conserva el candidato.'),
+      { timeout: 5000 },
+    ).toBeTruthy();
+    const gateBanner = page.getByRole('heading', { name: 'Atención Humana Requerida (HUMAN_REQUIRED)' });
+    await expect(gateBanner).toBeVisible({ timeout: 5000 });
+    await expect(page.getByText('Elige CONTINUE_CANDIDATE o conserva el candidato.')).toBeVisible();
+    await expect(page.getByText('Choose CONTINUE_CANDIDATE or preserve the candidate.')).toBeVisible();
+    await expect.poll(() => observedGates.some((gate) => gate.gate_id === `${runId}-gate-1`)).toBeTruthy();
+
+    const continueChoice = page.getByRole('button', { name: /Continuar con el candidato/ });
+    await continueChoice.click();
+    await expect(page.locator('textarea#clarificationInput')).toHaveValue('CONTINUE_CANDIDATE');
+
+    await page.goto('/dashboard');
+    await waitForAppMounted(page);
+    const eventConnectionsBeforeRecovery = eventStatuses.length;
+    const snapshotsBeforeRecovery = observedProjections.length;
+    fixture('recover-listener', projectId, runId);
+    await expect.poll(() => eventStatuses.length).toBeGreaterThan(eventConnectionsBeforeRecovery);
+    await page.goto(`/trabajo-actual?run=${runId}&project=${projectId}`);
+    await waitForAppMounted(page);
+    await expect(gateBanner).toBeVisible();
+    await expect.poll(() => observedProjections.length).toBeGreaterThan(snapshotsBeforeRecovery);
+
+    fixture('gate-resolve', projectId, runId);
+    await expect(gateBanner).toBeHidden({ timeout: 5000 });
+    const readsBeforeReload = observedProjections.length;
+    await page.reload();
+    await waitForAppMounted(page);
+    await expect(gateBanner).toBeHidden();
+    await expect.poll(() => observedProjections.length).toBeGreaterThan(readsBeforeReload);
+    expect(observedProjections.at(-1)).toBeNull();
+  } finally {
+    if (page) await page.close();
+    await context.close();
+    fixture('cleanup', projectId, runId);
+  }
+});
 
 test('offline recovery and PostgreSQL listener recovery refresh the authoritative snapshot', async ({ browser }) => {
   test.skip(!process.env['MINIME_DATABASE_URL'], 'Requires the disposable PostgreSQL E2E database');

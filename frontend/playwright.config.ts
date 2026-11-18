@@ -1,7 +1,9 @@
 import { defineConfig, devices } from '@playwright/test';
+import { resolve } from 'node:path';
 
 const PORT = process.env['PORT'] || '8788';
 const BASE_URL = `http://127.0.0.1:${PORT}`;
+const SOURCE_ROOT = resolve(process.cwd(), '../src');
 
 export default defineConfig({
   testDir: './e2e',
@@ -34,6 +36,9 @@ export default defineConfig({
     command: process.env['E2E_SERVER_CMD'] || `python -m uvicorn minime.api.app:app --host 127.0.0.1 --port ${PORT}`,
     url: `${BASE_URL}/health/live`,
     cwd: '..',
+    env: {
+      PYTHONPATH: [SOURCE_ROOT, process.env['PYTHONPATH']].filter(Boolean).join(':'),
+    },
     reuseExistingServer: !process.env['CI'],
     timeout: 30000,
   },

@@ -22,6 +22,17 @@ test('current gate question and options are rendered from the same payload', () 
   assert.match(component, /Opciones para responder a este gate/);
 });
 
+test('gate uses Spanish presentation while preserving exact source text and response values', () => {
+  assert.match(component, /payload\?\.question_es \|\| 'La pregunta del workflow aún no tiene una presentación en español\.'/);
+  assert.match(component, /humanGateOriginalQuestion\(\)/);
+  assert.match(component, /humanGateOptionLabel\(opt, i\)/);
+  assert.match(component, /humanGateOptionOriginalLabel\(opt, i\)/);
+  assert.match(component, /payload\?\.options_es\?\.\[index\] \|\| option\?\.label_es/);
+  assert.match(component, /const responseText = typeof option\?\.response_text === 'string' \? option\.response_text : ''/);
+  assert.match(component, /this\.operatorResponse\.set\(responseText \|\| option\?\.label \|\| option\?\.id/);
+  assert.match(component, /Texto original:/);
+});
+
 test('proposal-review gate renders structured findings and original reviewer evidence', () => {
   assert.match(component, /humanGateFindings\(\)/);
   assert.match(component, /finding\.severity/);

@@ -23,7 +23,11 @@ from minime.db.repository import (
     PostgresOrchestrationRunRepository,
     PostgresPersistenceUnitOfWork,
 )
-from minime.domain.enums import OrchestrationStage
+from minime.domain.enums import (
+    HumanGate,
+    OrchestrationStage,
+    OrchestrationStopOutcome,
+)
 from minime.domain.models import AuthorizedOperator, OrchestrationRun, Project
 from minime.api import app as api_module
 from minime.services.event_broker import EventBroker
@@ -109,6 +113,167 @@ async def test_run_transition_notification_is_transactional_and_only_for_stage_c
         notification = await asyncio.wait_for(notifications.get(), timeout=2)
         assert notification.channel == RUN_TRANSITION_CHANNEL
         assert json.loads(notification.payload) == {
+            "project_id": project_id,
+            "run_id": run_id,
+            "stage": OrchestrationStage.IMPLEMENTING.value,
+        }
+    finally:
+        if session is not None:
+            session.rollback()
+            session.execute(
+                delete(OrchestrationRunModel).where(OrchestrationRunModel.id == run_id)
+            )
+            session.execute(delete(ProjectModel).where(ProjectModel.id == project_id))
+            session.commit()
+            session.close()
+        notification_task.cancel()
+        with suppress(asyncio.CancelledError):
+            await notification_task
+        await listener.close()
+        engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_same_stage_human_gate_lifecycle_notifies_only_committed_changes():
+    engine = create_engine(DATABASE_URL, pool_pre_ping=True)
+    project_id, run_id = str(uuid4()), str(uuid4())
+    listener_url = make_url(DATABASE_URL).set(drivername="postgresql").render_as_string(
+        hide_password=False
+    )
+    listener = await AsyncConnection.connect(listener_url, autocommit=True)
+    await listener.execute(f"LISTEN {RUN_TRANSITION_CHANNEL}")
+    notifications: asyncio.Queue = asyncio.Queue()
+    notification_task = asyncio.create_task(_collect_notifications(listener, notifications))
+    session = None
+    try:
+        with engine.connect() as connection:
+            database_name = connection.execute(text("select current_database()")).scalar_one()
+            assert "test" in database_name.lower(), "Refusing to write outside a test database"
+
+        session = sessionmaker(bind=engine, autoflush=False, expire_on_commit=False)()
+        uow = PostgresPersistenceUnitOfWork(session)
+        runs = uow.orchestration_runs
+        uow.projects.save(
+            Project(project_id=project_id, display_name="Human gate notification E2E", repository="test/gate-events")
+        )
+        uow.orchestration_runs.save(
+            OrchestrationRun(
+                run_id=run_id,
+                project_id=project_id,
+                change_name="issue-396-gate-e2e",
+                base_sha="test-base",
+                current_stage=OrchestrationStage.IMPLEMENTING,
+                resumable_stage=OrchestrationStage.IMPLEMENTING,
+                is_active=True,
+            )
+        )
+        uow.commit()
+        await _expect_no_notification(notifications)
+
+        first_gate = {
+            "human_payload": {
+                "gate_id": "gate-1",
+                "gate": "proposal_feasibility",
+                "stage": OrchestrationStage.IMPLEMENTING.value,
+                "question": "Pregunta de prueba",
+                "options": ["continuar"],
+            }
+        }
+        runs.update_stop_outcome(
+            run_id,
+            OrchestrationStopOutcome.NEEDS_HUMAN,
+            HumanGate.NEEDS_HUMAN,
+            "Pregunta de prueba",
+            first_gate,
+            is_active=True,
+        )
+        session.commit()
+        event = await asyncio.wait_for(notifications.get(), timeout=2)
+        assert json.loads(event.payload) == {
+            "project_id": project_id,
+            "run_id": run_id,
+            "stage": OrchestrationStage.IMPLEMENTING.value,
+        }
+
+        replacement_gate = {
+            "human_payload": {
+                **first_gate["human_payload"],
+                "gate_id": "gate-2",
+                "question": "Pregunta reemplazada",
+            }
+        }
+        runs.update_stop_outcome(
+            run_id,
+            OrchestrationStopOutcome.NEEDS_HUMAN,
+            HumanGate.NEEDS_HUMAN,
+            "Pregunta reemplazada",
+            replacement_gate,
+            is_active=True,
+        )
+        session.commit()
+        await asyncio.wait_for(notifications.get(), timeout=2)
+
+        # Re-saving the same current gate is a no-op for the notification stream.
+        runs.update_stop_outcome(
+            run_id,
+            OrchestrationStopOutcome.NEEDS_HUMAN,
+            HumanGate.NEEDS_HUMAN,
+            "Pregunta reemplazada",
+            replacement_gate,
+            is_active=True,
+        )
+        session.commit()
+        await _expect_no_notification(notifications)
+
+        resolved_details = {
+            "resolved_human_gates": [{"gate_id": "gate-2", "response": "continuar"}]
+        }
+        runs.update_stop_outcome(
+            run_id,
+            None,
+            None,
+            None,
+            resolved_details,
+            is_active=True,
+        )
+        session.commit()
+        await asyncio.wait_for(notifications.get(), timeout=2)
+
+        # A gate update rolled back in its transaction must not be delivered.
+        rolled_back_gate = {
+            "human_payload": {
+                **first_gate["human_payload"],
+                "gate_id": "gate-3",
+            }
+        }
+        runs.update_stop_outcome(
+            run_id,
+            OrchestrationStopOutcome.NEEDS_HUMAN,
+            HumanGate.NEEDS_HUMAN,
+            "Pregunta revertida",
+            rolled_back_gate,
+            is_active=True,
+        )
+        session.rollback()
+        await _expect_no_notification(notifications)
+
+        # The other canonical writer (`save`) must publish the same hint.
+        run = runs.get_by_id(run_id)
+        assert run is not None
+        run.stop_outcome = OrchestrationStopOutcome.NEEDS_HUMAN
+        run.human_gate = HumanGate.NEEDS_HUMAN
+        run.stop_reason = "Pregunta por save"
+        run.stop_details = {
+            "human_payload": {
+                **first_gate["human_payload"],
+                "gate_id": "gate-4",
+                "question": "Pregunta por save",
+            }
+        }
+        runs.save(run)
+        session.commit()
+        saved_event = await asyncio.wait_for(notifications.get(), timeout=2)
+        assert json.loads(saved_event.payload) == {
             "project_id": project_id,
             "run_id": run_id,
             "stage": OrchestrationStage.IMPLEMENTING.value,

@@ -60,6 +60,8 @@ class AgentWorkflowHandoff:
     status: str
     summary: str
     pending: tuple[str, ...]
+    summary_es: str | None = None
+    pending_es: tuple[str, ...] = ()
 
 
 def parse_agent_workflow_handoff(answer: str) -> AgentWorkflowHandoff | None:
@@ -73,7 +75,9 @@ def parse_agent_workflow_handoff(answer: str) -> AgentWorkflowHandoff | None:
         payload = json.loads(lines[0])
     except (ValueError, TypeError):
         return None
-    if not isinstance(payload, dict) or set(payload) != {"status", "summary", "pending"}:
+    legacy_keys = frozenset({"status", "summary", "pending"})
+    localized_keys = legacy_keys | {"summary_es", "pending_es"}
+    if not isinstance(payload, dict) or frozenset(payload) not in {legacy_keys, localized_keys}:
         return None
     status = payload["status"]
     summary = payload["summary"]
@@ -89,7 +93,32 @@ def parse_agent_workflow_handoff(answer: str) -> AgentWorkflowHandoff | None:
         return None
     if (status == "COMPLETE" and pending) or (status != "COMPLETE" and not pending):
         return None
-    return AgentWorkflowHandoff(status=status, summary=summary.strip(), pending=tuple(pending))
+    summary_es = payload.get("summary_es")
+    pending_es = payload.get("pending_es")
+    if summary_es is not None and (
+        not isinstance(summary_es, str) or not summary_es.strip() or len(summary_es) > 2000
+    ):
+        return None
+    if pending_es is not None and (
+        not isinstance(pending_es, list)
+        or len(pending_es) > 30
+        or not all(
+            isinstance(item, str) and bool(item.strip()) and len(item) <= 1000
+            for item in pending_es
+        )
+    ):
+        return None
+    if status == "HUMAN_REQUIRED" and (
+        not summary_es or pending_es is None or len(pending_es) != len(pending)
+    ):
+        return None
+    return AgentWorkflowHandoff(
+        status=status,
+        summary=summary.strip(),
+        pending=tuple(pending),
+        summary_es=summary_es.strip() if isinstance(summary_es, str) else None,
+        pending_es=tuple(pending_es or ()),
+    )
 
 
 @dataclass(frozen=True)
@@ -903,9 +932,15 @@ class CliAgentRunner:
                 "OpenSpec work finished. Add exactly one standalone line "
                 "starting MINIME_WORKFLOW_RESULT: followed by a compact single-line JSON "
                 'object with exactly these keys: {"status":"COMPLETE|INCOMPLETE|HUMAN_REQUIRED",'
-                '"summary":"brief factual explanation","pending":["specific remaining work or question"]}. '
+                '"summary":"brief factual explanation in the source language",'
+                '"summary_es":"faithful Spanish rendering of summary",'
+                '"pending":["specific remaining work or question in the source language"],'
+                '"pending_es":["faithful Spanish rendering in the same order"]}. '
                 "Use an empty pending array ONLY for COMPLETE. For INCOMPLETE and "
-                "HUMAN_REQUIRED include at least one concrete pending item. COMPLETE means "
+                "HUMAN_REQUIRED include at least one concrete pending item. For HUMAN_REQUIRED, "
+                "include one faithful Spanish pending_es item for each original pending item. "
+                "Do not invent or alter workflow options; preserve their order and meaning. "
+                "COMPLETE means "
                 "you finished the requested workflow, not that OpenSpec validation passed; "
                 "the coordinator will ask the installed OpenSpec CLI separately. "
                 "Do not invent successful actions, tests, or evidence. No second model call.\n"

@@ -185,6 +185,9 @@ const STAGE_ILLUSTRATION_PATHS: Readonly<Record<string, string>> = Object.freeze
           <div class="p-4 rounded-xl bg-slate-900/90 border border-amber-500/30 space-y-2">
             <span class="text-xs font-semibold uppercase tracking-wider text-amber-400 font-mono">Pregunta del Workflow:</span>
             <p class="text-sm text-slate-100 font-medium whitespace-pre-wrap">{{ humanGateQuestion() }}</p>
+            <p *ngIf="humanGateOriginalQuestion()" class="text-xs text-slate-400 whitespace-pre-wrap">
+              <strong>Texto original:</strong> {{ humanGateOriginalQuestion() }}
+            </p>
           </div>
 
           <!-- Spanish Actionable Explanation (if available) -->
@@ -229,11 +232,14 @@ const STAGE_ILLUSTRATION_PATHS: Readonly<Record<string, string>> = Object.freeze
               {{ humanGateOptionsSource() === 'system_generated' ? 'Sugerencia del sistema; puedes responder con otro texto:' : humanGateOptionsSource() === 'native' ? 'Opciones originales del workflow:' : 'Opciones para responder a este gate:' }}
             </span>
             <div class="grid grid-cols-1 sm:grid-cols-2 gap-2">
-              <button *ngFor="let opt of humanGateOptions()"
+              <button *ngFor="let opt of humanGateOptions(); let i = index"
                       type="button"
                       (click)="selectHumanGateOption(opt)"
                       class="p-3 text-left rounded-xl bg-slate-900/60 hover:bg-slate-800 border border-slate-700 hover:border-sky-500 transition-colors cursor-pointer group">
-                <div class="text-xs font-bold text-white group-hover:text-sky-300">{{ opt.label || opt.id || opt }}</div>
+                <div class="text-xs font-bold text-white group-hover:text-sky-300">{{ humanGateOptionLabel(opt, i) }}</div>
+                <div *ngIf="humanGateOptionOriginalLabel(opt, i)" class="text-[11px] text-slate-400 mt-1 whitespace-pre-wrap">
+                  <strong>Texto original:</strong> {{ humanGateOptionOriginalLabel(opt, i) }}
+                </div>
                 <div *ngIf="opt.source === 'system_generated'" class="text-[10px] uppercase tracking-wide text-sky-300 mt-1">Sugerencia del sistema</div>
                 <div *ngIf="opt.description" class="text-[11px] text-slate-400 mt-0.5">{{ opt.description }}</div>
               </button>
@@ -695,7 +701,15 @@ export class TrabajoActualComponent {
     const run = this.targetRun();
     if (!run) return '';
     const payload = run.stop_details?.['human_payload'];
-    return payload?.question || payload?.prompt || 'El workflow requiere aclaración u autorización del operador para continuar.';
+    return payload?.question_es || 'La pregunta del workflow aún no tiene una presentación en español.';
+  }
+
+  humanGateOriginalQuestion(): string {
+    const run = this.targetRun();
+    if (!run) return '';
+    const payload = run.stop_details?.['human_payload'];
+    const original = payload?.question || payload?.prompt || '';
+    return original && original !== this.humanGateQuestion() ? original : '';
   }
 
   humanGateOptions(): any[] {
@@ -703,6 +717,24 @@ export class TrabajoActualComponent {
     if (!run) return [];
     const payload = run.stop_details?.['human_payload'];
     return Array.isArray(payload?.options) ? payload.options : [];
+  }
+
+  humanGateOptionLabel(option: any, index: number): string {
+    const run = this.targetRun();
+    const payload = run?.stop_details?.['human_payload'];
+    const translated = payload?.options_es?.[index] || option?.label_es;
+    return typeof translated === 'string' && translated.trim()
+      ? translated
+      : 'Esta opción todavía no tiene una presentación en español.';
+  }
+
+  humanGateOptionOriginalLabel(option: any, index: number): string {
+    const run = this.targetRun();
+    const payload = run?.stop_details?.['human_payload'];
+    const original = typeof option === 'string'
+      ? option
+      : option?.label || option?.id || option?.response_text || '';
+    return original && original !== this.humanGateOptionLabel(option, index) ? original : '';
   }
 
   selectHumanGateOption(option: any): void {
