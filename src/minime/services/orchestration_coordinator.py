@@ -6824,8 +6824,8 @@ class NativeOrchestrationCoordinator:
             return ApplyOutcome("HUMAN_REQUIRED", completed_ids, tuple(pending), sha_text.strip() if getattr(sha, "ok", True) else None,
                                 changed_files, digest, tests_passed, test_evidence,
                                 human_question=handoff.summary, human_options=handoff.pending,
-                                human_question_es=handoff.summary_es,
-                                human_options_es=handoff.pending_es,
+                                human_question_es=getattr(handoff, "summary_es", None),
+                                human_options_es=getattr(handoff, "pending_es", ()),
                                 branch=branch_text.strip(), worktree=str(worktree_path), run_id=run_id,
                                 provider_used=getattr(result, "provider_used", None) or provider,
                                 profile_used=getattr(result, "profile_used", None),
@@ -7171,8 +7171,8 @@ class NativeOrchestrationCoordinator:
                 "HUMAN_REQUIRED", handoff.summary,
                 human_question=handoff.summary,
                 human_options=tuple(handoff.pending),
-                human_question_es=handoff.summary_es,
-                human_options_es=tuple(handoff.pending_es),
+                human_question_es=getattr(handoff, "summary_es", None),
+                human_options_es=tuple(getattr(handoff, "pending_es", ())),
             )
         if not self._execution_is_successful(res):
             return VerifyOutcome("FAILED", "Native Verify execution failed.")
@@ -7370,9 +7370,10 @@ class NativeOrchestrationCoordinator:
                     question = str(handoff.summary or "El workflow nativo requiere una decisión humana.")
                     options = tuple(handoff.pending or ())
                     question_es = str(
-                        handoff.summary_es or "El workflow nativo requiere una decisión humana."
+                        getattr(handoff, "summary_es", None)
+                        or "El workflow nativo requiere una decisión humana."
                     )
-                    options_es = tuple(handoff.pending_es or ())
+                    options_es = tuple(getattr(handoff, "pending_es", ()) or ())
                     await self._finish_stage_invocation(
                         uow, run, invocation, "HUMAN_REQUIRED",
                         {
