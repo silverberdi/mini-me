@@ -7,6 +7,7 @@ import os
 import shutil
 import subprocess
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 from uuid import uuid4
 
@@ -16,6 +17,7 @@ from sqlalchemy import create_engine, text
 from sqlalchemy.orm import sessionmaker
 
 from minime.api.app import app, get_current_operator, get_uow
+from minime.cli import main as cli_main
 from minime.db.repository import PostgresPersistenceUnitOfWork
 from minime.domain.enums import HumanGate, OrchestrationStage, OrchestrationStopOutcome
 from minime.domain.models import (
@@ -213,6 +215,140 @@ def test_persisted_current_gate_reaches_operator_response_api(monkeypatch, tmp_p
             )
             run_uow.commit()
             run_uow.session.close()
+        engine.dispose()
+
+
+def test_cli_gate_response_uses_durable_postgres_action_and_replays_idempotently(
+    monkeypatch, tmp_path, capsys
+):
+    engine = create_engine(DATABASE_URL, pool_pre_ping=True)
+    project_id, run_id = str(uuid4()), str(uuid4())
+    session_factory = sessionmaker(bind=engine, autoflush=False, expire_on_commit=False)
+    setup_uow = None
+    inspection_uow = None
+    calls = []
+    try:
+        with engine.connect() as connection:
+            database_name = connection.execute(text("select current_database()")).scalar_one()
+            assert "test" in database_name.lower(), "Refusing to write outside a test database"
+
+        setup_uow = PostgresPersistenceUnitOfWork(session_factory())
+        project = Project(
+            project_id=project_id,
+            display_name="CLI gate response PostgreSQL integration",
+            repository="org/cli-gate-response-test",
+        )
+        binding = ProjectManagedRepositoryBinding(
+            project_id=project_id,
+            canonical_repository_identity="github.com/org/cli-gate-response-test",
+            managed_repository_root=str(tmp_path / "managed-repo"),
+            worktree_parent_dir=str(tmp_path / "worktrees"),
+        )
+        run = OrchestrationRun(
+            run_id=run_id,
+            project_id=project_id,
+            change_name="req-407-cli-gate-response-test",
+            base_sha="test-base",
+            current_stage=OrchestrationStage.VALIDATING,
+            resumable_stage=OrchestrationStage.VALIDATING,
+            is_active=True,
+        )
+        setup_uow.projects.save(project)
+        setup_uow.project_managed_repository_bindings.save(binding)
+        setup_uow.orchestration_runs.save(run)
+        setup_uow.commit()
+        gate_payload = NativeOrchestrationCoordinator(
+            uow_factory=lambda: setup_uow,
+            github_adapter=MagicMock(),
+            worktree_manager=MagicMock(),
+            agent_runner=MagicMock(),
+        )._record_current_human_gate(
+            setup_uow,
+            run,
+            gate="proposal_feasibility",
+            question="Choose how to proceed",
+            options=["Continue after evidence review"],
+        )
+
+        class FakeCoordinator:
+            async def execute_project_request(self, **kwargs):
+                calls.append(kwargs)
+                return SimpleNamespace(
+                    status="HUMAN_REQUIRED",
+                    run_id=run_id,
+                    current_stage=OrchestrationStage.VALIDATING,
+                    message="The current gate remains active.",
+                    human_payload=gate_payload,
+                    pr1_url=None,
+                    pr2_url=None,
+                )
+
+        class FakeRunner:
+            @staticmethod
+            def provider_for_role(role):
+                return role
+
+        monkeypatch.setattr(cli_main.db_manager, "session", session_factory)
+        monkeypatch.setattr("minime.adapters.github.GitHubAdapter", lambda: object())
+        monkeypatch.setattr(
+            "minime.services.worktree_manager.WorktreeManager", lambda **_: object()
+        )
+        monkeypatch.setattr(
+            "minime.services.capacity_lifecycle_service.CapacityLifecycleService",
+            lambda _: object(),
+        )
+        monkeypatch.setattr(
+            "minime.services.agent_runner.CliAgentRunner.for_project_profiles",
+            lambda *_, **__: FakeRunner(),
+        )
+        monkeypatch.setattr(
+            "minime.services.orchestration_coordinator.NativeOrchestrationCoordinator",
+            lambda **_: FakeCoordinator(),
+        )
+
+        for _ in range(2):
+            cli_main.request_run_cmd(
+                project_id,
+                operator_ack=False,
+                operator_response="Continue after evidence review",
+                explore_recovery_authorization_id=None,
+                propose_recovery_authorization_id=None,
+                json_output=False,
+            )
+        capsys.readouterr()
+
+        assert len(calls) == 1
+        assert calls[0]["target_run_id"] == run_id
+        assert calls[0]["operator_clarification"] == "Continue after evidence review"
+        assert calls[0]["operator_action_id"]
+
+        inspection_uow = PostgresPersistenceUnitOfWork(session_factory())
+        actions = inspection_uow.operator_actions.list_by_run(run_id)
+        assert len(actions) == 1
+        assert actions[0].action_type.value == "RESOLVE_GATE"
+        assert actions[0].status == "COMPLETED"
+        assert actions[0].parameters_json["accepted_response"] == "Continue after evidence review"
+        assert actions[0].result_payload_json["run_id"] == run_id
+    finally:
+        if inspection_uow is not None:
+            inspection_uow.session.close()
+        if setup_uow is not None:
+            setup_uow.session.execute(
+                text("delete from operator_action_records where run_id = :run_id"),
+                {"run_id": run_id},
+            )
+            setup_uow.session.execute(
+                text("delete from orchestration_runs where id = :run_id"), {"run_id": run_id}
+            )
+            setup_uow.session.execute(
+                text("delete from project_managed_repository_bindings where project_id = :project_id"),
+                {"project_id": project_id},
+            )
+            setup_uow.session.execute(
+                text("delete from projects where id = :project_id"), {"project_id": project_id}
+            )
+            setup_uow.commit()
+            setup_uow.session.close()
         engine.dispose()
 
 

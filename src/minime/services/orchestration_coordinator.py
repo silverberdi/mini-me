@@ -520,12 +520,12 @@ class NativeOrchestrationCoordinator:
                 question=question,
                 options=[
                     f"Aportar evidencia verificable para {stage}",
-                    "Actualizar el Change con OpenSpec Update y validarlo estrictamente",
+                    ProposalFeasibilityEvaluator.CANONICAL_UPDATE_OPTION,
                 ],
                 question_es=question,
                 options_es=[
                     f"Aportar evidencia verificable para {stage}",
-                    "Actualizar el Change con OpenSpec Update y validarlo estrictamente",
+                    ProposalFeasibilityEvaluator.CANONICAL_UPDATE_OPTION,
                 ],
                 payload={
                     "blocked_transition": stage,
@@ -2705,38 +2705,46 @@ class NativeOrchestrationCoordinator:
                         message="The same proposal and capability evidence were already assessed; no duplicate agent call was made.",
                     )
                 if complexity_result is None:
-                    attempt_id = str(uuid4())
-                    in_progress = ComplexityAssessment(
-                        status="IN_PROGRESS", reason="classification invocation started"
-                    )
-                    self._persist_complexity_assessment(
-                        active_run,
-                        in_progress,
-                        attempt_id=attempt_id,
-                        model_identity=self._configured_model(uow, project_id, "thinking"),
-                        artifact_hashes=artifact_hashes,
-                        context_hashes=context_hashes,
-                    )
-                    uow.orchestration_runs.save(active_run)
-                    uow.commit()
-                    complexity_result = await self._assess_complexity(
-                        worktree_path,
-                        thinker_provider,
-                        issue_title,
-                        issue_body,
-                        project_id,
-                        attempt_id,
-                        change_name=change_name,
-                        feasibility_inputs=feasibility_inputs,
-                    )
-                    self._persist_complexity_assessment(
-                        active_run,
-                        complexity_result,
-                        attempt_id=attempt_id,
-                        model_identity=self._configured_model(uow, project_id, "thinking"),
-                        artifact_hashes=artifact_hashes,
-                        context_hashes=context_hashes,
-                    )
+                    correction_diagnostics: tuple[str, ...] = ()
+                    for correction_number in range(3):
+                        attempt_id = str(uuid4())
+                        self._persist_complexity_assessment(
+                            active_run,
+                            ComplexityAssessment(
+                                status="IN_PROGRESS",
+                                reason="feasibility assessment started",
+                            ),
+                            attempt_id=attempt_id,
+                            model_identity=self._configured_model(uow, project_id, "thinking"),
+                            artifact_hashes=artifact_hashes,
+                            context_hashes=context_hashes,
+                        )
+                        uow.orchestration_runs.save(active_run)
+                        uow.commit()
+                        complexity_result = await self._assess_complexity(
+                            worktree_path,
+                            thinker_provider,
+                            issue_title,
+                            issue_body,
+                            project_id,
+                            attempt_id,
+                            change_name=change_name,
+                            feasibility_inputs=feasibility_inputs,
+                            correction_diagnostics=correction_diagnostics,
+                        )
+                        self._persist_complexity_assessment(
+                            active_run,
+                            complexity_result,
+                            attempt_id=attempt_id,
+                            model_identity=self._configured_model(uow, project_id, "thinking"),
+                            artifact_hashes=artifact_hashes,
+                            context_hashes=context_hashes,
+                        )
+                        if not self._should_retry_structural_feasibility(
+                            complexity_result, correction_number
+                        ):
+                            break
+                        correction_diagnostics = complexity_result.feasibility_blockers
             if not complexity_result.is_valid:
                 if hasattr(uow, "orchestration_runs"):
                     uow.orchestration_runs.save(active_run)
@@ -5191,6 +5199,20 @@ class NativeOrchestrationCoordinator:
         run.stop_details = details
 
     @staticmethod
+    def _should_retry_structural_feasibility(
+        assessment: ComplexityAssessment, correction_count: int
+    ) -> bool:
+        """Allow only bounded retries for reports blocked exclusively by structure."""
+        return (
+            correction_count < 2
+            and assessment.is_valid
+            and not assessment.is_executable
+            and ProposalFeasibilityEvaluator.only_correctable_structure_blockers(
+                assessment.feasibility_blockers
+            )
+        )
+
+    @staticmethod
     def _external_success(result: Any) -> bool:
         if result is None:
             return False
@@ -5321,6 +5343,7 @@ class NativeOrchestrationCoordinator:
         *,
         change_name: str | None = None,
         feasibility_inputs: dict[str, Any] | None = None,
+        correction_diagnostics: tuple[str, ...] = (),
     ) -> ComplexityAssessment:
         wf = self.agent_runner.resolve_workflow(
             worktree_path=worktree_path,
@@ -5374,6 +5397,13 @@ class NativeOrchestrationCoordinator:
                 f"Exact required scenario IDs: {json.dumps(scenario_ids)}"
             )
             structured_schema = ProposalFeasibilityEvaluator.output_schema()
+            if correction_diagnostics:
+                prompt_context += (
+                    "\n\nCorrect only these structural report defects, using the same Change, "
+                    "candidate, task/scenario inventory, and verified capability evidence. "
+                    "Do not reinterpret missing or unverified evidence as satisfied.\n"
+                    + "\n".join(f"- {item}" for item in correction_diagnostics)
+                )
         else:
             structured_schema = {
                 "type": "object",
@@ -5720,7 +5750,7 @@ class NativeOrchestrationCoordinator:
             if (
                 isinstance(option, str)
                 and option.strip() == response.strip()
-                and re.search(r"\bOpenSpec\s+Update\b", option, re.IGNORECASE)
+                and option.strip() == ProposalFeasibilityEvaluator.CANONICAL_UPDATE_OPTION
             ):
                 return option.strip()
         return None
