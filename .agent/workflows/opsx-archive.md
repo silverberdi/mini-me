@@ -111,30 +111,15 @@ Archive a completed change in the experimental workflow.
 
    Then run the `/opsx-sync` workflow inline (agent-driven intelligent merge) for change '<name>', passing the delta spec analysis and the fetched specs-rule snapshot from above, and wait for it to finish. The inline sync must reuse that snapshot without fetching `specs` instructions again. Do not delegate it to a background task — step 5 would move `changeRoot` out from under a sync that is still reading it, leaving the change archived and the main specs never updated. If your agent can only run it by delegation, delegate synchronously and wait for the result.
 
-   Then re-run the comparison from the top of this step against every capability that has a delta spec in `artifactPaths.specs.existingOutputPaths` — not only the ones the sync reports it touched. A successful sync leaves nothing left to apply, so each capability must now read as already synced:
-   - ADDED requirements present
-   - MODIFIED requirements carrying the scenario and description changes named in the delta, with their other scenarios intact
-   - REMOVED requirements gone — and where this sync retired a capability (removed its last requirement, leaving `## Requirements` empty), its main spec deleted rather than left empty; a spec the sync deliberately kept and reported is also a match
-   - RENAMED requirements present under the new name and absent under the old one
-
-   If the sync failed, or any capability does not match, report what differs and stop — do not archive. Nothing has moved and `changeRoot` is intact, so the user can fix the mismatch or re-run the sync and start the archive again.
+   The successful result of this native Sync workflow is the Sync completion signal. Do not add a second free-text or paragraph-equivalence comparison after it. If Sync reports failure or its result is ambiguous, stop and preserve the active Change for the existing recovery path.
 
 5. **Perform the archive**
 
-   Create an `archive` directory under `planningHome.changesDir` if it doesn't exist:
+   After successful native Sync, run the installed OpenSpec CLI from the selected planning root:
    ```bash
-   mkdir -p "<planningHome.changesDir>/archive"
+   openspec archive -y "<change-name>"
    ```
-
-   Generate the target name: use the change name as-is when it already starts with a `YYYY-MM-DD-` prefix; otherwise prepend the current date as `YYYY-MM-DD-<change-name>`. Never stack a second date (same rule as `openspec archive`).
-
-   **Check if target already exists:**
-   - If yes: Fail with error, suggest renaming existing archive or using different date
-   - If no: Move `changeRoot` to the archive directory
-
-   ```bash
-   mv "<changeRoot>" "<planningHome.changesDir>/archive/<target-name>"
-   ```
+   Use the CLI exit status and the existing active/archive artifact observation to determine completion. Do not create the archive directory or move the Change manually. On CLI failure or ambiguous artifacts, preserve the active Change and report the CLI diagnostics.
 
 6. **Display summary**
 
@@ -189,27 +174,20 @@ All artifacts complete. All tasks complete.
 Review the archive if this was not intentional.
 ```
 
-**Output On Error (Archive Exists)**
+**Output On Error**
 
 ```markdown
 ## Archive Failed
 
 **Change:** <change-name>
-**Target:** the archive path derived from `planningHome.changesDir`/<target-name>/
-
-Target archive directory already exists.
-
-**Options:**
-1. Rename the existing archive
-2. Delete the existing archive if it's a duplicate
-3. Wait until a different date to archive
+**Reason:** <actual OpenSpec CLI or artifact-observation diagnostic>
 ```
 
 **Guardrails**
 - Announce the selected change; prompt for selection when it is ambiguous
 - Use artifact graph (openspec status --json) for completion checking
 - Don't block archive on warnings - just inform and confirm
-- Preserve .openspec.yaml when moving to archive (it moves with the directory)
+- Preserve CLI-produced archive contents and report the observed archive location
 - Show clear summary of what happened
 - If sync is requested, run the `/opsx-sync` workflow inline (agent-driven)
 - Never archive while a spec sync is still in flight — run the sync inline and verify the main specs before moving `changeRoot`

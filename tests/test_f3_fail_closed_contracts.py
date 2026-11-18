@@ -10,7 +10,11 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 
 from minime.services.agent_runner import AgentExecutionResult
-from minime.services.orchestration_coordinator import ApplyOutcome, NativeOrchestrationCoordinator
+from minime.services.orchestration_coordinator import (
+    ApplyOutcome,
+    ComplexityAssessment,
+    NativeOrchestrationCoordinator,
+)
 from minime.services.proposal_feasibility import ProposalFeasibilityEvaluator
 
 
@@ -429,6 +433,12 @@ async def test_coordinator_holds_transition_until_stage_evidence_exists(tmp_path
     assert result.status == "HUMAN_REQUIRED"
     assert "pre_pr" in c._record_current_human_gate.call_args.kwargs["question"]
     assert c._record_current_human_gate.call_args.kwargs["payload"]["blocked_transition"] == "pre_pr"
+    options = c._record_current_human_gate.call_args.kwargs["options"]
+    canonical = ProposalFeasibilityEvaluator.CANONICAL_UPDATE_OPTION
+    assert canonical in options
+    assert NativeOrchestrationCoordinator._selected_feasibility_update_option(
+        {"options": options}, canonical
+    ) == canonical
 
 
 @pytest.mark.asyncio
@@ -1542,6 +1552,145 @@ def test_proposal_feasibility_rejects_unsafe_and_missing_path_evidence(tmp_path:
         )
         assert status == "BLOCKED"
         assert any(unsafe_ref in b for b in blockers)
+
+
+def test_apply_execution_profile_is_global_and_workflow_is_task_evidence(tmp_path: Path):
+    inputs = {
+        "status": "READY",
+        "tasks": [{"task_id": "1.1", "text": "Implement"}],
+        "scenarios": [{"scenario_id": "feature:1:1", "text": "WHEN run THEN pass"}],
+        "capabilities": [
+            {"ref": "profile:execution", "available": True},
+            {"ref": "workflow:execution:apply", "available": True},
+        ],
+    }
+    report = {
+        "tasks": [{
+            "task_id": "1.1",
+            "actor": "execution",
+            "execution_stage": "apply",
+            "capability_evidence_refs": ["workflow:execution:apply"],
+            "depends_on_task_ids": [],
+            "preconditions": [],
+            "completion_evidence": "Implementation appears in the candidate diff",
+        }],
+        "scenario_coverage": [{
+            "scenario_id": "feature:1:1",
+            "task_ids": ["1.1"],
+            "evidence_stage": "apply",
+        }],
+        "blockers": [],
+        "resolution_options": [],
+    }
+
+    assert ProposalFeasibilityEvaluator.validate_report(report, inputs, tmp_path)[0] == "EXECUTABLE"
+
+    inputs["capabilities"][0]["available"] = False
+    blocked = ProposalFeasibilityEvaluator.validate_report(report, inputs, tmp_path)
+    assert blocked[0] == "BLOCKED"
+    assert any("required verified capability" in item for item in blocked[3])
+
+
+def test_feasibility_retry_filter_accepts_only_structural_blockers():
+    structural = [
+        "task 2.1 has a dependency scheduled after its execution stage",
+        "assessment task IDs do not exactly cover native tasks",
+    ]
+    assert ProposalFeasibilityEvaluator.only_correctable_structure_blockers(structural)
+
+    for blocker in (
+        "Required capability profile:execution is unavailable in this project/worktree.",
+        "task 2.1 cites unavailable capability evidence: workflow:execution:apply",
+        "task 2.1 cites unknown capability evidence: path:docs/absent.md",
+        "task 2.1 has unverified precondition evidence required before Apply: path:docs/absent.md",
+        "task 2.1 lacks the required verified capability for actor execution",
+        "Provider invocation failed",
+    ):
+        assert not ProposalFeasibilityEvaluator.only_correctable_structure_blockers([blocker])
+
+    assert not ProposalFeasibilityEvaluator.only_correctable_structure_blockers([])
+
+    correctable = ComplexityAssessment(
+        status="VALID",
+        evidence="Valid structured assessment",
+        feasibility_status="BLOCKED",
+        feasibility_blockers=("assessment task IDs do not exactly cover native tasks",),
+    )
+    assert NativeOrchestrationCoordinator._should_retry_structural_feasibility(correctable, 0)
+    assert NativeOrchestrationCoordinator._should_retry_structural_feasibility(correctable, 1)
+    assert not NativeOrchestrationCoordinator._should_retry_structural_feasibility(correctable, 2)
+    assert not NativeOrchestrationCoordinator._should_retry_structural_feasibility(
+        ComplexityAssessment(status="EXECUTION_FAILED"), 0
+    )
+    assert not NativeOrchestrationCoordinator._should_retry_structural_feasibility(
+        ComplexityAssessment(
+            status="VALID",
+            evidence="Valid structured assessment",
+            feasibility_status="BLOCKED",
+            feasibility_blockers=("Required capability profile:execution is unavailable.",),
+        ),
+        0,
+    )
+
+
+def test_archive_instructions_use_native_cli_for_all_installed_agent_paths():
+    root = Path(__file__).parents[1]
+    archive_instructions = (
+        root / ".agents/skills/openspec-archive-change/SKILL.md",
+        root / ".agent/skills/openspec-archive-change/SKILL.md",
+        root / ".agent/workflows/opsx-archive.md",
+    )
+
+    for path in archive_instructions:
+        content = path.read_text(encoding="utf-8")
+        assert 'openspec archive -y "<change-name>"' in content
+        assert "paragraph-equivalence comparison" in content
+        assert 'mv "<changeRoot>"' not in content
+
+
+def test_blocked_feasibility_preserves_agent_options_and_adds_native_update(tmp_path: Path):
+    inputs = {
+        "status": "READY",
+        "tasks": [{"task_id": "1.1", "text": "Implement"}],
+        "scenarios": [{"scenario_id": "feature:1:1", "text": "WHEN run THEN pass"}],
+        "capabilities": [
+            {"ref": "profile:execution", "available": False},
+            {"ref": "workflow:execution:apply", "available": True},
+        ],
+    }
+    report = {
+        "tasks": [{
+            "task_id": "1.1",
+            "actor": "execution",
+            "execution_stage": "apply",
+            "capability_evidence_refs": ["workflow:execution:apply"],
+            "depends_on_task_ids": [],
+            "preconditions": [],
+            "completion_evidence": "Implementation appears in the candidate diff",
+        }],
+        "scenario_coverage": [{
+            "scenario_id": "feature:1:1",
+            "task_ids": ["1.1"],
+            "evidence_stage": "apply",
+        }],
+        "blockers": [],
+        "resolution_options": ["Provide an execution profile"],
+    }
+    status, _, _, blockers, actions = ProposalFeasibilityEvaluator.validate_report(
+        report, inputs, tmp_path
+    )
+
+    assert status == "BLOCKED"
+    assert blockers
+    assert "Provide an execution profile" in actions
+    canonical = next(action for action in actions if "OpenSpec Update" in action)
+    assert NativeOrchestrationCoordinator._selected_feasibility_update_option(
+        {"options": list(actions)}, canonical
+    ) == canonical
+    noncanonical = "Please consider OpenSpec Update after checking whether the profile exists"
+    assert NativeOrchestrationCoordinator._selected_feasibility_update_option(
+        {"options": [noncanonical]}, noncanonical
+    ) is None
 
 
 

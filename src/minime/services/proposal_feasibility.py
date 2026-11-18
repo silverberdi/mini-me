@@ -14,6 +14,33 @@ from minime.services.openspec_tasks import OpenSpecTaskTracker
 class ProposalFeasibilityEvaluator:
     """Read current capability evidence and validate a thinking-agent report."""
 
+    CANONICAL_UPDATE_OPTION = (
+        "Actualizar la solicitud mediante el flujo nativo OpenSpec Update y validarla de nuevo"
+    )
+    _CORRECTABLE_BLOCKER = re.compile(
+        r"(?:"
+        r"assessment omitted the OpenSpec task inventory|"
+        r"assessment omitted acceptance-scenario coverage|"
+        r"assessment contains a malformed task entry|"
+        r"assessment contains malformed scenario coverage|"
+        r"assessment task IDs do not exactly cover native tasks|"
+        r"assessment scenario IDs do not exactly cover native scenarios|"
+        r"task entry has unknown or duplicate ID: .+|"
+        r"task .+ has an unknown or missing execution stage|"
+        r"task .+ names an unsupported responsible actor|"
+        r"task .+ has no structured precondition assessment|"
+        r"task .+ has a malformed precondition assessment|"
+        r"task .+ has a precondition with an unknown required stage|"
+        r"task .+ has a dependency scheduled after its execution stage|"
+        r"task .+ repeats a task dependency|"
+        r"task .+ depends on an unknown or self-referential task|"
+        r"scenario entry has unknown or duplicate ID: .+|"
+        r"scenario .+ has an unknown or missing evidence stage|"
+        r"scenario .+ maps to no known OpenSpec task|"
+        r"scenario .+ claims evidence before its mapped task stage"
+        r")"
+    )
+
     STAGE_ORDER = {
         "apply": 0,
         "verify": 1,
@@ -370,7 +397,19 @@ class ProposalFeasibilityEvaluator:
             elif is_apply_task:
                 if unknown_refs:
                     blockers.append(f"task {task_id} cites unavailable capability evidence: {', '.join(sorted(unknown_refs))}")
-                if not role_refs[actor].issubset(verified_refs):
+                required_task_refs = (
+                    {"workflow:execution:apply"}
+                    if actor == "execution"
+                    else role_refs[actor]
+                )
+                required_capabilities = (
+                    role_refs["execution"]
+                    if actor == "execution"
+                    else required_task_refs
+                )
+                if not required_capabilities.issubset(available_refs):
+                    blockers.append(f"task {task_id} lacks the required verified capability for actor {actor}")
+                if not required_task_refs.issubset(verified_refs):
                     blockers.append(f"task {task_id} lacks the required verified capability for actor {actor}")
             elif actor in {"thinking", "execution", "operator"}:
                 if not role_refs[actor].issubset(available_refs):
@@ -511,17 +550,22 @@ class ProposalFeasibilityEvaluator:
             for action in actions[:5]
             if isinstance(action, str) and action.strip()
         ) if isinstance(actions, list) else ()
-        if blockers and not validated_actions:
-            validated_actions = (
-                "Actualizar la solicitud mediante el flujo nativo OpenSpec Update y validarla de nuevo",
-                "Aportar evidencia verificable de la capacidad o precondición que falta",
-            )
+        if blockers and cls.CANONICAL_UPDATE_OPTION not in validated_actions:
+            validated_actions += (cls.CANONICAL_UPDATE_OPTION,)
         return (
             "EXECUTABLE" if not blockers else "BLOCKED",
             tuple(validated_tasks),
             tuple(validated_scenarios),
             tuple(dict.fromkeys(blockers)),
             validated_actions,
+        )
+
+    @classmethod
+    def only_correctable_structure_blockers(cls, blockers: tuple[str, ...] | list[str]) -> bool:
+        """Retry only when every blocker is a recognized report-structure defect."""
+        return bool(blockers) and all(
+            isinstance(blocker, str) and cls._CORRECTABLE_BLOCKER.fullmatch(blocker)
+            for blocker in blockers
         )
 
     @classmethod

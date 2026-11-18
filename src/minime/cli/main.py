@@ -438,6 +438,9 @@ def budget_status_cmd(project_id: str | None = typer.Option(None, "--project-id"
 def request_run_cmd(
     project_id: str = typer.Argument(..., help="Target project ID"),
     operator_ack: bool = typer.Option(False, "--ack", help="Acknowledge high complexity changes"),
+    operator_response: str | None = typer.Option(
+        None, "--response", help="Respond to the current human gate of the active Run"
+    ),
     explore_recovery_authorization_id: str | None = typer.Option(
         None,
         "--explore-recovery-authorization-id",
@@ -452,8 +455,12 @@ def request_run_cmd(
 ) -> None:
     """Run or resume the next eligible OpenSpec request for a project."""
     from minime.adapters.github import GitHubAdapter
+    from minime.api.app import (
+        ProjectRequestRunPayload,
+        complete_gate_response,
+        prepare_gate_response,
+    )
     from minime.services.agent_runner import CliAgentRunner
-    from minime.services.budget_service import BudgetService
     from minime.services.capacity_lifecycle_service import CapacityLifecycleService
     from minime.services.orchestration_coordinator import NativeOrchestrationCoordinator
     from minime.services.worktree_manager import WorktreeManager
@@ -467,6 +474,21 @@ def request_run_cmd(
             if not proj:
                 typer.echo(f"Project '{project_id}' not found.", err=True)
                 raise typer.Exit(code=1)
+            request_body = ProjectRequestRunPayload(
+                operator_ack=operator_ack,
+                operator_response=operator_response,
+            )
+            accepted_action = None
+            if operator_response or operator_ack:
+                _, accepted_action, early_result = prepare_gate_response(
+                    uow, project_id, request_body, require_active_gate=True
+                )
+                if early_result is not None:
+                    if json_output:
+                        typer.echo(json.dumps(early_result, indent=2))
+                    else:
+                        typer.echo(str(early_result.get("message") or early_result.get("status")))
+                    return
 
             binding = None
             if hasattr(uow, "project_managed_repository_bindings"):
@@ -498,13 +520,21 @@ def request_run_cmd(
                 coordinator.execute_project_request(
                     project_id=project_id,
                     operator_ack=operator_ack,
+                    operator_clarification=request_body.operator_clarification,
                     explore_recovery_authorization_id=explore_recovery_authorization_id,
                     propose_recovery_authorization_id=propose_recovery_authorization_id,
+                    operator_action_id=(
+                        accepted_action.action_request_id if accepted_action is not None else None
+                    ),
+                    target_run_id=request_body.target_run_id,
                     thinker_provider=agent_runner.provider_for_role("thinker"),
                     implementer_provider=agent_runner.provider_for_role("implementer"),
                     reviewer_provider=agent_runner.provider_for_role("reviewer"),
                 )
             )
+            if accepted_action is not None:
+                complete_gate_response(uow, accepted_action.action_request_id, result)
+                uow.commit()
 
             payload = {
                 "status": result.status,
@@ -522,7 +552,7 @@ def request_run_cmd(
                 typer.echo(f"Stage: {result.current_stage}")
                 typer.echo(f"Message: {result.message}")
     except Exception as exc:
-        typer.echo(f"request run error: {exc}", err=True)
+        typer.echo(f"request run error: {getattr(exc, 'detail', None) or exc}", err=True)
         raise typer.Exit(code=1) from exc
 
 
