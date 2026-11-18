@@ -79,20 +79,26 @@ Before dispatching any agent invocation, the system SHALL check provider health,
 - **AND** preserves worktree files and current stage without advancing or dispatching.
 
 ### Requirement: Human Intervention Protocol and Option Fidelity
-When human intervention is required, the system SHALL persist and expose the exact question and options for the currently blocking gate across all workflow stages (including Explore checkpoint, Propose clarification, review escalation, Apply recovery exhaustion, PR1 merge acknowledgement, and physical validation), preserving original wording emitted by OpenSpec or the agent and distinguishing native options from agent-generated recommendations. The active payload SHALL be unified in PostgreSQL across stage checkpoints, `orchestration_runs.human_gate`, and `stop_details.human_payload`, and SHALL NOT be sourced from a resolved or superseded earlier gate. For exhausted Apply recovery, the active payload SHALL capture attempt counts for the current cycle, the hard ceiling, pending task lists, candidate SHA, and test outcomes, providing a concise, actionable Spanish explanation of what stopped the workflow and what decision is needed. When the operator submits an authorized response, the system SHALL accept it idempotently, record it atomically in PostgreSQL, clear the active gate immediately, and resume execution without rejecting the response with HTTP 409 or re-surfacing resolved gates. An accepted response that authorizes continuation from an Apply exhaustion gate SHALL start exactly one new Apply recovery cycle at 0/3; prior cycle attempts and outcomes SHALL remain durably auditable and SHALL NOT be rewritten.
+When human intervention is required, the system SHALL persist and expose the exact original question and options for the currently blocking gate across all workflow stages (including Explore checkpoint, Propose clarification, review escalation, Apply recovery exhaustion, PR1 merge acknowledgement, and physical validation), preserving original wording emitted by OpenSpec or the agent and distinguishing native options from agent-generated recommendations. If the original question or an option is not in Spanish, the operator-facing gate SHALL also provide a faithful Spanish rendering alongside the exact original text; the original SHALL remain available in the gate view and durable payload as the source of truth. The system SHALL NOT invent, remove, reorder, or change the meaning or authorization effect of native options. Selecting a rendered Spanish label SHALL submit the stable original option response value, never the translated display text. The active payload SHALL be unified in PostgreSQL across stage checkpoints, `orchestration_runs.human_gate`, and `stop_details.human_payload`, and SHALL NOT be sourced from a resolved or superseded earlier gate. For exhausted Apply recovery, the active payload SHALL capture attempt counts for the current cycle, the hard ceiling, pending task lists, candidate SHA, and test outcomes, providing a concise, actionable Spanish explanation of what stopped the workflow and what decision is needed. When the operator submits an authorized response, the system SHALL accept it idempotently, record it atomically in PostgreSQL, clear the active gate immediately, and resume execution without rejecting the response with HTTP 409 or re-surfacing resolved gates. An accepted response that authorizes continuation from an Apply exhaustion gate SHALL start exactly one new Apply recovery cycle at 0/3; prior cycle attempts and outcomes SHALL remain durably auditable and SHALL NOT be rewritten.
 
 #### Scenario: Verbatim options displayed to operator
-- **GIVEN** OpenSpec Explore or Propose emitting explicit options during clarification
+- **GIVEN** OpenSpec Explore or Propose emits explicit options during clarification, in Spanish or another language
 - **WHEN** mini me prepares a `HUMAN REQUIRED` operator prompt
-- **THEN** it presents the exact verbatim options in Spanish
+- **THEN** it presents each exact native option and, when needed, a faithful Spanish rendering alongside it
 - **AND** clearly separates native OpenSpec options from agent advice
 - **AND** pauses execution cleanly until human input is received.
 
 #### Scenario: Each scoped gate persists its active question and options
 - **GIVEN** a Run has a prior gate payload or no gate payload
 - **WHEN** Explore checkpoint, Propose clarification, review escalation, Apply recovery exhaustion, PR1 merge acknowledgement, or physical validation blocks that Run
-- **THEN** the Run durably records the current gate's question and options as its active human request in PostgreSQL
+- **THEN** the Run durably records the current gate's original question and options, Spanish presentation, and option source as its active human request in PostgreSQL
 - **AND** the active payload identifies the current gate and does not retain the prior gate's question or options.
+
+#### Scenario: Spanish display selection submits the original option value
+- **GIVEN** an active gate has an original native option and its Spanish rendering
+- **WHEN** the operator selects the Spanish rendering
+- **THEN** the submitted response is the stable original option response value
+- **AND** the translated text is not treated as authorization or as a replacement for that value.
 
 #### Scenario: Explore checkpoint response accepted without 409
 - **GIVEN** an active Run paused at Explore with a verified `HUMAN_REQUIRED` checkpoint
