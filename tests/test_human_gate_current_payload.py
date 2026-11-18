@@ -334,6 +334,33 @@ def test_pr1_acknowledgement_gate_persists_current_question_and_option(in_memory
     assert payload["gate"] == "pr1_merge_acknowledgement"
     assert payload["question"] == payload["prompt"]
     assert payload["options"] == ["Estoy enterado"]
+    assert payload["question_es"] == payload["question"]
+    assert payload["options_es"] == payload["options"]
+
+
+def test_active_gate_persists_parallel_spanish_presentation_without_rewriting_source(in_memory_uow):
+    run = _run(OrchestrationStage.PROPOSING)
+    in_memory_uow.orchestration_runs.save(run)
+    source_options = [
+        {"id": "continue", "label": "Continue with the current candidate", "response_text": "CONTINUE"},
+        {"id": "stop", "label": "Preservar el candidato", "response_text": "STOP"},
+    ]
+    payload = _coordinator(in_memory_uow)._record_current_human_gate(
+        in_memory_uow,
+        run,
+        gate="proposal_feasibility",
+        question="The preview database has no public connection.",
+        options=source_options,
+        question_es="La base de datos de vista previa no tiene una conexión pública.",
+        options_es=["Continuar con el candidato actual", "Preservar el candidato"],
+    )
+
+    stored = in_memory_uow.orchestration_runs.get_by_id(run.run_id)
+    assert payload["question"] == "The preview database has no public connection."
+    assert payload["question_es"] == "La base de datos de vista previa no tiene una conexión pública."
+    assert payload["options"] == source_options
+    assert payload["options_es"] == ["Continuar con el candidato actual", "Preservar el candidato"]
+    assert stored.stop_details["human_payload"] == payload
 
 
 def test_confirmed_resolution_clears_only_active_payload(in_memory_uow):
@@ -507,7 +534,9 @@ def test_run_projection_exposes_only_active_payload(in_memory_uow):
                 "gate": "pr1_merge_acknowledgement",
                 "stage": "PR1_PENDING",
                 "question": "Acknowledge PR1 merge",
+                "question_es": "Confirmar la fusión del PR1",
                 "options": ["Estoy enterado"],
+                "options_es": ["Estoy enterado"],
             },
             "proposal_review": {
                 "status": "changes_required",
@@ -529,7 +558,9 @@ def test_run_projection_exposes_only_active_payload(in_memory_uow):
     assert response.status_code == 200
     assert projected["status"] == "HUMAN_REQUIRED"
     assert projected["stop_details"]["human_payload"]["question"] == "Acknowledge PR1 merge"
+    assert projected["stop_details"]["human_payload"]["question_es"] == "Confirmar la fusión del PR1"
     assert projected["stop_details"]["human_payload"]["options"] == ["Estoy enterado"]
+    assert projected["stop_details"]["human_payload"]["options_es"] == ["Estoy enterado"]
 
 
 def test_explore_checkpoint_is_promoted_to_active_payload(in_memory_uow):

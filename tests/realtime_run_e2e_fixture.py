@@ -18,7 +18,7 @@ from minime.db.models import (
     ProjectModel,
 )
 from minime.db.repository import PostgresOrchestrationRunRepository, PostgresPersistenceUnitOfWork
-from minime.domain.enums import OrchestrationStage
+from minime.domain.enums import HumanGate, OrchestrationStage, OrchestrationStopOutcome
 from minime.domain.models import AuthorizedOperator, OrchestrationRun, Project
 from minime.services.auth_service import SessionManager, hash_token
 
@@ -30,9 +30,10 @@ def _engine():
     engine = create_engine(database_url, pool_pre_ping=True)
     with engine.connect() as connection:
         database_name = connection.execute(text("SELECT current_database()")).scalar_one()
-    if "test" not in database_name.lower():
+    normalized_name = database_name.lower()
+    if "test" not in normalized_name and not normalized_name.startswith("minime_f3_e2e_"):
         engine.dispose()
-        raise RuntimeError("Refusing to use a database whose name does not contain 'test'")
+        raise RuntimeError("Refusing to use a database not identified as test or dedicated F3 E2E")
     return engine
 
 
@@ -91,6 +92,46 @@ def main() -> None:
             run.current_stage = stage
             run.resumable_stage = stage
             uow.orchestration_runs.save(run)
+            uow.commit()
+        elif command == "gate-create":
+            run = uow.orchestration_runs.get_by_id(run_id)
+            if run is None or run.project_id != project_id:
+                raise RuntimeError("E2E Run was not found in the expected project")
+            uow.orchestration_runs.update_stop_outcome(
+                run_id,
+                OrchestrationStopOutcome.NEEDS_HUMAN,
+                HumanGate.NEEDS_HUMAN,
+                "Choose CONTINUE_CANDIDATE or preserve the candidate.",
+                {
+                    "human_payload": {
+                        "gate_id": f"{run_id}-gate-1",
+                        "gate": "e2e_native_choice",
+                        "stage": run.current_stage.value,
+                        "question": "Choose CONTINUE_CANDIDATE or preserve the candidate.",
+                        "question_es": "Elige CONTINUE_CANDIDATE o conserva el candidato.",
+                        "options": [
+                            {"id": "continue", "label": "Continue candidate", "response_text": "CONTINUE_CANDIDATE"},
+                            {"id": "preserve", "label": "Preserve candidate", "response_text": "PRESERVE_CANDIDATE"},
+                        ],
+                        "options_es": ["Continuar con el candidato", "Conservar el candidato"],
+                        "options_source": "native",
+                    }
+                },
+                is_active=True,
+            )
+            uow.commit()
+        elif command == "gate-resolve":
+            run = uow.orchestration_runs.get_by_id(run_id)
+            if run is None or run.project_id != project_id:
+                raise RuntimeError("E2E Run was not found in the expected project")
+            details = dict(run.stop_details or {})
+            details.pop("human_payload", None)
+            details["resolved_human_gates"] = [
+                {"gate_id": f"{run_id}-gate-1", "response": "CONTINUE_CANDIDATE"}
+            ]
+            uow.orchestration_runs.update_stop_outcome(
+                run_id, None, None, None, details, is_active=True
+            )
             uow.commit()
         elif command == "recover-listener":
             with engine.begin() as connection:

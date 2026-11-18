@@ -181,6 +181,8 @@ class ApplyOutcome:
     error: str | None = None
     human_question: str | None = None
     human_options: tuple[str, ...] = ()
+    human_question_es: str | None = None
+    human_options_es: tuple[str, ...] = ()
     branch: str | None = None
     worktree: str | None = None
     run_id: str | None = None
@@ -198,6 +200,8 @@ class VerifyOutcome:
     summary: str = ""
     human_question: str | None = None
     human_options: tuple[str, ...] = ()
+    human_question_es: str | None = None
+    human_options_es: tuple[str, ...] = ()
     findings: tuple[dict[str, Any], ...] = ()
 
     def __bool__(self) -> bool:
@@ -218,11 +222,20 @@ class StageInvocation:
 class NativeStageHumanRequired(RuntimeError):
     """Preserved native workflow handoff from a DOC_CLOSING invocation."""
 
-    def __init__(self, operation: str, question: str, options: tuple[str, ...]):
+    def __init__(
+        self,
+        operation: str,
+        question: str,
+        options: tuple[str, ...],
+        question_es: str,
+        options_es: tuple[str, ...],
+    ):
         super().__init__(question)
         self.operation = operation
         self.question = question
         self.options = options
+        self.question_es = question_es
+        self.options_es = options_es
 
 
 @dataclass(frozen=True)
@@ -353,6 +366,8 @@ class NativeOrchestrationCoordinator:
         gate: str,
         question: str,
         options: list[Any] | tuple[Any, ...] = (),
+        question_es: str | None = None,
+        options_es: list[str] | tuple[str, ...] | None = None,
         payload: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         """Replace and persist the one active operator request for this Run."""
@@ -366,6 +381,16 @@ class NativeOrchestrationCoordinator:
             "question": question,
             "options": choice_list,
         }
+        localized_question = question_es or (payload or {}).get("question_es")
+        localized_options = options_es if options_es is not None else (payload or {}).get("options_es")
+        if isinstance(localized_question, str) and localized_question.strip():
+            active_payload["question_es"] = localized_question.strip()
+        if (
+            isinstance(localized_options, (list, tuple))
+            and len(localized_options) == len(choice_list)
+            and all(isinstance(option, str) and option.strip() for option in localized_options)
+        ):
+            active_payload["options_es"] = [option.strip() for option in localized_options]
         active_payload = self._safe_human_payload(active_payload)
         details = dict(run.stop_details or {})
         details["human_payload"] = active_payload
@@ -497,6 +522,11 @@ class NativeOrchestrationCoordinator:
                     f"Aportar evidencia verificable para {stage}",
                     "Actualizar el Change con OpenSpec Update y validarlo estrictamente",
                 ],
+                question_es=question,
+                options_es=[
+                    f"Aportar evidencia verificable para {stage}",
+                    "Actualizar el Change con OpenSpec Update y validarlo estrictamente",
+                ],
                 payload={
                     "blocked_transition": stage,
                     "candidate_sha": candidate_sha,
@@ -595,6 +625,8 @@ class NativeOrchestrationCoordinator:
             gate="pr1_merge_acknowledgement",
             question=question,
             options=["Estoy enterado"],
+            question_es=question,
+            options_es=["Estoy enterado"],
             payload={
                 "action": "operator_ack",
                 "summary_es": f"Cambio de alta complejidad para el Issue #{issue_number}: {issue_title}. PR #{pr_number} listo para fusión.",
@@ -1875,6 +1907,8 @@ class NativeOrchestrationCoordinator:
                         uow, active_run, gate=RECOVERY_GATE,
                         question=recovery_gate["question"],
                         options=recovery_gate["options"],
+                        question_es=recovery_gate.get("question_es") or recovery_gate["question"],
+                        options_es=recovery_gate.get("options_es") or recovery_gate["options"],
                         payload={key: value for key, value in recovery_gate.items()
                                  if key not in {"gate_id", "gate", "stage", "run_id", "question", "options"}},
                     )
@@ -2292,6 +2326,8 @@ class NativeOrchestrationCoordinator:
                     gate="explore_clarification",
                     question=str(raw_payload.get("question") or "Explore stage requires operator clarification."),
                     options=raw_payload.get("options", []),
+                    question_es=raw_payload.get("question_es"),
+                    options_es=raw_payload.get("options_es"),
                     payload=raw_payload,
                 )
                 return OrchestrationCoordinationResult(
@@ -2728,6 +2764,8 @@ class NativeOrchestrationCoordinator:
                     gate="proposal_feasibility",
                     question=question,
                     options=list(complexity_result.feasibility_actions),
+                    question_es=question,
+                    options_es=list(complexity_result.feasibility_actions),
                     payload={
                         "blockers": blockers,
                         "candidate_sha": candidate_sha,
@@ -3123,18 +3161,24 @@ class NativeOrchestrationCoordinator:
                         gate_payload=current_gate,
                     )
                 if update_result["status"] != "VALIDATED":
-                    question = update_result.get("question") or (
+                    fallback_question = (
                         "OpenSpec Update no pudo validar la decisión humana. Revisa el detalle y elige cómo continuar."
                     )
+                    question = update_result.get("question") or fallback_question
+                    fallback_options = [
+                        "Revisar el detalle y responder cómo continuar",
+                        "Conservar el candidato detenido",
+                    ]
                     payload = self._record_current_human_gate(
                         uow,
                         active_run,
                         gate="apply_gate_update",
                         question=question,
-                        options=update_result.get("options") or [
-                            "Revisar el detalle y responder cómo continuar",
-                            "Conservar el candidato detenido",
-                        ],
+                        options=update_result.get("options") or fallback_options,
+                        question_es=update_result.get("question_es") or fallback_question,
+                        options_es=update_result.get("options_es") or (
+                            fallback_options if not update_result.get("options") else None
+                        ),
                     )
                     return OrchestrationCoordinationResult(
                         status="HUMAN_REQUIRED", run_id=active_run.run_id,
@@ -3168,6 +3212,14 @@ class NativeOrchestrationCoordinator:
                             "validado durable. Se conserva el candidato y no se repite Update ni Apply."
                         ),
                         options=[
+                            "Revisar el detalle y responder cómo continuar",
+                            "Conservar el candidato detenido",
+                        ],
+                        question_es=(
+                            "La respuesta ya inició OpenSpec Update, pero no existe un resultado "
+                            "validado durable. Se conserva el candidato y no se repite Update ni Apply."
+                        ),
+                        options_es=[
                             "Revisar el detalle y responder cómo continuar",
                             "Conservar el candidato detenido",
                         ],
@@ -3277,6 +3329,8 @@ class NativeOrchestrationCoordinator:
                         gate="apply_escalation",
                         question=outcome.human_question or "OpenSpec Apply requires operator input.",
                         options=outcome.human_options,
+                        question_es=outcome.human_question_es or "OpenSpec Apply requiere intervención del operador.",
+                        options_es=outcome.human_options_es,
                     )
                     return OrchestrationCoordinationResult(
                         status="HUMAN_REQUIRED", run_id=active_run.run_id,
@@ -3420,6 +3474,8 @@ class NativeOrchestrationCoordinator:
                     uow, active_run, gate="apply_escalation",
                     question=verify_outcome.human_question or "OpenSpec Verify requires operator input.",
                     options=verify_outcome.human_options,
+                    question_es=verify_outcome.human_question_es or "OpenSpec Verify requiere intervención del operador.",
+                    options_es=verify_outcome.human_options_es,
                 )
                 return OrchestrationCoordinationResult(
                     status="HUMAN_REQUIRED", run_id=active_run.run_id,
@@ -4618,6 +4674,7 @@ class NativeOrchestrationCoordinator:
         *,
         gate: str = "apply_escalation",
         options: list[Any] | tuple[Any, ...] | None = None,
+        options_es: list[str] | tuple[str, ...] | None = None,
         attempts: int | None = None,
         hard_limit: int | None = None,
         no_progress: int | None = None,
@@ -4666,13 +4723,16 @@ class NativeOrchestrationCoordinator:
         question = reason
         if options is not None:
             opts = list(options)
+            localized_options = list(options_es or ())
         elif gate == "apply_escalation" and (attempts is not None or hard_limit is not None):
             opts = [
                 {"id": "retry", "label": "Reintentar implementación (Apply)"},
                 {"id": "cancel", "label": "Cancelar run y preservar worktree"},
             ]
+            localized_options = [option["label"] for option in opts]
         else:
             opts = []
+            localized_options = []
 
         diagnostic_payload = {
             "attempts": att_count,
@@ -4693,6 +4753,8 @@ class NativeOrchestrationCoordinator:
             gate=gate,
             question=question,
             options=opts,
+            question_es=explanation_es,
+            options_es=localized_options,
             payload=diagnostic_payload,
         )
         return OrchestrationCoordinationResult(
@@ -4755,6 +4817,11 @@ class NativeOrchestrationCoordinator:
                     + ("" if findings else " No actionable findings were returned.")
                 ),
                 options=result.get("options") or (),
+                question_es=(
+                    self._review_pause_message("code", result)
+                    + ("" if findings else " No se recibieron hallazgos accionables.")
+                ),
+                options_es=result.get("options_es") or (),
             ),
         )
 
@@ -5472,7 +5539,9 @@ class NativeOrchestrationCoordinator:
             "\nIn your final response use exactly one standalone disposition line: "
             "READY_TO_PROPOSE if no material questions remain, or HUMAN REQUIRED "
             "if an unresolved decision genuinely blocks Propose. For HUMAN REQUIRED "
-            "include concrete bullet-point options after that line. Mentions of "
+            "include all original options as bullets, then a standalone OPCIONES_ES: "
+            "line and faithful Spanish bullets in the exact same order. Preserve "
+            "technical identifiers and response values. Mentions of "
             "historical gates must not be presented as disposition lines.\n"
         )
 
@@ -5504,9 +5573,25 @@ class NativeOrchestrationCoordinator:
             }
         if disposition == "HUMAN_REQUIRED":
             lines = output.splitlines()
+            spanish_marker = next(
+                (index for index, line in enumerate(lines) if line.strip() == "OPCIONES_ES:"),
+                None,
+            )
             options = [
                 line.strip().lstrip("-• ").strip()[:500]
-                for line in lines[marker_line + 1 :]
+                for line in lines[marker_line + 1 : spanish_marker]
+                if spanish_marker is not None
+                and line.strip().startswith(("- ", "• "))
+            ][:20]
+            if spanish_marker is None:
+                options = [
+                    line.strip().lstrip("-• ").strip()[:500]
+                    for line in lines[marker_line + 1 :]
+                    if line.strip().startswith(("- ", "• "))
+                ][:20]
+            options_es = [
+                line.strip().lstrip("-• ").strip()[:500]
+                for line in (lines[spanish_marker + 1 :] if spanish_marker is not None else [])
                 if line.strip().startswith(("- ", "• "))
             ][:20]
             if not options:
@@ -5519,7 +5604,9 @@ class NativeOrchestrationCoordinator:
                 "human_payload": self._safe_human_payload(
                     {
                         "question": f"¿Cómo debe resolverse la ambigüedad en el Issue #{issue_number}?",
+                        "question_es": f"¿Cómo debe resolverse la ambigüedad en el Issue #{issue_number}?",
                         "options": options,
+                        "options_es": options_es if len(options_es) == len(options) else [],
                         "agent_output": output[:1000],
                     }
                 ),
@@ -5721,9 +5808,13 @@ class NativeOrchestrationCoordinator:
                     "human_payload": self._safe_human_payload(
                         {
                             "question": report.pending[0],
+                            "question_es": (report.pending_es or ("",))[0] or None,
                             "options": [],
+                            "options_es": [],
                             "pending": list(report.pending),
+                            "pending_es": list(report.pending_es),
                             "agent_output": report.summary,
+                            "agent_output_es": report.summary_es,
                         }
                     ),
                     "execution": res,
@@ -6058,6 +6149,8 @@ class NativeOrchestrationCoordinator:
             payload = self._record_current_human_gate(
                 uow, run, gate=RECOVERY_GATE, question=projected["question"],
                 options=projected["options"],
+                question_es=projected.get("question_es") or projected["question"],
+                options_es=projected.get("options_es"),
                 payload={key: value for key, value in projected.items()
                          if key not in {"gate_id", "gate", "stage", "run_id", "question", "options"}},
             )
@@ -6274,6 +6367,13 @@ class NativeOrchestrationCoordinator:
                 gate="proposal_review_escalation",
                 question=reason,
                 options=review_options,
+                question_es=reason,
+                options_es=(
+                    list(result.get("options_es") or ())
+                    + ([str(correction_option.get("label") or correction_option)] if findings and correction_option else [])
+                    if len(result.get("options_es") or ()) == len(native_options if findings else review_options)
+                    else []
+                ),
                 payload={
                     "review_findings": findings,
                     "reviewer_summary": result.get("summary") or "",
@@ -6724,6 +6824,8 @@ class NativeOrchestrationCoordinator:
             return ApplyOutcome("HUMAN_REQUIRED", completed_ids, tuple(pending), sha_text.strip() if getattr(sha, "ok", True) else None,
                                 changed_files, digest, tests_passed, test_evidence,
                                 human_question=handoff.summary, human_options=handoff.pending,
+                                human_question_es=handoff.summary_es,
+                                human_options_es=handoff.pending_es,
                                 branch=branch_text.strip(), worktree=str(worktree_path), run_id=run_id,
                                 provider_used=getattr(result, "provider_used", None) or provider,
                                 profile_used=getattr(result, "profile_used", None),
@@ -7069,6 +7171,8 @@ class NativeOrchestrationCoordinator:
                 "HUMAN_REQUIRED", handoff.summary,
                 human_question=handoff.summary,
                 human_options=tuple(handoff.pending),
+                human_question_es=handoff.summary_es,
+                human_options_es=tuple(handoff.pending_es),
             )
         if not self._execution_is_successful(res):
             return VerifyOutcome("FAILED", "Native Verify execution failed.")
@@ -7265,11 +7369,23 @@ class NativeOrchestrationCoordinator:
                 ):
                     question = str(handoff.summary or "El workflow nativo requiere una decisión humana.")
                     options = tuple(handoff.pending or ())
+                    question_es = str(
+                        handoff.summary_es or "El workflow nativo requiere una decisión humana."
+                    )
+                    options_es = tuple(handoff.pending_es or ())
                     await self._finish_stage_invocation(
                         uow, run, invocation, "HUMAN_REQUIRED",
-                        {"operation": operation, "question": question, "options": options},
+                        {
+                            "operation": operation,
+                            "question": question,
+                            "options": options,
+                            "question_es": question_es,
+                            "options_es": options_es,
+                        },
                     )
-                    raise NativeStageHumanRequired(operation, question, options)
+                    raise NativeStageHumanRequired(
+                        operation, question, options, question_es, options_es
+                    )
                 status = "COMPLETE" if self._execution_is_successful(result) else "FAILED"
                 await self._finish_stage_invocation(
                     uow, run, invocation, status,
@@ -7365,6 +7481,7 @@ class NativeOrchestrationCoordinator:
                 self._record_current_human_gate(
                     uow, run, gate=f"doc_closing_{handoff.operation}",
                     question=handoff.question, options=handoff.options,
+                    question_es=handoff.question_es, options_es=handoff.options_es,
                 )
             return False, handoff.question
         if not completed:

@@ -32,6 +32,25 @@ def test_workflow_handoff_reports_specific_pending_work():
     assert report.pending == ("design.md", "tasks.md")
 
 
+def test_human_gate_handoff_preserves_source_and_parallel_spanish_text():
+    report = parse_agent_workflow_handoff(
+        'MINIME_WORKFLOW_RESULT: {"status":"HUMAN_REQUIRED",'
+        '"summary":"A decision is needed", "summary_es":"Se necesita una decisión",'
+        '"pending":["Use option A", "Use option B"],'
+        '"pending_es":["Usar la opción A", "Usar la opción B"]}'
+    )
+    assert report is not None
+    assert report.pending == ("Use option A", "Use option B")
+    assert report.pending_es == ("Usar la opción A", "Usar la opción B")
+
+
+def test_human_gate_handoff_without_spanish_presentation_is_not_accepted():
+    assert parse_agent_workflow_handoff(
+        'MINIME_WORKFLOW_RESULT: {"status":"HUMAN_REQUIRED",'
+        '"summary":"A decision is needed", "pending":["Use option A"]}'
+    ) is None
+
+
 def test_workflow_handoff_rejects_ambiguous_or_contradictory_reports():
     invalid = [
         "",

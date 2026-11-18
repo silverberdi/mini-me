@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import re
 from datetime import datetime, timedelta
 from decimal import Decimal
@@ -211,6 +212,7 @@ from minime.domain.models import (
     TaskRiskProfile,
     ValidationRun,
     generate_uuid,
+    get_active_human_payload,
     utc_now,
 )
 
@@ -225,6 +227,21 @@ def _to_decimal(value: Decimal | float | str | int | None, default: str = "0.0")
     if isinstance(value, Decimal):
         return value
     return Decimal(str(value))
+
+
+def _active_human_gate_identity(run: Any) -> str | None:
+    """Return the durable identity of the currently active gate, if any."""
+    payload = get_active_human_payload(run)
+    if not payload:
+        return None
+    gate_id = payload.get("gate_id")
+    if gate_id is not None:
+        return str(gate_id)
+    # Legacy gate records may not carry an id. Their stable content still lets
+    # persistence distinguish a no-op write from a changed active request.
+    return hashlib.sha256(
+        json.dumps(payload, sort_keys=True, ensure_ascii=False, default=str).encode("utf-8")
+    ).hexdigest()
 
 
 def project_model_to_domain(model: ProjectModel) -> Project:
@@ -2808,6 +2825,7 @@ class PostgresOrchestrationRunRepository(OrchestrationRunRepositoryInterface):
         existing = self.session.get(OrchestrationRunModel, run.run_id)
         if existing:
             stage_changed = existing.current_stage != run.current_stage.value
+            gate_changed = _active_human_gate_identity(existing) != _active_human_gate_identity(run)
             existing.project_id = run.project_id
             existing.change_name = run.change_name
             existing.base_sha = run.base_sha
@@ -2825,7 +2843,7 @@ class PostgresOrchestrationRunRepository(OrchestrationRunRepositoryInterface):
             existing.current_candidate_sha = run.current_candidate_sha
             existing.is_active = run.is_active
             existing.updated_at = utc_now()
-            if stage_changed:
+            if stage_changed or gate_changed:
                 notify_run_transition(
                     self.session,
                     project_id=run.project_id,
@@ -2853,6 +2871,13 @@ class PostgresOrchestrationRunRepository(OrchestrationRunRepositoryInterface):
                     updated_at=run.updated_at,
                 )
             )
+            if _active_human_gate_identity(run) is not None:
+                notify_run_transition(
+                    self.session,
+                    project_id=run.project_id,
+                    run_id=run.run_id,
+                    stage=run.current_stage.value,
+                )
 
     def get_by_id(self, run_id: str) -> OrchestrationRun | None:
         model = self.session.get(OrchestrationRunModel, run_id)
@@ -2955,6 +2980,7 @@ class PostgresOrchestrationRunRepository(OrchestrationRunRepositoryInterface):
             current = self.session.get(OrchestrationRunModel, run_id)
             if not current:
                 raise ValueError(f"Orchestration run '{run_id}' not found")
+            previous_gate_identity = _active_human_gate_identity(current)
             claim_subquery = (
                 select(1)
                 .where(
@@ -2993,6 +3019,7 @@ class PostgresOrchestrationRunRepository(OrchestrationRunRepositoryInterface):
             model = self.session.get(OrchestrationRunModel, run_id)
             if not model:
                 raise ValueError(f"Orchestration run '{run_id}' not found")
+            previous_gate_identity = _active_human_gate_identity(model)
             model.stop_outcome = stop_outcome.value if stop_outcome else None
             model.human_gate = human_gate.value if human_gate else None
             model.stop_reason = stop_reason
@@ -3001,6 +3028,13 @@ class PostgresOrchestrationRunRepository(OrchestrationRunRepositoryInterface):
             model.updated_at = now
 
         model = self.session.get(OrchestrationRunModel, run_id)
+        if previous_gate_identity != _active_human_gate_identity(model):
+            notify_run_transition(
+                self.session,
+                project_id=model.project_id,
+                run_id=model.id,
+                stage=model.current_stage,
+            )
         return orchestration_run_model_to_domain(model)
 
     def update_candidate_binding(
