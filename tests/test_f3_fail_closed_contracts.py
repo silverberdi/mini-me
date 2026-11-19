@@ -117,7 +117,7 @@ def test_feasibility_requires_exact_native_task_and_scenario_coverage(tmp_path: 
             }
         ],
         "scenario_coverage": [
-            {"scenario_id": "capability:req-1:1", "task_ids": ["1.1"], "evidence_stage": "apply"}
+            {"scenario_id": "capability:req-1:1", "task_ids": ["1.1"], "evidence_stage": "apply", "verification_mode": "other"}
         ],
         "blockers": [],
         "resolution_options": [],
@@ -172,7 +172,7 @@ def test_later_stage_preview_does_not_block_apply_and_remains_pending(tmp_path: 
             }
         ],
         "scenario_coverage": [
-            {"scenario_id": "mobile:req-1:1", "task_ids": ["2.1"], "evidence_stage": "verify"}
+            {"scenario_id": "mobile:req-1:1", "task_ids": ["2.1"], "evidence_stage": "verify", "verification_mode": "other"}
         ],
         "blockers": [],
         "resolution_options": ["Provide an exact-SHA preview"],
@@ -213,7 +213,7 @@ def test_unmet_apply_precondition_still_blocks_apply(tmp_path: Path):
         "scenario_coverage": [{
             "scenario_id": "build:req-1:1",
             "task_ids": ["1.1"],
-            "evidence_stage": "apply",
+            "evidence_stage": "apply", "verification_mode": "other",
         }],
         "blockers": [],
         "resolution_options": ["Provide the required credential"],
@@ -255,7 +255,7 @@ def test_precondition_evidence_requires_exact_capability_or_prefixed_candidate_p
         "scenario_coverage": [{
             "scenario_id": "game:req-1:1",
             "task_ids": ["2.1"],
-            "evidence_stage": "apply",
+            "evidence_stage": "apply", "verification_mode": "other",
         }],
         "blockers": [],
         "resolution_options": [],
@@ -308,7 +308,7 @@ def test_apply_output_dependency_is_not_a_precondition_for_starting_apply(tmp_pa
         "scenario_coverage": [{
             "scenario_id": "workspace:req-1:1",
             "task_ids": ["1.2", "4.1"],
-            "evidence_stage": "apply",
+            "evidence_stage": "apply", "verification_mode": "other",
         }],
         "blockers": [],
         "resolution_options": [],
@@ -469,7 +469,7 @@ async def test_structured_assessment_only_passes_when_all_capabilities_are_verif
                 "preconditions": [],
                 "completion_evidence": "Focused test command exits zero",
             }],
-            "scenario_coverage": [{"scenario_id": "change:req-1:1", "task_ids": ["1.1"], "evidence_stage": "apply"}],
+            "scenario_coverage": [{"scenario_id": "change:req-1:1", "task_ids": ["1.1"], "evidence_stage": "apply", "verification_mode": "other"}],
             "blockers": [],
             "resolution_options": [],
         },
@@ -653,6 +653,37 @@ async def test_request_revision_dispatches_installed_openspec_update(tmp_path: P
     assert "Execute official OpenSpec Update" in runner.calls[0]
     assert "native-update" in runner.calls[0]
     assert "Use the current authoritative Request." in runner.calls[0]
+
+
+@pytest.mark.asyncio
+async def test_native_propose_receives_tool_inventory_and_browser_assignment_rule(tmp_path: Path):
+    runner = ScriptedRunner("proposal is ready")
+    c = coordinator(tmp_path, runner)
+    c.openspec_adapter.planning_status = MagicMock(return_value={"status": "PASS", "pending": []})
+    inventory = {
+        "declared_test_commands": [
+            {"source": "package.json", "name": "test:e2e", "command": "npm run test:e2e"}
+        ],
+        "playwright_declared": True,
+        "chromium_runtime": {"available": True, "version": "Chromium test"},
+    }
+
+    result = await c._run_propose(
+        worktree_path=tmp_path,
+        provider="codex",
+        change_name="browser-change",
+        issue_number=420,
+        issue_title="Automate browser checks",
+        issue_body="Use Playwright for responsive UI acceptance.",
+        project_id="boxio",
+        tooling_inventory=inventory,
+    )
+
+    assert result["status"] == "READY_TO_VALIDATE"
+    assert "Observed repository test tooling" in runner.calls[0]
+    assert "npm run test:e2e" in runner.calls[0]
+    assert "Do not assign browser navigation" in runner.calls[0]
+    assert "human_validation" in runner.calls[0]
 
 
 @pytest.mark.asyncio
@@ -1185,7 +1216,7 @@ def test_boxio_gate_regression_scenarios_and_evidence_are_accepted(tmp_path: Pat
         return ["1.1"]
 
     scenario_coverage = [
-        {"scenario_id": sid, "task_ids": map_task_ids(sid), "evidence_stage": "apply"}
+        {"scenario_id": sid, "task_ids": map_task_ids(sid), "evidence_stage": "apply", "verification_mode": "other"}
         for sid in scenario_ids
     ]
     report = {
@@ -1259,7 +1290,7 @@ def test_proposal_feasibility_blocks_when_openspec_cli_fails(tmp_path: Path):
             }
         ],
         "scenario_coverage": [
-            {"scenario_id": "feature:1:1", "task_ids": ["1.1"], "evidence_stage": "apply"}
+            {"scenario_id": "feature:1:1", "task_ids": ["1.1"], "evidence_stage": "apply", "verification_mode": "other"}
         ],
         "blockers": [],
         "resolution_options": [],
@@ -1310,7 +1341,7 @@ def test_proposal_feasibility_blocks_when_openspec_cli_fails(tmp_path: Path):
             }
         ],
         "scenario_coverage": [
-            {"scenario_id": "feature:1:1", "task_ids": ["1.1"], "evidence_stage": "apply"}
+            {"scenario_id": "feature:1:1", "task_ids": ["1.1"], "evidence_stage": "apply", "verification_mode": "other"}
         ],
         "blockers": [],
         "resolution_options": [],
@@ -1357,7 +1388,7 @@ def test_proposal_feasibility_blocks_when_valid_capability_coexists_with_unverif
             }
         ],
         "scenario_coverage": [
-            {"scenario_id": "feature:1:1", "task_ids": ["1.1"], "evidence_stage": "apply"}
+            {"scenario_id": "feature:1:1", "task_ids": ["1.1"], "evidence_stage": "apply", "verification_mode": "other"}
         ],
         "blockers": [],
         "resolution_options": [],
@@ -1428,7 +1459,7 @@ def test_proposal_feasibility_rejects_non_canonical_openspec_assertion_even_when
             }
         ],
         "scenario_coverage": [
-            {"scenario_id": "feature:1:1", "task_ids": ["1.1"], "evidence_stage": "apply"}
+            {"scenario_id": "feature:1:1", "task_ids": ["1.1"], "evidence_stage": "apply", "verification_mode": "other"}
         ],
         "blockers": [],
         "resolution_options": [],
@@ -1484,7 +1515,7 @@ def test_proposal_feasibility_accepts_path_evidence_relative_to_change_dir(tmp_p
             }
         ],
         "scenario_coverage": [
-            {"scenario_id": "game-contracts:1:1", "task_ids": ["2.1"], "evidence_stage": "apply"}
+            {"scenario_id": "game-contracts:1:1", "task_ids": ["2.1"], "evidence_stage": "apply", "verification_mode": "other"}
         ],
         "blockers": [],
         "resolution_options": [],
@@ -1542,7 +1573,7 @@ def test_proposal_feasibility_rejects_unsafe_and_missing_path_evidence(tmp_path:
                 }
             ],
             "scenario_coverage": [
-                {"scenario_id": "feature:1:1", "task_ids": ["1.1"], "evidence_stage": "apply"}
+                {"scenario_id": "feature:1:1", "task_ids": ["1.1"], "evidence_stage": "apply", "verification_mode": "other"}
             ],
             "blockers": [],
             "resolution_options": [],
@@ -1577,7 +1608,7 @@ def test_apply_execution_profile_is_global_and_workflow_is_task_evidence(tmp_pat
         "scenario_coverage": [{
             "scenario_id": "feature:1:1",
             "task_ids": ["1.1"],
-            "evidence_stage": "apply",
+            "evidence_stage": "apply", "verification_mode": "other",
         }],
         "blockers": [],
         "resolution_options": [],
@@ -1671,7 +1702,7 @@ def test_blocked_feasibility_preserves_agent_options_and_adds_native_update(tmp_
         "scenario_coverage": [{
             "scenario_id": "feature:1:1",
             "task_ids": ["1.1"],
-            "evidence_stage": "apply",
+            "evidence_stage": "apply", "verification_mode": "other",
         }],
         "blockers": [],
         "resolution_options": ["Provide an execution profile"],

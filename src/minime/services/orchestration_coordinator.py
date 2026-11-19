@@ -2452,6 +2452,17 @@ class NativeOrchestrationCoordinator:
                         current_stage=OrchestrationStage.PROPOSING,
                         message="Propose dispatch is already owned or its durable intent is ambiguous.",
                     )
+                proposal_project = (
+                    uow.projects.get_by_id(project_id)
+                    if project_id and hasattr(uow, "projects")
+                    else None
+                )
+                from minime.services.candidate_test_resolver import CandidateTestResolver
+
+                proposal_tooling = CandidateTestResolver.inspect_tooling(
+                    worktree_path,
+                    project_checks=getattr(proposal_project, "checks", None),
+                )
                 propose_result = await self._run_native_dispatch(
                     uow,
                     active_run,
@@ -2465,6 +2476,7 @@ class NativeOrchestrationCoordinator:
                         issue_title=issue_title,
                         issue_body=issue_body,
                         project_id=project_id,
+                        tooling_inventory=proposal_tooling,
                         continue_existing=propose_recovery_needed or bool(pending_revision),
                         operator_clarification=(
                             self._proposal_revision_prompt(pending_revision)
@@ -3419,12 +3431,7 @@ class NativeOrchestrationCoordinator:
                 if hasattr(uow, "commit"):
                     uow.commit()
             if not tests_ok:
-                return OrchestrationCoordinationResult(
-                    status="PAUSED",
-                    run_id=active_run.run_id,
-                    current_stage=OrchestrationStage.RUNNING_TESTS,
-                    message="Automated tests failed during Apply. Worktree preserved.",
-                )
+                return self._route_automated_test_failure(uow, active_run, test_evidence)
 
             self._update_stage(uow, active_run, OrchestrationStage.VERIFYING)
 
@@ -5390,7 +5397,17 @@ class NativeOrchestrationCoordinator:
                 "verified from the supplied inputs or candidate, report that precise gap rather than guessing. "
                 "If a mandatory task has no authorized path at any stage, report it as unexecutable. For a "
                 "blocked feasibility result, set complexity to null. Only classify complexity when the plan "
-                "has an executable path. Return exactly the required JSON schema.\n"
+                "has an executable path. Browser-reproducible acceptance (navigation, responsive viewport, "
+                "asynchronous UI, and concurrent browser sessions) belongs to the configured execution agent "
+                "in Apply or Verify, with real browser evidence; never assign it to the operator or "
+                "human_validation. Keep actual human decisions and physical-device-only checks separate and "
+                "post-merge; they must not block browser-automatable work. Use observed test_tooling commands; "
+                "do not invent dependencies. Missing or unlaunchable browser runtime is a technical environment "
+                "failure for the existing environment-unavailable path, not a human test task. Return exactly "
+                "the required JSON schema. For each acceptance scenario, set verification_mode to exactly one of "
+                "browser, physical_device, human_decision, or other. A browser mode scenario must map only to "
+                "executor-owned Apply/Verify tasks; physical_device and human_decision modes require an operator "
+                "task at human_validation, with physical-only work deferred until post-merge.\n"
                 f"Change: {change_name}\nRequest title: {title}\nRequest body:\n{body}\n"
                 f"Verified assessment inputs:\n{json.dumps(feasibility_inputs, ensure_ascii=False, sort_keys=True)}\n"
                 f"Exact required task IDs: {json.dumps(task_ids)}\n"
@@ -5764,6 +5781,7 @@ class NativeOrchestrationCoordinator:
         issue_title: str,
         issue_body: str,
         project_id: str | None = None,
+        tooling_inventory: dict[str, Any] | None = None,
         continue_existing: bool = False,
         operator_clarification: str | None = None,
         process_start_observer: Any = None,
@@ -5805,8 +5823,19 @@ class NativeOrchestrationCoordinator:
                     else f"Generate canonical change planning artifacts under openspec/changes/{change_name}/: proposal.md, specs/, design.md, and tasks.md."
                 )
             )
-            if continue_existing and operator_clarification:
-                prompt += f"\nOperator clarification for the pending native workflow:\n{operator_clarification}\n"
+        if tooling_inventory is not None:
+            prompt += (
+                "\nObserved repository test tooling (bounded, read-only inventory; do not run scripts here):\n"
+                f"{json.dumps(tooling_inventory, ensure_ascii=False, sort_keys=True)}\n"
+                "For UI behavior reproducible in a real browser, assign the configured executor to implement/run "
+                "the declared browser checks in Apply or Verify, with observable result evidence. Do not assign "
+                "browser navigation, asynchronous UI, viewport, or concurrent-browser checks to the operator or "
+                "human_validation. Keep actual human decisions and physical-device-only checks distinct; schedule "
+                "physical-only follow-up post-merge and do not use it to block browser-automatable work. Do not "
+                "invent dependencies or ask a human to run a command that the configured executor can run.\n"
+            )
+        if continue_existing and operator_clarification:
+            prompt += f"\nOperator clarification for the pending native workflow:\n{operator_clarification}\n"
         res = await self.agent_runner.run(
             worktree_path=worktree_path,
             prompt_context=prompt,
@@ -6755,8 +6784,8 @@ class NativeOrchestrationCoordinator:
                     f"{idx}. [{sev}] {loc}\n   Violated: {req or 'unspecified'}\n   Fix: {fix or 'unspecified'}"
                 )
             correction_instruction = (
-                "\n\nThe independent reviewer returned CHANGES_REQUIRED with the following findings. "
-                "Correct every finding in this same change, then re-run the test suite:\n\n"
+                "\n\nThe existing correction workflow recorded the following evidence-backed findings. "
+                "Correct every finding in this same change, then re-run the relevant checks:\n\n"
                 + "\n\n".join(rendered)
                 + "\n\nDo not expand scope beyond these findings; preserve the existing OpenSpec change."
             )
@@ -7031,6 +7060,8 @@ class NativeOrchestrationCoordinator:
         if not plan.is_executable:
             return False, plan.diagnostic
 
+        candidate_sha = await self._get_git_head_sha(worktree_path)
+
         # 5. Handle explicit project checks strategy
         if plan.kind == CandidateTestStrategyKind.PROJECT_CHECKS:
             from minime.services.checks_runner import ChecksRunner
@@ -7040,14 +7071,51 @@ class NativeOrchestrationCoordinator:
                 job_id="apply-test-gate",
                 checks=plan.custom_checks,
                 worktree_path=worktree_path,
+                candidate_sha=candidate_sha or "",
+                process_start_observer=process_start_observer,
             )
             evidence_lines = []
             for r in res.results:
+                diagnostic = next(
+                    (item for item in res.diagnostics if item.check_name == r.check_name), None
+                )
+                diagnostic_status = getattr(
+                    getattr(diagnostic, "diagnostic_status", None), "value",
+                    getattr(diagnostic, "diagnostic_status", "UNKNOWN"),
+                )
                 evidence_lines.append(
-                    f"check: {r.check_name}\ncommand: {r.command}\nexit_code: {r.exit_code}\noutput:\n{r.output_snippet}"
+                    f"check: {r.check_name}\ncommand: {r.command}\nexit_code: {r.exit_code}\n"
+                    f"diagnostic_status: {diagnostic_status}\n"
+                    f"duration_ms: {r.duration_ms}\ncandidate_sha: {r.candidate_sha}\noutput:\n{r.output_snippet}"
                 )
             evidence = "\n---\n".join(evidence_lines) or "Configured project checks completed."
             return res.passed, evidence
+
+        # Declared JavaScript and Makefile commands use the same confined,
+        # evidence-producing check runner as explicitly configured checks.
+        if plan.kind in {
+            CandidateTestStrategyKind.NODE_ROOT,
+            CandidateTestStrategyKind.NODE_SUBDIRECTORY,
+            CandidateTestStrategyKind.MAKEFILE_TEST,
+        }:
+            from minime.services.checks_runner import ChecksRunner
+
+            check = {"name": "candidate-tests", "command": plan.command_text}
+            result = await ChecksRunner().run(
+                job_id="apply-test-gate",
+                checks=[check],
+                worktree_path=worktree_path,
+                candidate_sha=candidate_sha or "",
+                process_start_observer=process_start_observer,
+            )
+            evidence = "\n".join(
+                f"check: {item.check_name}\ncommand: {item.command}\nexit_code: {item.exit_code}\n"
+                f"diagnostic_status: {next((getattr(getattr(diag, 'diagnostic_status', None), 'value', getattr(diag, 'diagnostic_status', 'UNKNOWN')) for diag in result.diagnostics if diag.check_name == item.check_name), 'UNKNOWN')}\n"
+                f"duration_ms: {item.duration_ms}\ncandidate_sha: {item.candidate_sha}\n"
+                f"output:\n{item.output_snippet}"
+                for item in result.results
+            )
+            return result.passed, evidence or plan.diagnostic
 
         # 6. Unified subprocess execution with environment sanitization
         clean_env = os.environ.copy()
@@ -7115,6 +7183,45 @@ class NativeOrchestrationCoordinator:
                 + f"command: {command_text}\n"
                 f"exit_code: NOT_STARTED\nstdout:\n\nstderr:\n{exc}"
             )
+
+    def _route_automated_test_failure(
+        self,
+        uow: Any,
+        run: OrchestrationRun,
+        evidence: str,
+    ) -> OrchestrationCoordinationResult:
+        """Keep runtime failures technical; send executed assertion failures to Apply correction."""
+        if "diagnostic_status: ENVIRONMENT_UNAVAILABLE" in evidence:
+            return OrchestrationCoordinationResult(
+                status="PAUSED",
+                run_id=run.run_id,
+                current_stage=OrchestrationStage.RUNNING_TESTS,
+                message=(
+                    "Browser test runtime is unavailable; no human test gate was created. "
+                    f"Observed evidence: {evidence[:1200]}"
+                ),
+            )
+        details = dict(run.stop_details or {})
+        details["pending_corrections"] = [
+            {
+                "severity": "MAJOR",
+                "location": "Candidate automated browser checks",
+                "violated_requirement": "The declared browser acceptance checks must pass against this candidate.",
+                "expected_correction": (
+                    "Inspect the exact failed command and output, correct the candidate or its browser test, "
+                    "then rerun the declared check through the configured executor. Do not ask the operator "
+                    "to run the browser test.\n" + evidence[-2500:]
+                ),
+            }
+        ]
+        run.stop_details = details
+        self._update_stage(uow, run, OrchestrationStage.IMPLEMENTING)
+        return OrchestrationCoordinationResult(
+            status="RUNNING",
+            run_id=run.run_id,
+            current_stage=OrchestrationStage.IMPLEMENTING,
+            message="Automated browser checks failed; dispatching evidence-based Apply corrections.",
+        )
 
     async def _run_verify(
         self,

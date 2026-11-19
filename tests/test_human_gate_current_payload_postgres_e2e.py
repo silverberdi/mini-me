@@ -404,7 +404,7 @@ def test_postgres_api_stage_aware_feasibility_gate(tmp_path):
                     "scenario_coverage": [{
                         "scenario_id": "mobile:1:1",
                         "task_ids": ["2.1"],
-                        "evidence_stage": "verify",
+                        "evidence_stage": "verify", "verification_mode": "other",
                     }],
                 }
             },
@@ -433,7 +433,7 @@ def test_postgres_api_stage_aware_feasibility_gate(tmp_path):
             "scenario_coverage": [{
                 "scenario_id": "mobile:1:1",
                 "task_ids": ["2.1"],
-                "evidence_stage": "verify",
+                "evidence_stage": "verify", "verification_mode": "other",
             }],
             "blockers": [],
             "resolution_options": [],

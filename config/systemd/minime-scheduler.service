@@ -10,6 +10,8 @@ Group=minime
 WorkingDirectory=/opt/minime/app
 EnvironmentFile=/etc/minime/minime.env
 Environment=PYTHONUNBUFFERED=1
+Environment=PLAYWRIGHT_BROWSERS_PATH=/opt/minime/runtime/playwright-browsers
+Environment=PLAYWRIGHT_SKIP_BROWSER_GC=1
 Environment=PATH=/opt/minime/runtime/venv/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 ExecStart=/opt/minime/runtime/venv/bin/minime scheduler run
 Restart=always

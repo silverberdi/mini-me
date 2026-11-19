@@ -1644,7 +1644,7 @@ async def test_stored_blocked_feasibility_revalidated_to_executable_without_new_
                 }
             ],
             "scenario_coverage": [
-                {"scenario_id": "feature:1:1", "task_ids": ["1.1"], "evidence_stage": "apply"}
+                {"scenario_id": "feature:1:1", "task_ids": ["1.1"], "evidence_stage": "apply", "verification_mode": "other"}
             ],
             "blockers": [],
             "resolution_options": [],

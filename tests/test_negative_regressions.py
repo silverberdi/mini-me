@@ -211,23 +211,45 @@ async def test_negative_missing_verify_workflow_fails_closed(base_coordinator_en
 
 
 @pytest.mark.asyncio
-async def test_negative_automated_tests_failure_fails_closed(base_coordinator_env):
-    """Case 2: Automated tests failure halts before PR1."""
-    coordinator, uow, github_mock, candidate_wt, agent_runner, openspec_mock = base_coordinator_env
-    coordinator._run_automated_tests = AsyncMock(
-        return_value=(False, "FAILED tests/test_core.py::test_fail - AssertionError")
+async def test_failed_automated_checks_dispatch_apply_corrections(base_coordinator_env):
+    """A failed assertion returns to the executor with evidence, not a human test gate."""
+    coordinator, uow, _, _, _, _ = base_coordinator_env
+    from minime.domain.models import OrchestrationRun
+
+    run = OrchestrationRun(project_id="proj-test", change_name="req-901", base_sha="a" * 40,
+                           current_stage=OrchestrationStage.RUNNING_TESTS)
+    uow.orchestration_runs.save(run)
+    res = coordinator._route_automated_test_failure(
+        uow, run, "command: npm run test:e2e\nexit_code: 1\nAssertionError"
     )
 
-    res = await coordinator.execute_project_request(
-        "proj-test",
-        thinker_provider="codex",
-        implementer_provider="codex",
-        reviewer_provider="codex",
+    assert res.status == "RUNNING"
+    assert res.current_stage == OrchestrationStage.IMPLEMENTING
+    assert "dispatching evidence-based Apply corrections" in res.message
+    correction = run.stop_details["pending_corrections"][0]
+    assert correction["location"] == "Candidate automated browser checks"
+    assert "AssertionError" in correction["expected_correction"]
+
+
+@pytest.mark.asyncio
+async def test_unavailable_browser_runtime_stops_without_human_test_gate(base_coordinator_env):
+    coordinator, uow, _, _, _, _ = base_coordinator_env
+    from minime.domain.models import OrchestrationRun
+
+    run = OrchestrationRun(project_id="proj-test", change_name="req-901", base_sha="a" * 40,
+                           current_stage=OrchestrationStage.RUNNING_TESTS)
+    uow.orchestration_runs.save(run)
+    result = coordinator._route_automated_test_failure(
+        uow,
+        run,
+        "command: npm run test:e2e\ndiagnostic_status: ENVIRONMENT_UNAVAILABLE\nChromium missing",
     )
-    assert res.status == "PAUSED"
-    assert res.current_stage == OrchestrationStage.RUNNING_TESTS
-    assert "Automated tests failed during Apply" in res.message
-    assert github_mock.create_pull_request.call_count == 0
+
+    assert result.status == "PAUSED"
+    assert result.current_stage == OrchestrationStage.RUNNING_TESTS
+    assert "Browser test runtime is unavailable" in result.message
+    assert "Chromium missing" in result.message
+    assert run.human_gate is None
 
 
 @pytest.mark.asyncio

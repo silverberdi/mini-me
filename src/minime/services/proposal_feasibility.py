@@ -38,6 +38,9 @@ class ProposalFeasibilityEvaluator:
         r"scenario .+ has an unknown or missing evidence stage|"
         r"scenario .+ maps to no known OpenSpec task|"
         r"scenario .+ claims evidence before its mapped task stage"
+        r"|scenario .+ has an unknown or missing verification mode"
+        r"|scenario .+ marks browser-reproducible work outside executor Apply/Verify"
+        r"|scenario .+ requires operator-controlled human validation"
         r")"
     )
 
@@ -113,6 +116,13 @@ class ProposalFeasibilityEvaluator:
                 "task_ids": [task.task_id for task in tasks],
                 "scenario_ids": [scenario["scenario_id"] for scenario in scenarios],
             }
+
+        from minime.services.candidate_test_resolver import CandidateTestResolver
+
+        test_tooling = CandidateTestResolver.inspect_tooling(
+            worktree_path,
+            project_checks=getattr(project, "checks", None),
+        )
 
         capabilities: list[dict[str, Any]] = []
         profiles = getattr(project, "agent_profiles", {}) if project else {}
@@ -250,6 +260,7 @@ class ProposalFeasibilityEvaluator:
             "openspec_path": openspec_path,
             "tasks": [{"task_id": task.task_id, "text": task.text} for task in tasks],
             "scenarios": scenarios,
+            "test_tooling": test_tooling,
             "capabilities": capabilities,
             "mandatory_blockers": mandatory_blockers,
         }
@@ -511,12 +522,15 @@ class ProposalFeasibilityEvaluator:
             scenario_id = str(item.get("scenario_id") or "")
             task_ids = [str(task_id) for task_id in item.get("task_ids", [])] if isinstance(item.get("task_ids"), list) else []
             evidence_stage = str(item.get("evidence_stage") or "")
+            verification_mode = str(item.get("verification_mode") or "")
             if not scenario_id or scenario_id not in expected_scenarios or scenario_id in seen_scenarios:
                 blockers.append(f"scenario entry has unknown or duplicate ID: {scenario_id or '(empty)'}")
                 continue
             seen_scenarios.add(scenario_id)
             if evidence_stage not in cls.STAGE_ORDER:
                 blockers.append(f"scenario {scenario_id} has an unknown or missing evidence stage")
+            if verification_mode not in {"browser", "physical_device", "human_decision", "other"}:
+                blockers.append(f"scenario {scenario_id} has an unknown or missing verification mode")
             if not task_ids or not set(task_ids).issubset(expected_tasks):
                 blockers.append(f"scenario {scenario_id} maps to no known OpenSpec task")
             elif evidence_stage in cls.STAGE_ORDER and any(
@@ -525,6 +539,28 @@ class ProposalFeasibilityEvaluator:
                 for task_id in task_ids
             ):
                 blockers.append(f"scenario {scenario_id} claims evidence before its mapped task stage")
+            elif verification_mode == "browser" and (
+                evidence_stage not in {"apply", "verify"}
+                or any(
+                    task_stages.get(task_id) not in {"apply", "verify"}
+                    or next((task.get("actor") for task in validated_tasks if task.get("task_id") == task_id), None) != "execution"
+                    for task_id in task_ids
+                )
+            ):
+                blockers.append(
+                    f"scenario {scenario_id} marks browser-reproducible work outside executor Apply/Verify"
+                )
+            elif verification_mode in {"physical_device", "human_decision"} and (
+                evidence_stage != "human_validation"
+                or any(
+                    task_stages.get(task_id) != "human_validation"
+                    or next((task.get("actor") for task in validated_tasks if task.get("task_id") == task_id), None) != "operator"
+                    for task_id in task_ids
+                )
+            ):
+                blockers.append(
+                    f"scenario {scenario_id} requires operator-controlled human validation"
+                )
             validated_scenarios.append(
                 {
                     "scenario_id": scenario_id,
@@ -537,6 +573,7 @@ class ProposalFeasibilityEvaluator:
                     ).hexdigest(),
                     "task_ids": task_ids,
                     "evidence_stage": evidence_stage,
+                    "verification_mode": verification_mode,
                 }
             )
         if seen_scenarios != expected_scenarios:
@@ -696,8 +733,13 @@ class ProposalFeasibilityEvaluator:
                                     "scenario_id": {"type": "string"},
                                     "task_ids": {"type": "array", "items": {"type": "string"}},
                                     "evidence_stage": {"type": "string", "enum": list(ProposalFeasibilityEvaluator.STAGE_ORDER)},
+                                    "verification_mode": {
+                                        "type": "string",
+                                        "enum": ["browser", "physical_device", "human_decision", "other"],
+                                        "description": "Classify how this scenario is verified; browser-reproducible UI must map to executor Apply/Verify.",
+                                    },
                                 },
-                                "required": ["scenario_id", "task_ids", "evidence_stage"],
+                                "required": ["scenario_id", "task_ids", "evidence_stage", "verification_mode"],
                                 "additionalProperties": False,
                             },
                         },

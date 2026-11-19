@@ -43,7 +43,9 @@ def test_python_selected_tests_precedence(tmp_path: Path):
 
 def test_root_node_project_detection(tmp_path: Path):
     # Like Multiplo: package.json in root, no Python files
-    (tmp_path / "package.json").write_text('{"name": "multiplo"}', encoding="utf-8")
+    (tmp_path / "package.json").write_text(
+        '{"name": "multiplo", "scripts": {"test": "node --version"}}', encoding="utf-8"
+    )
 
     plan = CandidateTestResolver.resolve(
         tmp_path,
@@ -51,7 +53,7 @@ def test_root_node_project_detection(tmp_path: Path):
     )
     assert plan.kind == CandidateTestStrategyKind.NODE_ROOT
     assert plan.is_executable is True
-    assert plan.command == ["npm", "test"]
+    assert plan.command == ["npm", "run", "test"]
     assert plan.cwd == tmp_path
 
 
@@ -59,7 +61,9 @@ def test_monorepo_frontend_subfolder_detection(tmp_path: Path):
     # Like mini-me: frontend/package.json
     frontend_dir = tmp_path / "frontend"
     frontend_dir.mkdir()
-    (frontend_dir / "package.json").write_text('{"name": "ui"}', encoding="utf-8")
+    (frontend_dir / "package.json").write_text(
+        '{"name": "ui", "scripts": {"test": "node --version"}}', encoding="utf-8"
+    )
 
     plan = CandidateTestResolver.resolve(
         tmp_path,
@@ -67,7 +71,7 @@ def test_monorepo_frontend_subfolder_detection(tmp_path: Path):
     )
     assert plan.kind == CandidateTestStrategyKind.NODE_SUBDIRECTORY
     assert plan.is_executable is True
-    assert plan.command == ["npm", "--prefix", "frontend", "test"]
+    assert plan.command == ["npm", "--prefix", "frontend", "run", "test"]
 
 
 def test_rust_cargo_project_detection(tmp_path: Path):
@@ -150,8 +154,10 @@ async def test_coordinator_runs_root_node_test_suite(tmp_path: Path):
     )
     passed, evidence = await coord._run_automated_tests(repo, "main")
     assert passed is True
-    assert "command: npm test" in evidence
+    assert "command: npm run test" in evidence
     assert "exit_code: 0" in evidence
+    assert "candidate_sha:" in evidence
+    assert "duration_ms:" in evidence
 
 
 @pytest.mark.asyncio
@@ -184,3 +190,58 @@ async def test_coordinator_runs_configured_project_checks(tmp_path: Path):
     assert "check: echo-check" in evidence
     assert "check-passed" in evidence
     assert "exit_code: 0" in evidence
+
+
+def test_resolver_prefers_declared_playwright_script(tmp_path: Path):
+    (tmp_path / "package.json").write_text(
+        '{"scripts": {"test": "node --test", "test:e2e": "playwright test"}}', encoding="utf-8"
+    )
+
+    plan = CandidateTestResolver.resolve(tmp_path, {"src/app.js"})
+
+    assert plan.command == ["npm", "run", "test:e2e"]
+
+
+def test_resolver_uses_declared_makefile_test_target(tmp_path: Path):
+    (tmp_path / "Makefile").write_text("test:\n\tpytest -q\n", encoding="utf-8")
+
+    plan = CandidateTestResolver.resolve(tmp_path, {"src/app.py"})
+
+    assert plan.kind == CandidateTestStrategyKind.MAKEFILE_TEST
+    assert plan.command == ["make", "test"]
+
+
+def test_resolver_does_not_invent_undeclared_node_test(tmp_path: Path):
+    (tmp_path / "package.json").write_text('{"name": "no-test-script"}', encoding="utf-8")
+
+    plan = CandidateTestResolver.resolve(tmp_path, {"src/app.js"})
+
+    assert plan.kind == CandidateTestStrategyKind.NO_HARNESS_DETECTED
+    assert not plan.is_executable
+
+
+def test_tooling_inventory_is_bounded_and_reports_declared_browser_capability(tmp_path: Path, monkeypatch):
+    (tmp_path / "package.json").write_text(
+        '{"scripts": {"test:e2e": "playwright test --project=chromium"}, '
+        '"devDependencies": {"@playwright/test": "^1.65.0"}}', encoding="utf-8"
+    )
+    monkeypatch.setattr("minime.services.candidate_test_resolver.shutil.which", lambda name: "/usr/bin/chromium" if name == "chromium" else None)
+    empty_browser_cache = tmp_path / "empty-browser-cache"
+    empty_browser_cache.mkdir()
+    monkeypatch.setenv("PLAYWRIGHT_BROWSERS_PATH", str(empty_browser_cache))
+    monkeypatch.setattr(
+        "minime.services.candidate_test_resolver.subprocess.run",
+        lambda *args, **kwargs: type("Result", (), {"returncode": 0, "stdout": "Chromium 123", "stderr": ""})(),
+    )
+
+    inventory = CandidateTestResolver.inspect_tooling(tmp_path)
+
+    assert inventory["playwright_declared"] is True
+    assert inventory["playwright_packages"] == [{"name": "@playwright/test", "version": "^1.65.0"}]
+    assert inventory["declared_test_commands"][0]["command"] == "npm run test:e2e"
+    assert inventory["declared_test_commands"][0]["declared_command"] == "playwright test --project=chromium"
+    assert inventory["chromium_runtime"] == {
+        "available": True,
+        "executable": "/usr/bin/chromium",
+        "version": "Chromium 123",
+    }
