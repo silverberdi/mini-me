@@ -27,3 +27,13 @@ def test_f4_skills_do_not_require_mini_me_private_documents():
             assert "docs/BUSINESS_INTENT.md" not in content
             assert "docs/CHANGE_DELIVERY_CONTRACT.md" not in content
             assert "ficha MM-Rxx" not in content
+
+
+def test_implementer_skill_matches_both_provisioned_agent_paths():
+    root = Path(__file__).parents[1]
+    plural = (root / ".agents/skills/minime-implementer/SKILL.md").read_bytes()
+    singular = (root / ".agent/skills/minime-implementer/SKILL.md").read_bytes()
+
+    assert plural == singular
+    assert b"Do not wait for the coordinator to consolidate the candidate" in plural
+    assert b"expected SHA-256" in plural
