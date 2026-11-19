@@ -76,6 +76,15 @@ jobs:
           npm test
           npm run build
 
+      - name: Provision shared Playwright Chromium runtime
+        working-directory: frontend
+        env:
+          PLAYWRIGHT_BROWSERS_PATH: ${{ runner.temp }}/playwright-browsers
+          PLAYWRIGHT_SKIP_BROWSER_GC: '1'
+        run: |
+          npx playwright install --only-shell chromium
+          tar -czf "$RUNNER_TEMP/playwright-browsers.tar.gz" -C "$PLAYWRIGHT_BROWSERS_PATH" .
+
       - name: Assemble deployment tree
         shell: bash
         run: |
@@ -87,13 +96,15 @@ jobs:
             --exclude='*.pyc' --exclude='__pycache__' --exclude='.pytest_cache' \
             --exclude='frontend' --exclude='.git' \
             -czf "minime-${{ needs.version.outputs.tag }}.tar.gz" \
-            src alembic alembic.ini pyproject.toml
+            src alembic alembic.ini pyproject.toml config/systemd
 
       - name: Upload deployment artifact
         uses: actions/upload-artifact@v4
         with:
           name: minime-${{ needs.version.outputs.tag }}
-          path: minime-${{ needs.version.outputs.tag }}.tar.gz
+          path: |
+            minime-${{ needs.version.outputs.tag }}.tar.gz
+            ${{ runner.temp }}/playwright-browsers.tar.gz
           if-no-files-found: error
           retention-days: 14
 
@@ -152,6 +163,9 @@ jobs:
           scp -i "$HOME/.ssh/minime_deploy" \
             "minime-${RELEASE_TAG}.tar.gz" \
             "${DEPLOY_USER}@${DEPLOY_HOST}:/tmp/minime-${RELEASE_TAG}.tar.gz"
+          scp -i "$HOME/.ssh/minime_deploy" \
+            "playwright-browsers.tar.gz" \
+            "${DEPLOY_USER}@${DEPLOY_HOST}:/tmp/minime-${RELEASE_TAG}-playwright-browsers.tar.gz"
 
       - name: Install and verify release
         env:
@@ -167,11 +181,22 @@ jobs:
           : "${RELEASE_TAG:?missing RELEASE_TAG}"
           : "${DEPLOY_PATH:?missing DEPLOY_PATH}"
           archive="/tmp/minime-${RELEASE_TAG}.tar.gz"
+          browser_archive="/tmp/minime-${RELEASE_TAG}-playwright-browsers.tar.gz"
           test -s "$archive"
+          test -s "$browser_archive"
           test -d "$DEPLOY_PATH"
           sudo tar --no-same-owner --no-same-permissions -xzf "$archive" -C "$DEPLOY_PATH"
+          sudo install -m 0644 "$DEPLOY_PATH/config/systemd/minime-api.service" /etc/systemd/system/minime-api.service
+          sudo install -m 0644 "$DEPLOY_PATH/config/systemd/minime-scheduler.service" /etc/systemd/system/minime-scheduler.service
+          sudo systemctl daemon-reload
+          sudo install -d -o minime -g minime -m 0755 /opt/minime/runtime/playwright-browsers
+          sudo tar --no-same-owner --no-same-permissions -xzf "$browser_archive" -C /opt/minime/runtime/playwright-browsers
+          sudo chown -R minime:minime /opt/minime/runtime/playwright-browsers
           sudo chown -R minime:minime "$DEPLOY_PATH/src/minime/static" "$DEPLOY_PATH/src/minime" 
           sudo systemctl restart minime-api minime-scheduler
+          browser="$(find /opt/minime/runtime/playwright-browsers -type f \( -name headless_shell -o -name chrome-headless-shell \) -perm /111 -print -quit)"
+          test -n "$browser"
+          sudo -u minime "$browser" --no-sandbox --headless --disable-gpu --dump-dom about:blank >/dev/null
           for attempt in $(seq 1 30); do
             if curl --fail --silent --show-error --max-time 5 https://mini-me.silverman.pro/health >/tmp/minime-health.json; then
               grep -q '"status":"healthy"' /tmp/minime-health.json
@@ -184,4 +209,5 @@ jobs:
             sleep 2
           done
           rm -f "$archive"
+          rm -f "$browser_archive"
           REMOTE

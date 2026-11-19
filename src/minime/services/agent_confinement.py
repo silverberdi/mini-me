@@ -1048,6 +1048,7 @@ class AgentProcessConfinement:
         allowed_worktree_path: str,
         runtime_root: str,
         private_state_root: str | None = None,
+        secure_cache_path: str | None = None,
     ) -> str:
         """Deny host writes except the assigned worktree and private session state."""
         private_allows: list[str] = []
@@ -1056,6 +1057,11 @@ class AgentProcessConfinement:
             resolved_private = str(Path(private_state_root).resolve())
             if resolved_private != private_state_root:
                 private_allows.append(f'(allow file-write* (subpath "{resolved_private}"))\n')
+        if secure_cache_path:
+            private_allows.append(f'(allow file-write* (subpath "{secure_cache_path}"))\n')
+            resolved_cache = str(Path(secure_cache_path).resolve())
+            if resolved_cache != secure_cache_path:
+                private_allows.append(f'(allow file-write* (subpath "{resolved_cache}"))\n')
         private_allow = "".join(private_allows)
 
         worktree_allows: list[str] = [f'(allow file-write* (subpath "{allowed_worktree_path}"))\n']
@@ -1088,9 +1094,16 @@ class AgentProcessConfinement:
             + runtime_deny
         )
 
-    def _generate_profile(self, private_state_root: str | None = None) -> str:
+    def _generate_profile(
+        self,
+        private_state_root: str | None = None,
+        secure_cache_path: str | None = None,
+    ) -> str:
         return self._build_darwin_sandbox_profile(
-            self.allowed_worktree_path, self.runtime_root, private_state_root
+            self.allowed_worktree_path,
+            self.runtime_root,
+            private_state_root,
+            secure_cache_path,
         )
 
     def _generate_darwin_sandbox_profile(self) -> str:
@@ -1283,7 +1296,8 @@ class AgentProcessConfinement:
 
         if self.confinement_mechanism == "darwin_sandbox":
             profile = self._generate_profile(
-                str(runtime_state.host_root) if runtime_state is not None else None
+                str(runtime_state.host_root) if runtime_state is not None else None,
+                str(validated_cache) if validated_cache is not None else None,
             )
             sandbox_bin = (
                 "/usr/bin/sandbox-exec"

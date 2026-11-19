@@ -7,6 +7,7 @@ import os
 import signal
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Callable
 from urllib.parse import urlparse
 
 from minime.domain.enums import EvidenceDiagnosticStatus, ExternalOutcome
@@ -40,6 +41,7 @@ class ChecksRunner:
         candidate_sha: str = "",
         candidate_generation: int | None = None,
         attempt_id: str | None = None,
+        process_start_observer: Callable[[dict], None] | None = None,
     ) -> ChecksRunResult:
         results: list[CheckResult] = []
         diagnostics: list[EvidenceDiagnostic] = []
@@ -118,6 +120,12 @@ class ChecksRunner:
                         ephemeral_caches.append(pycache_dir)
 
                 env["PYTHONPYCACHEPREFIX"] = str(pycache_dir.resolve())
+                # Browser runners and other tools may create temporary profiles
+                # outside Python's cache path. Keep those files inside the same
+                # private location explicitly mounted by process confinement.
+                env["TMPDIR"] = str(pycache_dir.resolve())
+                env["TMP"] = str(pycache_dir.resolve())
+                env["TEMP"] = str(pycache_dir.resolve())
 
                 wt_path = Path(worktree_path)
                 wt_venv_bin = wt_path / ".venv" / "bin"
@@ -256,6 +264,20 @@ class ChecksRunner:
                         stderr=asyncio.subprocess.PIPE,
                         start_new_session=True,
                     )
+                    if process_start_observer is not None:
+                        from minime.services.agent_confinement import process_identity
+
+                        identity = process_identity(proc.pid)
+                        identity["pgid"] = proc.pid
+                        try:
+                            process_start_observer(identity)
+                        except Exception:
+                            try:
+                                os.killpg(proc.pid, signal.SIGKILL)
+                            except OSError:
+                                proc.kill()
+                            await proc.communicate()
+                            raise
                     stdout, stderr = await asyncio.wait_for(
                         proc.communicate(), timeout=self.timeout_seconds
                     )
@@ -311,6 +333,10 @@ class ChecksRunner:
                     exit_code in (126, 127)
                     or "command not found" in snippet.lower()
                     or "no such file or directory" in snippet.lower()
+                    or "executable doesn't exist" in snippet.lower()
+                    or "executable does not exist" in snippet.lower()
+                    or "missing dependencies to run browsers" in snippet.lower()
+                    or "failed to launch browser" in snippet.lower()
                 ):
                     diag_status = EvidenceDiagnosticStatus.ENVIRONMENT_UNAVAILABLE
                     reason = f"Check environment unavailable: {snippet}"

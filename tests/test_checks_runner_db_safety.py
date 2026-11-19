@@ -105,3 +105,31 @@ async def test_verified_disposable_database_receives_only_validated_environment(
     assert result.passed
     assert captured["MINIME_DATABASE_URL"] == "postgresql://x/disposable_011"
     assert captured["MINIME_EXPECTED_DATABASE"] == "disposable_011"
+
+
+@pytest.mark.asyncio
+async def test_missing_playwright_browser_is_classified_as_environment_unavailable(
+    monkeypatch, tmp_path
+):
+    class MissingBrowser:
+        returncode = 1
+
+        async def communicate(self):
+            return b"", b"browserType.launch: Executable doesn't exist at the configured Chromium path"
+
+    async def spawn(*args, **kwargs):
+        return MissingBrowser()
+
+    monkeypatch.setattr("minime.services.checks_runner.asyncio.create_subprocess_shell", spawn)
+    monkeypatch.setattr("minime.services.checks_runner.asyncio.create_subprocess_exec", spawn)
+    result = await ChecksRunner().run(
+        "job",
+        [{"name": "playwright", "command": "npm run test:e2e"}],
+        tmp_path,
+        candidate_sha="f" * 40,
+    )
+
+    assert not result.passed
+    assert result.results[0].candidate_sha == "f" * 40
+    assert result.diagnostics[0].diagnostic_status.value == "ENVIRONMENT_UNAVAILABLE"
+    assert "Executable doesn't exist" in result.diagnostics[0].reason
