@@ -7,7 +7,7 @@ Defines the schema, parsing, and validation rules for machine-readable review ve
 ## Requirements
 
 ### Requirement: Machine-readable review verdict schema
-The system SHALL parse and validate reviewer output into an explicit verdict enumeration: `READY_TO_MERGE` or `CHANGES_REQUIRED`, and SHALL validate reviewer missing-file finding claims against explicit OpenSpec contracts, the frozen `CandidateManifest`, and the authoritative candidate tree at the exact candidate SHA (supported by base..candidate diff analysis) before accepting a blocker finding.
+The system SHALL parse and validate reviewer output into an explicit verdict enumeration: `READY_TO_MERGE` or `CHANGES_REQUIRED`, SHALL validate reviewer missing-file finding claims against explicit OpenSpec contracts, the frozen `CandidateManifest`, and the authoritative candidate tree at the exact candidate SHA (supported by base..candidate diff analysis) before accepting a blocker finding, and SHALL instruct and validate reviewer textual fields (`summary`, `violated_requirement`, `expected_correction`) as clear, simple Spanish suitable for the human operator.
 
 #### Scenario: Authoritative READY_TO_MERGE verdict
 - **WHEN** the reviewer determines all requirements and checks are satisfied without blocking issues
@@ -18,6 +18,7 @@ The system SHALL parse and validate reviewer output into an explicit verdict enu
 - **WHEN** the reviewer detects defects or missing requirements
 - **THEN** the reviewer emits verdict `CHANGES_REQUIRED` accompanied by structured findings
 - **AND** each finding specifies a severity (`BLOCKER`, `MAJOR`, or `MINOR`), location, violated requirement, and expected correction.
+- **AND** the summary, violated requirement, and expected correction are provided in clear, simple Spanish.
 
 #### Scenario: Required unchanged base file verified present in candidate tree
 - **WHEN** a reviewer emits a `BLOCKER` finding claiming that an existing repository file is missing because it does not appear in the base..candidate diff
