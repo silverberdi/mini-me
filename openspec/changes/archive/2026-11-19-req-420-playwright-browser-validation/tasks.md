@@ -12,7 +12,7 @@
 
 ## 3. Base execution browser capability and failure handling
 
-- [ ] 3.1 Provision the supported Playwright Chromium runtime once through the existing Mini Me runtime/release path, and verify the configured execution user can launch it without per-project installation.
+- [x] 3.1 Provision the supported Playwright Chromium runtime once through the existing Mini Me runtime/release path, and verify the configured execution user can launch it without per-project installation.
 - [x] 3.2 Report missing or unusable browser dependencies through the existing `ENVIRONMENT_UNAVAILABLE` path with concrete diagnostics; route failed assertions through the ordinary correction workflow without creating a browser-test `HUMAN_REQUIRED` gate.
 - [x] 3.3 Add regression coverage for missing Chromium, browser launch failure, ordinary Playwright assertion failure, and successful recovery, without adding a state, database table, service, or Playwright wrapper.
 
