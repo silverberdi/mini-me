@@ -46,3 +46,12 @@ The system SHALL NOT treat malformed, missing, unparseable, or ambiguous reviewe
 - **WHEN** a reviewer outputs a structured JSON review verdict containing nested arrays, objects, or string literals with curly braces (such as CSS or code rules)
 - **THEN** the system SHALL successfully decode the root payload into `ReviewVerdictPayload`
 - **AND** the system SHALL preserve all findings without misclassifying the output as malformed.
+
+### Requirement: Diagnostic observability for malformed reviewer output
+The system SHALL capture and persist the prefix and suffix of the unparseable reviewer raw output upon review parse failure to provide immediate diagnostic visibility in run details and operational logs without speculative troubleshooting.
+
+#### Scenario: Parse failure persists raw response diagnostics
+- **WHEN** the review verdict parser fails to locate a valid structured verdict in the reviewer output
+- **THEN** the orchestrator captures the first 500 characters and last 500 characters of the raw reviewer output
+- **AND** stores this diagnostic snippet in `stop_details` and review diagnostic records
+- **AND** surfaces it in the human gate / operational view for immediate inspection.
