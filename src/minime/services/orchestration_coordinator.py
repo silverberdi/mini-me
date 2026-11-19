@@ -4474,6 +4474,11 @@ class NativeOrchestrationCoordinator:
         r"\[PUBLISHED_EVIDENCE\s+source=(?:\"[^\"]+\"|[^;\]]+);\s*sha=([^\]]+)\]",
         re.IGNORECASE,
     )
+    _PUBLISHED_CANDIDATE_CLAIM = re.compile(
+        r"\b(?:published|deployed|production|live)\s+(?:app(?:lication)?|build|version|site|candidate)\b"
+        r"|\bgithub\s+pages\b",
+        re.IGNORECASE,
+    )
 
     @classmethod
     def _deferred_task_ids(cls, tasks_text: str) -> list[str]:
@@ -4573,7 +4578,7 @@ class NativeOrchestrationCoordinator:
     def _invalid_published_evidence_completions(
         cls, tasks_text: str, candidate_sha: str | None
     ) -> list[str]:
-        """Reject completed tasks sourced from a published build without exact SHA proof."""
+        """Reject candidate-specific published application evidence without exact SHA proof."""
         invalid: list[str] = []
         for line in tasks_text.splitlines():
             completed = re.match(r"^\s*-\s*\[x\]\s+(\S+)", line, re.IGNORECASE)
@@ -4581,7 +4586,7 @@ class NativeOrchestrationCoordinator:
                 continue
             marker = cls._PUBLISHED_EVIDENCE_MARKER.search(line)
             if not marker:
-                if re.search(r"published|github pages", line, re.IGNORECASE):
+                if cls._PUBLISHED_CANDIDATE_CLAIM.search(line):
                     invalid.append(completed.group(1))
                 continue
             source_sha = marker.group(1).strip()
@@ -4679,6 +4684,10 @@ class NativeOrchestrationCoordinator:
                 f"Prior test result: {previous.get('tests_passed')}\n"
                 f"Prior test evidence: {previous.get('test_evidence', '')[-3000:]}\n"
                 "Inspect and preserve valid existing work. Mark [x] only tasks supported by observed diff and passing relevant tests. "
+                "During Apply, do not wait for the coordinator's final immutable candidate SHA to mark implementation progress; use the active worktree diff and passing relevant tests. "
+                "An immutable external asset or intentionally untracked fixture may be supported by a deterministic expected SHA-256 check and passing local tests without a Git commit for that excluded file. "
+                "Keep published application/build/version evidence bound to its source and require an exact candidate SHA match for candidate-specific claims. "
+                "Task checkboxes do not certify Apply or Change completion. "
                 "Do not redo or discard valid work. This recovery context is separate from reviewer corrections.")
 
     def _escalate_apply_to_human(
@@ -6793,11 +6802,15 @@ class NativeOrchestrationCoordinator:
             f"You are the implementer agent. Execute official OpenSpec Apply for change '{change_name}'.\n"
             f"Workflow command: {wf.dispatch_command}\n\n"
             f"Implement all pending tasks specified in tasks.md, write unit and E2E tests, "
-            f"ensure the test suite passes, and mark completed tasks as [x] only when coordinator-observed diff and passing relevant tests support completion."
+            f"ensure relevant automated tests pass with exit code 0, and mark implementation tasks [x] as soon as their work is present in the active worktree and passing relevant tests support completion. "
+            "Do not wait for the coordinator to consolidate the candidate or provide its final immutable candidate SHA; that SHA is established after Apply and binds evidence during Verify and independent review. "
+            "For immutable external assets or intentionally untracked fixtures, a deterministic check against the expected SHA-256 plus passing relevant local tests is valid Apply evidence; do not require a Git commit for a file intentionally excluded from Git. "
+            "This does not let evidence from a published application, build, or version satisfy a candidate-specific criterion unless its immutable SHA matches the candidate being verified. "
+            "Task checkboxes record implementation progress and do not by themselves certify Apply or Change completion. "
             " For any evidence from a published version, preserve a task note using "
             "[PUBLISHED_EVIDENCE source=\"<source identity>\"; sha=<full immutable SHA|unknown>]. "
-            "Never mark such evidence complete for this candidate unless its full SHA exactly "
-            "matches the candidate SHA; otherwise keep the task unchecked and identify the missing candidate evidence."
+            "Never mark such published-version evidence complete for this candidate unless its full SHA exactly "
+            "matches the candidate SHA; otherwise keep that candidate-specific task unchecked and identify the missing candidate evidence."
             f"{correction_instruction}"
             f"{recovery_context}"
         )

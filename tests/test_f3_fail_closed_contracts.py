@@ -991,6 +991,50 @@ def test_published_version_evidence_needs_exact_candidate_sha_to_complete():
     ) == ["4.2"]
 
 
+def test_external_published_asset_is_not_mistaken_for_published_candidate_evidence():
+    asset = "- [x] 1.1 Verify published GitHub release asset SHA-256 and local fixture tests"
+    deployed_app = "- [x] 1.2 Validate published application in GitHub Pages"
+
+    assert NativeOrchestrationCoordinator._invalid_published_evidence_completions(
+        asset, "a" * 40
+    ) == []
+    assert NativeOrchestrationCoordinator._invalid_published_evidence_completions(
+        deployed_app, "a" * 40
+    ) == ["1.2"]
+
+
+@pytest.mark.asyncio
+async def test_apply_prompt_separates_task_progress_from_final_candidate_sha(tmp_path: Path):
+    runner = ScriptedRunner("Apply completed")
+    c = coordinator(tmp_path, runner)
+    c._run_automated_tests = AsyncMock(return_value=(True, "pytest exit code 0"))
+    change = tmp_path / "openspec" / "changes" / "sample-change"
+    change.mkdir(parents=True)
+    (change / "tasks.md").write_text("## Tasks\n- [x] 1.1 Implement and test\n", encoding="utf-8")
+
+    outcome = await c._run_apply(tmp_path, "codex", "sample-change")
+
+    assert outcome.status == "COMPLETE"
+    prompt = runner.calls[0]
+    assert "Do not wait for the coordinator to consolidate the candidate" in prompt
+    assert "expected SHA-256" in prompt
+    assert "published application, build, or version" in prompt
+    assert "otherwise keep the task unchecked" not in prompt
+
+
+def test_apply_recovery_context_uses_the_same_evidence_phase_boundary():
+    context = NativeOrchestrationCoordinator._apply_recovery_context(
+        {
+            "completed": [], "pending": ["1.1"], "files": ["src/app.py"],
+            "sha": None, "tests_passed": True, "test_evidence": "exit code 0",
+        }
+    )
+
+    assert "do not wait for the coordinator's final immutable candidate SHA" in context
+    assert "expected SHA-256 check" in context
+    assert "exact candidate SHA match" in context
+
+
 def test_apply_recovery_progress_uses_pending_count_or_diff_fingerprint():
     previous = {"pending": ["1.1", "1.2"], "fingerprint": "old"}
     fewer_tasks = ApplyOutcome("PARTIAL", ("1.1",), ("1.2",), "sha-1", (), None, False, "red")
