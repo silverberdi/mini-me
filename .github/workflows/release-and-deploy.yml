@@ -97,14 +97,15 @@ jobs:
             --exclude='frontend' --exclude='.git' \
             -czf "minime-${{ needs.version.outputs.tag }}.tar.gz" \
             src alembic alembic.ini pyproject.toml config/systemd
+          mkdir -p release-artifacts
+          mv "minime-${{ needs.version.outputs.tag }}.tar.gz" release-artifacts/
+          mv "$RUNNER_TEMP/playwright-browsers.tar.gz" release-artifacts/
 
       - name: Upload deployment artifact
         uses: actions/upload-artifact@v4
         with:
           name: minime-${{ needs.version.outputs.tag }}
-          path: |
-            minime-${{ needs.version.outputs.tag }}.tar.gz
-            ${{ runner.temp }}/playwright-browsers.tar.gz
+          path: release-artifacts/*
           if-no-files-found: error
           retention-days: 14
 
@@ -135,6 +136,15 @@ jobs:
         uses: actions/download-artifact@v4
         with:
           name: minime-${{ needs.version.outputs.tag }}
+          path: release-artifacts
+
+      - name: Verify downloaded release files
+        env:
+          RELEASE_TAG: ${{ needs.version.outputs.tag }}
+        run: |
+          set -euo pipefail
+          test -s "release-artifacts/minime-${RELEASE_TAG}.tar.gz"
+          test -s "release-artifacts/playwright-browsers.tar.gz"
 
       - name: Configure SSH trust
         shell: bash
@@ -161,10 +171,10 @@ jobs:
           test -n "$DEPLOY_USER"
           test -n "$DEPLOY_PATH"
           scp -i "$HOME/.ssh/minime_deploy" \
-            "minime-${RELEASE_TAG}.tar.gz" \
+            "release-artifacts/minime-${RELEASE_TAG}.tar.gz" \
             "${DEPLOY_USER}@${DEPLOY_HOST}:/tmp/minime-${RELEASE_TAG}.tar.gz"
           scp -i "$HOME/.ssh/minime_deploy" \
-            "playwright-browsers.tar.gz" \
+            "release-artifacts/playwright-browsers.tar.gz" \
             "${DEPLOY_USER}@${DEPLOY_HOST}:/tmp/minime-${RELEASE_TAG}-playwright-browsers.tar.gz"
 
       - name: Install and verify release
