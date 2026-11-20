@@ -1,14 +1,21 @@
 """The agent reports completion in the same invocation; OpenSpec remains authoritative."""
 
 import asyncio
+import json
+import sys
 from types import SimpleNamespace
 
 import pytest
+from minime.config import CliInvocationProfile
+from minime.domain.enums import ExternalOutcome
+from minime.services import agent_runner as agent_runner_module
+from minime.services.agent_confinement import AgentProcessResult
 
 from minime.services.agent_runner import (
     AgentExecutionResult,
     AgentWorkflowHandoff,
     CliAgentRunner,
+    ResolvedWorkflow,
     parse_agent_workflow_handoff,
 )
 from minime.services.orchestration_coordinator import NativeOrchestrationCoordinator
@@ -222,6 +229,89 @@ def test_codex_terminal_handoff_is_not_read_from_tool_diagnostics():
     assert handoff is not None
     assert handoff.status == "INCOMPLETE"
     assert handoff.pending == ("design.md",)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("operation", "handoff_required"),
+    [("sync", False), ("archive", False), ("propose", True), ("continue", True)],
+)
+async def test_sync_and_archive_completion_token_is_optional_but_native_handoff_is_parsed(
+    tmp_path, monkeypatch, operation, handoff_required
+):
+    human_required = (
+        'MINIME_WORKFLOW_RESULT: {"status":"HUMAN_REQUIRED",'
+        '"summary":"Decision required", "summary_es":"Se requiere una decisión",'
+        '"pending":["Option A"], "pending_es":["Opción A"]}'
+    )
+    stream = "\n".join(
+        json.dumps(event)
+        for event in [
+            {"type": "turn.started"},
+            {"type": "item.completed", "item": {"type": "agent_message", "text": human_required}},
+            {"type": "turn.completed"},
+        ]
+    ).encode()
+
+    class FakeConfinement:
+        prompt = None
+
+        def __init__(self, **_kwargs):
+            pass
+
+        def validate_command_preflight(self, *, cwd):
+            return SimpleNamespace(outcome=ExternalOutcome.SUCCESS, error_message=None)
+
+        def codex_auth_source(self, _env):
+            return None
+
+        async def run_confined_async_subprocess(self, _cmd, **kwargs):
+            FakeConfinement.prompt = kwargs.get("input_bytes", b"").decode()
+            return AgentProcessResult(returncode=0, stdout=stream, stderr=b"")
+
+    monkeypatch.setattr(agent_runner_module, "AgentProcessConfinement", FakeConfinement)
+    profile = CliInvocationProfile(
+        provider="codex", role="thinker", executable=sys.executable,
+        args=("-c", "pass"), prompt_transport="stdin",
+    )
+    workflow = ResolvedWorkflow(
+        provider="codex", operation=operation, workflow_name=f"opsx-{operation}",
+        workflow_path=".agents/skills/workflow/SKILL.md", workflow_sha256="f" * 64,
+        change_name="change", dispatch_command=f"$opsx-{operation} change",
+    )
+
+    result = await CliAgentRunner(profile).run(
+        tmp_path, "Run the native workflow", provider="codex", role="thinker", workflow=workflow
+    )
+
+    assert result.workflow_handoff_required is handoff_required
+    assert ("MINIME_WORKFLOW_RESULT:" in FakeConfinement.prompt) is handoff_required
+    assert result.workflow_handoff is not None
+    assert result.workflow_handoff.status == "HUMAN_REQUIRED"
+    assert result.workflow_handoff.pending_es == ("Opción A",)
+
+
+def test_sync_archive_process_success_does_not_require_final_response():
+    process_result = AgentExecutionResult(
+        exit_code=0,
+        timed_out=False,
+        stdout=[],
+        stderr=[],
+        duration_ms=1,
+        final_response_status="MISSING",
+        workflow_handoff_required=False,
+    )
+    assert NativeOrchestrationCoordinator._execution_is_successful(
+        process_result, require_response=False
+    )
+    assert not NativeOrchestrationCoordinator._execution_is_successful(process_result)
+    assert not NativeOrchestrationCoordinator._execution_is_successful(
+        AgentExecutionResult(
+            exit_code=0, timed_out=True, stdout=[], stderr=[], duration_ms=1,
+            final_response_status="MISSING", workflow_handoff_required=False,
+        ),
+        require_response=False,
+    )
 
 
 @pytest.mark.asyncio

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+import subprocess
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
@@ -32,6 +33,28 @@ def _archived_change(doc_path: Path, change_name: str = "issue-263-doc-closing-i
         "## Requirements\n", encoding="utf-8"
     )
     return archived
+
+
+def _init_git_repo(path: Path) -> str:
+    path.mkdir(parents=True, exist_ok=True)
+    subprocess.run(["git", "init", str(path)], check=True, capture_output=True, text=True)
+    subprocess.run(["git", "-C", str(path), "config", "user.name", "Test User"], check=True)
+    subprocess.run(
+        ["git", "-C", str(path), "config", "user.email", "test@example.invalid"], check=True
+    )
+    subprocess.run(["git", "-C", str(path), "add", "-A"], check=True)
+    subprocess.run(
+        ["git", "-C", str(path), "commit", "--allow-empty", "-m", "test base"],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    return subprocess.run(
+        ["git", "-C", str(path), "rev-parse", "HEAD"],
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
 
 
 def test_doc_closing_probe_keeps_active_change_on_native_workflow_path(tmp_path: Path):
@@ -71,7 +94,14 @@ async def test_doc_closing_dispatches_native_workflows_only_for_active_change(
         worktree_manager=SimpleNamespace(),
         agent_runner=SimpleNamespace(),
     )
-    coordinator._run_sync_and_archive = AsyncMock(return_value=True)
+    _init_git_repo(active)
+
+    async def complete_archive(path, *_args, **_kwargs):
+        (path / "openspec" / "changes" / change_name).rmdir()
+        _archived_change(path, change_name)
+        return True
+
+    coordinator._run_sync_and_archive = AsyncMock(side_effect=complete_archive)
 
     active_result = await coordinator._ensure_doc_closing_sync_archive(
         active, "codex", change_name
@@ -85,6 +115,7 @@ async def test_doc_closing_dispatches_native_workflows_only_for_active_change(
 
     archived = tmp_path / "archived"
     _archived_change(archived, change_name)
+    archived_head = _init_git_repo(archived)
     coordinator._run_sync_and_archive.reset_mock()
     archived_result = await coordinator._ensure_doc_closing_sync_archive(
         archived, "codex", change_name
@@ -92,6 +123,70 @@ async def test_doc_closing_dispatches_native_workflows_only_for_active_change(
 
     assert archived_result == (True, None)
     coordinator._run_sync_and_archive.assert_not_awaited()
+    assert subprocess.run(
+        ["git", "-C", str(archived), "rev-parse", "HEAD"],
+        check=True, capture_output=True, text=True,
+    ).stdout.strip() == archived_head
+
+
+@pytest.mark.asyncio
+async def test_reentry_commits_pending_openspec_paths_before_pr2(tmp_path: Path):
+    doc_path = tmp_path / "doc"
+    _init_git_repo(doc_path)
+    _archived_change(doc_path)
+
+    coordinator = NativeOrchestrationCoordinator(
+        uow_factory=lambda: None,
+        github_adapter=SimpleNamespace(),
+        worktree_manager=SimpleNamespace(),
+        agent_runner=SimpleNamespace(),
+    )
+
+    result = await coordinator._ensure_doc_closing_sync_archive(
+        doc_path, "codex", "issue-263-doc-closing-idempotency"
+    )
+
+    assert result == (True, None)
+    assert subprocess.run(
+        ["git", "-C", str(doc_path), "log", "-1", "--format=%s"],
+        check=True, capture_output=True, text=True,
+    ).stdout.strip() == "docs(issue-263-doc-closing-idempotency): sync specs and archive change"
+    assert not subprocess.run(
+        ["git", "-C", str(doc_path), "status", "--porcelain", "--", "openspec/"],
+        check=True, capture_output=True, text=True,
+    ).stdout.strip()
+
+
+@pytest.mark.asyncio
+async def test_reentry_refuses_openspec_commit_with_unrelated_staged_paths(tmp_path: Path):
+    doc_path = tmp_path / "doc"
+    base_head = _init_git_repo(doc_path)
+    _archived_change(doc_path)
+    unrelated = doc_path / "notes.txt"
+    unrelated.write_text("must not be included", encoding="utf-8")
+    subprocess.run(["git", "-C", str(doc_path), "add", "notes.txt"], check=True)
+
+    coordinator = NativeOrchestrationCoordinator(
+        uow_factory=lambda: None,
+        github_adapter=SimpleNamespace(),
+        worktree_manager=SimpleNamespace(),
+        agent_runner=SimpleNamespace(),
+    )
+
+    result = await coordinator._ensure_doc_closing_sync_archive(
+        doc_path, "codex", "issue-263-doc-closing-idempotency"
+    )
+
+    assert result[0] is False
+    assert "unrelated paths are already staged" in result[1]
+    assert subprocess.run(
+        ["git", "-C", str(doc_path), "rev-parse", "HEAD"],
+        check=True, capture_output=True, text=True,
+    ).stdout.strip() == base_head
+    assert "notes.txt" in subprocess.run(
+        ["git", "-C", str(doc_path), "diff", "--cached", "--name-only"],
+        check=True, capture_output=True, text=True,
+    ).stdout
 
 
 @pytest.mark.parametrize("missing", ["proposal.md", "design.md", "tasks.md", "main_spec"])
@@ -163,6 +258,7 @@ async def test_reentry_with_archived_change_skips_workflows_and_continues_to_pr2
     )
     change_name = "issue-263-doc-closing-idempotency"
     _archived_change(doc_worktree, change_name)
+    _init_git_repo(doc_worktree)
 
     run = OrchestrationRun(
         project_id="issue-263-project",
