@@ -487,8 +487,11 @@ def test_bubblewrap_command_binds_only_worktree_and_private_state(tmp_path: Path
         if command[i] == "--ro-bind" and command[i + 1] == "/" and command[i + 2] == "/"
     ][0]
     assert command[ro_root_idx + 3 : ro_root_idx + 5] == ["--dev", "/dev"]
+    assert command[ro_root_idx + 5 : ro_root_idx + 7] == ["--tmpfs", "/tmp"]
     assert ["--dev", "/dev"] == command[command.index("--dev") : command.index("--dev") + 2]
-    assert ["--tmpfs", "/run"] == command[command.index("--tmpfs") : command.index("--tmpfs") + 2]
+    tmpfs_dirs = [command[i + 1] for i in range(len(command) - 1) if command[i] == "--tmpfs"]
+    assert "/tmp" in tmpfs_dirs
+    assert "/run" in tmpfs_dirs
     assert "--unshare-pid" in command
     assert "/global" not in " ".join(command)
 
@@ -601,7 +604,7 @@ def test_runtime_session_mounts_only_resolver_file_after_private_run(tmp_path: P
     with confinement.runtime_session({}) as runtime:
         command = confinement.wrap_command(["/usr/bin/true"], runtime)
 
-    run_tmpfs = command.index("--tmpfs")
+    run_tmpfs = [i for i in range(len(command) - 1) if command[i] == "--tmpfs" and command[i + 1] == "/run"][0]
     dns_bind = command.index("--ro-bind", run_tmpfs)
     private_runtime_bind = command.index("--bind", dns_bind)
     assert run_tmpfs < dns_bind < private_runtime_bind

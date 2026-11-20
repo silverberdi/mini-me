@@ -1252,6 +1252,8 @@ class AgentProcessConfinement:
                 "/",
                 "--dev",
                 "/dev",
+                "--tmpfs",
+                "/tmp",
                 worktree_mount,
                 self.allowed_worktree_path,
                 self.allowed_worktree_path,
