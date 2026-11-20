@@ -346,12 +346,22 @@ class NativeOrchestrationCoordinator:
             or recovery_count >= 1
             or not isinstance(coordinator, dict)
             or not isinstance(workflow_process, dict)
+            or not isinstance(current_process, dict)
             or coordinator.get("status") != "AVAILABLE"
             or workflow_process.get("status") != "AVAILABLE"
+            or current_process.get("status") != "AVAILABLE"
+            or not current_process.get("host")
+            or not current_process.get("boot_id")
             or coordinator.get("host") != current_process.get("host")
-            or coordinator.get("boot_id") != current_process.get("boot_id")
+            or workflow_process.get("host") != current_process.get("host")
+            or not coordinator.get("boot_id")
+            or coordinator.get("boot_id") != workflow_process.get("boot_id")
         ):
             return False
+        if coordinator["boot_id"] != current_process["boot_id"]:
+            # Both persisted process identities belong to the same previous
+            # boot on this host. Linux cannot retain those processes after reboot.
+            return True
         return (
             process_identity_state(coordinator) == "GONE"
             and process_identity_state(workflow_process) == "GONE"
@@ -878,6 +888,11 @@ class NativeOrchestrationCoordinator:
         try:
             coordinator_identity = process_identity()
             if abandoned_attempt is not None:
+                previous_coordinator = abandoned_attempt.get("coordinator_process") or {}
+                previous_workflow = (process_event or {}).get("process_identity") or {}
+                recovered_after_restart = previous_coordinator.get(
+                    "boot_id"
+                ) != coordinator_identity.get("boot_id")
                 self._save_stage_invocation_event(
                     uow, run, "STAGE_INVOCATION_ABANDONED", {
                         "attempt_id": abandoned_attempt.get("attempt_id"),
@@ -886,7 +901,16 @@ class NativeOrchestrationCoordinator:
                         "candidate": candidate,
                         "status": "ABANDONED",
                         "finished_at": utc_now().isoformat(),
-                        "reason": "Expired lease; coordinator and workflow process group proven absent.",
+                        "reason": (
+                            "Prior coordinator and workflow identities belong to the previous boot on this host."
+                            if recovered_after_restart
+                            else "Expired lease; coordinator, workflow process, and process group proven absent."
+                        ),
+                        "recovery_proof": (
+                            "previous_boot" if recovered_after_restart else "processes_gone"
+                        ),
+                        "previous_coordinator_process": previous_coordinator,
+                        "previous_workflow_process": previous_workflow,
                         "recovery_count": recovery_count,
                     },
                 )

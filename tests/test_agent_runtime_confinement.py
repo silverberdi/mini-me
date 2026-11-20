@@ -107,6 +107,7 @@ def test_attempt_state_is_private_sanitized_and_removed(tmp_path: Path):
         assert runtime.environment["XDG_RUNTIME_DIR"] == f"{env_root}/runtime"
         assert "OPENAI_API_KEY" not in runtime.environment
         assert runtime.environment["NORMAL_SETTING"] == "preserved"
+        assert runtime.environment["DOTNET_CLI_DO_NOT_USE_MSBUILD_SERVER"] == "1"
 
     assert not root.exists()
     assert auth.read_text(encoding="utf-8") == '{"access_token":"do-not-log"}'
@@ -129,6 +130,15 @@ def test_private_credential_rotation_is_detected_and_never_copied_back(tmp_path:
 
     assert not root.exists()
     assert auth.read_text(encoding="utf-8") == '{"token":"original"}'
+
+
+def test_confined_runtime_disables_persistent_msbuild_server(tmp_path: Path):
+    confinement, _worktree, _runtime = _confinement(tmp_path)
+    with confinement.runtime_session(
+        {"DOTNET_CLI_DO_NOT_USE_MSBUILD_SERVER": "0"},
+        extra_env={"DOTNET_CLI_DO_NOT_USE_MSBUILD_SERVER": "0"},
+    ) as runtime:
+        assert runtime.environment["DOTNET_CLI_DO_NOT_USE_MSBUILD_SERVER"] == "1"
 
 
 @pytest.mark.skipif(
@@ -488,7 +498,9 @@ def test_bubblewrap_command_binds_only_worktree_and_private_state(tmp_path: Path
     ][0]
     assert command[ro_root_idx + 3 : ro_root_idx + 5] == ["--dev", "/dev"]
     assert ["--dev", "/dev"] == command[command.index("--dev") : command.index("--dev") + 2]
-    assert ["--tmpfs", "/run"] == command[command.index("--tmpfs") : command.index("--tmpfs") + 2]
+    assert command[command.index("--dev") + 2 : command.index("--dev") + 4] == ["--tmpfs", "/tmp"]
+    tmp_run_idx = command.index("/run", command.index("--tmpfs")) - 1
+    assert ["--tmpfs", "/run"] == command[tmp_run_idx : tmp_run_idx + 2]
     assert "--unshare-pid" in command
     assert "/global" not in " ".join(command)
 
@@ -496,6 +508,9 @@ def test_bubblewrap_command_binds_only_worktree_and_private_state(tmp_path: Path
     assert ["--dev", "/dev"] == command_no_runtime[
         command_no_runtime.index("--dev") : command_no_runtime.index("--dev") + 2
     ]
+    assert command_no_runtime[
+        command_no_runtime.index("--dev") + 2 : command_no_runtime.index("--dev") + 4
+    ] == ["--tmpfs", "/tmp"]
     ro_root_no_rt = [
         i
         for i in range(len(command_no_runtime) - 2)
@@ -601,9 +616,14 @@ def test_runtime_session_mounts_only_resolver_file_after_private_run(tmp_path: P
     with confinement.runtime_session({}) as runtime:
         command = confinement.wrap_command(["/usr/bin/true"], runtime)
 
-    run_tmpfs = command.index("--tmpfs")
-    dns_bind = command.index("--ro-bind", run_tmpfs)
-    private_runtime_bind = command.index("--bind", dns_bind)
+    run_tmpfs = command.index("--tmpfs", command.index("/run") - 1)
+    dns_bind = next(
+        i
+        for i in range(len(command) - 2)
+        if command[i : i + 3]
+        == ["--ro-bind", str(resolver), "/run/systemd/resolve/stub-resolv.conf"]
+    )
+    private_runtime_bind = command.index("--dir", dns_bind)
     assert run_tmpfs < dns_bind < private_runtime_bind
     assert command[dns_bind : dns_bind + 3] == [
         "--ro-bind",
@@ -976,8 +996,6 @@ def test_real_bubblewrap_write_boundaries_and_ephemeral_cleanup(tmp_path: Path):
             other_worktree / "escape",
             global_home / "escape",
             arbitrary / "escape",
-            auth,
-            tmp_path / "host-tmp-escape",
         ]
         for denied_path in denied_paths:
             wrapped = confinement.wrap_command(
@@ -998,10 +1016,30 @@ def test_real_bubblewrap_write_boundaries_and_ephemeral_cleanup(tmp_path: Path):
                 check=False,
             )
             assert denied.returncode != 0, f"write unexpectedly succeeded: {denied_path}"
-            if denied_path == auth:
-                assert auth.read_text(encoding="utf-8") == "{}"
-            else:
-                assert not denied_path.exists()
+            assert not denied_path.exists()
+
+        host_tmp_escape = tmp_path / "host-tmp-escape"
+        for temporary_path in (auth, host_tmp_escape):
+            wrapped = confinement.wrap_command(
+                [
+                    sys.executable,
+                    "-c",
+                    "import pathlib,sys; pathlib.Path(sys.argv[1]).write_text('private')",
+                    str(temporary_path),
+                ],
+                state,
+            )
+            temporary_write = subprocess.run(
+                wrapped,
+                cwd=worktree,
+                env=state.environment,
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            assert temporary_write.returncode == 0, temporary_write.stderr
+        assert auth.read_text(encoding="utf-8") == "{}"
+        assert not host_tmp_escape.exists()
         assert stat.S_IMODE(state.host_root.stat().st_mode) == 0o700
     assert ephemeral_root is not None and not ephemeral_root.exists()
     assert not (managed / "escape").exists()
@@ -1080,6 +1118,7 @@ def test_deterministic_wrap_command_dev_null_flag_injection(tmp_path: Path):
         if cmd_list[i] == "--ro-bind" and cmd_list[i + 1] == "/" and cmd_list[i + 2] == "/"
     ][0]
     assert cmd_list[ro_idx + 3 : ro_idx + 5] == ["--dev", "/dev"]
+    assert cmd_list[ro_idx + 5 : ro_idx + 7] == ["--tmpfs", "/tmp"]
 
     cmd_str = confinement.wrap_command("pytest -q")
     ro_idx_str = [
@@ -1088,6 +1127,7 @@ def test_deterministic_wrap_command_dev_null_flag_injection(tmp_path: Path):
         if cmd_str[i] == "--ro-bind" and cmd_str[i + 1] == "/" and cmd_str[i + 2] == "/"
     ][0]
     assert cmd_str[ro_idx_str + 3 : ro_idx_str + 5] == ["--dev", "/dev"]
+    assert cmd_str[ro_idx_str + 5 : ro_idx_str + 7] == ["--tmpfs", "/tmp"]
 
 
 @pytest.mark.skipif(
@@ -1118,6 +1158,44 @@ def test_real_bubblewrap_dev_null_access(tmp_path: Path):
     assert "DEV_NULL_SUCCESS" in res.stdout
     assert "PermissionError" not in res.stderr
     assert "Errno 13" not in res.stderr
+
+
+@pytest.mark.skipif(
+    not AgentProcessConfinement.is_host_confinement_available(),
+    reason="private temporary filesystem proof requires Linux with Bubblewrap",
+)
+def test_real_bubblewrap_tmp_is_private_writable_and_ephemeral(tmp_path: Path):
+    confinement, worktree, _runtime = _confinement(tmp_path)
+    marker = f"/tmp/minime-private-{os.getpid()}-{os.urandom(8).hex()}"
+    host_marker = Path(marker)
+    assert not host_marker.exists()
+
+    first = asyncio.run(
+        confinement.run_confined_async_subprocess(
+            [
+                sys.executable,
+                "-c",
+                f"from pathlib import Path; Path({marker!r}).write_text('private')",
+            ],
+            cwd=str(worktree),
+            input_bytes=None,
+            timeout_seconds=10,
+        )
+    )
+    assert first.returncode == 0, first.stderr
+    assert not host_marker.exists()
+
+    second = asyncio.run(
+        confinement.run_confined_async_subprocess(
+            [sys.executable, "-c", f"from pathlib import Path; print(Path({marker!r}).exists())"],
+            cwd=str(worktree),
+            input_bytes=None,
+            timeout_seconds=10,
+        )
+    )
+    assert second.returncode == 0, second.stderr
+    assert second.stdout.strip() == b"False"
+    assert not host_marker.exists()
 
 
 @pytest.mark.skipif(

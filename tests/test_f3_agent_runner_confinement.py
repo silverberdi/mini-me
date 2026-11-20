@@ -18,9 +18,9 @@ async def test_cli_runner_executes_only_through_confined_subprocess(
 ):
     worktree = tmp_path / "worktree"
     runtime = tmp_path / "runtime"
-    outside = tmp_path / "outside.txt"
     worktree.mkdir()
     runtime.mkdir(mode=0o700)
+    outside = runtime / "outside.txt"
     (worktree / "authorized.txt").write_text("worktree-ok", encoding="utf-8")
     monkeypatch.setenv("MINIME_RUNTIME_ROOT", str(runtime))
     script = (
