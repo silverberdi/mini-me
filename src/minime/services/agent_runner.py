@@ -923,7 +923,7 @@ class CliAgentRunner:
         # artifact and still need the explicit handoff.
         handoff_required = bool(
             workflow is not None
-            and workflow.operation in {"propose", "continue", "sync", "archive"}
+            and workflow.operation in {"propose", "continue"}
             and output_schema is None
         )
         if handoff_required:
@@ -1128,7 +1128,11 @@ class CliAgentRunner:
                 final_response_source=final_response_source,
                 workflow_handoff=(
                     parse_agent_workflow_handoff(final_response or "")
-                    if handoff_required and final_response_status == "COMPLETE"
+                    if (
+                        workflow is not None
+                        and workflow.operation in {"propose", "continue", "sync", "archive"}
+                        and final_response_status == "COMPLETE"
+                    )
                     else None
                 ),
                 workflow_handoff_required=handoff_required,

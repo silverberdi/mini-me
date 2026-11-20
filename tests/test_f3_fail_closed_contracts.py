@@ -2,6 +2,7 @@
 
 import hashlib
 import json
+import shutil
 import subprocess
 from pathlib import Path
 from types import SimpleNamespace
@@ -348,6 +349,51 @@ def test_verify_transition_checks_deferred_preview_against_current_candidate(tmp
         task_feasibility, stage="verify", inputs=inputs, worktree_path=tmp_path
     )
     assert passed == ()
+
+
+def test_stage_precondition_with_empty_evidence_refs_does_not_block_transition(
+    tmp_path: Path,
+):
+    task_feasibility = [{
+        "task_id": "6.1",
+        "actor": "execution",
+        "execution_stage": "pre_pr",
+        "capability_evidence_refs": [],
+        "preconditions": [{
+            "required_before_stage": "pre_pr",
+            "satisfied": False,
+            "status": "PENDING",
+            "evidence_refs": [],
+        }],
+    }]
+    inputs = {"status": "READY", "capabilities": []}
+
+    assert ProposalFeasibilityEvaluator.blockers_before_stage(
+        task_feasibility, stage="pre_pr", inputs=inputs, worktree_path=tmp_path
+    ) == ()
+
+
+def test_stage_precondition_with_unknown_reference_remains_blocked(tmp_path: Path):
+    task_feasibility = [{
+        "task_id": "6.2",
+        "actor": "execution",
+        "execution_stage": "pre_pr",
+        "capability_evidence_refs": [],
+        "preconditions": [{
+            "required_before_stage": "pre_pr",
+            "satisfied": True,
+            "status": "PENDING",
+            "evidence_refs": ["preview:unavailable-candidate"],
+        }],
+    }]
+    inputs = {"status": "READY", "capabilities": []}
+
+    blockers = ProposalFeasibilityEvaluator.blockers_before_stage(
+        task_feasibility, stage="pre_pr", inputs=inputs, worktree_path=tmp_path
+    )
+
+    assert blockers
+    assert "preview:unavailable-candidate" in blockers[0]
 
 
 @pytest.mark.parametrize("stage", ["pre_pr", "post_merge", "human_validation"])
@@ -851,7 +897,7 @@ async def test_verify_requires_native_final_response_channel(tmp_path: Path):
 
     result = await coordinator(tmp_path, runner)._run_verify(tmp_path, "codex", "change")
 
-    assert result is True
+    assert result.status == "COMPLETE"
     assert "output-schema" not in runner.calls[0]
     assert "authorized final response channel" in runner.calls[0]
 
@@ -902,21 +948,65 @@ async def test_candidate_commit_is_created_only_for_dirty_worktree(tmp_path: Pat
 
 @pytest.mark.asyncio
 async def test_apply_and_sync_fail_closed_on_agent_error(tmp_path: Path):
-    runner = ScriptedRunner("failure", exit_code=2)
+    class SyncWritingRunner(ScriptedRunner):
+        async def run(self, *, prompt_context, **kwargs):
+            result = await super().run(prompt_context=prompt_context, **kwargs)
+            if len(self.calls) == 3:
+                main_spec = tmp_path / "openspec" / "specs" / "sample-capability" / "spec.md"
+                main_spec.parent.mkdir(parents=True, exist_ok=True)
+                main_spec.write_text("# Synced", encoding="utf-8")
+            elif len(self.calls) == 4:
+                shutil.rmtree(tmp_path / "openspec" / "changes" / "change")
+            return result
+
+    runner = SyncWritingRunner("failure", exit_code=2)
     c = coordinator(tmp_path, runner)
     assert not await c._run_apply(tmp_path, "codex", "change")
 
+    uow = SimpleNamespace(
+        claims=SimpleNamespace(release_claim=MagicMock()), commit=MagicMock()
+    )
+    run = SimpleNamespace(run_id="run-sync-archive", stop_details={})
+    c._begin_stage_invocation = AsyncMock(
+        side_effect=[SimpleNamespace(claim=object()) for _ in range(6)]
+    )
+    c._finish_stage_invocation = AsyncMock()
+
+    async def run_claimed(_uow, _claim, operation):
+        return await operation()
+
+    c._run_claimed = run_claimed
+
+    active_change = tmp_path / "openspec" / "changes" / "change"
+    delta_spec = active_change / "specs" / "sample-capability" / "spec.md"
+    delta_spec.parent.mkdir(parents=True)
+    delta_spec.write_text("# Delta", encoding="utf-8")
     runner.exit_code = 0
     runner.output = "sync evidence"
-    c._git_run = AsyncMock(return_value=SimpleNamespace(stdout=""))
-    # Exit zero and a success narrative are insufficient without archive files.
-    assert not await c._run_sync_and_archive(tmp_path, "codex", "change")
+    # A successful process without an observable Sync effect cannot reach Archive.
+    assert not await c._run_sync_and_archive(
+        tmp_path, "codex", "change", uow=uow, run=run
+    )
+    assert len(runner.calls) == 2
+    assert c._finish_stage_invocation.await_args_list[-1].args[3] == "FAILED"
     archive = tmp_path / "openspec" / "changes" / "archive" / "2026-10-27-change"
-    (archive / "specs").mkdir(parents=True)
+    archived_delta_spec = archive / "specs" / "sample-capability" / "spec.md"
+    archived_delta_spec.parent.mkdir(parents=True)
+    archived_delta_spec.write_text("# Delta", encoding="utf-8")
+    main_spec = tmp_path / "openspec" / "specs" / "sample-capability" / "spec.md"
     for filename in ("proposal.md", "design.md", "tasks.md"):
-        (archive / filename).write_text("native")
-    assert await c._run_sync_and_archive(tmp_path, "codex", "change")
-    assert len(runner.calls) == 5  # Apply plus two complete Sync/Archive cycles.
+        (archive / filename).write_text("native", encoding="utf-8")
+    assert await c._run_sync_and_archive(
+        tmp_path, "codex", "change", uow=uow, run=run
+    )
+    assert "--yes --skip-specs" in runner.calls[-1]
+    assert main_spec.read_text(encoding="utf-8") == "# Synced"
+    assert len(runner.calls) == 4  # Apply, effect-free Sync, successful Sync, Archive.
+    assert [call.args[3] for call in c._finish_stage_invocation.await_args_list] == [
+        "FAILED",
+        "COMPLETE",
+        "COMPLETE",
+    ]
 
 
 @pytest.mark.asyncio

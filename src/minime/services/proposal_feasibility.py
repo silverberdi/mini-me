@@ -655,7 +655,8 @@ class ProposalFeasibilityEvaluator:
                     continue
                 refs = [str(ref) for ref in precondition.get("evidence_refs", [])]
                 if not refs:
-                    blockers.append(f"task {task_id} has no evidence reference for its {stage} dependency")
+                    # An empty list declares no evidence-backed dependency for
+                    # this stage; it is not evidence of a missing dependency.
                     continue
                 stage_refs: list[str] = []
                 for ref in refs:

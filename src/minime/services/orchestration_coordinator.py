@@ -4850,8 +4850,8 @@ class NativeOrchestrationCoordinator:
         )
 
     @staticmethod
-    def _execution_is_successful(result: Any) -> bool:
-        """Only an explicit, evidenced, zero-exit execution can advance a stage."""
+    def _execution_is_successful(result: Any, *, require_response: bool = True) -> bool:
+        """Check process success, optionally requiring an authoritative final response."""
         if result is None or getattr(result, "exit_code", None) != 0:
             return False
         if getattr(result, "workflow_handoff_required", False):
@@ -4862,6 +4862,8 @@ class NativeOrchestrationCoordinator:
             return False
         if getattr(result, "environment_error", False):
             return False
+        if not require_response:
+            return True
         # Diagnostic output may be abbreviated for display. The authoritative
         # provider response is checked separately through final_response_status.
         if getattr(result, "structured_output_missing", False) or getattr(
@@ -7483,7 +7485,13 @@ class NativeOrchestrationCoordinator:
             change_name=change_name,
         )
 
-        async def dispatch(operation: str, workflow: ResolvedWorkflow, prompt: str) -> Any:
+        async def dispatch(
+            operation: str,
+            workflow: ResolvedWorkflow,
+            prompt: str,
+            *,
+            postcondition: Any = None,
+        ) -> Any:
             if uow is None or run is None:
                 raise RuntimeError("Durable stage invocation context is required for DOC_CLOSING")
             invocation = await self._begin_stage_invocation(
@@ -7513,8 +7521,7 @@ class NativeOrchestrationCoordinator:
                 )
                 handoff = getattr(result, "workflow_handoff", None)
                 if (
-                    getattr(result, "workflow_handoff_required", False)
-                    and handoff is not None
+                    handoff is not None
                     and handoff.status == "HUMAN_REQUIRED"
                 ):
                     question = str(handoff.summary or "El workflow nativo requiere una decisión humana.")
@@ -7537,14 +7544,19 @@ class NativeOrchestrationCoordinator:
                     raise NativeStageHumanRequired(
                         operation, question, options, question_es, options_es
                     )
-                status = "COMPLETE" if self._execution_is_successful(result) else "FAILED"
+                success = self._execution_is_successful(result, require_response=False)
+                effect_verified = success
+                if success and postcondition is not None:
+                    effect_verified = bool(await postcondition())
+                status = "COMPLETE" if success and effect_verified else "FAILED"
                 await self._finish_stage_invocation(
                     uow, run, invocation, status,
                     {"exit_code": getattr(result, "exit_code", None),
                      "timed_out": getattr(result, "timed_out", None),
-                     "final_response_status": getattr(result, "final_response_status", None)},
+                     "final_response_status": getattr(result, "final_response_status", None),
+                     "effect_verified": effect_verified},
                 )
-                return result
+                return result if status == "COMPLETE" else None
             except Exception:
                 # Leave the durable start open. Recovery must prove both processes gone.
                 uow.claims.release_claim(invocation.claim)
@@ -7557,6 +7569,18 @@ class NativeOrchestrationCoordinator:
             and bool(operator_response)
         )
         if not archive_resume:
+            expected_main_specs = self._doc_closing_expected_main_specs(
+                doc_path, change_name
+            )
+            sync_paths_before = await self._doc_closing_changed_spec_paths(doc_path)
+
+            async def sync_effect_observed() -> bool:
+                sync_paths_after = await self._doc_closing_changed_spec_paths(doc_path)
+                return not expected_main_specs or (
+                    all((doc_path / path).is_file() for path in expected_main_specs)
+                    and expected_main_specs.issubset(sync_paths_before | sync_paths_after)
+                )
+
             sync_result = await dispatch(
                 "sync", sync_wf,
                 (
@@ -7564,47 +7588,58 @@ class NativeOrchestrationCoordinator:
                     f"Dispatch: {sync_wf.dispatch_command}\n"
                     "Return evidence of the resulting synced specs."
                 ),
+                postcondition=sync_effect_observed,
             )
-            if not self._execution_is_successful(sync_result):
+            if not self._execution_is_successful(sync_result, require_response=False):
                 return False
 
         archive_prompt = (
             f"Execute ONLY the official OpenSpec Archive workflow for '{change_name}'.\n"
             f"Dispatch: {archive_wf.dispatch_command}\n"
             "The delta specs have already been synced in the prior step. Archive the change "
-            "directly without requesting a sync decision.\n"
+            "with the native CLI options `--yes --skip-specs` so it does not sync the deltas "
+            "a second time.\n"
             "Return evidence of the resulting archive."
         )
         if operator_response and operator_response.strip():
             archive_prompt += "\n\nAccepted operator response for the current gate (context only):\n" + operator_response.strip()
+
+        async def archive_effect_observed() -> bool:
+            state, _detail = self._observe_doc_closing_change(doc_path, change_name)
+            return state == "archived_complete"
+
         archive_result = await dispatch(
             "archive", archive_wf,
             archive_prompt,
+            postcondition=archive_effect_observed,
         )
-        if not self._execution_is_successful(archive_result):
+        if not self._execution_is_successful(archive_result, require_response=False):
             return False
-        archive_root = doc_path / "openspec" / "changes" / "archive"
-        archived = self._matching_archived_changes(archive_root, change_name)
-        # A success narrative cannot substitute for a real OpenSpec archive.
-        if len(archived) != 1:
-            return False
-        archived_change = archived[0]
-        if not (
-            (archived_change / "proposal.md").is_file()
-            and (archived_change / "design.md").is_file()
-            and (archived_change / "tasks.md").is_file()
-            and (archived_change / "specs").is_dir()
-        ):
-            return False
+        state, _detail = self._observe_doc_closing_change(doc_path, change_name)
+        return state == "archived_complete"
 
-        # Check git status in doc worktree; if changes are uncommitted, stage and commit them
-        status_result = await self._git_run(doc_path, ["status", "--porcelain"])
-        if status_result.stdout.strip():
-            await self._git_run(doc_path, ["add", "openspec/"])
-            await self._git_run(
-                doc_path, ["commit", "-m", f"docs({change_name}): sync specs and archive change"]
-            )
-        return True
+    @staticmethod
+    def _doc_closing_expected_main_specs(doc_path: Path, change_name: str) -> set[Path]:
+        """Map native delta spec paths to their main-spec counterparts."""
+        delta_specs = doc_path / "openspec" / "changes" / change_name / "specs"
+        if not delta_specs.is_dir():
+            return set()
+        return {
+            Path("openspec") / "specs" / spec.relative_to(delta_specs)
+            for spec in delta_specs.rglob("spec.md")
+        }
+
+    async def _doc_closing_changed_spec_paths(self, doc_path: Path) -> set[Path]:
+        """Return tracked or untracked main specs changed in this documentation worktree."""
+        result = await self._git_run(
+            doc_path,
+            ["status", "--porcelain=v1", "-z", "--untracked-files=all", "--", "openspec/specs/"],
+        )
+        return {
+            Path(entry[3:])
+            for entry in result.stdout.split("\0")
+            if len(entry) >= 4
+        }
 
     async def _ensure_doc_closing_sync_archive(
         self,
@@ -7619,6 +7654,15 @@ class NativeOrchestrationCoordinator:
         """Observe DOC_CLOSING before deciding whether native workflows are needed."""
         state, detail = self._observe_doc_closing_change(doc_path, change_name)
         if state == "archived_complete":
+            try:
+                await self._commit_doc_closing_openspec_changes(doc_path, change_name)
+            except GitOperationError as exc:
+                return False, f"Unable to commit verified OpenSpec archive state: {exc}."
+            verified_state, verified_detail = self._observe_doc_closing_change(
+                doc_path, change_name
+            )
+            if verified_state != "archived_complete":
+                return False, f"OpenSpec archive changed during commit: {verified_detail}."
             return True, None
         if state != "active":
             return False, f"Documentation Change state is {state}: {detail}."
@@ -7637,7 +7681,83 @@ class NativeOrchestrationCoordinator:
             return False, handoff.question
         if not completed:
             return False, "Native Sync or Archive failed."
+        verified_state, verified_detail = self._observe_doc_closing_change(
+            doc_path, change_name
+        )
+        if verified_state != "archived_complete":
+            return False, f"Native archive result is {verified_state}: {verified_detail}."
+        try:
+            await self._commit_doc_closing_openspec_changes(doc_path, change_name)
+        except GitOperationError as exc:
+            return False, f"Unable to commit verified OpenSpec archive state: {exc}."
+        verified_state, verified_detail = self._observe_doc_closing_change(
+            doc_path, change_name
+        )
+        if verified_state != "archived_complete":
+            return False, f"OpenSpec archive changed during commit: {verified_detail}."
         return True, None
+
+    async def _commit_doc_closing_openspec_changes(
+        self, doc_path: Path, change_name: str
+    ) -> str:
+        """Commit only verified OpenSpec changes before a documentation PR."""
+        pending_result = await self._git_run(
+            doc_path,
+            ["status", "--porcelain", "--untracked-files=all", "--", "openspec/"],
+        )
+        if pending_result.stdout.strip():
+            staged_result = await self._git_run(
+                doc_path, ["diff", "--cached", "--name-only", "-z"]
+            )
+            staged_paths = [path for path in staged_result.stdout.split("\0") if path]
+            unrelated_staged = [path for path in staged_paths if not path.startswith("openspec/")]
+            if unrelated_staged:
+                raise GitOperationError(
+                    GitCommandResult(
+                        ("diff", "--cached", "--name-only"),
+                        1,
+                        "",
+                        "Refusing the OpenSpec commit because unrelated paths are already staged: "
+                        + ", ".join(unrelated_staged),
+                    )
+                )
+
+            await self._git_run(doc_path, ["add", "-A", "--", "openspec/"])
+            staged_result = await self._git_run(
+                doc_path, ["diff", "--cached", "--name-only", "-z"]
+            )
+            staged_paths = [path for path in staged_result.stdout.split("\0") if path]
+            unrelated_staged = [path for path in staged_paths if not path.startswith("openspec/")]
+            if unrelated_staged:
+                raise GitOperationError(
+                    GitCommandResult(
+                        ("diff", "--cached", "--name-only"),
+                        1,
+                        "",
+                        "Refusing the OpenSpec commit because unrelated paths are staged: "
+                        + ", ".join(unrelated_staged),
+                    )
+                )
+            if staged_paths:
+                await self._git_run(
+                    doc_path,
+                    ["commit", "-m", f"docs({change_name}): sync specs and archive change"],
+                )
+
+        pending_result = await self._git_run(
+            doc_path,
+            ["status", "--porcelain", "--untracked-files=all", "--", "openspec/"],
+        )
+        if pending_result.stdout.strip():
+            raise GitOperationError(
+                GitCommandResult(
+                    ("status", "--porcelain", "--", "openspec/"),
+                    1,
+                    pending_result.stdout,
+                    "OpenSpec paths remain uncommitted after the documentation commit.",
+                )
+            )
+        return await self._get_git_head_sha(doc_path)
 
     @staticmethod
     def _matching_archived_changes(archive_root: Path, change_name: str) -> list[Path]:
