@@ -79,6 +79,34 @@ async def test_active_claim_suppresses_duplicate_and_completed_verify_reentry(tm
 
 
 @pytest.mark.asyncio
+async def test_incomplete_stage_evidence_is_not_reused_for_another_stage(tmp_path):
+    uow = InMemoryPersistenceUnitOfWork()
+    run = OrchestrationRun(
+        project_id="project-stage-test",
+        change_name="stage-lifecycle",
+        base_sha="main",
+        current_stage=OrchestrationStage.VERIFYING,
+    )
+    uow.orchestration_runs.save(run)
+    candidate = tmp_path / "candidate"
+    _git_candidate(candidate)
+    coordinator = _coordinator(uow)
+
+    interrupted_apply = await coordinator._begin_stage_invocation(uow, run, candidate, "APPLY")
+    verify = await coordinator._begin_stage_invocation(uow, run, candidate, "VERIFY")
+
+    assert interrupted_apply is not None
+    assert verify is not None
+    assert verify.recovered_from_attempt_id is None
+    events = uow.orchestration_stage_events.list_by_run(run.run_id)
+    assert [event.event_type for event in events] == [
+        "STAGE_INVOCATION_STARTED",
+        "STAGE_INVOCATION_STARTED",
+    ]
+    assert events[0].evidence_references["claim_key"] != events[1].evidence_references["claim_key"]
+
+
+@pytest.mark.asyncio
 async def test_human_required_blocks_reentry_until_operator_response(tmp_path):
     uow = InMemoryPersistenceUnitOfWork()
     run = OrchestrationRun(
@@ -252,7 +280,7 @@ async def test_unavailable_process_identity_is_durably_marked_for_no_recovery(tm
 def test_recovery_gate_requires_same_candidate_and_proven_process_group_exit(monkeypatch):
     coordinator_identity = {"status": "AVAILABLE", "host": "h", "boot_id": "b"}
     workflow_identity = {"status": "AVAILABLE", "host": "h", "boot_id": "b", "pgid": 42}
-    current_identity = {"host": "h", "boot_id": "b"}
+    current_identity = {"status": "AVAILABLE", "host": "h", "boot_id": "b"}
     monkeypatch.setattr(coordinator_module, "process_identity_state", lambda _: "GONE")
     monkeypatch.setattr(coordinator_module, "process_group_state", lambda _: "GONE")
     assert NativeOrchestrationCoordinator._stage_recovery_is_safe(
@@ -294,13 +322,46 @@ def test_recovery_gate_requires_same_candidate_and_proven_process_group_exit(mon
 def test_live_coordinator_or_reused_process_identity_stops_recovery(monkeypatch):
     coordinator_identity = {"status": "AVAILABLE", "host": "h", "boot_id": "b"}
     workflow_identity = {"status": "AVAILABLE", "host": "h", "boot_id": "b", "pgid": 42}
-    current_identity = {"host": "h", "boot_id": "b"}
+    current_identity = {"status": "AVAILABLE", "host": "h", "boot_id": "b"}
     states = iter(["LIVE", "GONE"])
     monkeypatch.setattr(coordinator_module, "process_identity_state", lambda _: next(states))
     monkeypatch.setattr(coordinator_module, "process_group_state", lambda _: "GONE")
     assert not NativeOrchestrationCoordinator._stage_recovery_is_safe(
         coordinator_identity, workflow_identity, current_identity,
         candidate_matches=True, recovery_count=0,
+    )
+
+
+def test_prior_boot_on_same_host_proves_stage_processes_are_gone(monkeypatch):
+    prior_coordinator = {"status": "AVAILABLE", "host": "h", "boot_id": "old", "pid": 10}
+    prior_workflow = {
+        "status": "AVAILABLE", "host": "h", "boot_id": "old", "pid": 11, "pgid": 11,
+    }
+    current = {"status": "AVAILABLE", "host": "h", "boot_id": "new"}
+    monkeypatch.setattr(
+        coordinator_module,
+        "process_identity_state",
+        lambda _identity: pytest.fail("prior boot must prove process death without PID lookup"),
+    )
+    monkeypatch.setattr(
+        coordinator_module,
+        "process_group_state",
+        lambda _pgid: pytest.fail("prior boot must prove process-group death without PGID lookup"),
+    )
+    assert NativeOrchestrationCoordinator._stage_recovery_is_safe(
+        prior_coordinator,
+        prior_workflow,
+        current,
+        candidate_matches=True,
+        recovery_count=0,
+    )
+
+    assert not NativeOrchestrationCoordinator._stage_recovery_is_safe(
+        prior_coordinator,
+        {**prior_workflow, "boot_id": "contradictory"},
+        current,
+        candidate_matches=True,
+        recovery_count=0,
     )
 
 

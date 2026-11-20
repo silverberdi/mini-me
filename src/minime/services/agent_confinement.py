@@ -812,6 +812,9 @@ class AgentProcessConfinement:
                 for k, v in extra_env.items():
                     safe_env[k] = v
 
+            # Keep MSBuild's background server and IPC within this invocation.
+            safe_env["DOTNET_CLI_DO_NOT_USE_MSBUILD_SERVER"] = "1"
+
             auth_copy: Path | None = None
             initial_auth_digest: str | None = None
             antigravity_auth_copy: Path | None = None
@@ -1252,6 +1255,8 @@ class AgentProcessConfinement:
                 "/",
                 "--dev",
                 "/dev",
+                "--tmpfs",
+                "/tmp",
                 worktree_mount,
                 self.allowed_worktree_path,
                 self.allowed_worktree_path,

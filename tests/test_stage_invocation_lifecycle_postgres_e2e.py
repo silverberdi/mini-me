@@ -165,8 +165,11 @@ async def test_postgres_expired_invocation_recovers_once_only_after_processes_ar
         subprocess.run(["git", "-C", str(candidate), "add", "README.md"], check=True)
         subprocess.run(["git", "-C", str(candidate), "commit", "-qm", "candidate"], check=True)
 
-        coordinator_identity = exited_process_identity()
-        first_workflow_identity = exited_process_identity()
+        current_boot_id = process_identity().get("boot_id")
+        assert current_boot_id
+        prior_boot_id = f"previous-{current_boot_id}"
+        coordinator_identity = {**exited_process_identity(), "boot_id": prior_boot_id}
+        first_workflow_identity = {**exited_process_identity(), "boot_id": prior_boot_id}
         identities = [coordinator_identity]
         real_identity = coordinator_module.process_identity
 
@@ -237,6 +240,14 @@ async def test_postgres_expired_invocation_recovers_once_only_after_processes_ar
         events = final_uow.orchestration_stage_events.list_by_run(run_id)
         assert [event.event_type for event in events].count("STAGE_INVOCATION_ABANDONED") == 1
         assert [event.event_type for event in events].count("STAGE_INVOCATION_STARTED") == 2
+        abandoned = next(
+            event for event in events if event.event_type == "STAGE_INVOCATION_ABANDONED"
+        )
+        assert abandoned.evidence_references["recovery_proof"] == "previous_boot"
+        assert (
+            abandoned.evidence_references["previous_coordinator_process"]["boot_id"]
+            == prior_boot_id
+        )
         assert all(
             event.evidence_references["candidate"] == first.candidate
             for event in events
