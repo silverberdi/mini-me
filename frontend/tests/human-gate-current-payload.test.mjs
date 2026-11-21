@@ -61,8 +61,9 @@ test('proposal-review options identify system suggestions and retain free-text r
 
 test('optional gate evidence fields render only when present and preserve old payload compatibility', () => {
   assert.match(component, /humanGateAffectedItems\(\): any\[\] \{[\s\S]*?Array\.isArray\(payload\?\.affected_items\) \? payload\.affected_items : \[\]/);
-  assert.match(component, /humanGateDiff\(\): string \{[\s\S]*?if \(!diff \|\| typeof diff !== 'object'\) return ''/);
+  assert.match(component, /humanGateDiff\(\): string \{[\s\S]*?if \(!diff \|\| typeof diff !== 'object'\) return ''[\s\S]*?diff\.status === 'NOT_APPLICABLE'[\s\S]*?diff\.status === 'UNAVAILABLE'/);
   assert.match(component, /humanGateOptionExplanation\(option: any, index: number\): string/);
+  assert.match(component, /humanGateDescription\(\): string/);
   assert.match(component, /\*ngIf="humanGateAffectedItems\(\)\.length > 0"/);
   assert.match(component, /\*ngIf="humanGateDiff\(\)"/);
   assert.match(component, /\*ngIf="humanGateOptionExplanation\(opt, i\)"/);

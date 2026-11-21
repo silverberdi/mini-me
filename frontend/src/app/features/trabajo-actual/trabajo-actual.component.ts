@@ -185,6 +185,9 @@ const STAGE_ILLUSTRATION_PATHS: Readonly<Record<string, string>> = Object.freeze
           <div class="p-4 rounded-xl bg-slate-900/90 border border-amber-500/30 space-y-2">
             <span class="text-xs font-semibold uppercase tracking-wider text-amber-400 font-mono">Pregunta del Workflow:</span>
             <p class="text-sm text-slate-100 font-medium whitespace-pre-wrap">{{ humanGateQuestion() }}</p>
+            <p *ngIf="humanGateDescription() && humanGateDescription() !== humanGateQuestion()" class="text-sm text-slate-200 whitespace-pre-wrap">
+              <strong>Descripción:</strong> {{ humanGateDescription() }}
+            </p>
             <p *ngIf="humanGateOriginalQuestion()" class="text-xs text-slate-400 whitespace-pre-wrap">
               <strong>Texto original:</strong> {{ humanGateOriginalQuestion() }}
             </p>
@@ -718,6 +721,11 @@ export class TrabajoActualComponent {
     return payload?.question_es || 'La pregunta del workflow aún no tiene una presentación en español.';
   }
 
+  humanGateDescription(): string {
+    const payload = this.targetRun()?.stop_details?.['human_payload'];
+    return typeof payload?.description === 'string' ? payload.description : '';
+  }
+
   humanGateOriginalQuestion(): string {
     const run = this.targetRun();
     if (!run) return '';
@@ -779,6 +787,12 @@ export class TrabajoActualComponent {
     const diff = this.targetRun()?.stop_details?.['human_payload']?.diff;
     if (typeof diff === 'string') return diff;
     if (!diff || typeof diff !== 'object') return '';
+    if (diff.status === 'NOT_APPLICABLE') {
+      return typeof diff.description === 'string' ? `No aplica: ${diff.description}` : 'No aplica un diff de tareas o requisitos.';
+    }
+    if (diff.status === 'UNAVAILABLE') {
+      return typeof diff.description === 'string' ? diff.description : 'No se pudo observar el diff de los artefactos implicados.';
+    }
     const summary = JSON.stringify({
       status: diff.status,
       tasks: diff.tasks,
