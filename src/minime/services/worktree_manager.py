@@ -1355,9 +1355,13 @@ class WorktreeManager:
                     content = (
                         exclude_file.read_text(encoding="utf-8") if exclude_file.exists() else ""
                     )
-                    if ".minime_worktree_ownership.json" not in content:
+                    patterns = [".minime_worktree_ownership.json", ".minime", ".minime/"]
+                    needed = [p for p in patterns if p not in content.splitlines()]
+                    if needed:
+                        new_content = content.rstrip()
+                        prefix = "\n" if new_content else ""
                         exclude_file.write_text(
-                            content.rstrip() + "\n.minime_worktree_ownership.json\n",
+                            new_content + prefix + "\n".join(needed) + "\n",
                             encoding="utf-8",
                         )
         except RuntimeError:
@@ -3396,14 +3400,19 @@ class WorktreeManager:
         status_lines = [
             line
             for line in status.splitlines()
-            if len(line) >= 4 and line[3:].strip() and "minime_worktree_ownership.json" not in line
+            if len(line) >= 4
+            and line[3:].strip()
+            and "minime_worktree_ownership.json" not in line
+            and not line[3:].strip().startswith(".minime")
         ]
         files = tuple(sorted(line[3:] for line in status_lines))
         cached = await self._git(["diff", "--cached", "--binary"], cwd=path)
         unstaged = await self._git(["diff", "--binary"], cwd=path)
         untracked = await self._git(["ls-files", "--others", "--exclude-standard", "-z"], cwd=path)
         untracked_files = [
-            p for p in untracked.split("\0") if p and "minime_worktree_ownership.json" not in p
+            p
+            for p in untracked.split("\0")
+            if p and "minime_worktree_ownership.json" not in p and not p.startswith(".minime")
         ]
         digest = hashlib.sha256()
         digest.update(cached.encode())
