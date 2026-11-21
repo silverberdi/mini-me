@@ -593,7 +593,12 @@ def request_ack_cmd(
     json_output: bool = typer.Option(False, "--json", help="Emit output as JSON"),
 ) -> None:
     """Acknowledge («Estoy enterado») high-complexity PR merge and continue."""
-    return request_run_cmd(project_id=project_id, operator_ack=True, json_output=json_output)
+    return request_run_cmd(
+        project_id=project_id,
+        operator_ack=True,
+        operator_response=None,
+        json_output=json_output,
+    )
 
 
 @request_app.command("complete")

@@ -59,6 +59,7 @@ from minime.services.apply_checkpoint_recovery import (
     human_gate_fingerprint,
     recovery_gate_payload,
 )
+from minime.services.openspec_tasks import OpenSpecTaskTracker
 from minime.services.pr_preparer_service import PrPreparationInput, PrPreparerService
 from minime.services.proposal_feasibility import ProposalFeasibilityEvaluator
 from minime.services.remote_request_intake import RemoteRequestIntakeService
@@ -484,16 +485,26 @@ class NativeOrchestrationCoordinator:
             )
         )
         current_tasks = inputs.get("tasks", [])
+        current_task_ids = [
+            str(item.get("task_id")) for item in current_tasks if isinstance(item, dict)
+        ]
         current_task_hashes = {
             str(item.get("task_id")): hashlib.sha256(
                 str(item.get("text") or "").encode("utf-8")
             ).hexdigest()
             for item in current_tasks if isinstance(item, dict)
         }
-        saved_task_hashes = {
-            str(item.get("task_id")): str(item.get("source_text_sha256") or "")
+        current_canonical_task_hashes = {
+            str(item.get("task_id")): self.proposal_feasibility.canonical_task_text_sha256(
+                str(item.get("task_id")), str(item.get("text") or "")
+            )
+            for item in current_tasks if isinstance(item, dict)
+        }
+        saved_tasks_by_id = {
+            str(item.get("task_id")): item
             for item in saved_tasks or () if isinstance(item, dict)
         }
+        saved_task_count = sum(1 for item in saved_tasks or () if isinstance(item, dict))
         current_scenario_hashes = {
             str(item.get("scenario_id")): hashlib.sha256(
                 str(item.get("text") or "").encode("utf-8")
@@ -504,14 +515,74 @@ class NativeOrchestrationCoordinator:
             str(item.get("scenario_id")): str(item.get("source_text_sha256") or "")
             for item in saved_scenarios if isinstance(item, dict)
         }
-        if {str(item.get("task_id")) for item in current_tasks if isinstance(item, dict)} != set(saved_task_hashes):
+        if (
+            len(current_task_ids) != len(set(current_task_ids))
+            or len(saved_tasks_by_id) != saved_task_count
+            or set(current_task_hashes) != set(saved_tasks_by_id)
+        ):
             blockers.append(
                 "The OpenSpec task inventory changed after assessment; native OpenSpec Update and strict validation are required."
             )
-        elif current_task_hashes != saved_task_hashes:
-            blockers.append(
-                "OpenSpec task descriptions changed after assessment; native OpenSpec Update and strict validation are required."
-            )
+        else:
+            legacy_tasks = [
+                item for item in saved_tasks_by_id.values()
+                if not item.get("canonical_text_sha256")
+            ]
+            recovered_legacy: dict[str, str] = {}
+            if legacy_tasks and any(
+                current_task_hashes.get(str(item.get("task_id")))
+                != str(item.get("source_text_sha256") or "")
+                and current_canonical_task_hashes.get(str(item.get("task_id")))
+                != str(item.get("source_text_sha256") or "")
+                for item in legacy_tasks
+            ):
+                assessment_sha = (
+                    assessment.get("candidate_sha")
+                    if isinstance(assessment, dict)
+                    else None
+                )
+                source_candidate_sha = assessment_sha
+                openspec_path = str(getattr(project_record, "openspec_path", "openspec") or "openspec")
+                if (
+                    isinstance(source_candidate_sha, str)
+                    and re.fullmatch(r"[0-9a-f]{40,64}", source_candidate_sha, re.IGNORECASE)
+                    and not Path(openspec_path).is_absolute()
+                    and ".." not in Path(openspec_path).parts
+                    and Path(run.change_name).name == run.change_name
+                    and ".." not in Path(run.change_name).parts
+                ):
+                    task_file = f"{openspec_path}/changes/{run.change_name}/tasks.md"
+                    try:
+                        baseline = await self._git_run(
+                            worktree_path, ["show", f"{source_candidate_sha}:{task_file}"]
+                        )
+                        recovered_legacy = {
+                            task.task_id: self.proposal_feasibility.canonical_task_text_sha256(
+                                task.task_id, task.text
+                            )
+                            for task in OpenSpecTaskTracker.parse_tasks_text(baseline.stdout)
+                        }
+                    except (GitOperationError, OSError):
+                        recovered_legacy = {}
+            for task_id, saved_task in saved_tasks_by_id.items():
+                saved_canonical = str(saved_task.get("canonical_text_sha256") or "")
+                source_hash = str(saved_task.get("source_text_sha256") or "")
+                if saved_canonical and current_canonical_task_hashes.get(task_id) == saved_canonical:
+                    continue
+                if not saved_canonical and (
+                    current_task_hashes.get(task_id) == source_hash
+                    or current_canonical_task_hashes.get(task_id) == source_hash
+                    or current_canonical_task_hashes.get(task_id) == recovered_legacy.get(task_id)
+                ):
+                    continue
+                if not saved_canonical and not recovered_legacy.get(task_id):
+                    blockers.append(
+                        f"Task {task_id} changed after assessment, but its legacy source text could not be recovered from the recorded candidate revision."
+                    )
+                else:
+                    blockers.append(
+                        f"OpenSpec task {task_id} description changed after assessment; native OpenSpec Update and strict validation are required."
+                    )
         if current_scenario_hashes != saved_scenario_hashes:
             blockers.append(
                 "OpenSpec acceptance scenarios changed after assessment; native OpenSpec Update and strict validation are required."
@@ -2674,6 +2745,7 @@ class NativeOrchestrationCoordinator:
                             model_identity=self._configured_model(uow, project_id, "thinking"),
                             artifact_hashes=artifact_hashes,
                             context_hashes=context_hashes,
+                            candidate_sha=candidate_sha,
                         )
                         if hasattr(uow, "orchestration_runs"):
                             uow.orchestration_runs.save(active_run)
@@ -2723,6 +2795,7 @@ class NativeOrchestrationCoordinator:
                                 model_identity=self._configured_model(uow, project_id, "thinking"),
                                 artifact_hashes=artifact_hashes,
                                 context_hashes=context_hashes,
+                                candidate_sha=candidate_sha,
                             )
                             if hasattr(uow, "orchestration_runs"):
                                 uow.orchestration_runs.save(active_run)
@@ -2754,6 +2827,7 @@ class NativeOrchestrationCoordinator:
                             model_identity=self._configured_model(uow, project_id, "thinking"),
                             artifact_hashes=artifact_hashes,
                             context_hashes=context_hashes,
+                            candidate_sha=candidate_sha,
                         )
                         uow.orchestration_runs.save(active_run)
                         uow.commit()
@@ -2775,6 +2849,7 @@ class NativeOrchestrationCoordinator:
                             model_identity=self._configured_model(uow, project_id, "thinking"),
                             artifact_hashes=artifact_hashes,
                             context_hashes=context_hashes,
+                            candidate_sha=candidate_sha,
                         )
                         if not self._should_retry_structural_feasibility(
                             complexity_result, correction_number
@@ -5207,6 +5282,7 @@ class NativeOrchestrationCoordinator:
         model_identity: str | None,
         artifact_hashes: dict[str, str],
         context_hashes: dict[str, str] | None = None,
+        candidate_sha: str | None = None,
     ) -> None:
         payload = {
             "status": assessment.status,
@@ -5222,6 +5298,7 @@ class NativeOrchestrationCoordinator:
             "artifact_hashes": artifact_hashes,
             "consumption": "unknown",
             "context_hashes": context_hashes,
+            "candidate_sha": candidate_sha,
             "structured_output": assessment.structured_output,
             "diagnostic_output": assessment.diagnostic_output,
             "output_truncated": assessment.output_truncated,
@@ -7281,6 +7358,8 @@ class NativeOrchestrationCoordinator:
         prompt = (
             f"Execute official OpenSpec Verify for change '{change_name}'.\n"
             f"Workflow dispatch command: {wf.dispatch_command}\n\n"
+            "Use `openspec validate --type change --strict <change-name>` only for structural CLI validation. "
+            "There is no `openspec verify` CLI command; execute Verify through the resolved native provider workflow above.\n\n"
             "Verify that all tasks and requirements are implemented and verified with green tests. "
             "After completing the native Verify workflow, return exactly one JSON object in the "
             "authorized final response channel matching this schema: "

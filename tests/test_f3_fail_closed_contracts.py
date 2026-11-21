@@ -128,6 +128,9 @@ def test_feasibility_requires_exact_native_task_and_scenario_coverage(tmp_path: 
     )
     assert result[0] == "EXECUTABLE"
     original_task_fingerprint = result[1][0]["source_text_sha256"]
+    assert result[1][0]["canonical_text_sha256"] == ProposalFeasibilityEvaluator.canonical_task_text_sha256(
+        "1.1", "Run focused verification"
+    )
     inputs["tasks"][0]["text"] = "Run focused verification against the exact candidate"
     revised = ProposalFeasibilityEvaluator.validate_report(report, inputs, tmp_path)
     assert revised[0] == "EXECUTABLE"
@@ -900,6 +903,168 @@ async def test_verify_requires_native_final_response_channel(tmp_path: Path):
     assert result.status == "COMPLETE"
     assert "output-schema" not in runner.calls[0]
     assert "authorized final response channel" in runner.calls[0]
+    assert "openspec validate --type change --strict <change-name>" in runner.calls[0]
+    assert "There is no `openspec verify` CLI command" in runner.calls[0]
+    assert "Workflow dispatch command: native-verify" in runner.calls[0]
+
+
+def test_canonical_task_text_ignores_only_supported_status_tags_and_whitespace():
+    normalize = ProposalFeasibilityEvaluator.canonical_task_text
+
+    assert normalize("1.1", "1.1 [DIFERIDA]   Add   the  API") == "Add the API"
+    assert normalize("1.1", "1.1 [optional] Add the API") == "Add the API"
+    assert normalize("1.1", "1.1 [BLOCKED] Add the API") == "[BLOCKED] Add the API"
+    assert normalize("1.1", "1.1 Add the changed API") != normalize(
+        "1.1", "1.1 Add the API"
+    )
+
+
+async def _check_legacy_task_source_recovery(
+    tmp_path: Path,
+    current_task_text: str,
+    *,
+    commit_task_source: bool,
+    current_task_id: str = "1.1",
+    baseline_task_text: str = "1.1 Add the API",
+    duplicate_current_task: bool = False,
+):
+    run_name = "legacy-task-recovery"
+    c = coordinator(tmp_path, ScriptedRunner("unused"))
+    change_dir = tmp_path / "openspec" / "changes" / run_name
+    change_dir.mkdir(parents=True)
+    baseline_text = baseline_task_text
+    tasks_file = change_dir / "tasks.md"
+    if commit_task_source:
+        tasks_file.write_text(f"- [ ] {baseline_text}\n")
+        subprocess.run(["git", "-C", str(tmp_path), "add", "openspec"], check=True)
+        subprocess.run(["git", "-C", str(tmp_path), "commit", "-qm", "add assessed tasks"], check=True)
+    candidate_sha = subprocess.run(
+        ["git", "-C", str(tmp_path), "rev-parse", "HEAD"],
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+    task = {
+        "task_id": "1.1",
+        "actor": "execution",
+        "execution_stage": "pre_pr",
+        "capability_evidence_refs": [],
+        "preconditions": [],
+        "source_text_sha256": hashlib.sha256(baseline_text.encode()).hexdigest(),
+    }
+    run = SimpleNamespace(
+        run_id="run-454",
+        change_name=run_name,
+        current_stage="IMPLEMENTING",
+        stop_details={
+            "complexity_assessment": {
+                "candidate_sha": candidate_sha,
+                "task_feasibility": [task],
+                "scenario_coverage": [{
+                    "scenario_id": "legacy-task-recovery:req-1:1",
+                    "source_text_sha256": hashlib.sha256(b"Scenario remains valid").hexdigest(),
+                }],
+            }
+        },
+    )
+    uow = SimpleNamespace(
+        projects=SimpleNamespace(get_by_id=MagicMock(return_value=SimpleNamespace(openspec_path="openspec")))
+    )
+    c.proposal_feasibility.collect_inputs = MagicMock(return_value={
+        "status": "READY",
+        "candidate_sha": candidate_sha,
+        "change_name": run_name,
+        "openspec_path": "openspec",
+        "tasks": [
+            {"task_id": current_task_id, "text": current_task_text},
+            *([{"task_id": current_task_id, "text": current_task_text}] if duplicate_current_task else []),
+        ],
+        "scenarios": [{
+            "scenario_id": "legacy-task-recovery:req-1:1",
+            "text": "Scenario remains valid",
+        }],
+        "capabilities": [],
+    })
+    c._record_current_human_gate = MagicMock(return_value={"question": "blocked"})
+    return await c._check_stage_feasibility(
+        uow,
+        run,
+        project_id="project-454",
+        worktree_path=tmp_path,
+        thinker_provider="codex",
+        implementer_provider="codex",
+        stage="pre_pr",
+    ), c
+
+
+@pytest.mark.asyncio
+async def test_legacy_task_assessment_recovers_cosmetic_edit_from_recorded_revision(tmp_path: Path):
+    result, gate_coordinator = await _check_legacy_task_source_recovery(
+        tmp_path,
+        "1.1 [DIFERIDA] Add the API",
+        commit_task_source=True,
+        baseline_task_text="1.1 Add   the API",
+    )
+
+    assert result is None
+    gate_coordinator._record_current_human_gate.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_legacy_task_assessment_fails_closed_without_recorded_source(tmp_path: Path):
+    result, gate_coordinator = await _check_legacy_task_source_recovery(
+        tmp_path,
+        "1.1 [DIFERIDA] Add the API",
+        commit_task_source=False,
+        baseline_task_text="1.1 Add   the API",
+    )
+
+    assert result is not None
+    assert result.status == "HUMAN_REQUIRED"
+    question = gate_coordinator._record_current_human_gate.call_args.kwargs["question"]
+    assert "legacy source text could not be recovered" in question
+
+
+@pytest.mark.asyncio
+async def test_legacy_task_assessment_blocks_substantive_edit(tmp_path: Path):
+    result, gate_coordinator = await _check_legacy_task_source_recovery(
+        tmp_path, "1.1 [DIFERIDA] Replace the API", commit_task_source=True
+    )
+
+    assert result is not None
+    assert result.status == "HUMAN_REQUIRED"
+    question = gate_coordinator._record_current_human_gate.call_args.kwargs["question"]
+    assert "description changed after assessment" in question
+
+
+@pytest.mark.asyncio
+async def test_legacy_task_assessment_blocks_changed_task_id(tmp_path: Path):
+    result, gate_coordinator = await _check_legacy_task_source_recovery(
+        tmp_path,
+        "1.2 Add the API",
+        commit_task_source=True,
+        current_task_id="1.2",
+    )
+
+    assert result is not None
+    assert result.status == "HUMAN_REQUIRED"
+    question = gate_coordinator._record_current_human_gate.call_args.kwargs["question"]
+    assert "task inventory changed" in question
+
+
+@pytest.mark.asyncio
+async def test_legacy_task_assessment_blocks_duplicate_task_ids(tmp_path: Path):
+    result, gate_coordinator = await _check_legacy_task_source_recovery(
+        tmp_path,
+        "1.1 Add the API",
+        commit_task_source=True,
+        duplicate_current_task=True,
+    )
+
+    assert result is not None
+    assert result.status == "HUMAN_REQUIRED"
+    question = gate_coordinator._record_current_human_gate.call_args.kwargs["question"]
+    assert "task inventory changed" in question
 
 
 @pytest.mark.asyncio
