@@ -141,6 +141,15 @@ def test_confined_runtime_disables_persistent_msbuild_server(tmp_path: Path):
         assert runtime.environment["DOTNET_CLI_DO_NOT_USE_MSBUILD_SERVER"] == "1"
 
 
+def test_authorized_agent_provider_environment_is_explicitly_preserved(tmp_path: Path):
+    confinement, _worktree, _runtime = _confinement(tmp_path)
+    with confinement.runtime_session(
+        {"OPENAI_API_KEY": "host-value-that-is-not-inherited"},
+        extra_env={"OPENAI_API_KEY": "authorized-agent-value"},
+    ) as runtime:
+        assert runtime.environment["OPENAI_API_KEY"] == "authorized-agent-value"
+
+
 @pytest.mark.skipif(
     not AgentProcessConfinement.is_host_confinement_available(),
     reason="confined credential-output suppression requires an OS confinement mechanism",

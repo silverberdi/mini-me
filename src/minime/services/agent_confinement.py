@@ -1611,6 +1611,46 @@ class AgentProcessConfinement:
             runtime_state.observe_credential_state()
             return result
 
+    @staticmethod
+    def prepare_candidate_test_environment(
+        base_env: dict[str, str] | None = None,
+    ) -> dict[str, str]:
+        """Build a candidate-test environment from the OS/toolchain runtime allowlist."""
+        source = os.environ if base_env is None else base_env
+        allowed_runtime_keys = {
+            "PATH",
+            "HOME",
+            "LANG",
+            "LC_ALL",
+            "LC_CTYPE",
+            "LC_MESSAGES",
+            "LANGUAGE",
+            "TMPDIR",
+            "TMP",
+            "TEMP",
+            "DOTNET_ROOT",
+            "DOTNET_ROOT_X64",
+            "DOTNET_ROOT_X86",
+            "DOTNET_CLI_HOME",
+            "NUGET_PACKAGES",
+            "NODE_PATH",
+            "PYTHONPATH",
+            "GOPATH",
+            "GOROOT",
+            "GOCACHE",
+            "GOMODCACHE",
+            "GOTOOLCHAIN",
+            "CARGO_HOME",
+            "CARGO_TARGET_DIR",
+            "RUSTUP_HOME",
+            "RUSTUP_TOOLCHAIN",
+        }
+        return {
+            key: value
+            for key, value in source.items()
+            if key.upper() in allowed_runtime_keys or key.upper().startswith("LC_")
+        }
+
     def prepare_environment(self, base_env: dict[str, str] | None = None) -> dict[str, str]:
         """Return a sanitized inherited environment before per-attempt paths are set."""
         source = os.environ if base_env is None else base_env

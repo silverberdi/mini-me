@@ -7234,7 +7234,9 @@ class NativeOrchestrationCoordinator:
             return result.passed, evidence or plan.diagnostic
 
         # 6. Unified subprocess execution with environment sanitization
-        clean_env = os.environ.copy()
+        from minime.services.agent_confinement import AgentProcessConfinement
+
+        clean_env = AgentProcessConfinement.prepare_candidate_test_environment()
         clean_env.pop("MINIME_DATABASE_URL", None)
         clean_env.pop("MINIME_EXPECTED_DATABASE", None)
 
