@@ -78,17 +78,17 @@ class ChecksRunner:
                     diagnostics.append(diag)
                     continue
 
-                env = os.environ.copy()
-                inherited_database_url = env.pop("MINIME_DATABASE_URL", None)
-                env.pop("MINIME_EXPECTED_DATABASE", None)
-
-                # Isolate bytecode compilation to a secure, process-private directory outside candidate worktree
-                import tempfile
-
                 from minime.services.agent_confinement import (
+                    AgentProcessConfinement,
                     safe_prepare_cache_dir,
                     validate_secure_cache_path,
                 )
+
+                inherited_database_url = os.environ.get("MINIME_DATABASE_URL")
+                env = AgentProcessConfinement.prepare_candidate_test_environment()
+
+                # Isolate bytecode compilation to a secure, process-private directory outside candidate worktree
+                import tempfile
 
                 current_uid = os.getuid()
                 pycache_dir: Path | None = None
@@ -213,8 +213,6 @@ class ChecksRunner:
                 start = asyncio.get_running_loop().time()
                 proc = None
                 try:
-                    from minime.services.agent_confinement import AgentProcessConfinement
-
                     confinement = AgentProcessConfinement(
                         allowed_worktree_path=str(worktree_path),
                         runtime_root=self.runtime_root,

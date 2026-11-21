@@ -2,11 +2,13 @@
 
 from pathlib import Path
 
+import pytest
+
 from minime.services.candidate_test_resolver import (
-    CandidateTestPlan,
     CandidateTestResolver,
     CandidateTestStrategyKind,
 )
+from minime.services.orchestration_coordinator import NativeOrchestrationCoordinator
 
 
 def test_explicit_project_checks_precedence(tmp_path: Path):
@@ -135,10 +137,6 @@ def _git_init_repo(path: Path) -> Path:
     return path
 
 
-import pytest
-from minime.services.orchestration_coordinator import NativeOrchestrationCoordinator
-
-
 @pytest.mark.asyncio
 async def test_coordinator_runs_root_node_test_suite(tmp_path: Path):
     repo = _git_init_repo(tmp_path)
@@ -158,6 +156,52 @@ async def test_coordinator_runs_root_node_test_suite(tmp_path: Path):
     assert "exit_code: 0" in evidence
     assert "candidate_sha:" in evidence
     assert "duration_ms:" in evidence
+
+
+@pytest.mark.asyncio
+async def test_coordinator_python_test_child_does_not_receive_host_provider_credentials(
+    monkeypatch, tmp_path
+):
+    repo = _git_init_repo(tmp_path)
+    (repo / "pyproject.toml").write_text("[tool.pytest.ini_options]\n", encoding="utf-8")
+    (repo / "src").mkdir()
+    (repo / "src" / "feature.py").write_text("VALUE = 1\n", encoding="utf-8")
+    (repo / "tests").mkdir()
+    (repo / "tests" / "test_feature.py").write_text(
+        "import os\n"
+        "def test_candidate_test_environment_is_sanitized():\n"
+        "    assert all(key not in os.environ for key in (\n"
+        "        'DEEPSEEK_API_KEY', 'OPENAI_API_KEY', 'ANTHROPIC_API_KEY',\n"
+        "        'CUSTOM_SERVICE_API_KEY', 'CUSTOM_SERVICE_SECRET',\n"
+        "        'AWS_ACCESS_KEY_ID', 'POSTGRES_PASSWORD', 'GITHUB_TOKEN',\n"
+        "        'ANTHROPIC_AUTH_TOKEN', 'HOST_ONLY_SETTING'))\n"
+        "    assert os.environ.get('PATH')\n"
+        "    assert os.environ.get('HOME')\n"
+        "    assert os.environ.get('LANG') == 'en_US.UTF-8'\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("DEEPSEEK_API_KEY", "host-deepseek-secret")
+    monkeypatch.setenv("OPENAI_API_KEY", "host-openai-secret")
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "host-anthropic-secret")
+    monkeypatch.setenv("CUSTOM_SERVICE_API_KEY", "host-custom-secret")
+    monkeypatch.setenv("CUSTOM_SERVICE_SECRET", "host-infra-secret")
+    monkeypatch.setenv("AWS_ACCESS_KEY_ID", "host-aws-secret")
+    monkeypatch.setenv("POSTGRES_PASSWORD", "host-postgres-secret")
+    monkeypatch.setenv("GITHUB_TOKEN", "host-github-secret")
+    monkeypatch.setenv("ANTHROPIC_AUTH_TOKEN", "host-anthropic-secret")
+    monkeypatch.setenv("HOST_ONLY_SETTING", "not-for-candidate")
+    monkeypatch.setenv("LANG", "en_US.UTF-8")
+
+    coord = NativeOrchestrationCoordinator(
+        uow_factory=lambda: None,
+        github_adapter=None,
+        worktree_manager=None,
+        agent_runner=None,
+    )
+    passed, evidence = await coord._run_automated_tests(repo, "main")
+
+    assert passed, evidence
+    assert "exit_code: 0" in evidence
 
 
 @pytest.mark.asyncio
