@@ -333,6 +333,151 @@ class NativeOrchestrationCoordinator:
         return clean if isinstance(clean, dict) else {}
 
     @staticmethod
+    def _human_gate_option_explanations(
+        gate: str, options: list[Any], payload: dict[str, Any]
+    ) -> list[dict[str, str]]:
+        """Explain choices without changing their native response values."""
+        supplied = payload.get("option_explanations")
+        if (
+            isinstance(supplied, list)
+            and len(supplied) == len(options)
+            and all(
+                isinstance(item, dict)
+                and isinstance(item.get("action"), str)
+                and item.get("action", "").strip()
+                and isinstance(item.get("consequence"), str)
+                and item.get("consequence", "").strip()
+                for item in supplied
+            )
+        ):
+            return supplied
+
+        explanations: list[dict[str, str]] = []
+        for option in options:
+            if isinstance(option, dict):
+                action = str(option.get("label") or option.get("id") or option.get("response_text") or "").strip()
+                consequence = str(option.get("consequence") or option.get("description") or "").strip()
+                option_id = str(option.get("id") or "").strip().lower()
+            else:
+                action = str(option).strip()
+                consequence = ""
+                option_id = ""
+
+            if not consequence and gate == "pr1_merge_acknowledgement":
+                consequence = (
+                    "Confirma que conoces el PR de implementación; según la política de alta complejidad, "
+                    "permite que Mini Me lo fusione. El Issue sigue abierto hasta el cierre documental."
+                )
+            elif not consequence and gate == "apply_checkpoint_recovery":
+                consequence = (
+                    "El Run permanece detenido y conserva el worktree. Esta opción no autoriza a repetir Apply."
+                    if option_id == "preserve"
+                    else "Autoriza guardar el estado observado como baseline y reanudar Apply una vez en el mismo Run y candidato."
+                )
+            elif not consequence and gate in {"apply_escalation", "physical_validation"}:
+                if option_id == "retry" or "reintentar" in action.lower():
+                    consequence = "Solicita un nuevo ciclo Apply en el Run y candidato actuales; siguen vigentes las pruebas y el límite de intentos."
+                elif option_id == "cancel" or "cancelar" in action.lower():
+                    consequence = "Cancela el Run y conserva el worktree para recuperación; no fusiona ni despliega el candidato."
+                elif gate == "physical_validation":
+                    consequence = (
+                        "Registra la respuesta del operador para las validaciones físicas pendientes. "
+                        "La tarea solo se satisface con evidencia observada; el candidato no se marca "
+                        "como validado por responder al gate."
+                    )
+                else:
+                    consequence = (
+                        "Entrega esta decisión al gate nativo de Apply en el Run y candidato actuales. "
+                        "El resultado vuelve a pasar por las validaciones y límites de Apply; la respuesta "
+                        "no los omite."
+                    )
+            elif not consequence and gate == "apply_gate_update":
+                if action == ProposalFeasibilityEvaluator.CANONICAL_UPDATE_OPTION:
+                    consequence = "Ejecuta OpenSpec Update y validación estricta; la factibilidad se vuelve a evaluar y no se omite ningún bloqueo."
+                elif "conservar" in action.lower() or "detenido" in action.lower():
+                    consequence = "Mantiene el Run y el candidato detenidos; no inicia Update ni Apply."
+                else:
+                    consequence = "Pasa la respuesta al flujo nativo de OpenSpec Update; solo una validación estricta satisfactoria permite reanudar Apply."
+            elif not consequence and gate == "proposal_feasibility":
+                if action == ProposalFeasibilityEvaluator.CANONICAL_UPDATE_OPTION:
+                    consequence = "Ejecuta OpenSpec Update y validación estricta; la factibilidad se reevalúa con la evidencia nueva y los bloqueos no se omiten."
+                else:
+                    consequence = "Aporta esta respuesta al bloqueo de factibilidad indicado; Mini Me vuelve a comprobar la evidencia y mantiene detenida la transición si no queda verificada."
+            elif not consequence and gate in {"explore_clarification", "propose_clarification"}:
+                workflow = "Explore" if gate == "explore_clarification" else "Propose"
+                consequence = (
+                    f"Añade esta respuesta como contexto al workflow nativo {workflow} del Change actual. "
+                    "El resultado sigue sujeto a las validaciones y revisiones de su etapa; no aprueba ni fusiona el cambio."
+                )
+            elif not consequence and gate == "proposal_review_escalation":
+                consequence = (
+                    "Aplica la instrucción a los hallazgos de revisión de propuesta del Change actual y solicita "
+                    "una nueva revisión independiente; la respuesta no aprueba la propuesta."
+                )
+            elif not consequence and gate in {"proposal_correction_failed", "proposal_correction_no_change"}:
+                consequence = (
+                    "Entrega la instrucción al workflow nativo OpenSpec Update para corregir los hallazgos; "
+                    "después se compara el artefacto y se repite la revisión independiente."
+                )
+            elif not consequence and gate == "code_review_escalation":
+                consequence = (
+                    "Entrega la instrucción a la corrección del candidato y vuelve a solicitar revisión "
+                    "independiente del código; no aprueba el candidato ni el PR."
+                )
+            elif not consequence and gate == "doc_closing_sync":
+                consequence = (
+                    "Entrega la respuesta al workflow nativo OpenSpec Sync del Change. Después se verifica "
+                    "el resultado antes de continuar con Archive; no fusiona ni cierra el Issue por sí sola."
+                )
+            elif not consequence and gate == "doc_closing_archive":
+                consequence = (
+                    "Entrega la respuesta al workflow nativo OpenSpec Archive del Change y verifica su resultado. "
+                    "No fusiona el PR documental ni cierra el Issue por sí sola."
+                )
+            if not consequence:
+                consequence = (
+                    f"La respuesta se registra literalmente para el gate {gate}; no cambia por sí sola el estado "
+                    "del Run. La transición requiere una acción nativa identificable y sus validaciones."
+                )
+            explanations.append({"action": action, "consequence": consequence})
+        return explanations
+
+    @staticmethod
+    def _human_gate_affected_items(gate: str, question: str, payload: dict[str, Any]) -> list[dict[str, str]]:
+        """Project available blocker evidence into a compact operator-facing list."""
+        supplied = payload.get("affected_items")
+        if (
+            isinstance(supplied, list)
+            and supplied
+            and all(isinstance(item, dict) for item in supplied)
+        ):
+            return supplied
+
+        for key in ("blockers", "pending_tasks", "review_findings", "proposal_findings", "findings"):
+            values = payload.get(key)
+            if not isinstance(values, list) or not values:
+                continue
+            items: list[dict[str, str]] = []
+            for index, value in enumerate(values, start=1):
+                if isinstance(value, dict):
+                    identifier = str(
+                        value.get("task_id") or value.get("scenario_id") or value.get("location")
+                        or value.get("id") or f"{key}:{index}"
+                    )
+                    description = str(
+                        value.get("description") or value.get("violated_requirement")
+                        or value.get("expected_correction") or value.get("reason") or identifier
+                    )
+                else:
+                    identifier = str(value)
+                    description = str(value)
+                items.append({"id": identifier[:200], "description": description[:1000]})
+            if items:
+                return items
+
+        return [{"id": gate, "description": question[:1000]}]
+
+    @staticmethod
     def _stage_recovery_is_safe(
         coordinator: Any,
         workflow_process: Any,
@@ -392,6 +537,33 @@ class NativeOrchestrationCoordinator:
             "question": question,
             "options": choice_list,
         }
+        source_payload = dict(payload or {})
+        description = str(
+            source_payload.get("description") or source_payload.get("explanation_es")
+            or question_es or question
+        ).strip()
+        active_payload["description"] = description or question
+        active_payload.setdefault(
+            "affected_items",
+            self._human_gate_affected_items(gate, question, source_payload),
+        )
+        if "diff" not in active_payload or active_payload.get("diff") is None:
+            has_artifact_findings = gate == "proposal_review_escalation" or bool(
+                source_payload.get("changed_tasks") or source_payload.get("changed_scenarios")
+                or source_payload.get("artifact_diff")
+            )
+            active_payload["diff"] = {
+                "status": "UNAVAILABLE" if has_artifact_findings else "NOT_APPLICABLE",
+                "text": None,
+                "description": (
+                    "No se pudo observar el diff de los artefactos implicados."
+                    if has_artifact_findings
+                    else "Este gate no está asociado a cambios observados en tareas o requisitos OpenSpec."
+                ),
+            }
+        active_payload["option_explanations"] = self._human_gate_option_explanations(
+            gate, choice_list, source_payload
+        )
         localized_question = question_es or (payload or {}).get("question_es")
         localized_options = options_es if options_es is not None else (payload or {}).get("options_es")
         if isinstance(localized_question, str) and localized_question.strip():
@@ -594,6 +766,49 @@ class NativeOrchestrationCoordinator:
                 f"La transición {stage} está detenida por evidencia pendiente: "
                 + "; ".join(dict.fromkeys(blockers))
             )
+            changed_tasks = [
+                {
+                    "id": task_id,
+                    "before_sha256": str(saved_tasks_by_id.get(task_id, {}).get("source_text_sha256") or ""),
+                    "after_sha256": current_task_hashes.get(task_id, ""),
+                }
+                for task_id in sorted(set(saved_tasks_by_id) | set(current_task_hashes))
+                if str(saved_tasks_by_id.get(task_id, {}).get("source_text_sha256") or "")
+                != current_task_hashes.get(task_id, "")
+            ]
+            changed_scenarios = [
+                {
+                    "id": scenario_id,
+                    "before_sha256": saved_scenario_hashes.get(scenario_id, ""),
+                    "after_sha256": current_scenario_hashes.get(scenario_id, ""),
+                }
+                for scenario_id in sorted(set(saved_scenario_hashes) | set(current_scenario_hashes))
+                if saved_scenario_hashes.get(scenario_id, "") != current_scenario_hashes.get(scenario_id, "")
+            ]
+            option_explanations = [
+                {
+                    "action": f"Aportar evidencia verificable para {stage}",
+                    "consequence": "La transición seguirá bloqueada hasta observar evidencia suficiente para esta etapa.",
+                },
+                {
+                    "action": ProposalFeasibilityEvaluator.CANONICAL_UPDATE_OPTION,
+                    "consequence": "Ejecuta OpenSpec Update y validación estricta; no omite la reevaluación de factibilidad.",
+                },
+            ]
+            observed_diff = None
+            baseline_sha = str(assessment.get("candidate_sha") or "") if isinstance(assessment, dict) else ""
+            if (changed_tasks or changed_scenarios) and re.fullmatch(
+                r"[0-9a-f]{40,64}", baseline_sha, re.IGNORECASE
+            ):
+                diff_result = await self._git_run(
+                    worktree_path,
+                    [
+                        "diff", "--no-ext-diff", "--unified=2", baseline_sha, "--",
+                        f"openspec/changes/{run.change_name}/tasks.md",
+                        f"openspec/changes/{run.change_name}/specs/",
+                    ],
+                )
+                observed_diff = diff_result.stdout[:12000] or None
             payload = self._record_current_human_gate(
                 uow,
                 run,
@@ -613,6 +828,32 @@ class NativeOrchestrationCoordinator:
                     "candidate_sha": candidate_sha,
                     "blockers": list(dict.fromkeys(blockers)),
                     "task_feasibility": saved_tasks,
+                    "affected_items": (
+                        [{"id": item, "description": item} for item in dict.fromkeys(blockers)]
+                        if not changed_tasks and not changed_scenarios
+                        else [
+                            {"id": f"task:{item['id']}", "description": f"Task {item['id']} changed."}
+                            for item in changed_tasks
+                        ] + [
+                            {"id": f"scenario:{item['id']}", "description": f"Scenario {item['id']} changed."}
+                            for item in changed_scenarios
+                        ]
+                    ),
+                    "diff": (
+                        {
+                            "tasks": changed_tasks,
+                            "scenarios": changed_scenarios,
+                            "text": observed_diff,
+                            "status": "OBSERVED" if observed_diff else "UNAVAILABLE",
+                            "description": (
+                                "Diff before/after observado desde Git."
+                                if observed_diff
+                                else "El diff de texto no pudo observarse; se muestran los IDs y hashes de tareas/escenarios detectados."
+                            ),
+                        }
+                        if changed_tasks or changed_scenarios else None
+                    ),
+                    "option_explanations": option_explanations,
                 },
             )
             return OrchestrationCoordinationResult(
@@ -839,6 +1080,14 @@ class NativeOrchestrationCoordinator:
                 terminal.add(attempt_id)
                 terminal_status[attempt_id] = str(evidence.get("status") or "")
                 terminal_evidence[attempt_id] = evidence
+        if operator_action_id and any(
+            evidence.get("operator_action_id") == operator_action_id
+            and attempt_id in terminal
+            for attempt_id, evidence in starts.items()
+        ):
+            # One durable operator response can authorize at most one native
+            # stage invocation, even when a second scheduler observes it late.
+            return None
         recovery_count = 0
         recovered_from_attempt_id: str | None = None
         latest_terminal_attempt_id = next(
@@ -2592,10 +2841,21 @@ class NativeOrchestrationCoordinator:
                 propose_attempt_id = dispatch[0]
                 human_required = propose_result.get("status") == "HUMAN_REQUIRED"
                 if human_required:
+                    raw_payload = propose_result.get("human_payload") or {}
+                    payload = self._record_current_human_gate(
+                        uow,
+                        active_run,
+                        gate="propose_clarification",
+                        question=str(raw_payload.get("question") or propose_result.get("message") or "Propose requires operator clarification."),
+                        options=raw_payload.get("options") or [],
+                        question_es=raw_payload.get("question_es"),
+                        options_es=raw_payload.get("options_es"),
+                        payload=raw_payload,
+                    )
                     details = dict(active_run.stop_details or {})
                     details["propose_human_required"] = {
                         "attempt_id": propose_attempt_id,
-                        "human_payload": self._safe_human_payload(propose_result["human_payload"]),
+                        "human_payload": payload,
                         "recorded_at": utc_now().isoformat(),
                     }
                     self._persist_run_stop_details(active_run, details)
@@ -2605,7 +2865,7 @@ class NativeOrchestrationCoordinator:
                         run_id=active_run.run_id,
                         current_stage=OrchestrationStage.PROPOSING,
                         message=propose_result["message"],
-                        human_payload=self._safe_human_payload(propose_result["human_payload"]),
+                        human_payload=payload,
                     )
                 if propose_result.get("status") != "READY_TO_VALIDATE":
                     return OrchestrationCoordinationResult(
@@ -3118,9 +3378,65 @@ class NativeOrchestrationCoordinator:
                         "findings": [],
                     }
                 )
+                if (
+                    res_dict.get("status") == "approved"
+                    and res_dict.get("verdict") == "READY_TO_MERGE"
+                ):
+                    approved_hashes = self._compute_proposal_artifacts_hashes(
+                        worktree_path, change_name
+                    )
+                    if approved_hashes != current_hashes:
+                        details = dict(active_run.stop_details or {})
+                        details["proposal_review"] = {
+                            "attempt_id": attempt_id,
+                            **res_dict,
+                            "artifact_hashes": current_hashes,
+                            "round": prior_round,
+                        }
+                        active_run.stop_details = details
+                        uow.orchestration_runs.save(active_run)
+                        uow.commit()
+                        return OrchestrationCoordinationResult(
+                            status="PAUSED", run_id=active_run.run_id,
+                            current_stage=OrchestrationStage.PROPOSAL_REVIEW,
+                            message="Proposal artifacts changed while independent review was running; approval remains bound to the reviewed snapshot and must be repeated.",
+                        )
+                    candidate_sha = await self._get_git_head_sha(worktree_path)
+                    git_status = await self._git_run(
+                        worktree_path, ["status", "--porcelain", "--untracked-files=all"]
+                    )
+                    if not self._rebase_complexity_assessment_hashes(
+                        active_run=active_run,
+                        worktree_path=worktree_path,
+                        project_id=project_id,
+                        change_name=change_name,
+                        candidate_sha=candidate_sha,
+                        candidate_clean=git_status.returncode == 0 and not git_status.stdout.strip(),
+                        artifact_hashes=approved_hashes,
+                        thinker_provider=thinker_provider,
+                        implementer_provider=implementer_provider,
+                        uow=uow,
+                    ):
+                        res_dict = {
+                            **res_dict,
+                            "status": "changes_required",
+                            "verdict": "BLOCKED_BY_FEASIBILITY_REVALIDATION",
+                            "findings": list(res_dict.get("findings") or []) + [{
+                                "severity": "high",
+                                "location": f"openspec/changes/{change_name}",
+                                "violated_requirement": "La propuesta aprobada debe seguir siendo ejecutable según la evaluación de factibilidad vigente.",
+                                "expected_correction": "Resuelve los bloqueos de la revalidación estricta de OpenSpec y factibilidad antes de aprobar la propuesta.",
+                            }],
+                        }
+                    else:
+                        # _rebase_complexity_assessment_hashes mutates the run's
+                        # assessment. Refresh this snapshot before adding the
+                        # review approval so one UoW commit persists both.
+                        details = dict(active_run.stop_details or {})
                 details["proposal_review"] = {
                     "attempt_id": attempt_id,
                     **res_dict,
+                    "artifact_hashes": current_hashes,
                     "round": prior_round,
                 }
                 active_run.stop_details = details
@@ -3532,9 +3848,54 @@ class NativeOrchestrationCoordinator:
             if not tests_ok:
                 return self._route_automated_test_failure(uow, active_run, test_evidence)
 
+            try:
+                await self._ensure_candidate_commit(worktree_path, issue_number)
+                candidate_sha = await self._get_git_head_sha(worktree_path)
+                clean = await self._git_run(
+                    worktree_path, ["status", "--porcelain", "--untracked-files=all"]
+                )
+                if not re.fullmatch(r"[0-9a-f]{40,64}", candidate_sha, re.IGNORECASE) or clean.stdout.strip():
+                    raise GitOperationError(GitCommandResult(
+                        ("status", "--porcelain"), 1, clean.stdout,
+                        "Candidate is not a clean, immutable commit after tests.",
+                    ))
+                active_run.current_candidate_sha = candidate_sha
+                active_run.candidate_sha = candidate_sha
+                details = dict(active_run.stop_details or {})
+                details["verify_candidate"] = {
+                    "sha": candidate_sha,
+                    "test_evidence": test_evidence,
+                    "recorded_at": utc_now().isoformat(),
+                }
+                active_run.stop_details = details
+                uow.orchestration_runs.save(active_run)
+                uow.commit()
+            except (GitOperationError, AttributeError) as exc:
+                return OrchestrationCoordinationResult(
+                    status="PAUSED", run_id=active_run.run_id,
+                    current_stage=OrchestrationStage.RUNNING_TESTS,
+                    message=f"Candidate could not be frozen after successful tests; Verify was not started: {exc}",
+                )
+
             self._update_stage(uow, active_run, OrchestrationStage.VERIFYING)
 
         if active_run.current_stage == OrchestrationStage.VERIFYING:
+            verify_candidate = (active_run.stop_details or {}).get("verify_candidate")
+            current_sha = await self._get_git_head_sha(worktree_path)
+            current_status = await self._git_run(
+                worktree_path, ["status", "--porcelain", "--untracked-files=all"]
+            )
+            if (
+                not isinstance(verify_candidate, dict)
+                or verify_candidate.get("sha") != current_sha
+                or active_run.current_candidate_sha != current_sha
+                or current_status.stdout.strip()
+            ):
+                return OrchestrationCoordinationResult(
+                    status="PAUSED", run_id=active_run.run_id,
+                    current_stage=OrchestrationStage.VERIFYING,
+                    message="Verify was not dispatched: the worktree is not clean at the exact tested candidate SHA. Any correction must return through Apply and tests before a new candidate is verified.",
+                )
             feasibility_gate = await self._check_stage_feasibility(
                 uow,
                 active_run,
@@ -3563,6 +3924,7 @@ class NativeOrchestrationCoordinator:
                     lambda: self._run_verify(
                         worktree_path, implementer_provider, change_name,
                         project_id=project_id,
+                        candidate_sha=current_sha,
                         operator_response=operator_clarification,
                         process_start_observer=self._observe_stage_process(
                             uow, active_run, invocation
@@ -3602,6 +3964,17 @@ class NativeOrchestrationCoordinator:
                     run_id=active_run.run_id,
                     current_stage=OrchestrationStage.VERIFYING,
                     message="OpenSpec verify reported discrepancies. Worktree preserved.",
+                )
+
+            verified_sha = await self._get_git_head_sha(worktree_path)
+            verify_status = await self._git_run(
+                worktree_path, ["status", "--porcelain", "--untracked-files=all"]
+            )
+            if verified_sha != verify_candidate.get("sha") or verify_status.stdout.strip():
+                return OrchestrationCoordinationResult(
+                    status="PAUSED", run_id=active_run.run_id,
+                    current_stage=OrchestrationStage.VERIFYING,
+                    message="Verify changed the candidate or left a dirty worktree; the verified SHA is invalid. Return any correction through Apply and tests before verifying a new SHA.",
                 )
 
             # Step 9: Post-Verify Routing & Code Review
@@ -4076,6 +4449,7 @@ class NativeOrchestrationCoordinator:
                     doc_path, thinker_provider, change_name, project_id=project_id,
                     uow=uow, run=active_run,
                     operator_response=operator_clarification,
+                    operator_action_id=operator_action_id,
                 )
             except GitOperationError as exc:
                 return OrchestrationCoordinationResult(
@@ -5317,6 +5691,103 @@ class NativeOrchestrationCoordinator:
         details["complexity_assessment"] = payload
         run.stop_details = details
 
+    def _rebase_complexity_assessment_hashes(
+        self,
+        *,
+        active_run: OrchestrationRun,
+        worktree_path: Path,
+        project_id: str,
+        change_name: str,
+        candidate_sha: str,
+        candidate_clean: bool,
+        artifact_hashes: dict[str, str],
+        thinker_provider: str,
+        implementer_provider: str,
+        uow: Any,
+    ) -> bool:
+        """Rebase task/scenario evidence to reviewed artifacts before one atomic save."""
+        details = dict(active_run.stop_details or {})
+        assessment = details.get("complexity_assessment")
+        if not isinstance(assessment, dict):
+            return True
+        project = uow.projects.get_by_id(project_id) if hasattr(uow, "projects") else None
+        inputs = self.proposal_feasibility.collect_inputs(
+            worktree_path=worktree_path,
+            change_name=change_name,
+            project=project,
+            candidate_sha=candidate_sha,
+            candidate_clean=candidate_clean,
+            preview_sessions=getattr(uow, "preview_sessions", None),
+            thinker_provider=thinker_provider,
+            implementer_provider=implementer_provider,
+        )
+        capabilities = {
+            str(item.get("ref")): item.get("available") is True
+            for item in inputs.get("capabilities", []) if isinstance(item, dict)
+        }
+        if (
+            inputs.get("status") != "READY"
+            or not capabilities.get("openspec:status:planning_complete")
+            or not capabilities.get("openspec:validate:valid")
+        ):
+            return False
+        try:
+            structured = json.loads(str(assessment.get("structured_output") or ""))
+        except (TypeError, ValueError):
+            return False
+        report = structured.get("feasibility") if isinstance(structured, dict) else None
+        if not isinstance(report, dict):
+            return False
+        feasibility_status, validated_tasks, validated_scenarios, blockers, actions = (
+            self.proposal_feasibility.validate_report(report, inputs, worktree_path)
+        )
+        if feasibility_status != "EXECUTABLE" or blockers:
+            return False
+        current_tasks = {
+            str(item.get("task_id")): item
+            for item in inputs.get("tasks", []) if isinstance(item, dict)
+        }
+        current_scenarios = {
+            str(item.get("scenario_id")): item
+            for item in inputs.get("scenarios", []) if isinstance(item, dict)
+        }
+        saved_tasks = list(validated_tasks)
+        saved_scenarios = list(validated_scenarios)
+        if (
+            not current_tasks
+            or not current_scenarios
+            or {str(item.get("task_id")) for item in saved_tasks if isinstance(item, dict)} != set(current_tasks)
+            or {str(item.get("scenario_id")) for item in saved_scenarios if isinstance(item, dict)} != set(current_scenarios)
+        ):
+            return False
+        rebased_tasks = []
+        for row in saved_tasks:
+            task_id = str(row.get("task_id"))
+            text = str(current_tasks[task_id].get("text") or "")
+            rebased_tasks.append({
+                **row,
+                "source_text_sha256": hashlib.sha256(text.encode("utf-8")).hexdigest(),
+                "canonical_text_sha256": self.proposal_feasibility.canonical_task_text_sha256(task_id, text),
+            })
+        rebased_scenarios = []
+        for row in saved_scenarios:
+            scenario_id = str(row.get("scenario_id"))
+            text = str(current_scenarios[scenario_id].get("text") or "")
+            rebased_scenarios.append({
+                **row,
+                "source_text_sha256": hashlib.sha256(text.encode("utf-8")).hexdigest(),
+            })
+        assessment["task_feasibility"] = rebased_tasks
+        assessment["scenario_coverage"] = rebased_scenarios
+        assessment["feasibility_status"] = "EXECUTABLE"
+        assessment["feasibility_blockers"] = []
+        assessment["feasibility_actions"] = list(actions)
+        assessment["candidate_sha"] = candidate_sha
+        assessment["artifact_hashes"] = dict(artifact_hashes)
+        details["complexity_assessment"] = assessment
+        active_run.stop_details = details
+        return True
+
     @staticmethod
     def _should_retry_structural_feasibility(
         assessment: ComplexityAssessment, correction_count: int
@@ -5945,6 +6416,11 @@ class NativeOrchestrationCoordinator:
                 "human_validation. Keep actual human decisions and physical-device-only checks distinct; schedule "
                 "physical-only follow-up post-merge and do not use it to block browser-automatable work. Do not "
                 "invent dependencies or ask a human to run a command that the configured executor can run.\n"
+            )
+        if operation == "propose":
+            prompt += (
+                "\nOpenSpec authoring reminder: every Requirement in every delta spec must contain at least one concrete Scenario; "
+                "do not rely on validation to infer or supply missing acceptance behavior. The native OpenSpec CLI remains the authority.\n"
             )
         if continue_existing and operator_clarification:
             prompt += f"\nOperator clarification for the pending native workflow:\n{operator_clarification}\n"
@@ -6607,21 +7083,29 @@ class NativeOrchestrationCoordinator:
 
         if not correction_ok:
             reason = "Native OpenSpec update failed after independent proposal findings; human decision required."
+            payload = self._record_current_human_gate(
+                uow, run, gate="proposal_correction_failed", question=reason,
+                payload={"proposal_findings": findings, "correction_status": "failed"},
+            )
             return OrchestrationCoordinationResult(
                 status="HUMAN_REQUIRED",
                 run_id=run.run_id,
                 current_stage=OrchestrationStage.PROPOSAL_REVIEW,
                 message=reason,
-                human_payload={"question": reason, "options": [], "run_id": run.run_id},
+                human_payload=payload,
             )
         if new_hashes == old_hashes:
             reason = "Proposal correction produced no artifact change; human decision required."
+            payload = self._record_current_human_gate(
+                uow, run, gate="proposal_correction_no_change", question=reason,
+                payload={"proposal_findings": findings, "correction_status": "no_change"},
+            )
             return OrchestrationCoordinationResult(
                 status="HUMAN_REQUIRED",
                 run_id=run.run_id,
                 current_stage=OrchestrationStage.PROPOSAL_REVIEW,
                 message=reason,
-                human_payload={"question": reason, "options": [], "run_id": run.run_id},
+                human_payload=payload,
             )
 
         self._update_stage(uow, run, OrchestrationStage.PROPOSAL_REVIEW)
@@ -7347,6 +7831,7 @@ class NativeOrchestrationCoordinator:
         provider: str,
         change_name: str,
         project_id: str | None = None,
+        candidate_sha: str | None = None,
         process_start_observer: Any = None,
         operator_response: str | None = None,
     ) -> VerifyOutcome:
@@ -7360,6 +7845,8 @@ class NativeOrchestrationCoordinator:
         prompt = (
             f"Execute official OpenSpec Verify for change '{change_name}'.\n"
             f"Workflow dispatch command: {wf.dispatch_command}\n\n"
+            f"Verify the exact immutable candidate commit SHA: {candidate_sha or 'UNAVAILABLE'}. "
+            "Stop if the worktree HEAD differs from this SHA or is dirty; do not verify another candidate.\n\n"
             "Use `openspec validate --type change --strict <change-name>` only for structural CLI validation. "
             "There is no `openspec verify` CLI command; execute Verify through the resolved native provider workflow above.\n\n"
             "Verify that all tasks and requirements are implemented and verified with green tests. "
@@ -7575,6 +8062,7 @@ class NativeOrchestrationCoordinator:
         uow: Any = None,
         run: OrchestrationRun | None = None,
         operator_response: str | None = None,
+        operator_action_id: str | None = None,
     ) -> bool:
         """Execute official OpenSpec Sync and Archive workflows with thinking agent."""
         sync_wf = self.agent_runner.resolve_workflow(
@@ -7602,6 +8090,7 @@ class NativeOrchestrationCoordinator:
             invocation = await self._begin_stage_invocation(
                 uow, run, doc_path, operation.upper(),
                 allow_human_resume=bool(operator_response),
+                operator_action_id=operator_action_id,
             )
             if invocation is None:
                 raise RuntimeError(f"{operation.title()} invocation is already active or ambiguous")
@@ -7673,7 +8162,26 @@ class NativeOrchestrationCoordinator:
             isinstance(gate, dict) and gate.get("gate") == "doc_closing_archive"
             and bool(operator_response)
         )
-        if not archive_resume:
+        sync_already_completed = False
+        if operator_action_id and uow is not None and run is not None:
+            events_repo = getattr(uow, "orchestration_stage_events", None)
+            prior_events = events_repo.list_by_run(run.run_id) if events_repo else []
+            sync_starts = {
+                str((event.evidence_references or {}).get("attempt_id"))
+                for event in prior_events
+                if event.event_type == "STAGE_INVOCATION_STARTED"
+                and (event.evidence_references or {}).get("operator_action_id") == operator_action_id
+                and str((event.evidence_references or {}).get("claim_key") or "").startswith(
+                    f"stage-invocation:{run.run_id}:SYNC:"
+                )
+            }
+            sync_already_completed = any(
+                event.event_type == "STAGE_INVOCATION_COMPLETED"
+                and str((event.evidence_references or {}).get("attempt_id")) in sync_starts
+                and (event.evidence_references or {}).get("result", {}).get("effect_verified") is True
+                for event in prior_events
+            )
+        if not archive_resume and not sync_already_completed:
             expected_main_specs = self._doc_closing_expected_main_specs(
                 doc_path, change_name
             )
@@ -7755,6 +8263,7 @@ class NativeOrchestrationCoordinator:
         uow: Any = None,
         run: OrchestrationRun | None = None,
         operator_response: str | None = None,
+        operator_action_id: str | None = None,
     ) -> tuple[bool, str | None]:
         """Observe DOC_CLOSING before deciding whether native workflows are needed."""
         state, detail = self._observe_doc_closing_change(doc_path, change_name)
@@ -7775,6 +8284,7 @@ class NativeOrchestrationCoordinator:
             completed = await self._run_sync_and_archive(
                 doc_path, provider, change_name, project_id=project_id, uow=uow, run=run,
                 operator_response=operator_response,
+                operator_action_id=operator_action_id,
             )
         except NativeStageHumanRequired as handoff:
             if uow is not None and run is not None:
@@ -7962,29 +8472,52 @@ class NativeOrchestrationCoordinator:
 
     async def _ensure_candidate_commit(self, worktree_path: Path, issue_number: int) -> None:
         """Persist Apply output before publishing it; never publish a dirty worktree."""
-        status = await self._git_run(worktree_path, ["status", "--porcelain"])
-        status_text = status if isinstance(status, str) else status.stdout
-        if not status_text.strip():
-            return
-        await self._git_run(worktree_path, ["add", "-A"])
-        ignored_paths: list[str] = []
-        for cache_dir in worktree_path.rglob("__pycache__"):
-            if cache_dir.is_dir():
-                ignored_paths.append(str(cache_dir.relative_to(worktree_path)))
-        ignored_paths.extend(
-            str(path.relative_to(worktree_path))
-            for path in worktree_path.rglob("*.pyc")
-            if path.is_file()
+        staged_before = await self._git_run(
+            worktree_path, ["diff", "--cached", "--name-only", "-z"]
         )
-        if ignored_paths:
-            await self._git_run(worktree_path, ["reset", "--", *ignored_paths])
-        staged = await self._git_run(worktree_path, ["diff", "--cached", "--name-only"])
+        if staged_before.stdout.strip("\0"):
+            raise GitOperationError(GitCommandResult(
+                ("diff", "--cached", "--name-only"), 1, staged_before.stdout,
+                "Refusing to commit a candidate with paths staged before the coordinator boundary.",
+            ))
+        tracked = await self._git_run(worktree_path, ["diff", "--name-only", "-z"])
+        untracked = await self._git_run(
+            worktree_path, ["ls-files", "--others", "--exclude-standard", "-z"]
+        )
+        paths = sorted({
+            path for path in (*tracked.stdout.split("\0"), *untracked.stdout.split("\0"))
+            if path and not path.endswith((".pyc",))
+            and "__pycache__/" not in path
+        })
+        unsafe_paths = [
+            path for path in paths
+            if Path(path).name.lower() in {".env", ".env.local", "credentials.json", "service-account.json"}
+            or Path(path).suffix.lower() in {".pem", ".key", ".p12", ".pfx", ".db", ".sqlite", ".dump"}
+        ]
+        if unsafe_paths:
+            raise GitOperationError(GitCommandResult(
+                ("git", "add"), 1, "",
+                "Refusing candidate commit because sensitive or local-state paths changed: "
+                + ", ".join(unsafe_paths),
+            ))
+        if not paths:
+            return
+        await self._git_run(worktree_path, ["add", "-A", "--", *paths])
+        staged = await self._git_run(worktree_path, ["diff", "--cached", "--name-only", "-z"])
         if not staged.stdout.strip():
             return
         await self._git_run(
             worktree_path,
             ["commit", "-m", f"feat(request-{issue_number}): implement OpenSpec change"],
         )
+        remaining = await self._git_run(
+            worktree_path, ["status", "--porcelain", "--untracked-files=all"]
+        )
+        if remaining.stdout.strip():
+            raise GitOperationError(GitCommandResult(
+                ("status", "--porcelain"), 1, remaining.stdout,
+                "Candidate commit did not leave a clean worktree.",
+            ))
 
     async def _get_git_head_sha(self, worktree_path: Path) -> str:
         result = await self._git_run(worktree_path, ["rev-parse", "HEAD"])

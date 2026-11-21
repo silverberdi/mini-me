@@ -59,6 +59,17 @@ test('proposal-review options identify system suggestions and retain free-text r
   assert.match(component, /Respuesta explícita del operador/);
 });
 
+test('optional gate evidence fields render only when present and preserve old payload compatibility', () => {
+  assert.match(component, /humanGateAffectedItems\(\): any\[\] \{[\s\S]*?Array\.isArray\(payload\?\.affected_items\) \? payload\.affected_items : \[\]/);
+  assert.match(component, /humanGateDiff\(\): string \{[\s\S]*?if \(!diff \|\| typeof diff !== 'object'\) return ''[\s\S]*?diff\.status === 'NOT_APPLICABLE'[\s\S]*?diff\.status === 'UNAVAILABLE'/);
+  assert.match(component, /humanGateOptionExplanation\(option: any, index: number\): string/);
+  assert.match(component, /humanGateDescription\(\): string/);
+  assert.match(component, /\*ngIf="humanGateAffectedItems\(\)\.length > 0"/);
+  assert.match(component, /\*ngIf="humanGateDiff\(\)"/);
+  assert.match(component, /\*ngIf="humanGateOptionExplanation\(opt, i\)"/);
+  assert.match(component, /const value = Array\.isArray\(explanations\)/);
+});
+
 test('selecting a generated correction places its complete response text in the clarification', () => {
   assert.match(component, /selectHumanGateOption\(opt\)/);
   assert.match(component, /option\?\.response_text/);
@@ -85,7 +96,7 @@ test('operator response submits through the existing authorized request endpoint
   assert.match(component, /operator_clarification: answer/);
   assert.match(component, /idempotency_key: idempotencyKey/);
   assert.match(component, /humanResponseIdempotencyKey\(run, answer\)/);
-  assert.match(component, /await this\.refresh\.read\(\)/);
+  assert.match(component, /await this\.refresh\.refreshRuns\(\)/);
 });
 
 test('Trabajo actual renders Spanish explanation and Apply diagnostic context', () => {

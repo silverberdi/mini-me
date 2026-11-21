@@ -1066,6 +1066,9 @@ async def test_agent_reports_incomplete_propose_without_false_completion(mock_en
     assert "design.md" in result["message"]
     assert "tasks.md" in result["message"]
     coordinator.agent_runner.run.assert_awaited_once()
+    prompt = coordinator.agent_runner.run.await_args.kwargs["prompt_context"]
+    assert "every Requirement in every delta spec must contain at least one concrete Scenario" in prompt
+    assert "native OpenSpec CLI remains the authority" in prompt
 
 
 @pytest.mark.asyncio

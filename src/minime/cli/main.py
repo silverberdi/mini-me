@@ -690,12 +690,15 @@ def scheduler_run_cmd(
 ) -> None:
     """Run autonomous background runner for active project."""
     import time
+    import hashlib
+    import json
     from minime.adapters.github import GitHubAdapter
     from minime.services.agent_runner import CliAgentRunner
     from minime.services.budget_service import BudgetService
     from minime.services.capacity_lifecycle_service import CapacityLifecycleService
     from minime.services.orchestration_coordinator import NativeOrchestrationCoordinator
     from minime.services.worktree_manager import WorktreeManager
+    from minime.domain.enums import OperatorActionStatus, OperatorActionType, OrchestrationStage
 
     iterations = 0
     typer.echo(f"Autonomous SDLC scheduler started (poll_interval={poll_interval}s).")
@@ -741,12 +744,56 @@ def scheduler_run_cmd(
 
                     # Check if there is an active run
                     active_runs = uow.orchestration_runs.list_runs(project_id=project_id, is_active=True)
+                    accepted_doc_action = None
                     if active_runs:
                         active_run = active_runs[0]
+                        actions = getattr(uow, "operator_actions", None)
+                        run_actions = actions.list_by_run(active_run.run_id, limit=100) if actions else []
+                        gate_payload = (active_run.stop_details or {}).get("human_payload")
+                        gate_fingerprint = None
+                        if active_run.current_stage == OrchestrationStage.DOC_CLOSING and isinstance(gate_payload, dict):
+                            gate_fingerprint = hashlib.sha256(json.dumps({
+                                "run_id": active_run.run_id,
+                                "stage": active_run.current_stage.value,
+                                "gate_id": gate_payload.get("gate_id"),
+                                "gate": gate_payload.get("gate"),
+                                "question": gate_payload.get("question"),
+                                "options": gate_payload.get("options"),
+                            }, sort_keys=True, ensure_ascii=False).encode()).hexdigest()
+                        stale_doc_actions = []
+                        for action in run_actions:
+                            if (
+                                action.action_type == OperatorActionType.RESOLVE_GATE
+                                and getattr(action.status, "value", action.status) == OperatorActionStatus.ACCEPTED.value
+                                and action.precondition_stage == OrchestrationStage.DOC_CLOSING.value
+                                and (
+                                    active_run.current_stage != OrchestrationStage.DOC_CLOSING
+                                    or action.parameters_json.get("gate_fingerprint") != gate_fingerprint
+                                )
+                            ):
+                                action.status = OperatorActionStatus.COMPLETED
+                                action.summary = "DOC_CLOSING response was consumed or superseded by a later durable Run state."
+                                action.result_payload_json = {
+                                    "run_id": active_run.run_id,
+                                    "current_stage": active_run.current_stage.value,
+                                    "superseded": True,
+                                }
+                                actions.save(action)
+                                stale_doc_actions.append(action)
+                        if stale_doc_actions:
+                            uow.commit()
+                        if active_run.current_stage == OrchestrationStage.DOC_CLOSING:
+                            accepted_doc_action = next((action for action in run_actions
+                                if action.action_type == OperatorActionType.RESOLVE_GATE
+                                and getattr(action.status, "value", action.status) == OperatorActionStatus.ACCEPTED.value
+                                and action.precondition_stage == OrchestrationStage.DOC_CLOSING.value
+                                and action.parameters_json.get("gate_fingerprint") == gate_fingerprint
+                                and isinstance(action.parameters_json.get("accepted_response"), str)
+                            ), None)
                         if getattr(active_run, "human_gate", None) in (
                             "NEEDS_HUMAN",
                             "READY_FOR_HUMAN_MERGE",
-                        ):
+                        ) and accepted_doc_action is None:
                             # Awaiting human attention (human_gate is the HumanGate enum,
                             # whose values are NEEDS_HUMAN / READY_FOR_HUMAN_MERGE — not
                             # the legacy "HUMAN_REQUIRED" string, which never matched).
@@ -776,11 +823,32 @@ def scheduler_run_cmd(
                     result = asyncio.run(
                         coordinator.execute_project_request(
                             project_id=project_id,
+                            operator_clarification=(
+                                accepted_doc_action.parameters_json["accepted_response"]
+                                if accepted_doc_action else None
+                            ),
+                            operator_action_id=(
+                                accepted_doc_action.action_request_id
+                                if accepted_doc_action else None
+                            ),
                             thinker_provider=agent_runner.provider_for_role("thinker"),
                             implementer_provider=agent_runner.provider_for_role("implementer"),
                             reviewer_provider=agent_runner.provider_for_role("reviewer"),
+                            target_run_id=(accepted_doc_action.run_id if accepted_doc_action else None),
                         )
                     )
+                    if accepted_doc_action is not None:
+                        accepted_doc_action.status = OperatorActionStatus.COMPLETED
+                        accepted_doc_action.summary = "Accepted DOC_CLOSING response processed by Scheduler."
+                        accepted_doc_action.result_payload_json = {
+                            "status": result.status,
+                            "run_id": result.run_id,
+                            "current_stage": result.current_stage.value if result.current_stage else None,
+                            "message": result.message,
+                            "human_payload": result.human_payload,
+                        }
+                        uow.operator_actions.save(accepted_doc_action)
+                        uow.commit()
                     typer.echo(f"[{project_id}] Result: status={result.status}, run_id={result.run_id}, message={result.message}")
 
         except Exception as exc:

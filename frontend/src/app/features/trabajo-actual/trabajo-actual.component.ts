@@ -185,6 +185,9 @@ const STAGE_ILLUSTRATION_PATHS: Readonly<Record<string, string>> = Object.freeze
           <div class="p-4 rounded-xl bg-slate-900/90 border border-amber-500/30 space-y-2">
             <span class="text-xs font-semibold uppercase tracking-wider text-amber-400 font-mono">Pregunta del Workflow:</span>
             <p class="text-sm text-slate-100 font-medium whitespace-pre-wrap">{{ humanGateQuestion() }}</p>
+            <p *ngIf="humanGateDescription() && humanGateDescription() !== humanGateQuestion()" class="text-sm text-slate-200 whitespace-pre-wrap">
+              <strong>Descripción:</strong> {{ humanGateDescription() }}
+            </p>
             <p *ngIf="humanGateOriginalQuestion()" class="text-xs text-slate-400 whitespace-pre-wrap">
               <strong>Texto original:</strong> {{ humanGateOriginalQuestion() }}
             </p>
@@ -226,6 +229,17 @@ const STAGE_ILLUSTRATION_PATHS: Readonly<Record<string, string>> = Object.freeze
             </div>
           </div>
 
+          <section *ngIf="humanGateAffectedItems().length > 0" class="space-y-2" aria-label="Elementos afectados">
+            <h4 class="text-xs font-semibold uppercase tracking-wider text-slate-300">Elementos afectados</h4>
+            <ul class="list-disc pl-5 text-sm text-slate-200 space-y-1">
+              <li *ngFor="let item of humanGateAffectedItems()">{{ humanGateAffectedItemLabel(item) }}</li>
+            </ul>
+          </section>
+          <section *ngIf="humanGateDiff()" class="space-y-2" aria-label="Diferencias del gate">
+            <h4 class="text-xs font-semibold uppercase tracking-wider text-slate-300">Diferencias</h4>
+            <pre class="p-3 rounded-xl bg-slate-900/80 border border-slate-700 text-xs text-slate-200 whitespace-pre-wrap overflow-x-auto">{{ humanGateDiff() }}</pre>
+          </section>
+
           <!-- Options (if available) -->
           <div *ngIf="humanGateOptions().length > 0" class="space-y-2">
             <span class="text-xs font-semibold text-slate-300 font-mono">
@@ -242,6 +256,9 @@ const STAGE_ILLUSTRATION_PATHS: Readonly<Record<string, string>> = Object.freeze
                 </div>
                 <div *ngIf="opt.source === 'system_generated'" class="text-[10px] uppercase tracking-wide text-sky-300 mt-1">Sugerencia del sistema</div>
                 <div *ngIf="opt.description" class="text-[11px] text-slate-400 mt-0.5">{{ opt.description }}</div>
+                <div *ngIf="humanGateOptionExplanation(opt, i)" class="text-[11px] text-slate-300 mt-1 whitespace-pre-wrap">
+                  {{ humanGateOptionExplanation(opt, i) }}
+                </div>
               </button>
             </div>
           </div>
@@ -704,6 +721,11 @@ export class TrabajoActualComponent {
     return payload?.question_es || 'La pregunta del workflow aún no tiene una presentación en español.';
   }
 
+  humanGateDescription(): string {
+    const payload = this.targetRun()?.stop_details?.['human_payload'];
+    return typeof payload?.description === 'string' ? payload.description : '';
+  }
+
   humanGateOriginalQuestion(): string {
     const run = this.targetRun();
     if (!run) return '';
@@ -747,6 +769,53 @@ export class TrabajoActualComponent {
     if (!run) return [];
     const payload = run.stop_details?.['human_payload'];
     return Array.isArray(payload?.review_findings) ? payload.review_findings : [];
+  }
+
+  humanGateAffectedItems(): any[] {
+    const payload = this.targetRun()?.stop_details?.['human_payload'];
+    return Array.isArray(payload?.affected_items) ? payload.affected_items : [];
+  }
+
+  humanGateAffectedItemLabel(item: any): string {
+    if (typeof item === 'string') return item;
+    if (!item || typeof item !== 'object') return String(item ?? '');
+    return [item.id, item.title, item.name, item.description]
+      .find(value => typeof value === 'string' && value.trim()) || JSON.stringify(item);
+  }
+
+  humanGateDiff(): string {
+    const diff = this.targetRun()?.stop_details?.['human_payload']?.diff;
+    if (typeof diff === 'string') return diff;
+    if (!diff || typeof diff !== 'object') return '';
+    if (diff.status === 'NOT_APPLICABLE') {
+      return typeof diff.description === 'string' ? `No aplica: ${diff.description}` : 'No aplica un diff de tareas o requisitos.';
+    }
+    if (diff.status === 'UNAVAILABLE') {
+      return typeof diff.description === 'string' ? diff.description : 'No se pudo observar el diff de los artefactos implicados.';
+    }
+    const summary = JSON.stringify({
+      status: diff.status,
+      tasks: diff.tasks,
+      scenarios: diff.scenarios,
+    }, null, 2);
+    return typeof diff.text === 'string' && diff.text
+      ? `${diff.text}\n\nEvidencia de identidad:\n${summary}`
+      : `No se pudo observar el diff textual. Evidencia disponible:\n${summary}`;
+  }
+
+  humanGateOptionExplanation(option: any, index: number): string {
+    const explanations = this.targetRun()?.stop_details?.['human_payload']?.option_explanations;
+    const value = Array.isArray(explanations)
+      ? explanations[index]
+      : explanations && typeof explanations === 'object'
+        ? explanations[option?.id || option?.response_text || index]
+        : undefined;
+    if (typeof value === 'string') return value;
+    if (value && typeof value === 'object') {
+      return [value.explanation, value.consequence, value.description]
+        .find(item => typeof item === 'string' && item.trim()) || '';
+    }
+    return '';
   }
 
   humanGateReviewerSummary(): string {
@@ -883,9 +952,11 @@ export class TrabajoActualComponent {
 
       if (response.ok) {
         this.submissionSuccess.set(true);
-        this.submissionMessage.set('Respuesta enviada, procesando…');
+        this.submissionMessage.set(run.stage === 'DOC_CLOSING'
+          ? 'Respuesta aceptada. DOC_CLOSING queda pendiente del Scheduler; el Run aún no confirma que haya comenzado.'
+          : 'Respuesta aceptada. Esperando la actualización del Run para confirmar la siguiente etapa.');
         this.operatorResponse.set('');
-        await this.refresh.read();
+        await this.refresh.refreshRuns();
       } else {
         this.pendingGateAcknowledgement.set(null);
         this.submissionSuccess.set(false);

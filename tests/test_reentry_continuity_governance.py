@@ -467,6 +467,8 @@ async def test_proposal_artifact_hash_change_invalidates_previous_approval(base_
 
 @pytest.mark.asyncio
 async def test_proposal_changes_required_with_changed_hashes_triggers_new_review(base_setup):
+    import json
+
     uow, candidate_worktree, change_dir = base_setup
     old_hashes = {"proposal.md": "old_hash", "design.md": "old_hash", "tasks.md": "old_hash"}
     run = OrchestrationRun(
@@ -482,6 +484,13 @@ async def test_proposal_changes_required_with_changed_hashes_triggers_new_review
                     "verdict": "CHANGES_REQUIRED",
                     "summary": "Fix section 2",
                     "artifact_hashes": old_hashes,
+                },
+                "complexity_assessment": {
+                    "status": "VALID",
+                    "structured_output": json.dumps({"feasibility": {"tasks": [], "scenarios": []}}),
+                    "task_feasibility": [{"task_id": "1.1", "source_text_sha256": "old-task"}],
+                    "scenario_coverage": [{"scenario_id": "feature:1:1", "source_text_sha256": "old-scenario"}],
+                    "candidate_sha": "old-candidate",
                 },
             }
         ),
@@ -505,10 +514,30 @@ async def test_proposal_changes_required_with_changed_hashes_triggers_new_review
     )
     coordinator.agent_runner.run = AsyncMock(return_value=mock_res)
     coordinator._run_apply = AsyncMock(return_value=False)
+    coordinator.proposal_feasibility.collect_inputs = MagicMock(return_value={
+        "status": "READY",
+        "tasks": [{"task_id": "1.1", "text": "Task text approved by reviewer"}],
+        "scenarios": [{"scenario_id": "feature:1:1", "text": "Scenario approved by reviewer"}],
+        "capabilities": [
+            {"ref": "openspec:status:planning_complete", "available": True},
+            {"ref": "openspec:validate:valid", "available": True},
+        ],
+    })
+    coordinator.proposal_feasibility.validate_report = MagicMock(return_value=(
+        "EXECUTABLE",
+        [{"task_id": "1.1", "status": "READY"}],
+        [{"scenario_id": "feature:1:1", "status": "COVERED"}],
+        [],
+        [],
+    ))
 
     await coordinator.execute_project_request("mini-me")
     updated_run = uow.orchestration_runs.get_by_id("run-test-hash-change")
     assert updated_run.current_stage == OrchestrationStage.IMPLEMENTING
+    assert updated_run.stop_details["proposal_review"]["status"] == "approved"
+    assert updated_run.stop_details["complexity_assessment"]["task_feasibility"][0]["source_text_sha256"] != "old-task"
+    assert updated_run.stop_details["complexity_assessment"]["scenario_coverage"][0]["source_text_sha256"] != "old-scenario"
+    assert updated_run.stop_details["complexity_assessment"]["candidate_sha"]
     # Agent runner was invoked because hashes changed, superseding the old rejection
     coordinator.agent_runner.run.assert_called_once()
 

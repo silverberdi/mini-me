@@ -44,6 +44,7 @@ from minime.domain.enums import (
     HumanGate,
     OperatorActionType,
     OperatorAuthDecision,
+    OrchestrationStage,
     OrchestrationStopOutcome,
     ProjectType,
 )
@@ -1839,6 +1840,73 @@ async def run_project_request(
             )
 
     intent_key = body.idempotency_key or f"{project_id}:active"
+    current_doc_gate = next(
+        (run for run in active_runs if accepted_action is not None and run.run_id == accepted_action.run_id),
+        None,
+    )
+    current_doc_payload = (
+        (current_doc_gate.stop_details or {}).get("human_payload")
+        if current_doc_gate is not None else None
+    )
+    current_doc_gate_fingerprint = None
+    if isinstance(current_doc_payload, dict):
+        current_doc_gate_fingerprint = hashlib.sha256(json.dumps({
+            "run_id": current_doc_gate.run_id,
+            "stage": current_doc_gate.current_stage.value,
+            "gate_id": current_doc_payload.get("gate_id"),
+            "gate": current_doc_payload.get("gate"),
+            "question": current_doc_payload.get("question"),
+            "options": current_doc_payload.get("options"),
+        }, sort_keys=True, ensure_ascii=False).encode()).hexdigest()
+    # DOC_CLOSING gate responses are durable work requests for the scheduler.
+    # The API acknowledges them here but must not also dispatch Sync/Archive;
+    # the scheduler is the single owner of that stage transition.
+    doc_closing_action = (
+        accepted_action is not None
+        and accepted_action.status == "ACCEPTED"
+        and accepted_action.action_type == OperatorActionType.RESOLVE_GATE
+        and accepted_action.precondition_stage == OrchestrationStage.DOC_CLOSING.value
+        and accepted_action.run_id is not None
+        and current_doc_gate is not None
+        and current_doc_gate.current_stage == OrchestrationStage.DOC_CLOSING
+        and current_doc_gate_fingerprint == accepted_action.parameters_json.get("gate_fingerprint")
+    )
+    if doc_closing_action:
+        operation_id = accepted_action.action_request_id
+        await event_broker.publish(
+            "run.gate_acknowledged",
+            {"project_id": project_id, "run_id": str(accepted_action.run_id)},
+        )
+        return {
+            "status": "ACCEPTED",
+            "operation_id": operation_id,
+            "idempotency_key": client_idempotency_key or operation_id,
+            "run_id": accepted_action.run_id,
+            "message": "Respuesta recibida; DOC_CLOSING está pendiente del Scheduler.",
+        }
+
+    active_doc_closing = next(
+        (run for run in active_runs if run.current_stage == OrchestrationStage.DOC_CLOSING),
+        None,
+    )
+    if active_doc_closing is not None:
+        if (
+            accepted_action is not None
+            and accepted_action.precondition_stage == OrchestrationStage.DOC_CLOSING.value
+            and accepted_action.parameters_json.get("gate_fingerprint") != current_doc_gate_fingerprint
+        ):
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail="The accepted DOC_CLOSING response belongs to a stale gate.",
+            )
+        return {
+            "status": "ACCEPTED",
+            "operation_id": f"scheduler:{active_doc_closing.run_id}",
+            "idempotency_key": client_idempotency_key,
+            "run_id": active_doc_closing.run_id,
+            "message": "DOC_CLOSING queda bajo despacho exclusivo del Scheduler.",
+        }
+
     operation_id = _accepted_operations.get((project_id, intent_key))
     newly_scheduled = operation_id is None
     if operation_id is None:

@@ -898,7 +898,9 @@ async def test_verify_requires_native_final_response_channel(tmp_path: Path):
     (skill / "SKILL.md").write_text("native verify")
     runner = ScriptedRunner('{"verdict":"READY_TO_MERGE","summary":"verified","findings":[]}')
 
-    result = await coordinator(tmp_path, runner)._run_verify(tmp_path, "codex", "change")
+    result = await coordinator(tmp_path, runner)._run_verify(
+        tmp_path, "codex", "change", candidate_sha="a" * 40
+    )
 
     assert result.status == "COMPLETE"
     assert "output-schema" not in runner.calls[0]
@@ -906,6 +908,7 @@ async def test_verify_requires_native_final_response_channel(tmp_path: Path):
     assert "openspec validate --type change --strict <change-name>" in runner.calls[0]
     assert "There is no `openspec verify` CLI command" in runner.calls[0]
     assert "Workflow dispatch command: native-verify" in runner.calls[0]
+    assert "exact immutable candidate commit SHA: " + "a" * 40 in runner.calls[0]
 
 
 def test_canonical_task_text_ignores_only_supported_status_tags_and_whitespace():
@@ -1099,16 +1102,58 @@ async def test_candidate_commit_is_created_only_for_dirty_worktree(tmp_path: Pat
 
     async def fake_git_run(_cwd: Path, args: list[str]):
         calls.append(args)
-        if args == ["status", "--porcelain"]:
-            return SimpleNamespace(stdout=" M src/app.py\n")
-        if args == ["diff", "--cached", "--name-only"]:
-            return SimpleNamespace(returncode=0, stdout="src/app.py\n")
+        if args == ["diff", "--cached", "--name-only", "-z"]:
+            return SimpleNamespace(returncode=0, stdout="" if calls.count(args) == 1 else "src/app.py\0")
+        if args == ["diff", "--name-only", "-z"]:
+            return SimpleNamespace(returncode=0, stdout="src/app.py\0")
+        if args == ["ls-files", "--others", "--exclude-standard", "-z"]:
+            return SimpleNamespace(returncode=0, stdout="")
+        if args == ["status", "--porcelain", "--untracked-files=all"]:
+            return SimpleNamespace(returncode=0, stdout="")
         return SimpleNamespace(returncode=0, stdout="")
 
     c._git_run = fake_git_run
     await c._ensure_candidate_commit(tmp_path, 5)
-    assert ["add", "-A"] in calls
+    assert ["add", "-A", "--", "src/app.py"] in calls
     assert ["commit", "-m", "feat(request-5): implement OpenSpec change"] in calls
+
+
+@pytest.mark.asyncio
+async def test_candidate_correction_after_tests_requires_a_new_commit_sha(tmp_path: Path):
+    candidate = tmp_path / "candidate"
+    candidate.mkdir()
+    subprocess.run(["git", "init", "-q", str(candidate)], check=True)
+    subprocess.run(["git", "-C", str(candidate), "config", "user.name", "Test"], check=True)
+    subprocess.run(["git", "-C", str(candidate), "config", "user.email", "test@example.com"], check=True)
+    source = candidate / "src" / "app.py"
+    source.parent.mkdir()
+    source.write_text("answer = 1\n")
+    subprocess.run(["git", "-C", str(candidate), "add", "src/app.py"], check=True)
+    subprocess.run(["git", "-C", str(candidate), "commit", "-qm", "seed candidate"], check=True)
+    c = NativeOrchestrationCoordinator(
+        uow_factory=lambda: None,
+        github_adapter=SimpleNamespace(),
+        worktree_manager=SimpleNamespace(),
+        agent_runner=ScriptedRunner(""),
+    )
+
+    source.write_text("answer = 2\n")
+    await c._ensure_candidate_commit(candidate, 460)
+    tested_sha = await c._get_git_head_sha(candidate)
+    assert not subprocess.run(
+        ["git", "-C", str(candidate), "status", "--porcelain", "--untracked-files=all"],
+        check=True, capture_output=True, text=True,
+    ).stdout.strip()
+
+    # A later Apply correction changes the candidate and must be frozen under a new SHA.
+    source.write_text("answer = 3\n")
+    await c._ensure_candidate_commit(candidate, 460)
+    corrected_sha = await c._get_git_head_sha(candidate)
+    assert corrected_sha != tested_sha
+    assert not subprocess.run(
+        ["git", "-C", str(candidate), "status", "--porcelain", "--untracked-files=all"],
+        check=True, capture_output=True, text=True,
+    ).stdout.strip()
 
 
 @pytest.mark.asyncio

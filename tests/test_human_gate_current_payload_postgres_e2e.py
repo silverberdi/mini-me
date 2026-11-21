@@ -3,9 +3,13 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import os
 import shutil
 import subprocess
+import threading
+from concurrent.futures import ThreadPoolExecutor
+from contextlib import contextmanager
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
@@ -40,6 +44,126 @@ pytestmark = pytest.mark.skipif(
     not DATABASE_URL,
     reason="MINIME_TEST_DATABASE_URL must point to a disposable migrated PostgreSQL database",
 )
+
+
+def test_proposal_review_approval_and_rebased_hashes_are_atomic_in_postgres(monkeypatch, tmp_path):
+    engine = create_engine(DATABASE_URL, pool_pre_ping=True)
+    project_id, run_id, rollback_run_id = str(uuid4()), str(uuid4()), str(uuid4())
+    sessions = sessionmaker(bind=engine, autoflush=False, expire_on_commit=False)
+    uow = None
+    try:
+        with engine.connect() as connection:
+            database_name = connection.execute(text("select current_database()")).scalar_one()
+            assert "test" in database_name.lower(), "Refusing to write outside a test database"
+
+        uow = PostgresPersistenceUnitOfWork(sessions())
+        uow.projects.save(Project(
+            project_id=project_id,
+            display_name="Proposal review atomic baseline",
+            repository="org/proposal-review-atomic-test",
+        ))
+
+        def run_with_prior_baseline(target_run_id: str) -> OrchestrationRun:
+            return OrchestrationRun(
+                run_id=target_run_id,
+                project_id=project_id,
+                change_name=f"proposal-review-atomic-test-{target_run_id[:8]}",
+                base_sha="base-sha",
+                stop_details={
+                    "complexity_assessment": {
+                        "structured_output": json.dumps({"feasibility": {"tasks": [], "scenarios": []}}),
+                        "task_feasibility": [{"task_id": "1.1", "source_text_sha256": "old-task"}],
+                        "scenario_coverage": [{"scenario_id": "demo:1:1", "source_text_sha256": "old-scenario"}],
+                        "candidate_sha": "old-candidate",
+                    }
+                },
+            )
+
+        run = run_with_prior_baseline(run_id)
+        rollback_run = run_with_prior_baseline(rollback_run_id)
+        uow.orchestration_runs.save(run)
+        uow.orchestration_runs.save(rollback_run)
+        uow.commit()
+
+        coordinator = NativeOrchestrationCoordinator(
+            uow_factory=lambda: uow,
+            github_adapter=MagicMock(),
+            worktree_manager=MagicMock(),
+            agent_runner=MagicMock(),
+        )
+        monkeypatch.setattr(coordinator.proposal_feasibility, "collect_inputs", MagicMock(return_value={
+            "status": "READY",
+            "tasks": [{"task_id": "1.1", "text": "Approved task wording"}],
+            "scenarios": [{"scenario_id": "demo:1:1", "text": "Approved scenario wording"}],
+            "capabilities": [
+                {"ref": "openspec:status:planning_complete", "available": True},
+                {"ref": "openspec:validate:valid", "available": True},
+            ],
+        }))
+        monkeypatch.setattr(coordinator.proposal_feasibility, "validate_report", MagicMock(return_value=(
+            "EXECUTABLE",
+            [{"task_id": "1.1", "status": "READY"}],
+            [{"scenario_id": "demo:1:1", "status": "COVERED"}],
+            [],
+            [],
+        )))
+
+        def persist_review_and_rebased_baseline(target_run: OrchestrationRun) -> None:
+            assert coordinator._rebase_complexity_assessment_hashes(
+                active_run=target_run,
+                worktree_path=tmp_path,
+                project_id=project_id,
+                change_name=target_run.change_name,
+                candidate_sha="a" * 40,
+                candidate_clean=True,
+                artifact_hashes={"proposal.md": "approved-artifact"},
+                thinker_provider="test-thinker",
+                implementer_provider="test-implementer",
+                uow=uow,
+            )
+            details = dict(target_run.stop_details or {})
+            details["proposal_review"] = {
+                "status": "approved",
+                "verdict": "READY_TO_MERGE",
+                "artifact_hashes": {"proposal.md": "approved-artifact"},
+            }
+            target_run.stop_details = details
+            uow.orchestration_runs.save(target_run)
+
+        persist_review_and_rebased_baseline(run)
+        uow.commit()
+
+        read_uow = PostgresPersistenceUnitOfWork(sessions())
+        try:
+            saved = read_uow.orchestration_runs.get_by_id(run_id)
+            assert saved.stop_details["proposal_review"]["status"] == "approved"
+            assert saved.stop_details["complexity_assessment"]["task_feasibility"][0]["source_text_sha256"] != "old-task"
+            assert saved.stop_details["complexity_assessment"]["scenario_coverage"][0]["source_text_sha256"] != "old-scenario"
+            assert saved.stop_details["complexity_assessment"]["candidate_sha"] == "a" * 40
+        finally:
+            read_uow.session.close()
+
+        persist_review_and_rebased_baseline(rollback_run)
+        uow.session.rollback()
+        verify_uow = PostgresPersistenceUnitOfWork(sessions())
+        try:
+            unchanged = verify_uow.orchestration_runs.get_by_id(rollback_run_id)
+            assert "proposal_review" not in unchanged.stop_details
+            assert unchanged.stop_details["complexity_assessment"]["candidate_sha"] == "old-candidate"
+            assert unchanged.stop_details["complexity_assessment"]["task_feasibility"][0]["source_text_sha256"] == "old-task"
+        finally:
+            verify_uow.session.close()
+    finally:
+        if uow is not None:
+            uow.session.rollback()
+            uow.session.execute(
+                text("delete from orchestration_runs where id in (:run_id, :rollback_run_id)"),
+                {"run_id": run_id, "rollback_run_id": rollback_run_id},
+            )
+            uow.session.execute(text("delete from projects where id = :project_id"), {"project_id": project_id})
+            uow.commit()
+            uow.session.close()
+        engine.dispose()
 
 
 def test_persisted_current_gate_reaches_operator_response_api(monkeypatch, tmp_path):
@@ -215,6 +339,278 @@ def test_persisted_current_gate_reaches_operator_response_api(monkeypatch, tmp_p
             )
             run_uow.commit()
             run_uow.session.close()
+        engine.dispose()
+
+
+def test_doc_closing_gate_api_acceptance_is_consumed_once_by_scheduler(monkeypatch, tmp_path):
+    """Use PostgreSQL for the real API/action and scheduler handoff; no agent is invoked."""
+    # The endpoint authorization dependency is replaced below; bypass the global
+    # session middleware too, which otherwise requires a signed web session.
+    monkeypatch.setenv("MINIME_AUTH_ENABLED", "false")
+    engine = create_engine(DATABASE_URL, pool_pre_ping=True)
+    project_id = str(uuid4())
+    run_id = str(uuid4())
+    session_factory = sessionmaker(bind=engine, autoflush=False, expire_on_commit=False)
+    setup_uow = None
+    inspection_uow = None
+    calls = []
+    try:
+        with engine.connect() as connection:
+            database_name = connection.execute(text("select current_database()")).scalar_one()
+            assert "test" in database_name.lower(), "Refusing to write outside a test database"
+
+        setup_uow = PostgresPersistenceUnitOfWork(session_factory())
+        setup_uow.projects.save(Project(
+            project_id=project_id,
+            display_name="DOC_CLOSING API Scheduler handoff",
+            repository="org/doc-closing-handoff-test",
+        ))
+        setup_uow.project_managed_repository_bindings.save(ProjectManagedRepositoryBinding(
+            project_id=project_id,
+            canonical_repository_identity="github.com/org/doc-closing-handoff-test",
+            managed_repository_root=str(tmp_path / "managed-repo"),
+            worktree_parent_dir=str(tmp_path / "worktrees"),
+        ))
+        gate_payload = {
+            "gate_id": "doc-closing-test-gate",
+            "gate": "doc_closing_sync",
+            "stage": OrchestrationStage.DOC_CLOSING.value,
+            "run_id": run_id,
+            "question": "Resolve the native Sync question.",
+            "options": ["Continue with the native Sync workflow"],
+        }
+        run = OrchestrationRun(
+            run_id=run_id,
+            project_id=project_id,
+            change_name="issue-460-stage-transition-robustness",
+            base_sha="base-sha",
+            current_stage=OrchestrationStage.DOC_CLOSING,
+            resumable_stage=OrchestrationStage.DOC_CLOSING,
+            human_gate=HumanGate.NEEDS_HUMAN,
+            stop_outcome=OrchestrationStopOutcome.NEEDS_HUMAN,
+            is_active=True,
+            stop_details={
+                "issue_number": 460,
+                "issue_title": "Stage transition robustness",
+                "request_normalization": {"normalized_body": "Close the current OpenSpec change"},
+                "human_payload": gate_payload,
+            },
+        )
+        setup_uow.orchestration_runs.save(run)
+        setup_uow.commit()
+
+        operator = AuthorizedOperator(email="operator@example.com", name="Operator", roles=["admin"])
+        app.dependency_overrides[get_uow] = lambda: setup_uow
+        app.dependency_overrides[get_current_operator] = lambda: operator
+        schedule = MagicMock(side_effect=AssertionError("DOC_CLOSING must not be dispatched by API"))
+        monkeypatch.setattr("minime.api.app._schedule_request_worker", schedule)
+        try:
+            with TestClient(app) as client:
+                response = client.post(
+                    f"/api/v1/projects/{project_id}/requests/run",
+                    json={
+                        "operator_clarification": "Continue with the native Sync workflow",
+                        "idempotency_key": "issue-460-doc-close-once",
+                    },
+                )
+                duplicate = client.post(
+                    f"/api/v1/projects/{project_id}/requests/run",
+                    json={
+                        "operator_clarification": "Continue with the native Sync workflow",
+                        "idempotency_key": "issue-460-doc-close-once",
+                    },
+                )
+        finally:
+            app.dependency_overrides.clear()
+
+        assert response.status_code == 202
+        assert response.json()["status"] == "ACCEPTED"
+        assert "pendiente del Scheduler" in response.json()["message"]
+        assert duplicate.status_code == 202
+        assert duplicate.json()["operation_id"] == response.json()["operation_id"]
+        schedule.assert_not_called()
+        action = setup_uow.operator_actions.get_by_request_id(response.json()["operation_id"])
+        assert action.status == "ACCEPTED"
+        assert action.precondition_stage == OrchestrationStage.DOC_CLOSING.value
+
+        @contextmanager
+        def scheduler_session():
+            session = session_factory()
+            try:
+                yield session
+            finally:
+                session.close()
+
+        class FakeRunner:
+            @classmethod
+            def for_project_profiles(cls, *_args, **_kwargs):
+                return cls()
+
+            @staticmethod
+            def provider_for_role(role):
+                return f"test-{role}"
+
+        class FakeCoordinator:
+            def __init__(self, **_kwargs):
+                pass
+
+            async def execute_project_request(self, **kwargs):
+                calls.append(kwargs)
+                return SimpleNamespace(
+                    status="HUMAN_REQUIRED",
+                    run_id=run_id,
+                    current_stage=OrchestrationStage.DOC_CLOSING,
+                    message="The native stage returned a later gate.",
+                    human_payload={"question": "Later gate"},
+                )
+
+        monkeypatch.setattr(cli_main.db_manager, "session", scheduler_session)
+        monkeypatch.setattr("minime.adapters.github.GitHubAdapter", lambda: object())
+        monkeypatch.setattr("minime.services.worktree_manager.WorktreeManager", lambda **_: object())
+        monkeypatch.setattr("minime.services.capacity_lifecycle_service.CapacityLifecycleService", lambda _: object())
+        monkeypatch.setattr("minime.services.agent_runner.CliAgentRunner.for_project_profiles", FakeRunner.for_project_profiles)
+        monkeypatch.setattr("minime.services.orchestration_coordinator.NativeOrchestrationCoordinator", FakeCoordinator)
+
+        cli_main.scheduler_run_cmd(poll_interval=0, max_iterations=1)
+        cli_main.scheduler_run_cmd(poll_interval=0, max_iterations=1)
+
+        assert len(calls) == 1
+        assert calls[0]["target_run_id"] == run_id
+        assert calls[0]["operator_action_id"] == action.action_request_id
+        assert calls[0]["operator_clarification"] == "Continue with the native Sync workflow"
+        inspection_uow = PostgresPersistenceUnitOfWork(session_factory())
+        saved_action = inspection_uow.operator_actions.get_by_request_id(action.action_request_id)
+        assert saved_action.status == "COMPLETED"
+        assert saved_action.result_payload_json["run_id"] == run_id
+    finally:
+        app.dependency_overrides.clear()
+        if inspection_uow is not None:
+            inspection_uow.session.close()
+        if setup_uow is not None:
+            setup_uow.session.execute(
+                text("delete from operator_action_records where run_id = :run_id"), {"run_id": run_id}
+            )
+            setup_uow.session.execute(
+                text("delete from orchestration_runs where id = :run_id"), {"run_id": run_id}
+            )
+            setup_uow.session.execute(
+                text("delete from project_managed_repository_bindings where project_id = :project_id"),
+                {"project_id": project_id},
+            )
+            setup_uow.session.execute(text("delete from projects where id = :project_id"), {"project_id": project_id})
+            setup_uow.commit()
+            setup_uow.session.close()
+        engine.dispose()
+
+
+def test_doc_closing_scheduler_workers_share_one_durable_native_invocation_claim(tmp_path):
+    """Concurrent scheduler processes can claim one accepted DOC_CLOSING response once."""
+    engine = create_engine(DATABASE_URL, pool_pre_ping=True)
+    project_id, run_id = str(uuid4()), str(uuid4())
+    sessions = sessionmaker(bind=engine, autoflush=False, expire_on_commit=False)
+    gate_action_id = str(uuid4())
+    claim_prefix = f"stage-invocation:{run_id}:SYNC:"
+    setup_uow = None
+    try:
+        with engine.connect() as connection:
+            database_name = connection.execute(text("select current_database()")).scalar_one()
+            assert "test" in database_name.lower(), "Refusing to write outside a test database"
+
+        setup_uow = PostgresPersistenceUnitOfWork(sessions())
+        setup_uow.projects.save(Project(
+            project_id=project_id,
+            display_name="DOC_CLOSING concurrent scheduler claim",
+            repository="org/doc-closing-claim-test",
+        ))
+        run = OrchestrationRun(
+            run_id=run_id,
+            project_id=project_id,
+            change_name="issue-460-doc-closing-concurrent-claim",
+            base_sha="test-base",
+            current_stage=OrchestrationStage.DOC_CLOSING,
+            resumable_stage=OrchestrationStage.DOC_CLOSING,
+            current_generation=1,
+            is_active=True,
+            stop_details={"current_candidate_sha": "a" * 40},
+        )
+        setup_uow.orchestration_runs.save(run)
+        setup_uow.commit()
+
+        # Both workers finish candidate inspection before either attempts the
+        # PostgreSQL claim, reproducing the scheduler race instead of serial calls.
+        candidate_barrier = threading.Barrier(2)
+        candidate = {
+            "run_id": run_id,
+            "stage": "SYNC",
+            "worktree": str(tmp_path),
+            "branch": "change/issue-460",
+            "generation": 1,
+            "candidate_sha": "a" * 40,
+            "candidate_fingerprint": "candidate-fingerprint",
+            "fingerprint": "same-claim-key",
+        }
+
+        def worker():
+            uow = PostgresPersistenceUnitOfWork(sessions())
+            try:
+                worker_run = uow.orchestration_runs.get_by_id(run_id)
+                coordinator = NativeOrchestrationCoordinator(
+                    uow_factory=lambda: uow,
+                    github_adapter=MagicMock(),
+                    worktree_manager=MagicMock(),
+                    agent_runner=MagicMock(),
+                )
+
+                async def candidate_identity(*_args):
+                    candidate_barrier.wait(timeout=10)
+                    return candidate
+
+                coordinator._stage_candidate_identity = candidate_identity
+                return asyncio.run(coordinator._begin_stage_invocation(
+                    uow,
+                    worker_run,
+                    tmp_path,
+                    "SYNC",
+                    allow_human_resume=True,
+                    operator_action_id=gate_action_id,
+                ))
+            finally:
+                uow.session.close()
+
+        with ThreadPoolExecutor(max_workers=2) as executor:
+            invocations = list(executor.map(lambda _index: worker(), range(2)))
+
+        claimed = [invocation for invocation in invocations if invocation is not None]
+        assert len(claimed) == 1
+
+        inspection_uow = PostgresPersistenceUnitOfWork(sessions())
+        try:
+            starts = [
+                event for event in inspection_uow.orchestration_stage_events.list_by_run(run_id)
+                if event.event_type == "STAGE_INVOCATION_STARTED"
+                and str((event.evidence_references or {}).get("claim_key", "")).startswith(claim_prefix)
+            ]
+            assert len(starts) == 1
+            assert starts[0].evidence_references["operator_action_id"] == gate_action_id
+        finally:
+            inspection_uow.session.close()
+    finally:
+        if setup_uow is not None:
+            setup_uow.session.execute(
+                text("delete from orchestration_stage_events where run_id = :run_id"),
+                {"run_id": run_id},
+            )
+            setup_uow.session.execute(
+                text("delete from recovery_claims where claim_key like :prefix"),
+                {"prefix": f"{claim_prefix}%"},
+            )
+            setup_uow.session.execute(
+                text("delete from orchestration_runs where id = :run_id"),
+                {"run_id": run_id},
+            )
+            setup_uow.session.execute(text("delete from projects where id = :project_id"), {"project_id": project_id})
+            setup_uow.commit()
+            setup_uow.session.close()
         engine.dispose()
 
 

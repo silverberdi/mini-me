@@ -23,16 +23,18 @@ test('new SSE events trigger targeted updates while quota handling functions wit
   assert.doesNotMatch(refresh, /setInterval\(/);
 });
 
-test('gate response hides the current question and shows processing feedback only while pending', () => {
-  assert.match(component, /\*ngIf="isGateResponsePending\(\)"[\s\S]*?Respuesta enviada, procesando/);
+test('gate response reports API acceptance immediately and waits for the authoritative Run transition', () => {
+  assert.match(component, /\*ngIf="isGateResponsePending\(\)"[\s\S]*?Respuesta aceptada/);
   assert.match(component, /\*ngIf="isHumanRequired\(\)"/);
   assert.match(component, /pendingGateAcknowledgement\.set\(\{ runId: run\.run_id, identity: gateIdentity \}\);[\s\S]*?this\.api\.post/);
-  assert.match(component, /this\.submissionMessage\.set\('Respuesta enviada, procesando…'\);/);
+  assert.match(component, /DOC_CLOSING queda pendiente del Scheduler/);
+  assert.match(component, /this\.submissionMessage\.set\(run\.stage === 'DOC_CLOSING'/);
+  assert.match(component, /await this\.refresh\.refreshRuns\(\);/);
 });
 
 test('failed HTTP and transport responses restore the gate, then authoritative Run state reconciles it', () => {
   assert.match(component, /\} else \{\s*this\.pendingGateAcknowledgement\.set\(null\);/);
   assert.match(component, /catch \(e: any\) \{\s*this\.pendingGateAcknowledgement\.set\(null\);/);
   assert.match(component, /effect\(\(\) => \{[\s\S]*?this\.refresh\.runs\(\)\.find[\s\S]*?this\.humanGateIdentity\(run\) !== pending\.identity[\s\S]*?pendingGateAcknowledgement\.set\(null\)/);
-  assert.match(component, /async submitHumanResponse[\s\S]*?await this\.refresh\.read\(\);/);
+  assert.match(component, /async submitHumanResponse[\s\S]*?await this\.refresh\.refreshRuns\(\);/);
 });

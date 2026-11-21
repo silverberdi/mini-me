@@ -363,6 +363,100 @@ def test_active_gate_persists_parallel_spanish_presentation_without_rewriting_so
     assert stored.stop_details["human_payload"] == payload
 
 
+@pytest.mark.parametrize(
+    "gate",
+    [
+        "explore_clarification",
+        "propose_clarification",
+        "proposal_feasibility",
+        "proposal_review_escalation",
+        "apply_checkpoint_recovery",
+        "apply_gate_update",
+        "apply_escalation",
+        "physical_validation",
+        "code_review_escalation",
+        "pr1_merge_acknowledgement",
+        "doc_closing_sync",
+    ],
+)
+def test_every_gate_projection_includes_description_evidence_diff_and_option_consequences(
+    in_memory_uow, gate
+):
+    run = _run(OrchestrationStage.IMPLEMENTING)
+    in_memory_uow.orchestration_runs.save(run)
+    options = [{"id": "continue", "label": "Continue", "response_text": "CONTINUE"}]
+    payload = _coordinator(in_memory_uow)._record_current_human_gate(
+        in_memory_uow,
+        run,
+        gate=gate,
+        question="The run needs an operator decision.",
+        options=options,
+        payload={"blockers": ["task 2.1 needs evidence"]},
+    )
+
+    assert payload["description"] == "The run needs an operator decision."
+    assert payload["affected_items"] == [
+        {"id": "task 2.1 needs evidence", "description": "task 2.1 needs evidence"}
+    ]
+    assert payload["diff"]["status"] == (
+        "UNAVAILABLE" if gate == "proposal_review_escalation" else "NOT_APPLICABLE"
+    )
+    assert payload["option_explanations"][0]["action"] == "Continue"
+    assert payload["option_explanations"][0]["consequence"]
+    assert payload["options"] == options
+    assert payload["options"][0]["response_text"] == "CONTINUE"
+
+
+@pytest.mark.parametrize(
+    ("gate", "option", "expected_consequence"),
+    [
+        ("explore_clarification", "Use this answer", "workflow nativo Explore"),
+        ("propose_clarification", "Use this answer", "workflow nativo Propose"),
+        ("proposal_feasibility", "Provide evidence", "vuelve a comprobar la evidencia"),
+        ("proposal_review_escalation", "Correct the findings", "revisión independiente"),
+        ("proposal_correction_failed", "Correct findings", "workflow nativo OpenSpec Update"),
+        ("proposal_correction_no_change", "Correct findings", "workflow nativo OpenSpec Update"),
+        ("apply_escalation", "Continue", "validaciones y límites de Apply"),
+        ("physical_validation", "Mark done", "solo se satisface con evidencia observada"),
+        ("apply_gate_update", "Conservar el candidato detenido", "no inicia Update ni Apply"),
+        ("code_review_escalation", "Correct and review", "revisión independiente del código"),
+        ("doc_closing_sync", "Continue Sync", "workflow nativo OpenSpec Sync"),
+        ("doc_closing_archive", "Continue Archive", "workflow nativo OpenSpec Archive"),
+    ],
+)
+def test_gate_option_explanations_describe_stage_specific_consequences(
+    gate, option, expected_consequence
+):
+    projected = NativeOrchestrationCoordinator._human_gate_option_explanations(
+        gate, [option], {}
+    )
+
+    assert projected[0]["action"] == option
+    assert expected_consequence in projected[0]["consequence"]
+
+
+def test_human_gate_projection_distinguishes_unavailable_artifact_diff(in_memory_uow):
+    run = _run(OrchestrationStage.PROPOSAL_REVIEW)
+    in_memory_uow.orchestration_runs.save(run)
+    payload = _coordinator(in_memory_uow)._record_current_human_gate(
+        in_memory_uow,
+        run,
+        gate="proposal_review_escalation",
+        question="The reviewer found a proposal issue.",
+        options=[],
+        payload={"review_findings": [{"location": "spec.md", "violated_requirement": "Keep the behavior safe."}]},
+    )
+
+    assert payload["affected_items"] == [
+        {
+            "id": "spec.md",
+            "description": "Keep the behavior safe.",
+        }
+    ]
+    assert payload["diff"]["status"] == "UNAVAILABLE"
+    assert payload["option_explanations"] == []
+
+
 def test_confirmed_resolution_clears_only_active_payload(in_memory_uow):
     run = _run(
         OrchestrationStage.IMPLEMENTING,
