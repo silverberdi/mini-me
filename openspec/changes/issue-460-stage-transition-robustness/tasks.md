@@ -22,4 +22,4 @@
 ## 5. Verificación integrada
 
 - [ ] 5.1 Ejecutar las pruebas pertinentes y un E2E integrado usando el endpoint API y el proceso Scheduler separados contra PostgreSQL; conservar evidencia observable de respuesta aceptada, claim, invocación y resultado, SHA del candidato y ausencia de despachos duplicados.
-- [ ] 5.2 Ejecutar `openspec validate issue-460-stage-transition-robustness --strict --no-interactive` y comprobar los cinco criterios del Issue contra el mismo candidato inmutable.
+- [x] 5.2 Ejecutar `openspec validate issue-460-stage-transition-robustness --strict --no-interactive` y comprobar los cinco criterios del Issue contra el mismo candidato inmutable.
