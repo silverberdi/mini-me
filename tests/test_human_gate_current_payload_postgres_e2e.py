@@ -7,6 +7,8 @@ import json
 import os
 import shutil
 import subprocess
+import threading
+from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
 from pathlib import Path
 from types import SimpleNamespace
@@ -494,6 +496,117 @@ def test_doc_closing_gate_api_acceptance_is_consumed_once_by_scheduler(monkeypat
             setup_uow.session.execute(
                 text("delete from project_managed_repository_bindings where project_id = :project_id"),
                 {"project_id": project_id},
+            )
+            setup_uow.session.execute(text("delete from projects where id = :project_id"), {"project_id": project_id})
+            setup_uow.commit()
+            setup_uow.session.close()
+        engine.dispose()
+
+
+def test_doc_closing_scheduler_workers_share_one_durable_native_invocation_claim(tmp_path):
+    """Concurrent scheduler processes can claim one accepted DOC_CLOSING response once."""
+    engine = create_engine(DATABASE_URL, pool_pre_ping=True)
+    project_id, run_id = str(uuid4()), str(uuid4())
+    sessions = sessionmaker(bind=engine, autoflush=False, expire_on_commit=False)
+    gate_action_id = str(uuid4())
+    claim_prefix = f"stage-invocation:{run_id}:SYNC:"
+    setup_uow = None
+    try:
+        with engine.connect() as connection:
+            database_name = connection.execute(text("select current_database()")).scalar_one()
+            assert "test" in database_name.lower(), "Refusing to write outside a test database"
+
+        setup_uow = PostgresPersistenceUnitOfWork(sessions())
+        setup_uow.projects.save(Project(
+            project_id=project_id,
+            display_name="DOC_CLOSING concurrent scheduler claim",
+            repository="org/doc-closing-claim-test",
+        ))
+        run = OrchestrationRun(
+            run_id=run_id,
+            project_id=project_id,
+            change_name="issue-460-doc-closing-concurrent-claim",
+            base_sha="test-base",
+            current_stage=OrchestrationStage.DOC_CLOSING,
+            resumable_stage=OrchestrationStage.DOC_CLOSING,
+            current_generation=1,
+            is_active=True,
+            stop_details={"current_candidate_sha": "a" * 40},
+        )
+        setup_uow.orchestration_runs.save(run)
+        setup_uow.commit()
+
+        # Both workers finish candidate inspection before either attempts the
+        # PostgreSQL claim, reproducing the scheduler race instead of serial calls.
+        candidate_barrier = threading.Barrier(2)
+        candidate = {
+            "run_id": run_id,
+            "stage": "SYNC",
+            "worktree": str(tmp_path),
+            "branch": "change/issue-460",
+            "generation": 1,
+            "candidate_sha": "a" * 40,
+            "candidate_fingerprint": "candidate-fingerprint",
+            "fingerprint": "same-claim-key",
+        }
+
+        def worker():
+            uow = PostgresPersistenceUnitOfWork(sessions())
+            try:
+                worker_run = uow.orchestration_runs.get_by_id(run_id)
+                coordinator = NativeOrchestrationCoordinator(
+                    uow_factory=lambda: uow,
+                    github_adapter=MagicMock(),
+                    worktree_manager=MagicMock(),
+                    agent_runner=MagicMock(),
+                )
+
+                async def candidate_identity(*_args):
+                    candidate_barrier.wait(timeout=10)
+                    return candidate
+
+                coordinator._stage_candidate_identity = candidate_identity
+                return asyncio.run(coordinator._begin_stage_invocation(
+                    uow,
+                    worker_run,
+                    tmp_path,
+                    "SYNC",
+                    allow_human_resume=True,
+                    operator_action_id=gate_action_id,
+                ))
+            finally:
+                uow.session.close()
+
+        with ThreadPoolExecutor(max_workers=2) as executor:
+            invocations = list(executor.map(lambda _index: worker(), range(2)))
+
+        claimed = [invocation for invocation in invocations if invocation is not None]
+        assert len(claimed) == 1
+
+        inspection_uow = PostgresPersistenceUnitOfWork(sessions())
+        try:
+            starts = [
+                event for event in inspection_uow.orchestration_stage_events.list_by_run(run_id)
+                if event.event_type == "STAGE_INVOCATION_STARTED"
+                and str((event.evidence_references or {}).get("claim_key", "")).startswith(claim_prefix)
+            ]
+            assert len(starts) == 1
+            assert starts[0].evidence_references["operator_action_id"] == gate_action_id
+        finally:
+            inspection_uow.session.close()
+    finally:
+        if setup_uow is not None:
+            setup_uow.session.execute(
+                text("delete from orchestration_stage_events where run_id = :run_id"),
+                {"run_id": run_id},
+            )
+            setup_uow.session.execute(
+                text("delete from recovery_claims where claim_key like :prefix"),
+                {"prefix": f"{claim_prefix}%"},
+            )
+            setup_uow.session.execute(
+                text("delete from orchestration_runs where id = :run_id"),
+                {"run_id": run_id},
             )
             setup_uow.session.execute(text("delete from projects where id = :project_id"), {"project_id": project_id})
             setup_uow.commit()

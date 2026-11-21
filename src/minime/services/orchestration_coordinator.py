@@ -379,13 +379,65 @@ class NativeOrchestrationCoordinator:
                     consequence = "Solicita un nuevo ciclo Apply en el Run y candidato actuales; siguen vigentes las pruebas y el límite de intentos."
                 elif option_id == "cancel" or "cancelar" in action.lower():
                     consequence = "Cancela el Run y conserva el worktree para recuperación; no fusiona ni despliega el candidato."
+                elif gate == "physical_validation":
+                    consequence = (
+                        "Registra la respuesta del operador para las validaciones físicas pendientes. "
+                        "La tarea solo se satisface con evidencia observada; el candidato no se marca "
+                        "como validado por responder al gate."
+                    )
+                else:
+                    consequence = (
+                        "Entrega esta decisión al gate nativo de Apply en el Run y candidato actuales. "
+                        "El resultado vuelve a pasar por las validaciones y límites de Apply; la respuesta "
+                        "no los omite."
+                    )
             elif not consequence and gate == "apply_gate_update":
                 if action == ProposalFeasibilityEvaluator.CANONICAL_UPDATE_OPTION:
                     consequence = "Ejecuta OpenSpec Update y validación estricta; la factibilidad se vuelve a evaluar y no se omite ningún bloqueo."
+                elif "conservar" in action.lower() or "detenido" in action.lower():
+                    consequence = "Mantiene el Run y el candidato detenidos; no inicia Update ni Apply."
+                else:
+                    consequence = "Pasa la respuesta al flujo nativo de OpenSpec Update; solo una validación estricta satisfactoria permite reanudar Apply."
+            elif not consequence and gate == "proposal_feasibility":
+                if action == ProposalFeasibilityEvaluator.CANONICAL_UPDATE_OPTION:
+                    consequence = "Ejecuta OpenSpec Update y validación estricta; la factibilidad se reevalúa con la evidencia nueva y los bloqueos no se omiten."
+                else:
+                    consequence = "Aporta esta respuesta al bloqueo de factibilidad indicado; Mini Me vuelve a comprobar la evidencia y mantiene detenida la transición si no queda verificada."
+            elif not consequence and gate in {"explore_clarification", "propose_clarification"}:
+                workflow = "Explore" if gate == "explore_clarification" else "Propose"
+                consequence = (
+                    f"Añade esta respuesta como contexto al workflow nativo {workflow} del Change actual. "
+                    "El resultado sigue sujeto a las validaciones y revisiones de su etapa; no aprueba ni fusiona el cambio."
+                )
+            elif not consequence and gate == "proposal_review_escalation":
+                consequence = (
+                    "Aplica la instrucción a los hallazgos de revisión de propuesta del Change actual y solicita "
+                    "una nueva revisión independiente; la respuesta no aprueba la propuesta."
+                )
+            elif not consequence and gate in {"proposal_correction_failed", "proposal_correction_no_change"}:
+                consequence = (
+                    "Entrega la instrucción al workflow nativo OpenSpec Update para corregir los hallazgos; "
+                    "después se compara el artefacto y se repite la revisión independiente."
+                )
+            elif not consequence and gate == "code_review_escalation":
+                consequence = (
+                    "Entrega la instrucción a la corrección del candidato y vuelve a solicitar revisión "
+                    "independiente del código; no aprueba el candidato ni el PR."
+                )
+            elif not consequence and gate == "doc_closing_sync":
+                consequence = (
+                    "Entrega la respuesta al workflow nativo OpenSpec Sync del Change. Después se verifica "
+                    "el resultado antes de continuar con Archive; no fusiona ni cierra el Issue por sí sola."
+                )
+            elif not consequence and gate == "doc_closing_archive":
+                consequence = (
+                    "Entrega la respuesta al workflow nativo OpenSpec Archive del Change y verifica su resultado. "
+                    "No fusiona el PR documental ni cierra el Issue por sí sola."
+                )
             if not consequence:
                 consequence = (
-                    "Esta respuesta se conserva literalmente para el gate vigente; el Run solo avanza según la "
-                    "transición nativa asociada y después de sus validaciones."
+                    f"La respuesta se registra literalmente para el gate {gate}; no cambia por sí sola el estado "
+                    "del Run. La transición requiere una acción nativa identificable y sus validaciones."
                 )
             explanations.append({"action": action, "consequence": consequence})
         return explanations

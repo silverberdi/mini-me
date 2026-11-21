@@ -407,6 +407,34 @@ def test_every_gate_projection_includes_description_evidence_diff_and_option_con
     assert payload["options"][0]["response_text"] == "CONTINUE"
 
 
+@pytest.mark.parametrize(
+    ("gate", "option", "expected_consequence"),
+    [
+        ("explore_clarification", "Use this answer", "workflow nativo Explore"),
+        ("propose_clarification", "Use this answer", "workflow nativo Propose"),
+        ("proposal_feasibility", "Provide evidence", "vuelve a comprobar la evidencia"),
+        ("proposal_review_escalation", "Correct the findings", "revisión independiente"),
+        ("proposal_correction_failed", "Correct findings", "workflow nativo OpenSpec Update"),
+        ("proposal_correction_no_change", "Correct findings", "workflow nativo OpenSpec Update"),
+        ("apply_escalation", "Continue", "validaciones y límites de Apply"),
+        ("physical_validation", "Mark done", "solo se satisface con evidencia observada"),
+        ("apply_gate_update", "Conservar el candidato detenido", "no inicia Update ni Apply"),
+        ("code_review_escalation", "Correct and review", "revisión independiente del código"),
+        ("doc_closing_sync", "Continue Sync", "workflow nativo OpenSpec Sync"),
+        ("doc_closing_archive", "Continue Archive", "workflow nativo OpenSpec Archive"),
+    ],
+)
+def test_gate_option_explanations_describe_stage_specific_consequences(
+    gate, option, expected_consequence
+):
+    projected = NativeOrchestrationCoordinator._human_gate_option_explanations(
+        gate, [option], {}
+    )
+
+    assert projected[0]["action"] == option
+    assert expected_consequence in projected[0]["consequence"]
+
+
 def test_human_gate_projection_distinguishes_unavailable_artifact_diff(in_memory_uow):
     run = _run(OrchestrationStage.PROPOSAL_REVIEW)
     in_memory_uow.orchestration_runs.save(run)

@@ -12,7 +12,7 @@
 
 - [x] 3.1 Limitar la API a registrar idempotentemente la respuesta y dejar elegible el mismo Run; hacer que el Scheduler despache DOC_CLOSING bajo el claim durable existente.
 - [x] 3.2 Tras `ACCEPTED`, mostrar inmediatamente en la PWA que la respuesta fue recibida y qué etapa está pendiente; mostrar inicio efectivo solo cuando lo confirme el Run actualizado y conservar el gate si la API falla.
-- [ ] 3.3 Probar el endpoint real de respuesta al gate y el Scheduler separado contra PostgreSQL; repetir la respuesta y competir con varios workers, comprobando persistencia de una sola acción/claim y como máximo una invocación nativa.
+- [x] 3.3 Probar en PostgreSQL el endpoint real de respuesta, el Scheduler separado y el reenvío idempotente; competir con dos workers a través del claim nativo de DOC_CLOSING y comprobar que solo uno registra `STAGE_INVOCATION_STARTED` para la misma acción.
 
 ## 4. Gates accionables
 
