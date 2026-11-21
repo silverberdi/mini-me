@@ -4509,27 +4509,7 @@ class NativeOrchestrationCoordinator:
                 change_summary=f"Documentation sync and archive for request #{issue_number}",
                 test_evidence="OpenSpec native sync and archive completed successfully.",
             )
-            if self.semantic_pr_agent:
-                try:
-                    semantic_title, semantic_body = await self._prepare_semantic_pr_content(
-                        worktree_path=doc_path,
-                        provider=thinker_provider,
-                        project_id=project_id,
-                        run_id=active_run.run_id,
-                        pr_input=doc_prep_input,
-                        request_body=issue_body,
-                    )
-                except (NativeOpenSpecWorkflowUnavailable, ValueError, OSError) as exc:
-                    return OrchestrationCoordinationResult(
-                        status="PAUSED",
-                        run_id=active_run.run_id,
-                        current_stage=OrchestrationStage.PR2_PENDING,
-                        pr1_url=pr1_url,
-                        message=f"Semantic PR2 content was not verified: {exc}. Worktree preserved.",
-                    )
-                doc_prep_input = dataclass_replace(
-                    doc_prep_input, semantic_title=semantic_title, semantic_body=semantic_body
-                )
+            # Phase 2 documentation PR is deterministically formatted without consuming LLM quota
             prepared_doc_pr = self.pr_preparer.prepare_pull_request(doc_prep_input)
 
             try:
@@ -7636,13 +7616,28 @@ class NativeOrchestrationCoordinator:
 
         # 3. Retrieve optional explicit project checks if project_id is available
         project_checks = None
-        if project_id and hasattr(self, "uow") and self.uow and hasattr(self.uow, "projects"):
-            try:
-                project = self.uow.projects.get_by_id(project_id)
-                if project and getattr(project, "checks", None):
-                    project_checks = project.checks
-            except Exception:
-                pass
+        if project_id:
+            if hasattr(self, "uow") and self.uow and hasattr(self.uow, "projects"):
+                try:
+                    project = self.uow.projects.get_by_id(project_id)
+                    if project and getattr(project, "checks", None):
+                        project_checks = project.checks
+                except Exception:
+                    pass
+            elif hasattr(self, "uow_factory") and self.uow_factory:
+                try:
+                    res = self.uow_factory()
+                    uow = res.__enter__() if hasattr(res, "__enter__") else res
+                    try:
+                        if hasattr(uow, "projects"):
+                            project = uow.projects.get_by_id(project_id)
+                            if project and getattr(project, "checks", None):
+                                project_checks = project.checks
+                    finally:
+                        if hasattr(res, "__exit__"):
+                            res.__exit__(None, None, None)
+                except Exception:
+                    pass
 
         # 4. Resolve candidate test plan via polyglot resolver strategy
         from minime.services.candidate_test_resolver import (
