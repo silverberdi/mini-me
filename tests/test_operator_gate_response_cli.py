@@ -3,6 +3,7 @@ from types import SimpleNamespace
 
 import pytest
 from fastapi import HTTPException
+from typer.testing import CliRunner
 
 from minime.api.app import ProjectRequestRunPayload, prepare_gate_response
 from minime.cli import main as cli_main
@@ -209,3 +210,21 @@ def test_request_run_cli_passes_the_accepted_current_gate_action(monkeypatch):
         json_output=False,
     )
     assert seen["calls"] == 1
+
+
+def test_request_ack_cli_passes_explicit_none_response(monkeypatch):
+    seen = {}
+
+    def capture_request_run_cmd(**kwargs):
+        seen.update(kwargs)
+
+    monkeypatch.setattr(cli_main, "request_run_cmd", capture_request_run_cmd)
+    result = CliRunner().invoke(cli_main.app, ["request", "ack", "project-1"])
+
+    assert result.exit_code == 0, result.output
+    assert seen == {
+        "project_id": "project-1",
+        "operator_ack": True,
+        "operator_response": None,
+        "json_output": False,
+    }

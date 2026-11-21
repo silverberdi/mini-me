@@ -52,9 +52,30 @@ class ProposalFeasibilityEvaluator:
         "human_validation": 4,
     }
 
+    _TASK_STATUS_TAG = re.compile(r"^\[(?:DIFERIDA|DEFERRED|OPTIONAL)\](?:\s+|$)", re.IGNORECASE)
+
     def __init__(self, openspec_adapter: Any, agent_runner: Any) -> None:
         self.openspec_adapter = openspec_adapter
         self.agent_runner = agent_runner
+
+    @classmethod
+    def canonical_task_text(cls, task_id: str, text: str) -> str:
+        """Normalize only task formatting and the explicitly supported status tags."""
+        value = " ".join(str(text or "").split())
+        task_prefix = re.match(rf"^{re.escape(task_id)}(?:\s+|$)", value)
+        if task_prefix:
+            value = value[task_prefix.end():]
+            value = cls._TASK_STATUS_TAG.sub("", value, count=1)
+        return " ".join(value.split())
+
+    @classmethod
+    def canonical_task_text_sha256(cls, task_id: str, text: str) -> str:
+        canonical = cls.canonical_task_text(task_id, text)
+        # Include the canonical ID in the digest as well as the inventory key.
+        # This allows safe comparison with legacy raw hashes when their source
+        # description was already canonically formatted.
+        canonical_task = f"{task_id} {canonical}".strip()
+        return hashlib.sha256(canonical_task.encode("utf-8")).hexdigest()
 
     def collect_inputs(
         self,
@@ -482,6 +503,14 @@ class ProposalFeasibilityEvaluator:
                             if str(task.get("task_id")) == task_id
                         )).encode("utf-8")
                     ).hexdigest(),
+                    "canonical_text_sha256": cls.canonical_task_text_sha256(
+                        task_id,
+                        str(next(
+                            task.get("text", "")
+                            for task in inputs.get("tasks", [])
+                            if str(task.get("task_id")) == task_id
+                        )),
+                    ),
                     "actor": actor,
                     "execution_stage": execution_stage,
                     "capability_evidence_refs": task_capability_refs,

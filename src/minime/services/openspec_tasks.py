@@ -32,18 +32,23 @@ class OpenSpecTaskTracker:
         path = self.tasks_path(openspec_path, change_name)
         if not path.exists():
             return []
+        return self.parse_tasks_text(path.read_text(encoding="utf-8"))
+
+    @classmethod
+    def parse_tasks_text(cls, content: str) -> list[OpenSpecTask]:
+        """Parse a tasks.md snapshot using the same rules as the worktree file."""
         current_section: str | None = None
         tasks: list[OpenSpecTask] = []
-        for line in path.read_text(encoding="utf-8").splitlines():
+        for line in content.splitlines():
             stripped = line.strip()
             if stripped.startswith("## "):
                 current_section = stripped[3:].strip()
                 continue
-            match = self._task_re.match(stripped)
+            match = cls._task_re.match(stripped)
             if not match:
                 continue
             body = match.group("body").strip()
-            id_match = self._task_id_re.search(body)
+            id_match = cls._task_id_re.search(body)
             task_id = id_match.group("id") if id_match else body
             tasks.append(
                 OpenSpecTask(

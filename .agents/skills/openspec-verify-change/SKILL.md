@@ -48,6 +48,8 @@ Verify that an implementation matches the change artifacts (specs, tasks, design
 
    This returns the change directory and `contextFiles` (artifact ID -> array of concrete file paths). Read all available artifacts from `contextFiles`.
 
+   For structural Change validation, run `openspec validate --type change --strict <change-name>`. There is no `openspec verify` CLI command; this CLI check does not replace the native Verify workflow described by this skill.
+
 4. **Initialize verification report structure**
 
    Create a report structure with three dimensions:
