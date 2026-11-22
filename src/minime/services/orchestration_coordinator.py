@@ -609,8 +609,18 @@ class NativeOrchestrationCoordinator:
         thinker_provider: str,
         implementer_provider: str,
         stage: str,
+        operator_clarification: str | None = None,
     ) -> OrchestrationCoordinationResult | None:
         """Hold an internal workflow transition until its declared evidence is available."""
+        if (run.stop_details or {}).get("feasibility_overridden"):
+            return None
+        if self._is_feasibility_override_response(operator_clarification):
+            self._clear_current_human_gate(uow, run, response_text=operator_clarification)
+            details = dict(run.stop_details or {})
+            details["feasibility_overridden"] = True
+            details["feasibility_override_reason"] = operator_clarification
+            self._persist_run_stop_details(run, details)
+            return None
         assessment = (run.stop_details or {}).get("complexity_assessment")
         saved_tasks = assessment.get("task_feasibility") if isinstance(assessment, dict) else None
         saved_scenarios = (
@@ -785,7 +795,12 @@ class NativeOrchestrationCoordinator:
                 for scenario_id in sorted(set(saved_scenario_hashes) | set(current_scenario_hashes))
                 if saved_scenario_hashes.get(scenario_id, "") != current_scenario_hashes.get(scenario_id, "")
             ]
+            override_action = f"Proceder con la etapa {stage} bajo autorización del operador"
             option_explanations = [
+                {
+                    "action": override_action,
+                    "consequence": f"El operador autoriza omitir la advertencia de precondición y proceder directamente a {stage}.",
+                },
                 {
                     "action": f"Aportar evidencia verificable para {stage}",
                     "consequence": "La transición seguirá bloqueada hasta observar evidencia suficiente para esta etapa.",
@@ -809,20 +824,19 @@ class NativeOrchestrationCoordinator:
                     ],
                 )
                 observed_diff = diff_result.stdout[:12000] or None
+            stage_options = [
+                override_action,
+                f"Aportar evidencia verificable para {stage}",
+                ProposalFeasibilityEvaluator.CANONICAL_UPDATE_OPTION,
+            ]
             payload = self._record_current_human_gate(
                 uow,
                 run,
                 gate="proposal_feasibility",
                 question=question,
-                options=[
-                    f"Aportar evidencia verificable para {stage}",
-                    ProposalFeasibilityEvaluator.CANONICAL_UPDATE_OPTION,
-                ],
+                options=stage_options,
                 question_es=question,
-                options_es=[
-                    f"Aportar evidencia verificable para {stage}",
-                    ProposalFeasibilityEvaluator.CANONICAL_UPDATE_OPTION,
-                ],
+                options_es=stage_options,
                 payload={
                     "blocked_transition": stage,
                     "candidate_sha": candidate_sha,
@@ -2297,6 +2311,7 @@ class NativeOrchestrationCoordinator:
         legacy_feasibility_missing = (
             active_run.current_stage
             in {OrchestrationStage.READY_TO_APPLY, OrchestrationStage.IMPLEMENTING}
+            and not (active_run.stop_details or {}).get("feasibility_overridden")
             and (
                 not isinstance(prior_feasibility, dict)
                 or prior_feasibility.get("feasibility_status") != "EXECUTABLE"
@@ -2382,7 +2397,24 @@ class NativeOrchestrationCoordinator:
             selected_update_option = self._selected_feasibility_update_option(
                 feasibility_gate, operator_clarification
             )
+            selected_override = self._is_feasibility_override_response(operator_clarification)
             if (
+                feasibility_gate.get("gate") == "proposal_feasibility"
+                and selected_override
+            ):
+                details = dict(active_run.stop_details or {})
+                details["feasibility_overridden"] = True
+                details["feasibility_override_reason"] = operator_clarification
+                self._persist_run_stop_details(active_run, details)
+                self._clear_current_human_gate(
+                    uow, active_run, response_text=operator_clarification
+                )
+                complexity = details.get("complexity") or "low"
+                if complexity == "high":
+                    self._update_stage(uow, active_run, OrchestrationStage.PROPOSAL_REVIEW)
+                else:
+                    self._update_stage(uow, active_run, OrchestrationStage.READY_TO_APPLY)
+            elif (
                 feasibility_gate.get("gate") == "proposal_feasibility"
                 and selected_update_option
             ):
@@ -3128,39 +3160,40 @@ class NativeOrchestrationCoordinator:
                     message=f"Thinking agent complexity assessment failed: {complexity_result.reason or complexity_result.status}.",
                 )
             if not complexity_result.is_executable:
-                blockers = list(complexity_result.feasibility_blockers) or [
-                    "The feasibility report did not establish an executable path for every task and scenario."
-                ]
-                question = (
-                    "La propuesta sigue sin aceptarse: hay tareas sin una ruta ejecutable verificada. "
-                    "Actualiza la solicitud o aporta evidencia de capacidad verificable; una respuesta de texto no omite este bloqueo. "
-                    + "Bloqueos: "
-                    + "; ".join(blockers)
-                )
-                payload = self._record_current_human_gate(
-                    uow,
-                    active_run,
-                    gate="proposal_feasibility",
-                    question=question,
-                    options=list(complexity_result.feasibility_actions),
-                    question_es=question,
-                    options_es=list(complexity_result.feasibility_actions),
-                    payload={
-                        "blockers": blockers,
-                        "candidate_sha": candidate_sha,
-                        "task_feasibility": list(complexity_result.task_feasibility),
-                        "scenario_coverage": list(complexity_result.scenario_coverage),
-                        "artifact_hashes": artifact_hashes,
-                        "context_hashes": context_hashes,
-                    },
-                )
-                return OrchestrationCoordinationResult(
-                    status="HUMAN_REQUIRED",
-                    run_id=active_run.run_id,
-                    current_stage=OrchestrationStage.VALIDATING,
-                    message=question,
-                    human_payload=payload,
-                )
+                if not (active_run.stop_details or {}).get("feasibility_overridden"):
+                    blockers = list(complexity_result.feasibility_blockers) or [
+                        "The feasibility report did not establish an executable path for every task and scenario."
+                    ]
+                    question = (
+                        "La propuesta tiene advertencias de precondición o capacidad. "
+                        "El operador puede autorizar continuar directamente a implementación bajo su criterio o solicitar actualizar la propuesta mediante OpenSpec Update. "
+                        + "Bloqueos detectados: "
+                        + "; ".join(blockers)
+                    )
+                    payload = self._record_current_human_gate(
+                        uow,
+                        active_run,
+                        gate="proposal_feasibility",
+                        question=question,
+                        options=list(complexity_result.feasibility_actions),
+                        question_es=question,
+                        options_es=list(complexity_result.feasibility_actions),
+                        payload={
+                            "blockers": blockers,
+                            "candidate_sha": candidate_sha,
+                            "task_feasibility": list(complexity_result.task_feasibility),
+                            "scenario_coverage": list(complexity_result.scenario_coverage),
+                            "artifact_hashes": artifact_hashes,
+                            "context_hashes": context_hashes,
+                        },
+                    )
+                    return OrchestrationCoordinationResult(
+                        status="HUMAN_REQUIRED",
+                        run_id=active_run.run_id,
+                        current_stage=OrchestrationStage.VALIDATING,
+                        message=question,
+                        human_payload=payload,
+                    )
             self._clear_current_human_gate(uow, active_run)
             complexity = complexity_result.complexity
             active_run.stop_details["complexity"] = complexity
@@ -3904,6 +3937,7 @@ class NativeOrchestrationCoordinator:
                 thinker_provider=thinker_provider,
                 implementer_provider=implementer_provider,
                 stage="verify",
+                operator_clarification=operator_clarification,
             )
             if feasibility_gate is not None:
                 return feasibility_gate
@@ -4294,6 +4328,7 @@ class NativeOrchestrationCoordinator:
                     thinker_provider=thinker_provider,
                     implementer_provider=implementer_provider,
                     stage="pre_pr",
+                    operator_clarification=operator_clarification,
                 )
                 if feasibility_gate is not None:
                     return feasibility_gate
@@ -4434,6 +4469,7 @@ class NativeOrchestrationCoordinator:
                 thinker_provider=thinker_provider,
                 implementer_provider=implementer_provider,
                 stage="post_merge",
+                operator_clarification=operator_clarification,
             )
             if feasibility_gate is not None:
                 return feasibility_gate
@@ -6478,6 +6514,28 @@ class NativeOrchestrationCoordinator:
             ):
                 return option.strip()
         return None
+
+    @staticmethod
+    def _is_feasibility_override_response(response: str | None) -> bool:
+        """Check if operator chose to override/bypass heuristic feasibility warnings."""
+        if not isinstance(response, str) or not response.strip():
+            return False
+        normalized = response.strip().lower()
+        canonical_override = getattr(
+            ProposalFeasibilityEvaluator,
+            "CANONICAL_OVERRIDE_OPTION",
+            "proceder a la implementación bajo autorización del operador e ignorar advertencias heurísticas",
+        ).lower()
+        return (
+            normalized == canonical_override
+            or "ignorar" in normalized
+            or "autorización" in normalized
+            or "autorizacion" in normalized
+            or "proceder" in normalized
+            or "override" in normalized
+            or "aprobar" in normalized
+            or "continuar" in normalized
+        )
 
     async def _run_propose(
         self,
