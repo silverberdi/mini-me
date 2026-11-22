@@ -21,5 +21,5 @@
 
 ## 5. Verificación integrada
 
-- [ ] 5.1 Ejecutar las pruebas pertinentes y un E2E integrado usando el endpoint API y el proceso Scheduler separados contra PostgreSQL; conservar evidencia observable de respuesta aceptada, claim, invocación y resultado, SHA del candidato y ausencia de despachos duplicados.
+- [x] 5.1 Ejecutar las pruebas pertinentes y un E2E integrado usando el endpoint API y el proceso Scheduler separados contra PostgreSQL; conservar evidencia observable de respuesta aceptada, claim, invocación y resultado, SHA del candidato y ausencia de despachos duplicados. Evidencia: CI backend de PR #464 aprobó las pruebas PostgreSQL de aceptación/idempotencia API y claim único del Scheduler; el Run productivo `c4629c80-c578-429d-9630-a4ee97c412b8` registró SYNC y ARCHIVE exitosos, con un inicio por claim, `exit_code=0`, `effect_verified=true` y SHA `5feb767112d707782713d963f18a8311f471fb5a`.
 - [x] 5.2 Ejecutar `openspec validate issue-460-stage-transition-robustness --strict --no-interactive` y comprobar los cinco criterios del Issue contra el mismo candidato inmutable.
