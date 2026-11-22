@@ -124,6 +124,15 @@ def test_provision_canonical_capabilities_and_readiness(tmp_path):
     assert (tmp_path / ".agents" / "skills" / "openspec-propose" / "SKILL.md").is_file()
     assert (tmp_path / ".agent" / "workflows" / "opsx-propose.md").is_file()
 
+    for skill in (
+        "minime-postgresql-state-guardian",
+        "minime-real-e2e-proof",
+        "minime-reviewer",
+    ):
+        canonical = tmp_path / ".agents" / "skills" / skill / "SKILL.md"
+        compatibility_copy = tmp_path / ".agent" / "skills" / skill / "SKILL.md"
+        assert canonical.read_bytes() == compatibility_copy.read_bytes()
+
     is_ready, missing = verify_workflow_readiness(tmp_path, {})
     assert is_ready is True
     assert missing == []

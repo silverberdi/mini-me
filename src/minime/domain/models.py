@@ -114,6 +114,64 @@ def generate_uuid() -> str:
     return str(uuid.uuid4())
 
 
+class ProjectTestDatabase(BaseModel):
+    """Non-secret identity and host environment reference for a project's PostgreSQL test DB."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    host: str = Field(min_length=1, max_length=255)
+    port: int = Field(ge=1, le=65535)
+    database_name: str = Field(min_length=1, max_length=63)
+    url_env: str = Field(min_length=1, max_length=128)
+    production_database_names: list[str] = Field(default_factory=list)
+
+    @field_validator("host")
+    @classmethod
+    def validate_host(cls, value: str) -> str:
+        normalized = value.strip().lower()
+        if not normalized or any(char in normalized for char in "/\\@:#? "):
+            raise ValueError("test database host must be a hostname or IP address only")
+        return normalized
+
+    @field_validator("database_name")
+    @classmethod
+    def validate_database_name(cls, value: str) -> str:
+        normalized = value.strip()
+        if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_$-]{0,62}", normalized):
+            raise ValueError("test database name must be a safe PostgreSQL database identifier")
+        if normalized.casefold() == "minime":
+            raise ValueError("Mini Me databases cannot be configured as a project test database")
+        return normalized
+
+    @field_validator("url_env")
+    @classmethod
+    def validate_url_environment_name(cls, value: str) -> str:
+        normalized = value.strip()
+        if not re.fullmatch(r"[A-Z][A-Z0-9_]*_TEST_DATABASE_URL", normalized):
+            raise ValueError("test database URL reference must end in _TEST_DATABASE_URL")
+        return normalized
+
+    @field_validator("production_database_names")
+    @classmethod
+    def validate_production_database_names(cls, values: list[str]) -> list[str]:
+        normalized: list[str] = []
+        for value in values:
+            name = value.strip()
+            if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_$-]{0,62}", name):
+                raise ValueError("production database names must be safe PostgreSQL identifiers")
+            if name.casefold() not in {item.casefold() for item in normalized}:
+                normalized.append(name)
+        return normalized
+
+    @model_validator(mode="after")
+    def validate_not_production_database(self) -> "ProjectTestDatabase":
+        if self.database_name.casefold() in {
+            name.casefold() for name in self.production_database_names
+        }:
+            raise ValueError("test database name cannot match a configured production database")
+        return self
+
+
 class Project(BaseModel):
     """Project domain model with immutable internal project_id."""
 
@@ -126,6 +184,7 @@ class Project(BaseModel):
     implementer: str = "codex"
     reviewer: str = "antigravity"
     checks: list[dict[str, Any]] = Field(default_factory=list)
+    test_database: ProjectTestDatabase | None = None
     external_providers_allowed: list[str] = Field(
         default_factory=lambda: ["codex", "antigravity", "deepseek"]
     )
@@ -214,6 +273,7 @@ class ProjectConfigurationInput(BaseModel):
     provider_connections: dict[str, ProjectProviderConnection]
     agent_profiles: dict[str, ProjectAgentProfile]
     execution_policy: ProjectExecutionPolicy = Field(default_factory=ProjectExecutionPolicy)
+    test_database: ProjectTestDatabase | None = None
     github_app_credentials: ProjectGitHubAppCredentials | None = None
 
     @model_validator(mode="after")
@@ -269,6 +329,7 @@ class ProjectConfigurationPatch(BaseModel):
     provider_connections: dict[str, ProjectProviderConnection] | None = None
     agent_profiles: dict[str, ProjectAgentProfile] | None = None
     execution_policy: ProjectExecutionPolicy | None = None
+    test_database: ProjectTestDatabase | None = None
     github_app_credentials: ProjectGitHubAppCredentials | None = None
 
     @model_validator(mode="after")

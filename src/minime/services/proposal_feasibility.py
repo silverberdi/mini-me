@@ -144,8 +144,47 @@ class ProposalFeasibilityEvaluator:
             worktree_path,
             project_checks=getattr(project, "checks", None),
         )
-
+        test_database = getattr(project, "test_database", None)
+        if hasattr(test_database, "model_dump"):
+            test_database = test_database.model_dump(mode="json")
+        if isinstance(test_database, dict):
+            test_tooling["project_test_database"] = {
+                key: test_database.get(key)
+                for key in (
+                    "host", "port", "database_name", "production_database_names", "url_env"
+                )
+            }
+        else:
+            test_tooling["project_test_database"] = None
+        database_checks = [
+            check for check in (getattr(project, "checks", None) or ())
+            if isinstance(check, dict) and check.get("uses_test_database") is True
+        ]
+        if database_checks and test_database is None:
+            test_tooling["database_configuration_blocker"] = (
+                "Database-backed project checks are configured without an isolated project test_database profile."
+            )
         capabilities: list[dict[str, Any]] = []
+        capabilities.append(
+            {
+                "ref": "project:test_database",
+                "kind": "project_test_database_profile",
+                "available": isinstance(test_database, dict),
+            }
+        )
+        for check in test_tooling.get("configured_checks", []):
+            check_name = str(check.get("pr_ci_check_name") or "").strip()
+            if check_name:
+                capabilities.append(
+                    {
+                        "ref": f"project:ci_check:{check_name}",
+                        "kind": "project_ci_check",
+                        "available": (
+                            not check.get("uses_test_database") or isinstance(test_database, dict)
+                        ),
+                        "check_name": check_name,
+                    }
+                )
         profiles = getattr(project, "agent_profiles", {}) if project else {}
         if not isinstance(profiles, dict):
             profiles = {}
@@ -274,6 +313,10 @@ class ProposalFeasibilityEvaluator:
             )
             if ref not in available
         ]
+        if database_checks and not isinstance(test_database, dict):
+            mandatory_blockers.append(
+                "Database-backed project checks have no isolated test_database profile."
+            )
         return {
             "status": "READY",
             "candidate_sha": candidate_sha,
@@ -419,10 +462,17 @@ class ProposalFeasibilityEvaluator:
                     ref for ref in verified_refs
                     if ref.startswith("path:.github/workflows/")
                 }
+                ci_checks = {
+                    ref for ref in refs if ref.startswith("project:ci_check:")
+                }
                 if is_apply_task:
                     blockers.append(f"task {task_id} assigns Apply work to project CI/CD")
                 elif not workflow_paths:
                     blockers.append(f"task {task_id} has no verified project CI/CD workflow path")
+                elif not ci_checks or not ci_checks.issubset(verified_refs):
+                    blockers.append(f"task {task_id} has no verified exact project CI check mapping")
+                elif "project:test_database" in refs and "project:test_database" not in verified_refs:
+                    blockers.append(f"task {task_id} has no verified isolated test database profile")
             elif actor == "external":
                 if not role_refs[actor].issubset(set(refs)) or not role_refs[actor].issubset(verified_refs):
                     blockers.append(f"task {task_id} has no confirmed external participant or capability path")

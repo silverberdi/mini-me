@@ -980,6 +980,10 @@ class GitPullRequestAdapter(Protocol):
         self, repository: str, pr_number: int
     ) -> ExternalActionResult[dict[str, Any]]: ...
 
+    def get_check_run_status(
+        self, repository: str, head_sha: str, check_name: str
+    ) -> ExternalActionResult[dict[str, Any]]: ...
+
 
 class GitHubAdapterInterface(ABC):
     def get_repository_default_branch(self, repository: str) -> ExternalActionResult[str]:
@@ -1105,6 +1109,16 @@ class GitHubAdapterInterface(ABC):
 
     def get_pull_request_details(
         self, repository: str, pr_number: int
+    ) -> ExternalActionResult[dict[str, Any]]:
+        return ExternalActionResult[dict[str, Any]](
+            outcome=ExternalOutcome.UNKNOWN,
+            value={},
+            source_adapter="interface",
+            reason_code=ExternalReasonCode.UNSUPPORTED,
+        )
+
+    def get_check_run_status(
+        self, repository: str, head_sha: str, check_name: str
     ) -> ExternalActionResult[dict[str, Any]]:
         return ExternalActionResult[dict[str, Any]](
             outcome=ExternalOutcome.UNKNOWN,

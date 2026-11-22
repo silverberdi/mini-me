@@ -255,6 +255,7 @@ def project_model_to_domain(model: ProjectModel) -> Project:
         implementer=model.implementer,
         reviewer=model.reviewer,
         checks=model.checks or [],
+        test_database=model.test_database,
         external_providers_allowed=model.external_providers_allowed or [],
         independent_audit_required=getattr(model, "independent_audit_required", False),
         strict_validation_required=getattr(model, "strict_validation_required", True),
@@ -914,6 +915,11 @@ class PostgresProjectRepository(ProjectRepositoryInterface):
             existing.implementer = project.implementer
             existing.reviewer = project.reviewer
             existing.checks = project.checks
+            existing.test_database = (
+                project.test_database.model_dump(mode="json")
+                if project.test_database is not None
+                else None
+            )
             existing.external_providers_allowed = project.external_providers_allowed
             existing.independent_audit_required = project.independent_audit_required
             existing.strict_validation_required = project.strict_validation_required
@@ -941,6 +947,11 @@ class PostgresProjectRepository(ProjectRepositoryInterface):
                 implementer=project.implementer,
                 reviewer=project.reviewer,
                 checks=project.checks,
+                test_database=(
+                    project.test_database.model_dump(mode="json")
+                    if project.test_database is not None
+                    else None
+                ),
                 external_providers_allowed=project.external_providers_allowed,
                 independent_audit_required=project.independent_audit_required,
                 strict_validation_required=project.strict_validation_required,

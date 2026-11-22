@@ -121,6 +121,59 @@ def test_project_github_adapter_reports_provider_default_branch_only_for_exact_r
     assert requested == ["/repos/example/demo"]
 
 
+def test_github_adapter_observes_named_check_only_for_requested_head_sha():
+    candidate_sha = "d" * 40
+    requested = []
+
+    def handler(request):
+        requested.append(request)
+        return httpx.Response(
+            200,
+            json={
+                "total_count": 2,
+                "check_runs": [
+                    {
+                        "id": 10,
+                        "name": "PR Validation / PostgreSQL",
+                        "head_sha": "e" * 40,
+                        "status": "completed",
+                        "conclusion": "success",
+                    },
+                    {
+                        "id": 11,
+                        "name": "PR Validation / PostgreSQL",
+                        "head_sha": candidate_sha,
+                        "status": "completed",
+                        "conclusion": "success",
+                        "started_at": "2026-11-21T12:00:00Z",
+                        "html_url": "https://github.com/example/demo/actions/runs/11",
+                    },
+                ],
+            },
+        )
+
+    result = GitHubAdapter(auth=_StaticAuth(handler)).get_check_run_status(
+        "example/demo", candidate_sha, "PR Validation / PostgreSQL"
+    )
+
+    assert result.outcome == ExternalOutcome.SUCCESS
+    assert result.data["head_sha"] == candidate_sha
+    assert result.data["check_name"] == "PR Validation / PostgreSQL"
+    assert result.data["check_run_id"] == 11
+    assert requested[0].url.path == f"/repos/example/demo/commits/{candidate_sha}/check-runs"
+
+
+def test_github_adapter_reports_absent_named_check_as_observed_missing():
+    candidate_sha = "f" * 40
+    adapter = GitHubAdapter(auth=_StaticAuth(lambda _: httpx.Response(200, json={"total_count": 0, "check_runs": []})))
+
+    result = adapter.get_check_run_status("example/demo", candidate_sha, "required")
+
+    assert result.outcome == ExternalOutcome.SUCCESS
+    assert result.data["status"] == "missing"
+    assert result.data["head_sha"] == candidate_sha
+
+
 def test_project_github_adapter_uses_official_graphql_when_rest_keeps_draft():
     head_sha = "c" * 40
     calls = []

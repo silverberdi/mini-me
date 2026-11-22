@@ -539,6 +539,7 @@ class CandidateRemediationService:
                 workspace.path,
                 candidate_sha=new_sha,
                 candidate_generation=generation,
+                test_database=project.test_database,
             )
             if self.pipeline
             else None

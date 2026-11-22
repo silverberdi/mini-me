@@ -78,7 +78,7 @@ class CandidateTestResolver:
     ) -> dict[str, Any]:
         """Return bounded, read-only evidence about declared test commands and Chromium."""
         declared: list[dict[str, str]] = []
-        configured: list[dict[str, str]] = []
+        configured: list[dict[str, Any]] = []
         manifests: list[str] = []
         playwright_packages: list[dict[str, str]] = []
 
@@ -96,6 +96,8 @@ class CandidateTestResolver:
                             "source": "project.checks",
                             "name": str(check.get("name") or "configured-check")[:120],
                             "command": redact_secrets(command),
+                            "uses_test_database": check.get("uses_test_database") is True,
+                            "pr_ci_check_name": str(check.get("pr_ci_check_name") or "")[:120],
                         }
                     )
 
