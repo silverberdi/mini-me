@@ -123,3 +123,42 @@ def test_blockers_before_stage_ignores_phantom_preview_precondition_when_no_prev
 
     # The phantom preview precondition must not block pre_pr when no preview service exists
     assert len(blockers) == 0, f"Expected 0 blockers, got: {blockers}"
+
+
+def test_blockers_before_stage_enforces_preview_when_preview_capability_is_declared_but_unavailable(tmp_path: Path):
+    evaluator = ProposalFeasibilityEvaluator(SimpleNamespace(), SimpleNamespace())
+
+    task_with_preview_precondition = [
+        {
+            "task_id": "2.1",
+            "actor": "project_ci_cd",
+            "execution_stage": "verify",
+            "preconditions": [
+                {
+                    "required_before_stage": "verify",
+                    "evidence_refs": [f"preview:{'a' * 40}"],
+                }
+            ],
+        }
+    ]
+
+    inputs_with_unavailable_preview = {
+        "status": "READY",
+        "capabilities": [
+            {"ref": "profile:execution", "available": True},
+            {"ref": f"preview:{'a' * 40}", "available": False},
+        ],
+        "openspec_path": "openspec",
+        "change_name": "test-change",
+    }
+
+    blockers = evaluator.blockers_before_stage(
+        task_with_preview_precondition,
+        stage="verify",
+        inputs=inputs_with_unavailable_preview,
+        worktree_path=tmp_path,
+    )
+
+    # When preview capability is explicitly declared for the project, it must enforce it
+    assert len(blockers) > 0
+    assert "preview:" in blockers[0]

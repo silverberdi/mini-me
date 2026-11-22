@@ -712,6 +712,11 @@ class ProposalFeasibilityEvaluator:
             for item in inputs.get("capabilities", [])
             if isinstance(item, dict) and item.get("available") is True
         }
+        has_preview_capability = any(
+            str(item.get("ref", "")).startswith("preview:")
+            for item in inputs.get("capabilities", [])
+            if isinstance(item, dict)
+        )
         current_preview = next(
             (ref for ref in available_refs if ref.startswith("preview:")), None
         )
@@ -750,8 +755,8 @@ class ProposalFeasibilityEvaluator:
                     continue
                 stage_refs: list[str] = []
                 for ref in refs:
-                    # Ignore phantom preview preconditions if the environment lacks a preview service
-                    if ref.startswith("preview:") and not current_preview:
+                    # Ignore phantom preview preconditions if the project has no preview capability at all
+                    if ref.startswith("preview:") and not has_preview_capability:
                         continue
                     # Preview evidence is candidate-specific. The initial
                     # assessment may contain the pre-Apply SHA; resolve the
