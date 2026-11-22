@@ -288,15 +288,16 @@ class ProposalFeasibilityEvaluator:
             and str(preview_status).upper() in {"READY", "RUNNING"}
             and getattr(preview, "preview_url", None)
         )
-        capabilities.append(
-            {
-                "ref": f"preview:{candidate_sha}",
-                "kind": "candidate_sha_matched_preview",
-                "available": preview_ready,
-                "preview_id": getattr(preview, "preview_id", None) if preview_ready else None,
-                "candidate_clean": candidate_clean,
-            }
-        )
+        if preview is not None:
+            capabilities.append(
+                {
+                    "ref": f"preview:{candidate_sha}",
+                    "kind": "candidate_sha_matched_preview",
+                    "available": preview_ready,
+                    "preview_id": getattr(preview, "preview_id", None) if preview_ready else None,
+                    "candidate_clean": candidate_clean,
+                }
+            )
         available = {
             str(item.get("ref"))
             for item in capabilities
@@ -711,6 +712,11 @@ class ProposalFeasibilityEvaluator:
             for item in inputs.get("capabilities", [])
             if isinstance(item, dict) and item.get("available") is True
         }
+        has_preview_capability = any(
+            str(item.get("ref", "")).startswith("preview:")
+            for item in inputs.get("capabilities", [])
+            if isinstance(item, dict)
+        )
         current_preview = next(
             (ref for ref in available_refs if ref.startswith("preview:")), None
         )
@@ -749,10 +755,15 @@ class ProposalFeasibilityEvaluator:
                     continue
                 stage_refs: list[str] = []
                 for ref in refs:
+                    # Ignore phantom preview preconditions if the project has no preview capability at all
+                    if ref.startswith("preview:") and not has_preview_capability:
+                        continue
                     # Preview evidence is candidate-specific. The initial
                     # assessment may contain the pre-Apply SHA; resolve the
                     # same capability kind against the candidate at this stage.
                     stage_refs.append(current_preview if ref.startswith("preview:") and current_preview else ref)
+                if not stage_refs:
+                    continue
                 verified, unknown = cls.verified_evidence_refs(
                     stage_refs,
                     available_refs,
