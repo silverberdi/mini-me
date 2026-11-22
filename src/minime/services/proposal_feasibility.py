@@ -371,7 +371,7 @@ class ProposalFeasibilityEvaluator:
                         )
                     except Exception:
                         has_symlink = True
-                    if not has_symlink and candidate_path.is_file():
+                    if not has_symlink and candidate_path.exists():
                         file_found = True
                         break
 
