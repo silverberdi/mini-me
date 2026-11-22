@@ -128,3 +128,81 @@ def test_browser_scenarios_are_executor_work_and_real_decisions_stay_human(tmp_p
     assert blocked[0] == "BLOCKED"
     assert any("browser-reproducible work outside executor Apply/Verify" in issue for issue in blocked[3])
     assert ProposalFeasibilityEvaluator.only_correctable_structure_blockers(blocked[3])
+
+
+def test_scenario_auto_promotes_evidence_stage_to_latest_task_stage(tmp_path: Path):
+    (tmp_path / "package.json").write_text(
+        '{"scripts":{"test:e2e":"playwright test"}}', encoding="utf-8"
+    )
+    (tmp_path / "openspec" / "changes" / "stage_promo").mkdir(parents=True)
+    (tmp_path / "openspec" / "changes" / "stage_promo" / "tasks.md").write_text(
+        "## Tasks\n- [ ] 1.1 Apply task\n- [ ] 1.2 Verify task\n",
+        encoding="utf-8",
+    )
+    raw_scenarios = ["Scenario: cross-stage scenario"]
+    adapter = SimpleNamespace(
+        show_change=lambda *_: {
+            "deltas": [
+                {
+                    "spec": "ui",
+                    "requirements": [{"id": "1", "scenarios": [{"rawText": text} for text in raw_scenarios]}],
+                }
+            ]
+        },
+        planning_status=lambda *_: {"status": "PASS"},
+        validate_change_strict=lambda *_: {"status": "PASS"},
+    )
+    evaluator = ProposalFeasibilityEvaluator(adapter, SimpleNamespace(resolve_workflow=lambda **_: object()))
+    inputs = evaluator.collect_inputs(
+        worktree_path=tmp_path,
+        change_name="stage_promo",
+        project=SimpleNamespace(project_id="multiplo", openspec_path="openspec", agent_profiles={
+            "thinking": {"agent_id": "codex", "provider_id": "codex"},
+            "execution": {"agent_id": "codex", "provider_id": "codex"},
+        }),
+        candidate_sha="b" * 40,
+        candidate_clean=True,
+        preview_sessions=None,
+        thinker_provider="codex",
+        implementer_provider="codex",
+    )
+    report = {
+        "tasks": [
+            {
+                "task_id": "1.1",
+                "actor": "execution",
+                "execution_stage": "apply",
+                "capability_evidence_refs": ["profile:execution", "workflow:execution:apply"],
+                "depends_on_task_ids": [],
+                "preconditions": [],
+                "completion_evidence": "Applied code",
+            },
+            {
+                "task_id": "1.2",
+                "actor": "execution",
+                "execution_stage": "verify",
+                "capability_evidence_refs": ["profile:execution", "workflow:execution:verify"],
+                "depends_on_task_ids": ["1.1"],
+                "preconditions": [],
+                "completion_evidence": "Verified code",
+            },
+        ],
+        "scenario_coverage": [
+            {
+                "scenario_id": inputs["scenarios"][0]["scenario_id"],
+                "task_ids": ["1.1", "1.2"],
+                "evidence_stage": "apply",
+                "verification_mode": "browser",
+            }
+        ],
+        "blockers": [],
+        "resolution_options": [],
+    }
+
+    status, tasks, scenarios, blockers, _ = ProposalFeasibilityEvaluator.validate_report(
+        report, inputs, tmp_path
+    )
+
+    assert status == "EXECUTABLE"
+    assert blockers == ()
+    assert scenarios[0]["evidence_stage"] == "verify"

@@ -617,34 +617,39 @@ class ProposalFeasibilityEvaluator:
                 blockers.append(f"scenario {scenario_id} has an unknown or missing verification mode")
             if not task_ids or not set(task_ids).issubset(expected_tasks):
                 blockers.append(f"scenario {scenario_id} maps to no known OpenSpec task")
-            elif evidence_stage in cls.STAGE_ORDER and any(
-                task_stages.get(task_id) in cls.STAGE_ORDER
-                and cls.STAGE_ORDER[task_stages[task_id]] > cls.STAGE_ORDER[evidence_stage]
-                for task_id in task_ids
-            ):
-                blockers.append(f"scenario {scenario_id} claims evidence before its mapped task stage")
-            elif verification_mode == "browser" and (
-                evidence_stage not in {"apply", "verify"}
-                or any(
-                    task_stages.get(task_id) not in {"apply", "verify"}
-                    or next((task.get("actor") for task in validated_tasks if task.get("task_id") == task_id), None) != "execution"
+            else:
+                if evidence_stage in cls.STAGE_ORDER and any(
+                    task_stages.get(task_id) in cls.STAGE_ORDER
+                    and cls.STAGE_ORDER[task_stages[task_id]] > cls.STAGE_ORDER[evidence_stage]
                     for task_id in task_ids
-                )
-            ):
-                blockers.append(
-                    f"scenario {scenario_id} marks browser-reproducible work outside executor Apply/Verify"
-                )
-            elif verification_mode in {"physical_device", "human_decision"} and (
-                evidence_stage != "human_validation"
-                or any(
-                    task_stages.get(task_id) != "human_validation"
-                    or next((task.get("actor") for task in validated_tasks if task.get("task_id") == task_id), None) != "operator"
-                    for task_id in task_ids
-                )
-            ):
-                blockers.append(
-                    f"scenario {scenario_id} requires operator-controlled human validation"
-                )
+                ):
+                    evidence_stage = max(
+                        (task_stages[t] for t in task_ids if task_stages.get(t) in cls.STAGE_ORDER),
+                        key=lambda s: cls.STAGE_ORDER[s],
+                        default=evidence_stage,
+                    )
+                if verification_mode == "browser" and (
+                    evidence_stage not in {"apply", "verify"}
+                    or any(
+                        task_stages.get(task_id) not in {"apply", "verify"}
+                        or next((task.get("actor") for task in validated_tasks if task.get("task_id") == task_id), None) != "execution"
+                        for task_id in task_ids
+                    )
+                ):
+                    blockers.append(
+                        f"scenario {scenario_id} marks browser-reproducible work outside executor Apply/Verify"
+                    )
+                elif verification_mode in {"physical_device", "human_decision"} and (
+                    evidence_stage != "human_validation"
+                    or any(
+                        task_stages.get(task_id) != "human_validation"
+                        or next((task.get("actor") for task in validated_tasks if task.get("task_id") == task_id), None) != "operator"
+                        for task_id in task_ids
+                    )
+                ):
+                    blockers.append(
+                        f"scenario {scenario_id} requires operator-controlled human validation"
+                    )
             validated_scenarios.append(
                 {
                     "scenario_id": scenario_id,
