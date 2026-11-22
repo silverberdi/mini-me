@@ -9,6 +9,10 @@ const component = fs.readFileSync(
   path.join(root, 'src/app/features/trabajo-actual/trabajo-actual.component.ts'),
   'utf8',
 );
+const presentation = fs.readFileSync(
+  path.join(root, 'src/app/shared/pipeline-stage-presentation.ts'),
+  'utf8',
+);
 
 const expected = {
   ADMITTED: 'admitted.png',
@@ -25,7 +29,7 @@ const expected = {
 
 test('normative stage mapping contains every exact Issue assignment', () => {
   for (const [stage, filename] of Object.entries(expected)) {
-    assert.match(component, new RegExp(`${stage}: '/illustrations/${filename.replace('.', '\\.')}'`));
+    assert.match(presentation, new RegExp(`${stage}: '/illustrations/${filename.replace('.', '\\.')}'`));
     assert.ok(fs.existsSync(path.join(root, 'public/illustrations', filename)));
   }
 });
@@ -38,7 +42,8 @@ test('all approved illustration files are PNGs in the public asset surface', () 
 });
 
 test('unknown or absent stage has no guessed fallback image', () => {
-  assert.match(component, /STAGE_ILLUSTRATION_PATHS\[stage\] \?\? null/);
+  assert.match(presentation, /STAGE_ILLUSTRATION_PATHS\[stage\] \?\? null/);
+  assert.match(component, /getStageIllustrationPath\(stage\)/);
   assert.match(component, /const stage = this\.targetRun\(\)\?\.stage/);
   assert.match(component, /\*ngIf="stageIllustrationPath\(\) as illustrationPath"/);
 });

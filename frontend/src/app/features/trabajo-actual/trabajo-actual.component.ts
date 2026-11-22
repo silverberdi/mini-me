@@ -4,24 +4,12 @@ import { RouterModule, ActivatedRoute } from '@angular/router';
 import { FormsModule } from '@angular/forms';
 import { RefreshService } from '../../core/refresh.service';
 import { ApiService } from '../../core/api.service';
-
-interface PipelineStage {
-  key: string;
-  label: string;
-}
-
-const STAGE_ILLUSTRATION_PATHS: Readonly<Record<string, string>> = Object.freeze({
-  ADMITTED: '/illustrations/admitted.png',
-  EXPLORING: '/illustrations/exploring.png',
-  PROPOSING: '/illustrations/proposing.png',
-  PROPOSAL_REVIEW: '/illustrations/proposal-review.png',
-  IMPLEMENTING: '/illustrations/implementing.png',
-  RUNNING_TESTS: '/illustrations/running-tests.png',
-  VERIFYING: '/illustrations/verifying.png',
-  CODE_REVIEW: '/illustrations/code-review.png',
-  PREPARING_PR: '/illustrations/preparing-pr.png',
-  COMPLETED: '/illustrations/completed.png',
-});
+import {
+  getStageBadgeClass,
+  getStageIllustrationPath,
+  getStagePanelClass,
+  PIPELINE_STAGES,
+} from '../../shared/pipeline-stage-presentation';
 
 @Component({
   selector: 'app-trabajo-actual',
@@ -113,9 +101,9 @@ const STAGE_ILLUSTRATION_PATHS: Readonly<Record<string, string>> = Object.freeze
           <div class="grid grid-cols-2 sm:grid-cols-5 lg:grid-cols-10 gap-2">
             <div *ngFor="let stage of pipelineStages; let idx = index"
                  class="p-2.5 rounded-xl border flex flex-col items-center text-center transition-all"
-                 [ngClass]="getStageClass(stage.key, idx)">
+                 [ngClass]="getStageClass(stage.key)">
               <span class="w-6 h-6 rounded-full flex items-center justify-center text-xs font-bold font-mono mb-1.5"
-                    [ngClass]="getBadgeClass(stage.key, idx)">
+                    [ngClass]="getBadgeClass(stage.key)">
                 {{ idx + 1 }}
               </span>
               <span class="text-[11px] font-semibold leading-tight line-clamp-2">
@@ -448,18 +436,7 @@ export class TrabajoActualComponent {
   readonly cancellationMessage = signal<string | null>(null);
   readonly cancellationSuccess = signal<boolean>(false);
 
-  readonly pipelineStages: PipelineStage[] = [
-    { key: 'ADMITTED', label: 'Admisión' },
-    { key: 'EXPLORING', label: 'Exploración' },
-    { key: 'PROPOSING', label: 'Propuesta' },
-    { key: 'PROPOSAL_REVIEW', label: 'Review Propuesta' },
-    { key: 'IMPLEMENTING', label: 'Implementación' },
-    { key: 'RUNNING_TESTS', label: 'Tests' },
-    { key: 'VERIFYING', label: 'Verificación' },
-    { key: 'CODE_REVIEW', label: 'Review Código' },
-    { key: 'PREPARING_PR', label: 'Preparar PR' },
-    { key: 'COMPLETED', label: 'Cierre' },
-  ];
+  readonly pipelineStages = PIPELINE_STAGES;
 
   readonly targetRun = computed(() => {
     const runs = this.refresh.runs();
@@ -474,7 +451,7 @@ export class TrabajoActualComponent {
 
   stageIllustrationPath(): string | null {
     const stage = this.targetRun()?.stage;
-    return stage ? STAGE_ILLUSTRATION_PATHS[stage] ?? null : null;
+    return getStageIllustrationPath(stage);
   }
 
   assignedComplexity(): 'high' | 'moderate' | 'low' | 'Pendiente' {
@@ -905,30 +882,12 @@ export class TrabajoActualComponent {
     }
   }
 
-  getStageClass(stageKey: string, idx: number): string {
-    const current = this.targetRun()?.stage;
-    const currentIdx = this.pipelineStages.findIndex(s => s.key === current);
-
-    if (stageKey === current) {
-      return 'border-sky-500 bg-sky-500/10 text-sky-300 shadow-md shadow-sky-500/10';
-    } else if (currentIdx !== -1 && idx < currentIdx) {
-      return 'border-emerald-500/30 bg-emerald-500/5 text-emerald-400';
-    } else {
-      return 'border-slate-800 bg-slate-900/40 text-slate-500';
-    }
+  getStageClass(stageKey: string): string {
+    return getStagePanelClass(stageKey, this.targetRun()?.stage);
   }
 
-  getBadgeClass(stageKey: string, idx: number): string {
-    const current = this.targetRun()?.stage;
-    const currentIdx = this.pipelineStages.findIndex(s => s.key === current);
-
-    if (stageKey === current) {
-      return 'bg-sky-500 text-white animate-pulse';
-    } else if (currentIdx !== -1 && idx < currentIdx) {
-      return 'bg-emerald-500/20 text-emerald-400 border border-emerald-500/40';
-    } else {
-      return 'bg-slate-800 text-slate-500';
-    }
+  getBadgeClass(stageKey: string): string {
+    return getStageBadgeClass(stageKey, this.targetRun()?.stage);
   }
 
   async submitHumanResponse(event: Event): Promise<void> {

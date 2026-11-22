@@ -1,10 +1,16 @@
-import { Component, signal } from '@angular/core';
+import { Component, computed, signal } from '@angular/core';
 import { CommonModule } from '@angular/common';
 import { RouterModule } from '@angular/router';
 import { RefreshService } from '../../core/refresh.service';
 import { AnalogGaugeComponent } from '../../shared/analog-gauge.component';
+import {
+  getStageBadgeClass,
+  getStageIllustrationPath,
+  getStagePanelClass,
+  PIPELINE_STAGES,
+} from '../../shared/pipeline-stage-presentation';
 import { toDashboardCostChartPoints } from './dashboard-cost-chart';
-import type { QuotaObservation } from '../../core/models';
+import type { OrchestrationRun, QuotaObservation } from '../../core/models';
 
 @Component({
   selector: 'app-dashboard',
@@ -179,85 +185,129 @@ import type { QuotaObservation } from '../../core/models';
         </div>
       </div>
 
-      <!-- Active Runs & Requests Grid -->
-      <div class="grid grid-cols-1 lg:grid-cols-2 gap-6">
-        <!-- Active Runs Card -->
-        <div class="bg-slate-800/40 rounded-2xl border border-slate-700/50 p-6 backdrop-blur-sm">
-          <div class="flex items-center justify-between mb-4">
-            <h2 class="text-base font-semibold text-white">Runs de Orquestación</h2>
-            <span class="text-xs font-mono text-slate-400">{{ refresh.runs().length }} registrados</span>
-          </div>
+      <!-- Active Change Summary -->
+      <section class="bg-slate-800/40 rounded-2xl border border-slate-700/50 p-4 sm:p-5 backdrop-blur-sm space-y-4" aria-labelledby="active-change-heading" data-testid="active-change-card">
+        <div class="flex items-center justify-between gap-3">
+          <h2 id="active-change-heading" class="text-base font-semibold text-white">Change activo</h2>
+          <span *ngIf="refresh.activeProject().project_id" class="text-xs font-mono text-slate-400 truncate">{{ refresh.activeProject().project_id }}</span>
+        </div>
 
-          <div *ngIf="refresh.runs().length === 0" class="text-center py-8 text-slate-500 text-sm">
-            No hay runs registrados para el proyecto seleccionado.
-          </div>
-
-          <div class="space-y-3">
-            <div *ngFor="let run of refresh.runs().slice(0, 5)" class="p-3.5 rounded-xl bg-slate-900/60 border border-slate-700/40 hover:border-slate-600 transition-colors flex items-center justify-between">
-              <div class="min-w-0 pr-4">
-                <div class="flex items-center gap-2">
-                  <span class="font-mono text-xs font-semibold text-slate-200 truncate">{{ run.run_id }}</span>
-                  <span class="px-2 py-0.5 text-[11px] font-medium rounded-full bg-slate-800 border border-slate-700 text-slate-300">
-                    {{ run.stage }}
-                  </span>
-                </div>
-                <div class="text-xs text-slate-400 mt-1 truncate">
-                  {{ run.change_name || 'Sin cambio asignado' }}
-                </div>
+        <ng-container *ngIf="activeRun() as run; else noActiveRun">
+          <div class="flex items-start gap-3 sm:gap-5 min-w-0">
+            <div class="flex-1 min-w-0 space-y-2">
+              <h3 class="text-sm sm:text-base font-bold text-white break-words" data-testid="active-change-name">
+                {{ run.change_name || 'Change sin nombre asignado' }}
+              </h3>
+              <div *ngIf="activeRequest() as request" class="text-xs sm:text-sm text-slate-300 break-words" data-testid="active-change-request">
+                <span *ngIf="request.issue_number || request.number" class="font-mono font-bold text-sky-400 mr-1">
+                  #{{ request.issue_number || request.number }}
+                </span>
+                <span>{{ request.title }}</span>
               </div>
-              <div>
-                <span class="px-2.5 py-1 text-xs font-semibold rounded-lg"
-                      [ngClass]="{
-                        'bg-emerald-500/10 text-emerald-400 border border-emerald-500/20': run.status === 'SUCCEEDED' || run.status === 'COMPLETED',
-                        'bg-sky-500/10 text-sky-400 border border-sky-500/20': run.status === 'RUNNING' || run.status === 'IN_PROGRESS',
-                        'bg-rose-500/10 text-rose-400 border border-rose-500/20': run.status === 'FAILED' || run.status === 'ERRORED',
-                        'bg-amber-500/10 text-amber-400 border border-amber-500/20': run.status === 'PAUSED' || run.status === 'WAITING' || run.status === 'HUMAN_REQUIRED'
-                      }">
+              <div class="flex flex-wrap items-center gap-2">
+                <span class="px-2.5 py-1 text-xs font-semibold rounded-lg border"
+                      [ngClass]="getStageBadgeClass(run.stage, run.stage)"
+                      [title]="run.stage"
+                      data-testid="active-change-stage">
+                  Etapa: {{ stageLabel(run.stage) }}
+                </span>
+                <span class="px-2.5 py-1 text-xs font-semibold rounded-lg border"
+                      [ngClass]="runStatusClass(run.status)"
+                      data-testid="active-change-status">
                   {{ run.status }}
                 </span>
               </div>
             </div>
-          </div>
-        </div>
-
-        <!-- Requests in Queue Card -->
-        <div class="bg-slate-800/40 rounded-2xl border border-slate-700/50 p-6 backdrop-blur-sm">
-          <div class="flex items-center justify-between mb-4">
-            <h2 class="text-base font-semibold text-white">Solicitudes de Cambio</h2>
-            <span class="text-xs font-mono text-slate-400">{{ refresh.requests().length }} abiertas</span>
-          </div>
-
-          <div *ngIf="refresh.requests().length === 0" class="text-center py-8 text-slate-500 text-sm">
-            No hay solicitudes activas para este proyecto.
-          </div>
-
-          <div class="space-y-3">
-            <div *ngFor="let req of refresh.requests().slice(0, 5)" class="p-3.5 rounded-xl bg-slate-900/60 border border-slate-700/40 hover:border-slate-600 transition-colors flex items-center justify-between">
-              <div class="min-w-0 pr-4">
-                <div class="flex items-center gap-2">
-                  <span *ngIf="req.issue_number" class="text-xs font-mono font-bold text-sky-400">#{{ req.issue_number }}</span>
-                  <span class="text-sm font-medium text-slate-200 truncate">{{ req.title }}</span>
-                </div>
-                <div class="text-xs text-slate-500 mt-1 font-mono">
-                  ID: {{ req.request_id }}
-                </div>
-              </div>
-              <div>
-                <span class="px-2.5 py-1 text-xs font-semibold rounded-lg bg-slate-800 border border-slate-700 text-slate-300">
-                  {{ req.status }}
-                </span>
-              </div>
+            <div *ngIf="stageIllustrationPath(run.stage) as illustrationPath" class="h-20 w-24 sm:h-24 sm:w-32 shrink-0 flex items-center justify-center" data-testid="active-change-illustration-slot">
+              <img [src]="illustrationPath" [alt]="'Ilustración de la etapa ' + stageLabel(run.stage)" class="max-h-full max-w-full object-contain" data-testid="active-change-illustration" />
             </div>
           </div>
-        </div>
-      </div>
+
+          <div *ngIf="activeStageIndex(run) !== -1" class="grid grid-cols-10 gap-1 sm:gap-1.5" role="list" aria-label="Avance por etapas" data-testid="active-change-stage-progress">
+            <span *ngFor="let stage of pipelineStages; let idx = index"
+                  class="h-5 min-w-0 sm:h-6 rounded-md border flex items-center justify-center text-[10px] sm:text-xs font-bold font-mono transition-colors"
+                  [ngClass]="getStageBadgeClass(stage.key, run.stage)"
+                  [attr.aria-current]="stage.key === run.stage ? 'step' : null"
+                  [attr.aria-label]="stage.label + (stage.key === run.stage ? ', etapa actual' : idx < activeStageIndex(run) ? ', completada' : ', pendiente')"
+                  [title]="stage.label"
+                  role="listitem">
+              {{ idx + 1 }}
+            </span>
+          </div>
+
+          <div class="flex justify-end pt-1">
+            <a routerLink="/trabajo-actual" [queryParams]="{ run: run.run_id, project: run.project_id }"
+               class="inline-flex min-h-10 items-center justify-center gap-1.5 rounded-xl bg-sky-600 px-4 py-2 text-xs font-semibold text-white transition-colors hover:bg-sky-500 focus:outline-none focus:ring-2 focus:ring-sky-300"
+               data-testid="active-change-link">
+              Supervisar en Trabajo Actual <span aria-hidden="true">&rarr;</span>
+            </a>
+          </div>
+        </ng-container>
+
+        <ng-template #noActiveRun>
+          <div class="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3 py-1">
+            <p class="text-sm text-slate-300" role="status" data-testid="active-change-idle">Sin ejecución activa en este momento</p>
+            <a routerLink="/backlog" class="inline-flex min-h-10 items-center justify-center gap-1.5 self-start rounded-xl bg-slate-700 px-4 py-2 text-xs font-semibold text-slate-100 transition-colors hover:bg-slate-600 focus:outline-none focus:ring-2 focus:ring-slate-300" data-testid="active-change-backlog-link">
+              Iniciar o consultar en Backlog <span aria-hidden="true">&rarr;</span>
+            </a>
+          </div>
+        </ng-template>
+      </section>
     </div>
   `
 })
 export class DashboardComponent {
   readonly selectedDimension = signal<'autonomy' | 'time' | 'cost'>('autonomy');
+  readonly pipelineStages = PIPELINE_STAGES;
+  readonly activeRun = computed(() => {
+    const projectId = this.refresh.activeProject()?.project_id;
+    return this.refresh.runs().find(run => run.is_active && (!projectId || run.project_id === projectId)) ?? null;
+  });
+  readonly activeRequest = computed(() => {
+    const requestId = this.activeRun()?.request_id;
+    if (!requestId) return null;
+    return [...this.refresh.allRequests(), ...this.refresh.closedRequests()]
+      .find(request => request.request_id === requestId) ?? null;
+  });
 
   constructor(public refresh: RefreshService) {}
+
+  activeStageIndex(run: OrchestrationRun): number {
+    return this.pipelineStages.findIndex(stage => stage.key === run.stage);
+  }
+
+  stageLabel(stageKey: string): string {
+    return this.pipelineStages.find(stage => stage.key === stageKey)?.label ?? stageKey;
+  }
+
+  stageIllustrationPath(stageKey: string): string | null {
+    return getStageIllustrationPath(stageKey);
+  }
+
+  runStatusClass(status: string): string {
+    switch (status) {
+      case 'SUCCEEDED':
+      case 'COMPLETED':
+        return 'bg-emerald-500/10 text-emerald-400 border-emerald-500/20';
+      case 'RUNNING':
+      case 'IN_PROGRESS':
+        return 'bg-sky-500/10 text-sky-400 border-sky-500/20';
+      case 'FAILED':
+      case 'ERRORED':
+        return 'bg-rose-500/10 text-rose-400 border-rose-500/20';
+      case 'PAUSED':
+      case 'WAITING':
+      case 'WAITING_CAPACITY':
+      case 'HUMAN_REQUIRED':
+        return 'bg-amber-500/10 text-amber-400 border-amber-500/20';
+      default:
+        return 'bg-slate-800 text-slate-300 border-slate-700';
+    }
+  }
+
+  getStageBadgeClass(stageKey: string, currentStage: string): string {
+    return getStageBadgeClass(stageKey, currentStage);
+  }
 
   get projectProgressPercent(): number {
     const closed = this.refresh.closedRequests().length;
