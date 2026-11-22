@@ -17,6 +17,9 @@ class ProposalFeasibilityEvaluator:
     CANONICAL_UPDATE_OPTION = (
         "Actualizar la solicitud mediante el flujo nativo OpenSpec Update y validarla de nuevo"
     )
+    CANONICAL_OVERRIDE_OPTION = (
+        "Proceder a la implementación bajo autorización del operador e ignorar advertencias heurísticas"
+    )
     _CORRECTABLE_BLOCKER = re.compile(
         r"(?:"
         r"assessment omitted the OpenSpec task inventory|"
@@ -677,8 +680,11 @@ class ProposalFeasibilityEvaluator:
             for action in actions[:5]
             if isinstance(action, str) and action.strip()
         ) if isinstance(actions, list) else ()
-        if blockers and cls.CANONICAL_UPDATE_OPTION not in validated_actions:
-            validated_actions += (cls.CANONICAL_UPDATE_OPTION,)
+        if blockers:
+            if cls.CANONICAL_OVERRIDE_OPTION not in validated_actions:
+                validated_actions = (cls.CANONICAL_OVERRIDE_OPTION,) + validated_actions
+            if cls.CANONICAL_UPDATE_OPTION not in validated_actions:
+                validated_actions += (cls.CANONICAL_UPDATE_OPTION,)
         return (
             "EXECUTABLE" if not blockers else "BLOCKED",
             tuple(validated_tasks),
