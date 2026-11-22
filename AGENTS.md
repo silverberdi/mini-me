@@ -11,7 +11,7 @@
 - La revisión independiente converge: defectos sustantivos sobre artefactos completos, sin re-flag ni peticiones de formato.
 - Capturar preguntas originales y opciones de OpenSpec; si no hay opciones, pensamiento intenta respuesta fundamentada en contexto sin usurpar autorizaciones humanas; luego operador responde y el trabajo continúa. El gate humano muestra siempre la pregunta vigente con opciones.
 - Higiene de workspace y re-ejecución idempotente: al completar o cancelar un run, limpiar worktree y registro de propiedad; observar el estado antes de repetir una etapa.
-- Primer PR de implementación con merge automático para baja/moderada complejidad y acuse informativo humano («Estoy enterado») para alta complejidad. PR de sync/archive documental se fusiona automáticamente. Cierre remoto de ticket únicamente tras el segundo merge. Despliegue fuera de mini me, por CI/CD del proyecto.
+- Primer PR de implementación con merge automático tras revisión independiente aprobada (sin pausas por acuses informativos sintéticos). PR de sync/archive documental se fusiona automáticamente. Cierre remoto de ticket únicamente tras el segundo merge. Despliegue fuera de mini me, por CI/CD del proyecto.
 - POO, SOLID, DRY, KISS, YAGNI, clases pequeñas, interfaces mínimas, eliminar código/DB muerto pertinente mediante migraciones conservadoras; evidencia real E2E.
 - No ejecutar acciones pagas, reiniciar scheduler, migrar/desplegar ni cerrar tickets históricos por el mero hecho de aprobar documentos.
 

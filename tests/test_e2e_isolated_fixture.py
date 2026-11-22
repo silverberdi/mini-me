@@ -153,7 +153,7 @@ async def test_e2e_high_complexity_full_cycle_with_ack(isolated_fixture_repo):
         ],
     )
 
-    # First pass without ack -> HUMAN_REQUIRED
+    # PR1 auto-merges after approved independent review without synthetic acknowledgement gate
     res1 = await coordinator.execute_project_request(
         "fixture-project",
         operator_ack=False,
@@ -161,17 +161,5 @@ async def test_e2e_high_complexity_full_cycle_with_ack(isolated_fixture_repo):
         implementer_provider="antigravity",
         reviewer_provider="antigravity",
     )
-    assert res1.status == "HUMAN_REQUIRED"
-    assert res1.current_stage == OrchestrationStage.PR1_PENDING
-    assert "Estoy enterado" in res1.human_payload.get("prompt", "")
-
-    # Second pass with ack -> continues, merges PR1, doc close, merges PR2, closes issue
-    res2 = await coordinator.execute_project_request(
-        "fixture-project",
-        operator_ack=True,
-        thinker_provider="antigravity",
-        implementer_provider="antigravity",
-        reviewer_provider="antigravity",
-    )
-    assert res2.status == "COMPLETED"
-    assert res2.current_stage == OrchestrationStage.COMPLETED
+    assert res1.status == "COMPLETED"
+    assert res1.current_stage == OrchestrationStage.COMPLETED

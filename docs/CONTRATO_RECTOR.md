@@ -51,7 +51,7 @@ Para un proyecto habilitado y **cuando exista admisión de trabajo autorizada**,
 **Revisión independiente de código (condicional para alta complejidad):** agente de solo lectura contrasta ticket, propuesta, specs, diff y pruebas. Hallazgos → vuelta a Apply/Verify. Aprobación → preparación de PR.
 
 **Preparación de PR y política de merge:** la skill mínima `minime-pr-preparer` usa referencias estrictamente informativas (`Addresses #...` o `Ref #...`), excluyendo taxativamente palabras de cierre automático (`Fixes`, `Closes`, `Resolves`).
-- *Primer PR (implementación):* merge automático por mini me para baja/moderada; acuse informativo humano («Estoy enterado») para alta complejidad antes de que mini me ejecute el merge.
+- *Primer PR (implementación):* merge automático por mini me tras verificación y revisión independiente aprobadas, sin detenerse por acuses informativos sintéticos («Estoy enterado»).
 - *Rama documental y segundo PR:* tras confirmar merge de PR1, crear rama fresca `doc-close-<num>-<slug>` desde `main` actualizado en la raíz administrada; agente de pensamiento ejecuta Sync y Archive nativos; PR2 documental con merge automático incondicional por mini me.
 - *Cierre remoto:* mini me cierra el Issue remoto únicamente tras verificar el merge de PR2, liberando el bloqueo y pasando al siguiente ticket FIFO.
 - *Higiene de workspace:* al completar o cancelar un run, mini me limpia su worktree y su registro de propiedad; no deja worktrees huérfanos que bloqueen runs futuros sobre el mismo cambio.
