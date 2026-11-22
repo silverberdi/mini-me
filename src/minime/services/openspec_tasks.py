@@ -186,6 +186,10 @@ _VERIFICATION_PATTERNS = (
         re.IGNORECASE,
     ),
     re.compile(r"\b(?:ruff|pytest|mypy)\b", re.IGNORECASE),
+    re.compile(
+        r"\b(?:comprobar|verificar|validar|ejecutar|probar)\b.*\b(?:prueba|pruebas|test|tests|navegaci[oó]n|enlace|enlaces|calidad|accesibilidad|check|checks|suite)\b",
+        re.IGNORECASE,
+    ),
 )
 
 

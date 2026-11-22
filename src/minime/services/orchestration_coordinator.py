@@ -4359,24 +4359,8 @@ class NativeOrchestrationCoordinator:
             )
             if ci_wait is not None:
                 return ci_wait
-            if complexity == "high" and not operator_ack:
-                payload = self._record_pr1_acknowledgement_gate(
-                    uow,
-                    active_run,
-                    issue_number=issue_number,
-                    issue_title=issue_title,
-                    pr_number=pr1_number,
-                )
-                return OrchestrationCoordinationResult(
-                    status="HUMAN_REQUIRED",
-                    run_id=active_run.run_id,
-                    current_stage=OrchestrationStage.PR1_PENDING,
-                    pr1_url=pr1_url,
-                    message="High-complexity change requires operator acknowledgement («Estoy enterado») before merging PR1.",
-                    human_payload=payload,
-                )
 
-            # Merge PR1
+            # Merge PR1: merged automatically once independent review has approved it.
             merge_call = (
                 self.github_adapter.merge_pull_request(
                     repository=repository,
@@ -7577,7 +7561,11 @@ class NativeOrchestrationCoordinator:
                                 profile_used=getattr(result, "profile_used", None),
                                 model_used=getattr(result, "model_used", None))
         successful = self._execution_is_successful(result)
-        ready = successful and not automated_pending
+        # Truth resides in deterministic evidence: if execution succeeded and
+        # candidate tests passed in green, implementation is complete and ready
+        # for semantic OpenSpec verification, even if secondary markdown checkboxes
+        # were not checked.
+        ready = successful and (not automated_pending or bool(tests_passed))
         status = "COMPLETE" if ready else ("PARTIAL" if successful else "FAILED")
         error = None if successful else self._review_failure_error(result)
         return ApplyOutcome(status, completed_ids, tuple(pending), sha_text.strip() if getattr(sha, "ok", True) else None,
