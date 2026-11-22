@@ -2916,12 +2916,10 @@ class NativeOrchestrationCoordinator:
                     self._persist_run_stop_details(active_run, details)
                 self._update_stage(uow, active_run, OrchestrationStage.VALIDATING)
             validate_pass = False
-            for attempt in range(self.max_correction_attempts if not existing_proposal else 1):
+            for attempt in range(self.max_correction_attempts):
                 val_res = self.openspec_adapter.validate_change_strict(change_name, worktree_path)
                 if val_res.get("status") == "PASS":
                     validate_pass = True
-                    break
-                if existing_proposal:
                     break
                 # Correction pass
                 logger.info(
@@ -6599,10 +6597,12 @@ class NativeOrchestrationCoordinator:
                 "physical-only follow-up post-merge and do not use it to block browser-automatable work. Do not "
                 "invent dependencies or ask a human to run a command that the configured executor can run.\n"
             )
-        if operation == "propose":
+        if operation in ("propose", "update"):
             prompt += (
-                "\nOpenSpec authoring reminder: every Requirement in every delta spec must contain at least one concrete Scenario; "
-                "do not rely on validation to infer or supply missing acceptance behavior. The native OpenSpec CLI remains the authority.\n"
+                "\nOpenSpec authoring reminder: every Requirement in every delta spec must contain at least one concrete Scenario. "
+                "CRITICAL: When updating existing requirements in specs/ (under ## MODIFIED Requirements), you MUST retain all "
+                "pre-existing scenarios verbatim unless explicitly marking them removed with '#### Scenario: ... [REMOVED]'. "
+                "Omitting an existing scenario causes strict validation failure. The native OpenSpec CLI remains the authority.\n"
             )
         if continue_existing and operator_clarification:
             prompt += f"\nOperator clarification for the pending native workflow:\n{operator_clarification}\n"
@@ -6650,6 +6650,12 @@ class NativeOrchestrationCoordinator:
                 }
             return {"status": "INCOMPLETE", "message": message}
         if not self._execution_is_successful(res):
+            if self._proposal_artifacts_present(worktree_path, change_name):
+                logger.info(
+                    "Propose agent execution finished with non-zero exit or unconfirmed handoff, "
+                    "but all canonical proposal artifacts are present. Proceeding to validation and auto-correction."
+                )
+                return {"status": "READY_TO_VALIDATE", "workflow": wf, "execution": res}
             return {
                 "status": "FAILED",
                 "message": "Propose agent execution was not successful or did not report a valid final handoff.",
