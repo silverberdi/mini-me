@@ -465,11 +465,16 @@ class ProposalFeasibilityEvaluator:
                 ci_checks = {
                     ref for ref in refs if ref.startswith("project:ci_check:")
                 }
+                requires_ci_check_mapping = (
+                    execution_stage == "pre_pr" or "project:test_database" in refs
+                )
                 if is_apply_task:
                     blockers.append(f"task {task_id} assigns Apply work to project CI/CD")
                 elif not workflow_paths:
                     blockers.append(f"task {task_id} has no verified project CI/CD workflow path")
-                elif not ci_checks or not ci_checks.issubset(verified_refs):
+                elif requires_ci_check_mapping and (
+                    not ci_checks or not ci_checks.issubset(verified_refs)
+                ):
                     blockers.append(f"task {task_id} has no verified exact project CI check mapping")
                 elif "project:test_database" in refs and "project:test_database" not in verified_refs:
                     blockers.append(f"task {task_id} has no verified isolated test database profile")
