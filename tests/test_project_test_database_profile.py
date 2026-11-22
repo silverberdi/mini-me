@@ -44,4 +44,3 @@ def test_project_test_database_profile_round_trips_without_secrets():
         legacy = repository.get_by_id("legacy")
         assert legacy is not None
         assert legacy.test_database is None
-

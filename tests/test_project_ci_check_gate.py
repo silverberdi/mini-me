@@ -212,4 +212,3 @@ def test_ci_deferral_requires_existing_workflow_and_exact_mapped_check(tmp_path)
     )
     assert status == "BLOCKED"
     assert any("exact project CI check mapping" in blocker for blocker in blockers)
-

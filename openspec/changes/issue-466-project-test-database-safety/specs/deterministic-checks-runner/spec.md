@@ -32,4 +32,3 @@ The system SHALL sequentially execute each deterministic check configured in the
 #### Scenario: A check command fails
 - **WHEN** any configured check command exits with a non-zero return code
 - **THEN** the failure stdout/stderr is captured, subsequent checks are halted, and the job transitions to `CHECKS_FAILED`.
-
