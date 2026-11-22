@@ -347,3 +347,295 @@ async def test_reentry_with_archived_change_skips_workflows_and_continues_to_pr2
         "doc-close-263-doc-closing-idempotency"
     )
     assert github.create_pull_request.await_args.kwargs["head_sha"] == "dddddddddddddddddddddddddddddddddddddddd"
+
+
+@pytest.mark.asyncio
+async def test_reentry_when_pr2_already_merged_completes_cleanly(tmp_path: Path):
+    repo = tmp_path / "repo"
+    worktree_parent = tmp_path / "worktrees"
+    doc_worktree = worktree_parent / "doc-close-264-already-merged"
+    candidate_worktree = worktree_parent / "request-264-already-merged"
+    uow = InMemoryPersistenceUnitOfWork()
+    setup_managed_repository_fixture(
+        uow,
+        "issue-264-project",
+        repo,
+        worktree_parent,
+        canonical_repository_identity="github.com/silverberdi/mini-me-fixture",
+    )
+    uow.projects.save(
+        Project(
+            project_id="issue-264-project",
+            display_name="DOC_CLOSING already merged fixture",
+            repository="silverberdi/mini-me-fixture",
+        )
+    )
+    change_name = "issue-264-already-merged"
+    _archived_change(doc_worktree, change_name)
+    _init_git_repo(doc_worktree)
+
+    run = OrchestrationRun(
+        project_id="issue-264-project",
+        run_id="run-doc-closing-264",
+        change_name=change_name,
+        base_sha="base-sha",
+        current_stage=OrchestrationStage.PR2_PENDING,
+        resumable_stage=OrchestrationStage.PR2_PENDING,
+        stop_details={
+            "issue_number": 264,
+            "issue_title": "DOC_CLOSING already merged fixture",
+            "request_normalization": {"normalized_body": "Accepted fixture request"},
+            "pr1_number": 901,
+            "pr1_url": "https://github.com/silverberdi/mini-me-fixture/pull/901",
+            "pr2_number": 902,
+            "pr2_url": "https://github.com/silverberdi/mini-me-fixture/pull/902",
+            "pr2_head_sha": "a" * 40,
+        },
+    )
+    uow.orchestration_runs.save(run)
+
+    github = SimpleNamespace(
+        _repo=object(),
+        get_pull_request_details=AsyncMock(
+            return_value=ExternalActionResult(
+                outcome=ExternalOutcome.SUCCESS,
+                source_adapter="github-fixture",
+                data={
+                    "state": "closed",
+                    "is_merged": True,
+                    "merged": True,
+                    "merged_at": "2026-11-22T17:00:00Z",
+                    "merge_commit_sha": "b" * 40,
+                    "head_sha": "a" * 40,
+                    "head_branch": "doc-close-264-already-merged",
+                    "base_branch": "main",
+                },
+            )
+        ),
+        merge_pull_request=AsyncMock(),
+        close_issue=AsyncMock(
+            return_value=ExternalActionResult(
+                outcome=ExternalOutcome.SUCCESS,
+                source_adapter="github-fixture",
+                data=True,
+            )
+        ),
+        get_issue=AsyncMock(
+            return_value=ExternalActionResult(
+                outcome=ExternalOutcome.SUCCESS,
+                source_adapter="github-fixture",
+                data={"number": 264, "state": "closed"},
+            )
+        ),
+    )
+    worktrees = SimpleNamespace(
+        create_request_worktree=AsyncMock(
+            return_value=WorktreeInfo(
+                path=candidate_worktree,
+                branch_name="request-264-already-merged",
+                base_sha="base-sha",
+            )
+        ),
+        create_documentation_worktree=AsyncMock(
+            return_value=WorktreeInfo(
+                path=doc_worktree,
+                branch_name="doc-close-264-already-merged",
+                base_sha="merged-main-sha",
+            )
+        ),
+        remove_clean_worktree_path=AsyncMock(
+            return_value=SimpleNamespace(outcome=ExternalOutcome.SUCCESS)
+        ),
+        format_documentation_branch_name=MagicMock(return_value="doc-close-264-already-merged"),
+        resolve_worktree_parent_dir=MagicMock(return_value=worktree_parent),
+    )
+    coordinator = NativeOrchestrationCoordinator(
+        uow_factory=lambda: uow,
+        github_adapter=github,
+        worktree_manager=worktrees,
+        agent_runner=SimpleNamespace(
+            resolve_workflow=MagicMock(return_value=SimpleNamespace())
+        ),
+    )
+
+    result = await coordinator.execute_project_request(
+        "issue-264-project",
+        target_run_id=run.run_id,
+        thinker_provider="codex",
+    )
+
+    assert result.status == "COMPLETED"
+    assert result.current_stage == OrchestrationStage.COMPLETED
+    saved_run = uow.orchestration_runs.get_by_id(run.run_id)
+    assert saved_run.is_active is False
+    github.merge_pull_request.assert_not_awaited()
+    github.close_issue.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_reentry_when_pr2_creation_reuses_already_merged_pr(tmp_path: Path):
+    repo = tmp_path / "repo"
+    worktree_parent = tmp_path / "worktrees"
+    doc_worktree = worktree_parent / "doc-close-265-create-merged"
+    candidate_worktree = worktree_parent / "request-265-create-merged"
+    uow = InMemoryPersistenceUnitOfWork()
+    setup_managed_repository_fixture(
+        uow,
+        "issue-265-project",
+        repo,
+        worktree_parent,
+        canonical_repository_identity="github.com/silverberdi/mini-me-fixture",
+    )
+    uow.projects.save(
+        Project(
+            project_id="issue-265-project",
+            display_name="DOC_CLOSING reuse merged fixture",
+            repository="silverberdi/mini-me-fixture",
+        )
+    )
+    change_name = "issue-265-create-merged"
+    _archived_change(doc_worktree, change_name)
+    _init_git_repo(doc_worktree)
+
+    run = OrchestrationRun(
+        project_id="issue-265-project",
+        run_id="run-doc-closing-265",
+        change_name=change_name,
+        base_sha="base-sha",
+        current_stage=OrchestrationStage.DOC_CLOSING,
+        resumable_stage=OrchestrationStage.DOC_CLOSING,
+        stop_details={
+            "issue_number": 265,
+            "issue_title": "DOC_CLOSING reuse merged fixture",
+            "request_normalization": {"normalized_body": "Accepted fixture request"},
+            "pr1_number": 903,
+            "pr1_url": "https://github.com/silverberdi/mini-me-fixture/pull/903",
+        },
+    )
+    uow.orchestration_runs.save(run)
+
+    github = SimpleNamespace(
+        _repo=object(),
+        create_pull_request=AsyncMock(
+            return_value=ExternalActionResult(
+                outcome=ExternalOutcome.SUCCESS,
+                source_adapter="github_rest",
+                data={
+                    "number": 904,
+                    "html_url": "https://github.com/silverberdi/mini-me-fixture/pull/904",
+                    "state": "closed",
+                    "merged": True,
+                    "head_sha": "a" * 40,
+                },
+            )
+        ),
+        get_pull_request_details=AsyncMock(
+            return_value=ExternalActionResult(
+                outcome=ExternalOutcome.SUCCESS,
+                source_adapter="github-fixture",
+                data={
+                    "state": "closed",
+                    "is_merged": True,
+                    "merged": True,
+                    "merged_at": "2026-11-22T17:00:00Z",
+                    "merge_commit_sha": "b" * 40,
+                    "head_sha": "a" * 40,
+                    "head_branch": "doc-close-265-create-merged",
+                    "base_branch": "main",
+                },
+            )
+        ),
+        merge_pull_request=AsyncMock(),
+        close_issue=AsyncMock(
+            return_value=ExternalActionResult(
+                outcome=ExternalOutcome.SUCCESS,
+                source_adapter="github-fixture",
+                data=True,
+            )
+        ),
+        get_issue=AsyncMock(
+            return_value=ExternalActionResult(
+                outcome=ExternalOutcome.SUCCESS,
+                source_adapter="github-fixture",
+                data={"number": 265, "state": "closed"},
+            )
+        ),
+    )
+    worktrees = SimpleNamespace(
+        create_request_worktree=AsyncMock(
+            return_value=WorktreeInfo(
+                path=candidate_worktree,
+                branch_name="request-265-create-merged",
+                base_sha="base-sha",
+            )
+        ),
+        create_documentation_worktree=AsyncMock(
+            return_value=WorktreeInfo(
+                path=doc_worktree,
+                branch_name="doc-close-265-create-merged",
+                base_sha="merged-main-sha",
+            )
+        ),
+        remove_clean_worktree_path=AsyncMock(
+            return_value=SimpleNamespace(outcome=ExternalOutcome.SUCCESS)
+        ),
+        format_documentation_branch_name=MagicMock(return_value="doc-close-265-create-merged"),
+        resolve_worktree_parent_dir=MagicMock(return_value=worktree_parent),
+    )
+    coordinator = NativeOrchestrationCoordinator(
+        uow_factory=lambda: uow,
+        github_adapter=github,
+        worktree_manager=worktrees,
+        agent_runner=SimpleNamespace(
+            resolve_workflow=MagicMock(return_value=SimpleNamespace())
+        ),
+    )
+    coordinator._push_branch = AsyncMock()
+    coordinator._get_git_head_sha = AsyncMock(return_value="c" * 40)
+
+    result = await coordinator.execute_project_request(
+        "issue-265-project",
+        target_run_id=run.run_id,
+        thinker_provider="codex",
+    )
+
+    assert result.status == "COMPLETED"
+    assert result.current_stage == OrchestrationStage.COMPLETED
+    saved_run = uow.orchestration_runs.get_by_id(run.run_id)
+    assert saved_run.is_active is False
+    assert saved_run.stop_details.get("pr2_number") == 904
+    github.merge_pull_request.assert_not_awaited()
+    github.close_issue.assert_awaited_once()
+
+
+def test_github_adapter_create_pr_reuses_existing_when_merged():
+    from minime.adapters.github import GitHubAdapter
+    from unittest.mock import patch
+
+    adapter = GitHubAdapter(token="fake-token")
+    with patch.object(
+        adapter,
+        "get_pull_request",
+        return_value=ExternalActionResult(
+            outcome=ExternalOutcome.SUCCESS,
+            source_adapter="github_rest",
+            data={
+                "number": 42,
+                "head_sha": "old-sha-12345",
+                "state": "closed",
+                "merged": True,
+            },
+        ),
+    ):
+        result = adapter.create_pull_request(
+            repository="silverberdi/test-repo",
+            branch="doc-close-42",
+            base="main",
+            title="Docs",
+            body="Docs body",
+            head_sha="new-sha-67890",
+            draft=False,
+        )
+        assert result.outcome == ExternalOutcome.SUCCESS
+        assert result.reason_code.value == "REUSED_EXISTING"
+        assert result.data["number"] == 42

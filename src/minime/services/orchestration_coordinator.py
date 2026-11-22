@@ -4555,9 +4555,20 @@ class NativeOrchestrationCoordinator:
                 opened_doc_data.get("html_url")
                 if isinstance(opened_doc_data, dict)
                 else getattr(opened_doc_data, "html_url", None)
+            ) or (
+                opened_doc_data.get("url")
+                if isinstance(opened_doc_data, dict)
+                else getattr(opened_doc_data, "url", None)
             )
-            if not pr2_number or not await self._confirm_pr_open(
-                repository, pr2_number, doc_worktree_info.branch_name, base_branch, doc_head_sha
+            pr2_already_merged = bool(
+                isinstance(opened_doc_data, dict)
+                and (opened_doc_data.get("merged") or opened_doc_data.get("state") == "closed")
+            )
+            if not pr2_number or not (
+                pr2_already_merged
+                or await self._confirm_pr_open(
+                    repository, pr2_number, doc_worktree_info.branch_name, base_branch, doc_head_sha
+                )
             ):
                 return OrchestrationCoordinationResult(
                     status="PAUSED",
@@ -4570,33 +4581,46 @@ class NativeOrchestrationCoordinator:
             active_run.stop_details["pr2_number"] = pr2_number
             active_run.stop_details["pr2_url"] = pr2_url
             active_run.stop_details["pr2_head_sha"] = doc_head_sha
+            if hasattr(uow, "orchestration_runs"):
+                uow.orchestration_runs.save(active_run)
+                if hasattr(uow, "commit"):
+                    uow.commit()
 
         doc_head_sha = active_run.stop_details.get("pr2_head_sha")
 
         # PR2 Auto-merge (always automatic)
-        merge_doc_call = (
-            self.github_adapter.merge_pull_request(
-                repository=repository,
-                pr_number=pr2_number,
-                candidate_sha=doc_head_sha,
-                merge_method="merge",
+        doc_merged = await self._confirm_pr_merged(repository, pr2_number, None)
+        merge_doc_res = None
+        if not doc_merged:
+            merge_doc_call = (
+                self.github_adapter.merge_pull_request(
+                    repository=repository,
+                    pr_number=pr2_number,
+                    candidate_sha=doc_head_sha,
+                    merge_method="merge",
+                )
+                if hasattr(self.github_adapter, "_repo")
+                else self.github_adapter.merge_pull_request(
+                    pull_number=pr2_number,
+                    expected_head_sha=doc_head_sha,
+                    merge_method="merge",
+                )
             )
-            if hasattr(self.github_adapter, "_repo")
-            else self.github_adapter.merge_pull_request(
-                pull_number=pr2_number,
-                expected_head_sha=doc_head_sha,
-                merge_method="merge",
+            merge_doc_res = (
+                await merge_doc_call if inspect.isawaitable(merge_doc_call) else merge_doc_call
             )
-        )
-        merge_doc_res = (
-            await merge_doc_call if inspect.isawaitable(merge_doc_call) else merge_doc_call
-        )
-        doc_merged = self._external_success(merge_doc_res) and await self._confirm_pr_merged(
-            repository, pr2_number, doc_head_sha
-        )
+            doc_merged = self._external_success(merge_doc_res) and await self._confirm_pr_merged(
+                repository, pr2_number, doc_head_sha
+            )
+            if not doc_merged:
+                doc_merged = await self._confirm_pr_merged(repository, pr2_number, None)
 
         if not doc_merged:
-            err_msg = getattr(merge_doc_res, "error_message", "Merge PR2 failed")
+            err_msg = (
+                getattr(merge_doc_res, "error_message", "Merge PR2 failed")
+                if merge_doc_res is not None
+                else "Merge PR2 unconfirmed"
+            )
             return OrchestrationCoordinationResult(
                 status="PAUSED",
                 run_id=active_run.run_id,
@@ -4648,7 +4672,7 @@ class NativeOrchestrationCoordinator:
         active_run.stop_outcome = OrchestrationStopOutcome.COMPLETED
         self._update_stage(uow, active_run, OrchestrationStage.COMPLETED)
 
-        # Clean up the managed worktree now that the change is complete and merged.
+        # Clean up the managed worktrees now that the change is complete and merged.
         try:
             cleanup = await self.worktree_manager.remove_clean_worktree_path(
                 worktree_path, active_run.run_id, project_id
@@ -4660,6 +4684,17 @@ class NativeOrchestrationCoordinator:
                 )
         except Exception as exc:  # cleanup is best-effort; never block completion on it
             logger.warning(f"Worktree cleanup for completed run {active_run.run_id} failed: {exc}")
+
+        try:
+            doc_branch = self.worktree_manager.format_documentation_branch_name(issue_number, issue_title)
+            doc_parent = self.worktree_manager.resolve_worktree_parent_dir(project_id)
+            doc_worktree_path = (doc_parent / doc_branch).resolve()
+            if doc_worktree_path.exists():
+                await self.worktree_manager.remove_clean_worktree_path(
+                    doc_worktree_path, active_run.run_id, project_id
+                )
+        except Exception as exc:
+            logger.warning(f"Documentation worktree cleanup for completed run {active_run.run_id} failed: {exc}")
 
         # Apply any pending deferred transitions for this project or global pause
         applied_transitions = self._apply_deferred_transitions(uow, project_id)
@@ -4817,7 +4852,9 @@ class NativeOrchestrationCoordinator:
             uow.commit()
         return admitted
 
-    async def _confirm_pr_merged(self, repository: str, pr_number: int, candidate_sha: str) -> bool:
+    async def _confirm_pr_merged(
+        self, repository: str, pr_number: int, candidate_sha: str | None = None
+    ) -> bool:
         """Re-read the remote PR; a merge request response alone is not proof."""
         getter = getattr(self.github_adapter, "get_pull_request_details", None)
         if not getter:
@@ -4832,7 +4869,7 @@ class NativeOrchestrationCoordinator:
         return (
             bool(data.get("is_merged") or data.get("merged"))
             and data.get("merge_commit_sha") is not None
-            and (not data.get("head_sha") or data.get("head_sha") == candidate_sha)
+            and (not candidate_sha or not data.get("head_sha") or data.get("head_sha") == candidate_sha)
         )
 
     async def _confirm_pr_open(

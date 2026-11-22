@@ -1241,6 +1241,7 @@ class GitHubAdapter(GitHubAdapterInterface):
                     "state": data.get("state"),
                     "title": data.get("title"),
                     "body": data.get("body"),
+                    "merged": bool(data.get("merged_at") or data.get("merged")),
                 },
             )
         except GitHubAuthorizationError:
@@ -1300,12 +1301,12 @@ class GitHubAdapter(GitHubAdapterInterface):
         repo = self._repo(repository)
         existing = self.get_pull_request(repo, branch, base)
         if existing.outcome == ExternalOutcome.SUCCESS and existing.data:
-            if existing.data.get("head_sha") == head_sha:
+            if existing.data.get("head_sha") == head_sha or existing.data.get("merged") or existing.data.get("state") == "closed":
                 return ExternalActionResult(
                     outcome=ExternalOutcome.SUCCESS,
                     source_adapter="github_rest",
                     reason_code=ExternalReasonCode.REUSED_EXISTING,
-                    retry_safety=RetrySafety.UNSAFE,
+                    retry_safety=RetrySafety.SAFE if existing.data.get("merged") else RetrySafety.UNSAFE,
                     data=existing.data,
                     external_id=str(existing.data.get("number")),
                 )
