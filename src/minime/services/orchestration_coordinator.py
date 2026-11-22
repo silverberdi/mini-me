@@ -3959,6 +3959,22 @@ class NativeOrchestrationCoordinator:
                     message=payload["question"], human_payload=payload,
                 )
             if not verify_outcome:
+                findings = list(verify_outcome.findings)
+                if findings:
+                    details = dict(active_run.stop_details or {})
+                    details["pending_corrections"] = findings
+                    active_run.stop_details = details
+                    if hasattr(uow, "orchestration_runs"):
+                        uow.orchestration_runs.save(active_run)
+                        if hasattr(uow, "commit"):
+                            uow.commit()
+                    self._update_stage(uow, active_run, OrchestrationStage.IMPLEMENTING)
+                    return OrchestrationCoordinationResult(
+                        status="RUNNING",
+                        run_id=active_run.run_id,
+                        current_stage=OrchestrationStage.IMPLEMENTING,
+                        message="OpenSpec verify reported discrepancies; returning through Apply for correction.",
+                    )
                 return OrchestrationCoordinationResult(
                     status="PAUSED",
                     run_id=active_run.run_id,
@@ -7992,6 +8008,7 @@ class NativeOrchestrationCoordinator:
             "Use `openspec validate --type change --strict <change-name>` only for structural CLI validation. "
             "There is no `openspec verify` CLI command; execute Verify through the resolved native provider workflow above.\n\n"
             "Verify that all tasks and requirements are implemented and verified with green tests. "
+            "Pending post-merge operator reviews or human visual confirmation documented for the PR are NOT discrepancies or findings; do not block READY_TO_MERGE for them.\n\n"
             "After completing the native Verify workflow, return exactly one JSON object in the "
             "authorized final response channel matching this schema: "
             '{"verdict":"READY_TO_MERGE|CHANGES_REQUIRED",'
@@ -8068,13 +8085,30 @@ class NativeOrchestrationCoordinator:
             return VerifyOutcome("FAILED", "Native Verify structured result is missing.")
         try:
             parsed = parse_review_verdict(res.response_output)
+            actionable_findings = tuple(
+                item.model_dump() if hasattr(item, "model_dump") else dict(item)
+                for item in parsed.findings
+                if not any(
+                    phrase in str(getattr(item, "expected_correction", "") or "").lower()
+                    or phrase in str(getattr(item, "violated_requirement", "") or "").lower()
+                    for phrase in (
+                        "validación ui humana",
+                        "revisión visual humana",
+                        "validación humana",
+                        "decisión humana",
+                        "human validation",
+                        "human visual validation",
+                        "post-merge human",
+                    )
+                )
+            )
+            is_complete = parsed.verdict.value == "READY_TO_MERGE" or (
+                not actionable_findings and len(parsed.findings) > 0
+            )
             return VerifyOutcome(
-                "COMPLETE" if parsed.verdict.value == "READY_TO_MERGE" else "FAILED",
+                "COMPLETE" if is_complete else "FAILED",
                 parsed.summary,
-                findings=tuple(
-                    item.model_dump() if hasattr(item, "model_dump") else dict(item)
-                    for item in parsed.findings
-                ),
+                findings=actionable_findings,
             )
         except MalformedReviewOutputError:
             return VerifyOutcome("FAILED", "Native Verify returned an invalid structured result.")
