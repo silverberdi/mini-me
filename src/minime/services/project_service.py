@@ -110,6 +110,7 @@ class ProjectService:
                 project_type=configuration.project_type,
                 base_branch=configuration.base_branch.strip() or "main",
                 provider_connections=connections,
+                test_database=configuration.test_database,
                 agent_profiles={
                     key: value.model_dump(mode="json")
                     for key, value in configuration.agent_profiles.items()
@@ -530,6 +531,8 @@ class ProjectService:
                 }
             if patch.execution_policy is not None:
                 project.execution_policy = patch.execution_policy.model_dump(mode="json")
+            if "test_database" in patch.model_fields_set:
+                project.test_database = patch.test_database
             project.updated_at = utc_now()
             self.uow.projects.save(project)
             commit_started = True

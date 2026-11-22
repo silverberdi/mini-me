@@ -1901,6 +1901,107 @@ class GitHubAdapter(GitHubAdapterInterface):
                 provider_detail=_safe_error(str(exc)),
             )
 
+    def get_check_run_status(
+        self, repository: str, head_sha: str, check_name: str
+    ) -> ExternalActionResult[dict[str, Any]]:
+        """Observe one named GitHub Actions check on an exact commit SHA."""
+        repo = self._repo(repository)
+        if not re.fullmatch(r"[0-9a-f]{40,64}", head_sha, re.IGNORECASE) or not check_name.strip():
+            return ExternalActionResult(
+                outcome=ExternalOutcome.FAILURE,
+                source_adapter="github_rest",
+                reason_code=ExternalReasonCode.UNOBSERVABLE,
+                retry_safety=RetrySafety.SAFE,
+                error_message="GitHub check lookup requires an exact commit SHA and check name.",
+            )
+        try:
+            matching: list[dict[str, Any]] = []
+            for page in range(1, 6):
+                response = self._request(
+                    "GET",
+                    f"/repos/{repo}/commits/{head_sha}/check-runs",
+                    params={"per_page": 100, "page": page},
+                )
+                if response.status_code in (401, 403):
+                    return ExternalActionResult(
+                        outcome=ExternalOutcome.FAILURE,
+                        source_adapter="github_rest",
+                        reason_code=ExternalReasonCode.AUTH_REQUIRED,
+                        retry_safety=RetrySafety.SAFE,
+                        provider_detail=f"HTTP {response.status_code}",
+                        error_message="GitHub App is unauthorized to observe commit checks.",
+                    )
+                if response.status_code >= 400:
+                    return ExternalActionResult(
+                        outcome=ExternalOutcome.UNKNOWN,
+                        source_adapter="github_rest",
+                        reason_code=ExternalReasonCode.UNOBSERVABLE,
+                        retry_safety=RetrySafety.SAFE,
+                        provider_detail=f"HTTP {response.status_code}",
+                        error_message="GitHub commit check result is unobservable.",
+                    )
+                payload = response.json()
+                runs = payload.get("check_runs") if isinstance(payload, dict) else None
+                if not isinstance(runs, list):
+                    return ExternalActionResult(
+                        outcome=ExternalOutcome.UNKNOWN,
+                        source_adapter="github_rest",
+                        reason_code=ExternalReasonCode.UNOBSERVABLE,
+                        retry_safety=RetrySafety.SAFE,
+                        error_message="GitHub returned a malformed commit check response.",
+                    )
+                matching.extend(
+                    item for item in runs
+                    if isinstance(item, dict)
+                    and item.get("name") == check_name
+                    and str(item.get("head_sha") or "").lower() == head_sha.lower()
+                )
+                if len(runs) < 100 or len(matching) >= payload.get("total_count", 0):
+                    break
+            if not matching:
+                data = {
+                    "repository": repo,
+                    "head_sha": head_sha,
+                    "check_name": check_name,
+                    "status": "missing",
+                    "conclusion": None,
+                    "check_run_id": None,
+                }
+            else:
+                latest = max(
+                    matching,
+                    key=lambda item: (
+                        str(item.get("started_at") or item.get("created_at") or ""),
+                        int(item.get("id") or 0),
+                    ),
+                )
+                data = {
+                    "repository": repo,
+                    "head_sha": head_sha,
+                    "check_name": check_name,
+                    "status": latest.get("status"),
+                    "conclusion": latest.get("conclusion"),
+                    "check_run_id": latest.get("id"),
+                    "html_url": latest.get("html_url"),
+                }
+            return ExternalActionResult(
+                outcome=ExternalOutcome.SUCCESS,
+                source_adapter="github_rest",
+                reason_code=ExternalReasonCode.EXECUTION_SUCCESS,
+                retry_safety=RetrySafety.SAFE,
+                data=data,
+                external_id=str(data.get("check_run_id") or ""),
+            )
+        except (GitHubAuthorizationError, GitHubRemoteError, httpx.HTTPError, ValueError) as exc:
+            return ExternalActionResult(
+                outcome=ExternalOutcome.UNKNOWN,
+                source_adapter="github_rest",
+                reason_code=ExternalReasonCode.UNOBSERVABLE,
+                retry_safety=RetrySafety.SAFE,
+                error_message="GitHub commit check result is unobservable.",
+                provider_detail=_safe_error(str(exc)),
+            )
+
     def merge_pull_request(
         self,
         repository: str,

@@ -165,7 +165,7 @@ def test_later_stage_preview_does_not_block_apply_and_remains_pending(tmp_path: 
                 "task_id": "2.1",
                 "actor": "project_ci_cd",
                 "execution_stage": "verify",
-                "capability_evidence_refs": ["path:.github/workflows/deploy.yml", f"preview:{'b' * 40}"],
+                    "capability_evidence_refs": ["path:.github/workflows/deploy.yml", f"preview:{'b' * 40}"],
                 "depends_on_task_ids": [],
                 "preconditions": [{
                     "required_before_stage": "verify",

@@ -4351,6 +4351,14 @@ class NativeOrchestrationCoordinator:
 
         # Differentiated Merge Policy for PR1
         if active_run.current_stage == OrchestrationStage.PR1_PENDING:
+            ci_wait = await self._required_project_ci_before_merge(
+                uow,
+                active_run,
+                repository=repository,
+                candidate_sha=candidate_sha,
+            )
+            if ci_wait is not None:
+                return ci_wait
             if complexity == "high" and not operator_ack:
                 payload = self._record_pr1_acknowledgement_gate(
                     uow,
@@ -4865,6 +4873,98 @@ class NativeOrchestrationCoordinator:
             and data.get("head_sha") == candidate_sha
             and (data.get("head_branch") == head_branch and data.get("base_branch") == base_branch)
         )
+
+    async def _required_project_ci_before_merge(
+        self,
+        uow: Any,
+        run: OrchestrationRun,
+        *,
+        repository: str,
+        candidate_sha: str,
+    ) -> OrchestrationCoordinationResult | None:
+        """Wait for every explicitly mapped project CI check on the exact PR head."""
+        project = uow.projects.get_by_id(run.project_id) if getattr(uow, "projects", None) else None
+        if project is None:
+            return OrchestrationCoordinationResult(
+                status="PAUSED", run_id=run.run_id,
+                current_stage=OrchestrationStage.PR1_PENDING,
+                message="Implementation PR merge is waiting because project check configuration is unavailable.",
+            )
+        checks = [
+            item for item in (getattr(project, "checks", None) or [])
+            if isinstance(item, dict) and item.get("pr_ci_check_name")
+        ]
+        if not checks:
+            return None
+        mapped_names = [str(item.get("pr_ci_check_name") or "").strip() for item in checks]
+        if any(not name for name in mapped_names) or len(mapped_names) != len(set(mapped_names)):
+            reason = "Configured project CI check names are empty or duplicated."
+            return OrchestrationCoordinationResult(
+                status="PAUSED", run_id=run.run_id,
+                current_stage=OrchestrationStage.PR1_PENDING,
+                message=f"Implementation PR merge is blocked: {reason}",
+            )
+        if not re.fullmatch(r"[0-9a-f]{40,64}", candidate_sha or "", re.IGNORECASE):
+            return OrchestrationCoordinationResult(
+                status="PAUSED", run_id=run.run_id,
+                current_stage=OrchestrationStage.PR1_PENDING,
+                message="Implementation PR merge is waiting for an immutable candidate SHA.",
+            )
+        getter = getattr(self.github_adapter, "get_check_run_status", None)
+        if not callable(getter):
+            return OrchestrationCoordinationResult(
+                status="PAUSED", run_id=run.run_id,
+                current_stage=OrchestrationStage.PR1_PENDING,
+                message="Implementation PR merge is waiting because the configured GitHub checks cannot be observed.",
+            )
+        observations: list[dict[str, Any]] = []
+        wait_message: str | None = None
+        for check, check_name in zip(checks, mapped_names, strict=True):
+            if check.get("uses_test_database") is True and project.test_database is None:
+                wait_message = f"Implementation PR merge is blocked: check '{check.get('name')}' has no isolated project test database profile."
+                observations.append({"check_name": check_name, "status": "blocked_configuration"})
+                break
+            result = getter(repository=repository, head_sha=candidate_sha, check_name=check_name)
+            if inspect.isawaitable(result):
+                result = await result
+            if not self._external_success(result):
+                wait_message = f"Implementation PR merge is waiting: GitHub result for '{check_name}' is unavailable."
+                observations.append({"check_name": check_name, "status": "unobservable"})
+                break
+            data = result.data if hasattr(result, "data") else result
+            if not isinstance(data, dict) or data.get("head_sha") != candidate_sha or data.get("check_name") != check_name:
+                wait_message = f"Implementation PR merge is blocked: GitHub result identity for '{check_name}' does not match candidate {candidate_sha}."
+                observations.append({"check_name": check_name, "status": "identity_mismatch"})
+                break
+            observation = {
+                "check_name": check_name,
+                "candidate_sha": candidate_sha,
+                "status": data.get("status"),
+                "conclusion": data.get("conclusion"),
+                "check_run_id": data.get("check_run_id"),
+                "html_url": data.get("html_url"),
+                "observed_at": utc_now().isoformat(),
+            }
+            observations.append(observation)
+            if data.get("status") != "completed" or data.get("conclusion") != "success":
+                state = "failed" if data.get("status") == "completed" else "pending"
+                wait_message = f"Implementation PR merge is waiting: check '{check_name}' is {state} for candidate {candidate_sha}."
+                break
+        details = dict(run.stop_details or {})
+        details["required_project_ci_checks"] = observations
+        run.stop_details = details
+        if hasattr(uow, "orchestration_runs"):
+            uow.orchestration_runs.save(run)
+            if hasattr(uow, "commit"):
+                uow.commit()
+        if wait_message:
+            return OrchestrationCoordinationResult(
+                status="PAUSED", run_id=run.run_id,
+                current_stage=OrchestrationStage.PR1_PENDING,
+                pr1_url=(run.stop_details or {}).get("pr1_url"),
+                message=wait_message,
+            )
+        return None
 
     async def _confirm_issue_closed(self, repository: str, issue_number: int) -> bool:
         getter = getattr(self.github_adapter, "get_issue", None)
@@ -5963,7 +6063,14 @@ class NativeOrchestrationCoordinator:
                 "has an executable path. Browser-reproducible acceptance (navigation, responsive viewport, "
                 "asynchronous UI, and concurrent browser sessions) belongs to the configured execution agent "
                 "in Apply or Verify, with real browser evidence; never assign it to the operator or "
-                "human_validation. Keep actual human decisions and physical-device-only checks separate and "
+                "human_validation. For database-backed checks, use only the supplied project_test_database "
+                "identity and configured test command, and schedule that check at the earliest available "
+                "execution stage. A check may be deferred to pre_pr only when its configured project.checks "
+                "entry has uses_test_database=true and an exact pr_ci_check_name represented by a supplied "
+                "project:ci_check:<name> capability; cite that exact capability and project:test_database. "
+                "Never defer missing/unsafe database configuration, an unmapped check, or missing CI identity, "
+                "and never call a deferred result passed before the exact SHA-bound GitHub check succeeds. "
+                "Keep actual human decisions and physical-device-only checks separate and "
                 "post-merge; they must not block browser-automatable work. Use observed test_tooling commands; "
                 "do not invent dependencies. Missing or unlaunchable browser runtime is a technical environment "
                 "failure for the existing environment-unavailable path, not a human test task. Return exactly "
@@ -7616,12 +7723,15 @@ class NativeOrchestrationCoordinator:
 
         # 3. Retrieve optional explicit project checks if project_id is available
         project_checks = None
+        project_test_database = None
         if project_id:
             if hasattr(self, "uow") and self.uow and hasattr(self.uow, "projects"):
                 try:
                     project = self.uow.projects.get_by_id(project_id)
                     if project and getattr(project, "checks", None):
                         project_checks = project.checks
+                    if project is not None:
+                        project_test_database = project.test_database
                 except Exception:
                     pass
             elif hasattr(self, "uow_factory") and self.uow_factory:
@@ -7633,6 +7743,8 @@ class NativeOrchestrationCoordinator:
                             project = uow.projects.get_by_id(project_id)
                             if project and getattr(project, "checks", None):
                                 project_checks = project.checks
+                            if project is not None:
+                                project_test_database = project.test_database
                     finally:
                         if hasattr(res, "__exit__"):
                             res.__exit__(None, None, None)
@@ -7668,6 +7780,8 @@ class NativeOrchestrationCoordinator:
                 worktree_path=worktree_path,
                 candidate_sha=candidate_sha or "",
                 process_start_observer=process_start_observer,
+                test_database=project_test_database,
+                allow_ci_deferral=True,
             )
             evidence_lines = []
             for r in res.results:
@@ -7684,6 +7798,14 @@ class NativeOrchestrationCoordinator:
                     f"duration_ms: {r.duration_ms}\ncandidate_sha: {r.candidate_sha}\noutput:\n{r.output_snippet}"
                 )
             evidence = "\n---\n".join(evidence_lines) or "Configured project checks completed."
+            for pending in res.pending_ci_checks:
+                evidence += (
+                    "\n---\n"
+                    f"pending_ci_check: {pending['pr_ci_check_name']}\n"
+                    f"project_check: {pending['check_name']}\n"
+                    f"candidate_sha: {pending['candidate_sha']}\n"
+                    "status: PENDING"
+                )
             return res.passed, evidence
 
         # Declared JavaScript and Makefile commands use the same confined,

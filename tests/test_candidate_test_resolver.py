@@ -27,6 +27,25 @@ def test_explicit_project_checks_precedence(tmp_path: Path):
     assert plan.custom_checks == checks
 
 
+def test_tooling_inventory_exposes_only_database_test_identity_and_named_ci_check(tmp_path: Path):
+    check = {
+        "name": "postgres-tests",
+        "command": "pytest tests/db --database-url postgresql://user:password@db/prod",
+        "uses_test_database": True,
+        "pr_ci_check_name": "Backend / PostgreSQL",
+        "database_url": "postgresql://user:password@db/prod",
+    }
+
+    inventory = CandidateTestResolver.inspect_tooling(tmp_path, project_checks=[check])
+
+    configured = inventory["configured_checks"][0]
+    assert configured["name"] == "postgres-tests"
+    assert configured["uses_test_database"] is True
+    assert configured["pr_ci_check_name"] == "Backend / PostgreSQL"
+    assert "password" not in repr(inventory)
+    assert "database_url" not in repr(inventory)
+
+
 def test_python_selected_tests_precedence(tmp_path: Path):
     (tmp_path / "pyproject.toml").write_text("", encoding="utf-8")
     selected_tests = ["tests/test_models.py", "tests/test_api.py"]

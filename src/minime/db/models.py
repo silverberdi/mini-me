@@ -100,6 +100,7 @@ class ProjectModel(Base):
     implementer: Mapped[str] = mapped_column(String(64), default="codex", nullable=False)
     reviewer: Mapped[str] = mapped_column(String(64), default="antigravity", nullable=False)
     checks: Mapped[list[dict[str, Any]]] = mapped_column(JSON, default=list, nullable=False)
+    test_database: Mapped[dict[str, Any] | None] = mapped_column(JSON, nullable=True)
     external_providers_allowed: Mapped[list[str]] = mapped_column(
         JSON, default=lambda: ["codex", "antigravity", "deepseek"], nullable=False
     )
