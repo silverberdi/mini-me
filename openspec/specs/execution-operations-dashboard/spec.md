@@ -118,7 +118,7 @@ Then the server SHALL return the HTML application
 And static assets under `/static/` SHALL be delivered without external network dependencies.
 
 ### Requirement: Liquidated provider cost presentation
-The Dashboard SHALL present cost data only from verifiable liquidated entries in the durable PostgreSQL budget ledger, never by deriving a price from run tokens or by substituting synthetic values. Each presented cost point SHALL retain its ledger timestamp, provider identity, model identity when available, and USD amount at the ledger's precision, and SHALL be attributable separately at minimum to DeepSeek Direct and OpenRouter.
+The Dashboard SHALL present cost data only from verifiable liquidated entries in the durable PostgreSQL budget ledger, never by deriving a price from run tokens or by substituting synthetic values. Each presented cost point SHALL retain its ledger timestamp, provider identity, model identity when available, and USD amount at the ledger's precision, SHALL be attributable separately at minimum to DeepSeek Direct and OpenRouter, and SHALL reflect newly committed settlements on the existing dashboard refresh path.
 
 #### Scenario: Display settled DeepSeek and OpenRouter costs
 - **WHEN** the durable ledger contains liquidated cost entries for DeepSeek Direct and OpenRouter, including provider, model, amount, and timestamps
@@ -160,6 +160,11 @@ The Dashboard SHALL present cost data only from verifiable liquidated entries in
 #### Scenario: End-to-end ledger-to-dashboard representation
 - **WHEN** PostgreSQL contains registered liquidated usage for DeepSeek Direct and OpenRouter
 - **THEN** a real end-to-end verification observes the ledger records, invokes the Dashboard read path, and demonstrates the corresponding provider/model costs in the rendered visualization
+
+#### Scenario: Newly settled cost appears after the existing refresh boundary
+- **WHEN** a verified settlement is committed after a Dashboard query and the existing reactive refresh path becomes eligible
+- **THEN** the next Dashboard projection reads the committed ledger entry and reports `status="available"` with its provider/model series
+- **AND** the change does not alter the existing refresh TTL or introduce a second cost authority
 
 ### Requirement: Compact Active Change summary on Dashboard
 The Dashboard SHALL replace its dense recent-run and open-request lists with one compact, responsive summary of the active Run for the selected project. The summary SHALL use the existing Run and Request data, show the Change name, linked Request number and title when available, current stage and execution status, the official illustration for a recognized current stage, a visual stage-progress indicator rendered with the same stage-card structure as Trabajo Actual, and a direct link to Trabajo Actual. The stage cards SHALL show each stage's number and label, with the same completed/current/pending colors and presentation classes used in Trabajo Actual. The summary SHALL show only progress supported by the current persisted stage; it SHALL NOT invent a numeric percentage or a separate orchestration state.
