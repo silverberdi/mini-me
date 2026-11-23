@@ -46,6 +46,10 @@ from minime.services.provider_health_service import ProviderHealthService
 from minime.services.systemd_scheduler_observer import (
     SystemdSchedulerObserver,
 )
+from minime.services.temporal_multiseries_telemetry_service import (
+    TemporalMultiseriesTelemetryService,
+    TemporalTelemetryProjectionDTO,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -375,6 +379,7 @@ class DashboardOverviewResponse(BaseModel):
     cost: DashboardCostDTO = Field(
         default_factory=lambda: DashboardCostDTO(status="no_data")
     )
+    temporal_telemetry: dict[str, TemporalTelemetryProjectionDTO] = Field(default_factory=dict)
 
 
 class DashboardChangeDetailResponse(BaseModel):
@@ -954,6 +959,21 @@ class OperationsDashboardService:
             recent_completions=recent_completions,
             changes=change_summaries,
             cost=self.get_cost_projection(project_id),
+            temporal_telemetry={
+                dimension: TemporalMultiseriesTelemetryService(self.uow).project(
+                    dimension=dimension,
+                    window_days=30,
+                )
+                for dimension in ("autonomy", "time", "cost")
+            },
+        )
+
+    def get_temporal_telemetry(
+        self, dimension: str = "autonomy", window_days: int = 30, granularity: str | None = None
+    ) -> TemporalTelemetryProjectionDTO:
+        """Return the single authenticated temporal telemetry read model."""
+        return TemporalMultiseriesTelemetryService(self.uow).project(
+            dimension=dimension, window_days=window_days, granularity=granularity
         )
 
     def get_cost_projection(self, project_id: str | None) -> DashboardCostDTO:

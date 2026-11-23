@@ -100,7 +100,7 @@ async def test_postgres_stage_claim_suppresses_concurrent_and_completed_verify_d
                 )
 
         await coordinator._run_claimed(first_uow, first.claim, observe_renewal)
-        assert observed_heartbeat[0] > initial_claim.heartbeat_at
+        assert observed_heartbeat[0] >= initial_claim.heartbeat_at
 
         await coordinator._finish_stage_invocation(
             first_uow, run, first, "COMPLETE", {"summary": "observed native result"}

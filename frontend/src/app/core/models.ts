@@ -120,6 +120,33 @@ export interface DashboardCost {
   series: DashboardCostSeriesPoint[];
 }
 
+export interface TemporalTelemetryPoint {
+  timestamp: string;
+  value: number;
+  source_timestamps: string[];
+  quality: string;
+}
+
+export interface TemporalTelemetrySeries {
+  series_id: string;
+  label: string;
+  project_id?: string | null;
+  color: string;
+  points: TemporalTelemetryPoint[];
+  no_data: boolean;
+}
+
+export interface TemporalTelemetryProjection {
+  dimension: 'autonomy' | 'time' | 'cost';
+  window_days: number;
+  granularity: 'daily' | 'weekly';
+  axis: string[];
+  series: TemporalTelemetrySeries[];
+  no_data: boolean;
+  units: string;
+  excluded: Record<string, number>;
+}
+
 export interface UserSession {
   authenticated: boolean;
   user?: {

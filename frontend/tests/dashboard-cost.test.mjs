@@ -11,7 +11,7 @@ test('dashboard renders ledger costs by provider/model and has an explicit no-da
   assert.match(refresh, /readonly cost = signal<DashboardCost>/);
   assert.match(dashboard, /provider\.label/);
   assert.match(dashboard, /model\.model/);
-  assert.match(dashboard, /Sin datos de costo liquidado/);
+  assert.match(dashboard, /Sin datos verificables para esta dimensión/);
   assert.doesNotMatch(dashboard, /\(r as any\)\.tokens/);
   assert.doesNotMatch(dashboard, /displayVal = 'CLI'/);
 });
