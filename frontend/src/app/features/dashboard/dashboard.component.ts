@@ -45,42 +45,46 @@ import type { OrchestrationRun, QuotaObservation } from '../../core/models';
           <h2 class="text-sm font-bold text-white uppercase tracking-wider font-mono">Cuota Disponible por Agente / Proveedor</h2>
           <span class="text-xs text-slate-500 font-mono">Telemetría de Capacidad en Tiempo Real</span>
         </div>
+        <p class="px-1 text-xs text-slate-400" data-testid="capacity-reference-note">Cuando no hay porcentaje informado, el saldo USD usa $20 como referencia visual del 100%.</p>
         <div class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
           <app-analog-gauge
             label="Codex"
             unit="%"
             color="emerald"
-            [value]="codexValue"
+            [value]="capacityGaugeValue('codex')"
             [max]="100"
-            [sublabel]="codexSublabel">
+            [textValue]="capacityTextValue('codex')"
+            [sublabel]="capacitySublabel('codex', 'Codex')">
           </app-analog-gauge>
 
           <app-analog-gauge
             label="Antigravity"
             unit="%"
             color="sky"
-            [value]="antigravityValue"
+            [value]="capacityGaugeValue('antigravity')"
             [max]="100"
-            [sublabel]="antigravitySublabel">
+            [textValue]="capacityTextValue('antigravity')"
+            [sublabel]="capacitySublabel('antigravity', 'Antigravity')">
           </app-analog-gauge>
 
           <app-analog-gauge
             label="DeepSeek"
             unit="%"
             color="amber"
-            [value]="deepseekValue"
+            [value]="capacityGaugeValue('deepseek')"
             [max]="100"
-            [textValue]="deepseekTextValue"
-            [sublabel]="deepseekSublabel">
+            [textValue]="capacityTextValue('deepseek')"
+            [sublabel]="capacitySublabel('deepseek', 'DeepSeek')">
           </app-analog-gauge>
 
           <app-analog-gauge
             label="OpenRouter"
             unit="%"
             color="sky"
-            [value]="openrouterValue"
+            [value]="capacityGaugeValue('openrouter')"
             [max]="100"
-            [sublabel]="openrouterSublabel">
+            [textValue]="capacityTextValue('openrouter')"
+            [sublabel]="capacitySublabel('openrouter', 'OpenRouter')">
           </app-analog-gauge>
         </div>
       </div>
@@ -343,64 +347,54 @@ export class DashboardComponent {
     return `fuente ${quota.source}; observado ${quota.observed_at}`;
   }
 
-  get codexValue(): number | null {
-    const q = this.getQuota('codex');
-    return q?.remaining_percent ?? null;
+  private quotaPercent(quota: QuotaObservation | undefined): number | null {
+    const value = quota?.remaining_percent;
+    return typeof value === 'number' && Number.isFinite(value) ? value : null;
   }
 
-  get codexSublabel(): string {
-    const q = this.getQuota('codex');
-    if (!q || q.remaining_percent == null) return q ? `Estado observado: ${q.state}; porcentaje no disponible; ${this.observationDetails(q)}` : 'No disponible (sin telemetría)';
-    const model = q.model_id || 'Codex';
-    return `${model} (${q.remaining_percent}% disponible; ${this.observationDetails(q)})`;
+  private quotaBalance(quota: QuotaObservation | undefined): { amount: number; currency: string } | null {
+    if (typeof quota?.balance !== 'number' || !Number.isFinite(quota.balance) || !quota.currency?.trim()) return null;
+    return { amount: quota.balance, currency: quota.currency.trim().toUpperCase() };
   }
 
-  get antigravityValue(): number | null {
-    const q = this.getQuota('antigravity');
-    return q?.remaining_percent ?? null;
+  private formatQuotaBalance(balance: { amount: number; currency: string }): string {
+    const amount = balance.amount.toFixed(2);
+    return balance.currency === 'USD' ? `$${amount} USD` : `${amount} ${balance.currency}`;
   }
 
-  get antigravitySublabel(): string {
-    const q = this.getQuota('antigravity');
-    if (!q || q.remaining_percent == null) return q ? `Estado observado: ${q.state}; porcentaje no disponible; ${this.observationDetails(q)}` : 'No disponible (sin telemetría)';
-    const model = q.model_id || 'Antigravity';
-    return `${model} (${q.remaining_percent}% disponible; ${this.observationDetails(q)})`;
+  capacityGaugeValue(provider: string): number | null {
+    const quota = this.getQuota(provider);
+    const reportedPercent = this.quotaPercent(quota);
+    if (reportedPercent !== null) return reportedPercent;
+
+    const balance = this.quotaBalance(quota);
+    if (balance?.currency === 'USD') return (balance.amount / 20) * 100;
+    return null;
   }
 
-  get deepseekValue(): number | null {
-    const q = this.getQuota('deepseek');
-    return q?.remaining_percent !== null && q?.remaining_percent !== undefined && Number.isFinite(q.remaining_percent)
-      ? q.remaining_percent
-      : null;
+  capacityTextValue(provider: string): string | null {
+    const quota = this.getQuota(provider);
+    if (this.quotaPercent(quota) !== null) return null;
+
+    const balance = this.quotaBalance(quota);
+    return balance ? this.formatQuotaBalance(balance) : null;
   }
 
-  get deepseekTextValue(): string | null {
-    const q = this.getQuota('deepseek');
-    if (this.deepseekValue !== null || !q || q.balance === null || q.balance === undefined || !Number.isFinite(q.balance) || !q.currency?.trim()) {
-      return null;
+  capacitySublabel(provider: string, fallbackModel: string): string {
+    const quota = this.getQuota(provider);
+    if (!quota) return 'No disponible (sin telemetría)';
+
+    const model = quota.model_id || fallbackModel;
+    const percent = this.quotaPercent(quota);
+    if (percent !== null) return `${model} (${percent}% disponible; ${this.observationDetails(quota)})`;
+
+    const balance = this.quotaBalance(quota);
+    if (balance) {
+      const scale = balance.currency === 'USD' ? 'arco con referencia visual USD 20 = 100%' : 'sin escala visual definida para esta moneda';
+      return `${this.formatQuotaBalance(balance)} observado; ${scale}; ${this.observationDetails(quota)}`;
     }
-    return `$${q.balance.toFixed(2)} ${q.currency.trim()}`;
-  }
 
-  get deepseekSublabel(): string {
-    const q = this.getQuota('deepseek');
-    if (this.deepseekTextValue) {
-      return `${this.deepseekTextValue} observado; porcentaje no disponible; ${this.observationDetails(q!)}`;
-    }
-    return q ? `Estado observado: ${q.state}; capacidad no disponible; ${this.observationDetails(q)}` : 'No disponible (sin telemetría)';
-  }
-
-  get openrouterValue(): number | null {
-    const q = this.getQuota('openrouter');
-    return q?.remaining_percent ?? null;
-  }
-
-  get openrouterSublabel(): string {
-    const q = this.getQuota('openrouter');
-    if (q?.balance !== null && q?.balance !== undefined) {
-      return `$${q.balance.toFixed(2)} ${q.currency || 'USD'} observado; porcentaje no disponible; ${this.observationDetails(q)}`;
-    }
-    return q ? `Estado observado: ${q.state}; saldo no disponible; ${this.observationDetails(q)}` : 'No disponible (sin telemetría)';
+    return `Estado observado: ${quota.state}; capacidad no disponible; ${this.observationDetails(quota)}`;
   }
 
   get currentDimensionTitle(): string {

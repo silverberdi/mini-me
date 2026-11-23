@@ -32,6 +32,7 @@ import { CommonModule } from '@angular/common';
             fill="none"
             stroke="currentColor"
             [class]="gaugeColorClass"
+            data-testid="gauge-progress"
             stroke-width="8"
             stroke-linecap="round"
             stroke-dasharray="179.07 179.07"
