@@ -60,14 +60,17 @@ class ObservedCostSettlementService:
     atomic with its completion outcome instead of committing a second command.
     """
 
-    _KNOWN_PROVIDERS = {"codex", "deepseek", "openrouter"}
+    # Provider identity is a closed contract at the settlement boundary.  A
+    # new provider must be explicitly admitted here before it can create a
+    # durable financial record.
+    _ACCEPTED_PROVIDERS: frozenset[str] = frozenset({"codex", "deepseek", "openrouter"})
 
     def __init__(self, uow: PersistenceUnitOfWork):
         self.uow = uow
 
     def settle(self, observed: ObservedCost) -> BudgetLedgerEntry:
         provider = observed.provider.strip().lower()
-        if provider not in self._KNOWN_PROVIDERS:
+        if provider not in self._ACCEPTED_PROVIDERS:
             raise ValueError("provider identity is not verified")
         if not observed.usage_identity.strip():
             raise ValueError("usage identity is required")

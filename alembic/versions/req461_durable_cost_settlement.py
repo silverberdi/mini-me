@@ -12,17 +12,39 @@ depends_on: Union[str, Sequence[str], None] = None
 
 
 def upgrade() -> None:
-    op.add_column("budget_ledger", sa.Column("usage_identity", sa.String(256), nullable=True))
-    op.add_column("budget_ledger", sa.Column("source", sa.String(128), nullable=True))
-    op.add_column(
-        "budget_ledger",
-        sa.Column("observed_at", sa.DateTime(timezone=True), nullable=True),
-    )
-    op.create_unique_constraint("uq_budget_ledger_usage_identity", "budget_ledger", ["usage_identity"])
+    bind = op.get_bind()
+    existing_columns = _column_names(bind)
+    columns = {
+        "usage_identity": sa.Column("usage_identity", sa.String(256), nullable=True),
+        "source": sa.Column("source", sa.String(128), nullable=True),
+        "observed_at": sa.Column("observed_at", sa.DateTime(timezone=True), nullable=True),
+    }
+    for name, column in columns.items():
+        if name not in existing_columns:
+            op.add_column("budget_ledger", column)
+
+    if "uq_budget_ledger_usage_identity" not in _unique_constraint_names(bind):
+        op.create_unique_constraint(
+            "uq_budget_ledger_usage_identity", "budget_ledger", ["usage_identity"]
+        )
 
 
 def downgrade() -> None:
-    op.drop_constraint("uq_budget_ledger_usage_identity", "budget_ledger", type_="unique")
-    op.drop_column("budget_ledger", "observed_at")
-    op.drop_column("budget_ledger", "source")
-    op.drop_column("budget_ledger", "usage_identity")
+    bind = op.get_bind()
+    if "uq_budget_ledger_usage_identity" in _unique_constraint_names(bind):
+        op.drop_constraint("uq_budget_ledger_usage_identity", "budget_ledger", type_="unique")
+    for name in ("observed_at", "source", "usage_identity"):
+        if name in _column_names(bind):
+            op.drop_column("budget_ledger", name)
+
+
+def _column_names(bind) -> set[str]:
+    return {column["name"] for column in sa.inspect(bind).get_columns("budget_ledger")}
+
+
+def _unique_constraint_names(bind) -> set[str]:
+    return {
+        constraint["name"]
+        for constraint in sa.inspect(bind).get_unique_constraints("budget_ledger")
+        if constraint.get("name")
+    }

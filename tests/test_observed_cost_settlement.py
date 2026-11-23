@@ -64,3 +64,10 @@ def test_settlement_is_idempotent_and_preserves_precision():
     assert len(uow.budget_ledger.entries) == 1
     assert first.amount_usd == Decimal("0.120001")
     assert first.observed_at == datetime(2026, 11, 23, 12, 0, tzinfo=UTC)
+
+
+@pytest.mark.parametrize("provider", ["codex", "deepseek", "openrouter"])
+def test_settlement_accepts_only_explicitly_admitted_provider_names(provider):
+    entry = ObservedCostSettlementService(Uow()).settle(observed(provider=provider))
+
+    assert entry.provider == provider
