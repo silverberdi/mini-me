@@ -305,6 +305,8 @@ def seed_e2e_state() -> None:
             )
             session.add(res2)
 
+        session.flush()
+
         ledger1 = session.execute(
             select(BudgetLedgerModel).where(BudgetLedgerModel.id == "ledger-e2e-1")
         ).scalar_one_or_none()

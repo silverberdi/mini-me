@@ -195,12 +195,22 @@ jobs:
 
   pr-gate:
     name: PR validation gate
+    if: always()
     needs:
       - backend-validation
       - frontend-validation
       - e2e-validation
     runs-on: ubuntu-latest
     steps:
-      - name: PR validation summary
+      - name: Verify all checks succeeded
         run: |
+          if [[ "${{ needs.backend-validation.result }}" != "success" || \
+                "${{ needs.frontend-validation.result }}" != "success" || \
+                "${{ needs.e2e-validation.result }}" != "success" ]]; then
+            echo "::error::One or more PR validation jobs failed."
+            echo "backend-validation: ${{ needs.backend-validation.result }}"
+            echo "frontend-validation: ${{ needs.frontend-validation.result }}"
+            echo "e2e-validation: ${{ needs.e2e-validation.result }}"
+            exit 1
+          fi
           echo "All PR validation checks passed successfully for candidate SHA: ${{ github.event.pull_request.head.sha || github.sha }}"
