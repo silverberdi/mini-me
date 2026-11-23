@@ -135,8 +135,8 @@ import type { OrchestrationRun, QuotaObservation, TemporalTelemetryProjection, T
 
           <div class="relative w-full h-52">
             <div *ngIf="!currentProjection || currentProjection.no_data" class="h-full flex flex-col items-center justify-center text-center p-6 text-slate-500 space-y-1" role="status" aria-live="polite">
-              <span class="text-sm font-medium text-slate-400">Sin datos verificables para esta dimensión</span>
-              <span class="text-xs font-mono">No se muestran ceros, estimaciones ni puntos inventados.</span>
+              <span class="text-sm font-medium text-slate-400">{{ selectedDimension() === 'cost' ? 'Sin datos de costo liquidado' : 'Sin datos verificables para esta dimensión' }}</span>
+              <span class="text-xs font-mono">{{ selectedDimension() === 'cost' ? 'No existe un importe verificable en el ledger.' : 'No se muestran ceros, estimaciones ni puntos inventados.' }}</span>
             </div>
 
             <svg *ngIf="currentProjection && !currentProjection.no_data" viewBox="0 0 600 170" preserveAspectRatio="none" class="w-full h-full overflow-visible" aria-label="Series temporales de telemetría">
