@@ -223,16 +223,23 @@ import type { OrchestrationRun, QuotaObservation } from '../../core/models';
             </div>
           </div>
 
-          <div *ngIf="activeStageIndex(run) !== -1" class="grid grid-cols-10 gap-1 sm:gap-1.5" role="list" aria-label="Avance por etapas" data-testid="active-change-stage-progress">
-            <span *ngFor="let stage of pipelineStages; let idx = index"
-                  class="h-5 min-w-0 sm:h-6 rounded-md border flex items-center justify-center text-[10px] sm:text-xs font-bold font-mono transition-colors"
-                  [ngClass]="getStageBadgeClass(stage.key, run.stage)"
-                  [attr.aria-current]="stage.key === run.stage ? 'step' : null"
-                  [attr.aria-label]="stage.label + (stage.key === run.stage ? ', etapa actual' : idx < activeStageIndex(run) ? ', completada' : ', pendiente')"
-                  [title]="stage.label"
-                  role="listitem">
-              {{ idx + 1 }}
-            </span>
+          <div *ngIf="activeStageIndex(run) !== -1" class="grid grid-cols-2 sm:grid-cols-5 lg:grid-cols-10 gap-2" role="list" aria-label="Avance por etapas" data-testid="active-change-stage-progress">
+            <div *ngFor="let stage of pipelineStages; let idx = index"
+                 class="p-2.5 rounded-xl border flex flex-col items-center text-center transition-all"
+                 [ngClass]="getStagePanelClass(stage.key, run.stage)"
+                 [attr.aria-current]="stage.key === run.stage ? 'step' : null"
+                 [attr.aria-label]="stage.label + (stage.key === run.stage ? ', etapa actual' : idx < activeStageIndex(run) ? ', completada' : ', pendiente')"
+                 [title]="stage.label"
+                 data-testid="active-change-stage-card"
+                 role="listitem">
+              <span class="w-6 h-6 rounded-full flex items-center justify-center text-xs font-bold font-mono mb-1.5"
+                    [ngClass]="getStageBadgeClass(stage.key, run.stage)">
+                {{ idx + 1 }}
+              </span>
+              <span class="text-[11px] font-semibold leading-tight line-clamp-2">
+                {{ stage.label }}
+              </span>
+            </div>
           </div>
 
           <div class="flex justify-end pt-1">
@@ -307,6 +314,10 @@ export class DashboardComponent {
 
   getStageBadgeClass(stageKey: string, currentStage: string): string {
     return getStageBadgeClass(stageKey, currentStage);
+  }
+
+  getStagePanelClass(stageKey: string, currentStage: string): string {
+    return getStagePanelClass(stageKey, currentStage);
   }
 
   get projectProgressPercent(): number {
