@@ -26,6 +26,7 @@ from minime.domain.models import (
     OpenRouterPricingSnapshot,
     Project,
 )
+from minime.services.auth_service import SessionManager
 
 
 DATABASE_URL = os.environ.get("MINIME_TEST_DATABASE_URL")
@@ -44,13 +45,27 @@ def postgres_cost_uow():
 
     with session_factory() as session:
         uow = PostgresPersistenceUnitOfWork(session)
+        uow.authorized_operators.save(
+            AuthorizedOperator(
+                email="dashboard-cost-e2e@example.test",
+                display_name="Dashboard cost E2E",
+            )
+        )
+        auth_token, _ = SessionManager(uow).create_session(
+            operator_email="dashboard-cost-e2e@example.test",
+            user_agent="dashboard-cost-postgres-e2e",
+        )
         uow.projects.save(
             Project(project_id=project_id, display_name="Dashboard cost E2E", repository="test/cost")
         )
         uow.jobs.save(Job(job_id=job_id, project_id=project_id, change_name="cost-e2e", implementer_role="codex"))
         uow.commit()
 
-    yield engine, session_factory, project_id, job_id
+    yield engine, session_factory, project_id, job_id, auth_token
+
+    if os.environ.get("MINIME_E2E_KEEP_FIXTURE") == "1":
+        engine.dispose()
+        return
 
     with engine.begin() as connection:
         connection.execute(text("DELETE FROM budget_ledger WHERE project_id = :project_id"), {"project_id": project_id})
@@ -58,6 +73,14 @@ def postgres_cost_uow():
         connection.execute(text("DELETE FROM openrouter_pricing_snapshots WHERE id = :snapshot_id"), {"snapshot_id": f"snapshot-{project_id}"})
         connection.execute(text("DELETE FROM jobs WHERE id = :job_id"), {"job_id": job_id})
         connection.execute(text("DELETE FROM projects WHERE id = :project_id"), {"project_id": project_id})
+        connection.execute(
+            text("DELETE FROM auth_sessions WHERE operator_email = :email"),
+            {"email": "dashboard-cost-e2e@example.test"},
+        )
+        connection.execute(
+            text("DELETE FROM authorized_operators WHERE email = :email"),
+            {"email": "dashboard-cost-e2e@example.test"},
+        )
         remaining = {
             "budget_ledger": connection.execute(
                 text("SELECT count(*) FROM budget_ledger WHERE project_id = :project_id"),
@@ -194,7 +217,7 @@ def _seed_cost_rows(session: Session, project_id: str, job_id: str) -> list[Budg
 
 
 def test_postgres_ledger_rows_flow_through_dashboard_api_and_ui_contract(postgres_cost_uow, tmp_path: Path):
-    engine, session_factory, project_id, job_id = postgres_cost_uow
+    engine, session_factory, project_id, job_id, auth_token = postgres_cost_uow
     with session_factory() as session:
         empty_uow = PostgresPersistenceUnitOfWork(session)
         app.dependency_overrides[get_uow] = lambda: empty_uow
@@ -292,6 +315,7 @@ console.log(JSON.stringify(chart.toDashboardCostChartPoints(payload.series)));
     evidence = {
         "test_project_id": project_id,
         "test_job_id": job_id,
+        "auth_token": "<redacted; see MINIME_E2E_AUTH_TOKEN_PATH>",
         "database_rows": [dict(row) for row in observed_rows],
         "http_status": response.status_code,
         "cost_payload": payload,
@@ -320,6 +344,11 @@ console.log(JSON.stringify(chart.toDashboardCostChartPoints(payload.series)));
     evidence_path = Path(
         os.environ.get("MINIME_E2E_EVIDENCE_PATH", str(tmp_path / "dashboard-cost-postgres-e2e.json"))
     )
+    auth_token_path = os.environ.get("MINIME_E2E_AUTH_TOKEN_PATH")
+    if auth_token_path:
+        token_file = Path(auth_token_path)
+        token_file.write_text(auth_token + "\n", encoding="utf-8")
+        token_file.chmod(0o600)
     evidence_path.parent.mkdir(parents=True, exist_ok=True)
     evidence_path.write_text(
         json.dumps(evidence, default=str, indent=2, ensure_ascii=False) + "\n",
