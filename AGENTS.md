@@ -13,12 +13,13 @@
 - Higiene de workspace y re-ejecución idempotente: al completar o cancelar un run, limpiar worktree y registro de propiedad; observar el estado antes de repetir una etapa.
 - Primer PR de implementación con merge automático tras revisión independiente aprobada (sin pausas por acuses informativos sintéticos). PR de sync/archive documental se fusiona automáticamente. Cierre remoto de ticket únicamente tras el segundo merge. Despliegue fuera de mini me, por CI/CD del proyecto.
 - POO, SOLID, DRY, KISS, YAGNI, clases pequeñas, interfaces mínimas, eliminar código/DB muerto pertinente mediante migraciones conservadoras; evidencia real E2E.
+- En la redacción de `tasks.md`, las tareas de verificación deben acotar su ejecución a la suite o archivos pertinentes al Change (ej. `npm --prefix frontend run test:e2e -- <spec>`, `pytest tests/test_<modulo>.py`). No declarar suites completas del repositorio para Changes verticales acotados.
 - No ejecutar acciones pagas, reiniciar scheduler, migrar/desplegar ni cerrar tickets históricos por el mero hecho de aprobar documentos.
 
 ## Orden operativo
 Contrato rector → OpenSpec del Change autorizado → inventario del código/DB real → diseñar la menor solución suficiente → aplicar por skill nativa → probar resultado real → PR humano → sync/archive nativos → cierre. Conservar evidencia sin crear nueva burocracia.
 
 ## Regla permanente de aceptación de entregas
-Una implementación no se declara completa por el número de tareas marcadas, la cantidad de tests aprobados o el informe de su ejecutor. Todo criterio que exija una integración real necesita evidencia observable de la invocación, su resultado y sus efectos. Las pruebas simuladas no pueden presentarse como E2E reales. La revisión independiente debe contrastar el código y la evidencia contra un SHA inmutable. Ante evidencia ausente, ambigua o fallida, se aplica fail-closed.
+Una implementación no se declara completa por el número de tareas marcadas, la cantidad de tests aprobados o el informe de su ejecutor. Todo criterio que exija una integración real necesita evidencia observable de la invocación, su resultado y sus efectos. Las pruebas simuladas no pueden presentarse como E2E reales. La revisión independiente contrasta el código y la evidencia directamente contra el SHA inmutable del candidato provisto por el orquestador (`git rev-parse HEAD`), sin exigir ni auditar autorreferencias de texto o cadenas de hash incrustadas dentro de archivos markdown. Ante evidencia ausente, ambigua o fallida, se aplica fail-closed.
 
 Los expedientes anteriores MM-Rxx y Nxx quedan como referencias históricas hasta reconciliación.
