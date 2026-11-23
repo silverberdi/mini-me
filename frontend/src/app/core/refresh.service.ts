@@ -1,6 +1,6 @@
 import { Injectable, signal, computed, OnDestroy } from "@angular/core";
 import { ApiService } from "./api.service";
-import { DashboardCost, Project, OrchestrationRun, RequestItem, QuotaObservation } from "./models";
+import { DashboardCost, Project, OrchestrationRun, RequestItem, QuotaObservation, TemporalTelemetryProjection } from "./models";
 
 const SELECTED_PROJECT_STORAGE_KEY = 'minime_selected_project_id';
 
@@ -39,6 +39,7 @@ export class RefreshService implements OnDestroy {
   readonly closedRequests = signal<RequestItem[]>([]);
   readonly quotas = signal<QuotaObservation[]>([]);
   readonly cost = signal<DashboardCost>({ status: 'no_data', providers: [], series: [] });
+  readonly temporalTelemetry = signal<Record<string, TemporalTelemetryProjection>>({});
   readonly syncState = signal<'idle' | 'syncing' | 'error'>('idle');
   private events: EventSource | null = null;
 
@@ -118,7 +119,7 @@ export class RefreshService implements OnDestroy {
         this.api.get<OrchestrationRun[]>(`/api/v1/orchestration/runs${query}`, { signal }),
         activeId ? this.api.get<RequestItem[]>(`/api/v1/projects/${encodeURIComponent(activeId)}/requests`, { signal }) : Promise.resolve(null),
         shouldFetchDashboard
-          ? this.api.get<{ cost: DashboardCost }>(`/api/v1/dashboard/overview${query}`, { signal })
+          ? this.api.get<{ cost: DashboardCost; temporal_telemetry?: Record<string, TemporalTelemetryProjection> }>(`/api/v1/dashboard/overview${query}`, { signal })
           : Promise.resolve(null),
         this.api.get<{ providers: QuotaObservation[] }>("/api/v1/providers/quotas", { signal }),
       ]);
@@ -158,6 +159,9 @@ export class RefreshService implements OnDestroy {
 
       if (dashboardRes && dashboardRes.ok && dashboardRes.data?.cost) {
         this.cost.set(dashboardRes.data.cost);
+        if (dashboardRes.data.temporal_telemetry) {
+          this.temporalTelemetry.set(dashboardRes.data.temporal_telemetry);
+        }
         this.lastDashboardFetchTime = now;
       }
 

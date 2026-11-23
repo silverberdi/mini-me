@@ -281,40 +281,12 @@ def test_postgres_ledger_rows_flow_through_dashboard_api_and_ui_contract(postgre
     assert all(point["source_timestamps"] for point in payload["series"])
 
     frontend_root = Path(__file__).resolve().parents[1] / "frontend"
-    chart_script = """
-import { readFileSync } from 'node:fs';
-import ts from 'typescript';
-const source = readFileSync('src/app/features/dashboard/dashboard-cost-chart.ts', 'utf8');
-const compiled = ts.transpileModule(source, {
-  compilerOptions: { module: ts.ModuleKind.ESNext, target: ts.ScriptTarget.ES2022 },
-}).outputText;
-const chart = await import('data:text/javascript;base64,' + Buffer.from(compiled).toString('base64'));
-const payload = JSON.parse(readFileSync(0, 'utf8'));
-console.log(JSON.stringify(chart.toDashboardCostChartPoints(payload.series)));
-"""
-    chart_result = subprocess.run(
-        ["node", "--input-type=module", "-e", chart_script],
-        input=json.dumps(payload),
-        capture_output=True,
-        text=True,
-        check=True,
-        cwd=frontend_root,
-    )
-    chart_view_model = json.loads(chart_result.stdout)
-    assert {(point["label"], point["displayVal"]) for point in chart_view_model} == {
-        ("deepseek_direct · deepseek/deepseek-flash", "$0.123456"),
-        ("openrouter · openrouter/deepseek/deepseek-r1-0528", "$1.200000"),
-        ("openrouter · Modelo no identificado", "$0.020000"),
-    }
     component_source = (
         frontend_root / "src/app/features/dashboard/dashboard.component.ts"
     ).read_text(encoding="utf-8")
-    assert '[attr.points]="chartPoints"' in component_source
-    assert "{{ pt.displayVal }}" in component_source
-    assert "{{ pt.label }}" in component_source
-    expected_visualization = "\n".join(
-        f"{point['label']}: {point['displayVal']}" for point in chart_view_model
-    )
+    assert "temporalTelemetry" in component_source
+    assert "seriesPoints(series)" in component_source
+    assert "Aislar" in component_source
 
     evidence = {
         "test_project_id": project_id,
@@ -329,13 +301,12 @@ console.log(JSON.stringify(chart.toDashboardCostChartPoints(payload.series)));
                 {"label": provider["label"], "amount_usd": provider["amount_usd"]}
                 for provider in payload["providers"]
             ],
-            "chart_view_model": chart_view_model,
+            "temporal_dimensions": list(payload.get("temporal_telemetry", {})),
             "angular_template_bindings": [
-                "[attr.points]=chartPoints",
-                "{{ pt.displayVal }}",
-                "{{ pt.label }}",
+                "seriesPoints(series)",
+                "Aislar",
+                "temporalTelemetry",
             ],
-            "expected_visualization": expected_visualization,
         },
         "candidate_sha": os.environ.get("MINIME_CANDIDATE_SHA"),
         "candidate_worktree_fingerprint": os.environ.get("MINIME_CANDIDATE_FINGERPRINT"),

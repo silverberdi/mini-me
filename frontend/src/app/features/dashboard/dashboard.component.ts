@@ -9,8 +9,7 @@ import {
   getStagePanelClass,
   PIPELINE_STAGES,
 } from '../../shared/pipeline-stage-presentation';
-import { toDashboardCostChartPoints } from './dashboard-cost-chart';
-import type { OrchestrationRun, QuotaObservation } from '../../core/models';
+import type { OrchestrationRun, QuotaObservation, TemporalTelemetryProjection, TemporalTelemetrySeries } from '../../core/models';
 
 @Component({
   selector: 'app-dashboard',
@@ -93,7 +92,7 @@ import type { OrchestrationRun, QuotaObservation } from '../../core/models';
         </div>
       </div>
 
-      <!-- Line Chart Section (3 Independent Dimensions: Autonomy, Delivery Time, Settled Cost) -->
+      <!-- Temporal multi-series telemetry. Interaction state is intentionally local. -->
       <div class="bg-slate-800/40 rounded-2xl border border-slate-700/50 p-6 backdrop-blur-sm space-y-4 shadow-xl">
         <div class="flex flex-col sm:flex-row sm:items-center justify-between gap-3 border-b border-slate-700/60 pb-4">
           <div>
@@ -101,9 +100,9 @@ import type { OrchestrationRun, QuotaObservation } from '../../core/models';
               <span>Gráfica de Líneas de Efectividad</span>
               <span class="text-xs font-mono font-normal text-slate-400">(Tres Dimensiones Independientes)</span>
             </h2>
-            <p class="text-xs text-slate-400 mt-0.5">Observabilidad de calidad/autonomía, duración efectiva y costo liquidado por ejecución terminada.</p>
+            <p class="text-xs text-slate-400 mt-0.5">Tendencias verificables de los últimos 30 días; las esperas humanas quedan excluidas del tiempo activo.</p>
           </div>
-          <div class="flex items-center gap-1.5 bg-slate-900/80 p-1 rounded-xl border border-slate-800 self-start sm:self-auto">
+          <div class="flex flex-wrap items-center gap-1.5 bg-slate-900/80 p-1 rounded-xl border border-slate-800 self-start sm:self-auto">
             <button
               (click)="selectedDimension.set('autonomy')"
               [ngClass]="selectedDimension() === 'autonomy' ? 'bg-emerald-500 text-white shadow' : 'text-slate-400 hover:text-slate-200'"
@@ -125,22 +124,22 @@ import type { OrchestrationRun, QuotaObservation } from '../../core/models';
           </div>
         </div>
 
-        <div class="p-4 rounded-xl bg-slate-950/70 border border-slate-800 space-y-3">
+        <div class="p-4 rounded-xl bg-slate-950/70 border border-slate-800 space-y-3" data-testid="temporal-telemetry-chart">
           <div class="flex items-center justify-between text-xs font-mono">
             <span class="text-slate-300 font-semibold flex items-center gap-2">
-              <span class="w-2.5 h-2.5 rounded-full" [style.background-color]="chartColor"></span>
+              <span class="w-2.5 h-2.5 rounded-full" [style.background-color]="selectedSeriesColor"></span>
               {{ currentDimensionTitle }}
             </span>
-            <span class="text-slate-400 font-mono">Unidad: {{ currentDimensionUnit }}</span>
+            <span class="text-slate-400 font-mono">Unidad: {{ currentProjection?.units || currentDimensionUnit }}</span>
           </div>
 
           <div class="relative w-full h-52">
-            <div *ngIf="dataPoints.length === 0" class="h-full flex flex-col items-center justify-center text-center p-6 text-slate-500 space-y-1" role="status" aria-live="polite">
-              <span class="text-sm font-medium text-slate-400">{{ selectedDimension() === 'cost' ? 'Sin datos de costo liquidado' : 'Sin ejecuciones históricas registradas' }}</span>
-              <span class="text-xs font-mono">{{ selectedDimension() === 'cost' ? 'No existe un importe verificable en el ledger.' : 'Las métricas de efectividad se trazarán automáticamente al completarse ciclos reales.' }}</span>
+            <div *ngIf="!currentProjection || currentProjection.no_data" class="h-full flex flex-col items-center justify-center text-center p-6 text-slate-500 space-y-1" role="status" aria-live="polite">
+              <span class="text-sm font-medium text-slate-400">Sin datos verificables para esta dimensión</span>
+              <span class="text-xs font-mono">No se muestran ceros, estimaciones ni puntos inventados.</span>
             </div>
 
-            <svg *ngIf="dataPoints.length > 0" viewBox="0 0 600 170" preserveAspectRatio="none" class="w-full h-full overflow-visible">
+            <svg *ngIf="currentProjection && !currentProjection.no_data" viewBox="0 0 600 170" preserveAspectRatio="none" class="w-full h-full overflow-visible" aria-label="Series temporales de telemetría">
               <!-- Grid lines -->
               <line x1="45" y1="20" x2="580" y2="20" stroke="#334155" stroke-dasharray="3 3" stroke-width="0.75" />
               <line x1="45" y1="65" x2="580" y2="65" stroke="#334155" stroke-dasharray="3 3" stroke-width="0.75" />
@@ -158,21 +157,27 @@ import type { OrchestrationRun, QuotaObservation } from '../../core/models';
                 stroke-width="2.5"
                 stroke-linecap="round"
                 stroke-linejoin="round"
-                [attr.points]="chartPoints"
-                [attr.stroke]="chartColor"
+                *ngFor="let series of visibleSeries"
+                [attr.points]="seriesPoints(series)"
+                [attr.stroke]="series.color"
+                [attr.opacity]="hoveredSeriesId && hoveredSeriesId !== series.series_id ? 0.22 : 1"
+                [attr.data-series-id]="series.series_id"
+                (mouseenter)="hoveredSeriesId = series.series_id"
+                (mouseleave)="hoveredSeriesId = null"
               />
 
               <!-- Data Point Circles and Labels -->
-              <g *ngFor="let pt of dataPoints">
-                <circle [attr.cx]="pt.x" [attr.cy]="pt.y" r="5.5" [attr.fill]="chartColor" stroke="#020617" stroke-width="2" />
-                <text [attr.x]="pt.x" [attr.y]="pt.y - 10" text-anchor="middle" fill="#f8fafc" font-size="11" font-weight="bold" font-family="monospace">
-                  {{ pt.displayVal }}
-                </text>
-                <text [attr.x]="pt.x" y="162" text-anchor="middle" fill="#94a3b8" font-size="10" font-family="monospace">
-                  {{ pt.label }}
-                </text>
-              </g>
             </svg>
+          </div>
+
+          <div class="flex flex-wrap gap-2" aria-label="Leyenda de series temporales">
+            <div *ngFor="let series of currentProjection?.series || []" class="flex items-center gap-1 rounded-lg border border-slate-700 px-2 py-1 text-xs" [class.opacity-40]="!isSeriesVisible(series.series_id) || (hoveredSeriesId && hoveredSeriesId !== series.series_id)" (mouseenter)="hoveredSeriesId = series.series_id" (mouseleave)="hoveredSeriesId = null">
+              <button type="button" class="inline-flex items-center gap-1 focus:outline-none focus:ring-2 focus:ring-sky-300" [attr.aria-pressed]="isSeriesVisible(series.series_id)" [attr.aria-label]="'Mostrar u ocultar ' + series.label" (click)="toggleSeries(series.series_id)">
+                <span class="w-2.5 h-2.5 rounded-full" [style.background-color]="series.color"></span>{{ series.label }}
+              </button>
+              <button type="button" class="text-[10px] text-sky-300 hover:text-white" [attr.aria-label]="'Aislar ' + series.label" (click)="soloSeries(series.series_id)">Aislar</button>
+            </div>
+            <button type="button" class="text-xs text-slate-300 underline" (click)="restoreSeries()">Restaurar</button>
           </div>
 
           <div *ngIf="selectedDimension() === 'cost' && refresh.cost().status === 'available'" class="grid grid-cols-1 md:grid-cols-2 gap-3" aria-label="Costos liquidados por proveedor">
@@ -188,7 +193,7 @@ import type { OrchestrationRun, QuotaObservation } from '../../core/models';
           </div>
 
           <div class="flex items-center justify-between text-[11px] text-slate-500 pt-2 border-t border-slate-900 font-mono">
-            <span>{{ selectedDimension() === 'cost' ? (refresh.cost().status === 'available' ? dataPoints.length + ' puntos de costo liquidados' : 'Costo liquidado no disponible') : dataPoints.length + ' ejecuciones históricas trazadas' }}</span>
+            <span>{{ currentProjection?.no_data ? 'Sin observaciones verificables' : (currentProjection?.axis?.length || 0) + ' buckets temporales; ' + visibleSeries.length + ' series visibles' }}</span>
             <span>Métricas duraderas calculadas sin simulación ni interpolación</span>
           </div>
         </div>
@@ -274,6 +279,8 @@ import type { OrchestrationRun, QuotaObservation } from '../../core/models';
 })
 export class DashboardComponent {
   readonly selectedDimension = signal<'autonomy' | 'time' | 'cost'>('autonomy');
+  private readonly visibleSeriesIds = signal<Set<string>>(new Set());
+  hoveredSeriesId: string | null = null;
   readonly pipelineStages = PIPELINE_STAGES;
   readonly activeRun = computed(() => {
     const projectId = this.refresh.activeProject()?.project_id;
@@ -429,12 +436,49 @@ export class DashboardComponent {
     }
   }
 
-  get chartColor(): string {
-    switch (this.selectedDimension()) {
-      case 'autonomy': return '#10b981';
-      case 'time': return '#38bdf8';
-      case 'cost': return '#f59e0b';
-    }
+  get currentProjection(): TemporalTelemetryProjection | null {
+    return this.refresh.temporalTelemetry()[this.selectedDimension()] ?? null;
+  }
+
+  get selectedSeriesColor(): string {
+    return this.currentProjection?.series[0]?.color ?? '#38bdf8';
+  }
+
+  get visibleSeries(): TemporalTelemetrySeries[] {
+    const all = this.currentProjection?.series ?? [];
+    const selected = this.visibleSeriesIds();
+    return selected.size ? all.filter(series => selected.has(series.series_id)) : all;
+  }
+
+  isSeriesVisible(seriesId: string): boolean {
+    return this.visibleSeriesIds().size === 0 || this.visibleSeriesIds().has(seriesId);
+  }
+
+  toggleSeries(seriesId: string): void {
+    const all = this.currentProjection?.series ?? [];
+    const next = new Set(this.visibleSeriesIds().size ? this.visibleSeriesIds() : all.map(series => series.series_id));
+    if (next.has(seriesId)) next.delete(seriesId); else next.add(seriesId);
+    this.visibleSeriesIds.set(next.size === all.length ? new Set() : next);
+  }
+
+  soloSeries(seriesId: string): void {
+    this.visibleSeriesIds.set(new Set([seriesId]));
+  }
+
+  restoreSeries(): void {
+    this.visibleSeriesIds.set(new Set());
+  }
+
+  seriesPoints(series: TemporalTelemetrySeries): string {
+    const projection = this.currentProjection;
+    if (!projection || projection.axis.length < 1) return '';
+    const max = Math.max(...projection.series.flatMap(item => item.points.map(point => point.value)), 1);
+    return series.points.map(point => {
+      const index = projection.axis.indexOf(point.timestamp);
+      const x = projection.axis.length === 1 ? 300 : 70 + (index * 500 / (projection.axis.length - 1));
+      const y = Math.max(20, Math.round(145 - Math.min(1, point.value / max) * 125));
+      return `${x},${y}`;
+    }).join(' ');
   }
 
   get yMaxLabel(): string {
@@ -461,41 +505,4 @@ export class DashboardComponent {
     }
   }
 
-  get dataPoints(): Array<{ x: number; y: number; label: string; displayVal: string }> {
-    if (this.selectedDimension() === 'cost') {
-      return toDashboardCostChartPoints(this.refresh.cost().series);
-    }
-    const runs = this.refresh.runs().slice(0, 5).reverse();
-    if (runs.length === 0) {
-      return [];
-    }
-
-    const step = 500 / Math.max(1, (runs.length - 1) || 1);
-    return runs.map((r, i) => {
-      const x = runs.length === 1 ? 300 : 70 + (i * step);
-      let y = 80;
-      let displayVal = '';
-
-      if (this.selectedDimension() === 'autonomy') {
-        const isSuccess = r.status === 'COMPLETED' || r.status === 'SUCCEEDED';
-        const autonomyPct = (r as any).autonomy_percent ?? (isSuccess ? 100 : 0);
-        y = Math.max(20, Math.round(145 - ((autonomyPct / 100) * 125)));
-        displayVal = `${autonomyPct}%`;
-      } else if (this.selectedDimension() === 'time') {
-        const t1 = r.created_at ? new Date(r.created_at).getTime() : 0;
-        const t2 = r.updated_at ? new Date(r.updated_at).getTime() : Date.now();
-        const dm = Math.max(1, Math.round((t2 - t1) / 60000));
-        displayVal = dm >= 60 ? `${(dm / 60).toFixed(1)}h` : `${dm}m`;
-        y = Math.max(20, Math.round(145 - Math.min(1, dm / 1440) * 125));
-      }
-
-      const shortId = r.run_id.length > 8 ? r.run_id.substring(0, 8) : r.run_id;
-      const label = r.change_name ? (r.change_name.length > 12 ? r.change_name.substring(0, 10) + '..' : r.change_name) : shortId;
-      return { x, y, label, displayVal };
-    });
-  }
-
-  get chartPoints(): string {
-    return this.dataPoints.map(p => `${p.x},${p.y}`).join(' ');
-  }
 }
