@@ -13,6 +13,14 @@ const quotaResponse = (quota: Record<string, unknown>) => ({
       observed_at: '2026-11-22T12:00:00Z',
       ...quota,
     },
+    {
+      provider: 'codex',
+      model_id: 'codex-e2e',
+      state: 'Normal',
+      source: 'e2e',
+      observed_at: '2026-11-22T12:00:00Z',
+      remaining_percent: 42,
+    },
   ],
 });
 
@@ -29,18 +37,37 @@ async function stubQuotaObservation(page: import('@playwright/test').Page, quota
 }
 
 test.describe('Dashboard capacity balance', () => {
-  test('renders a verified DeepSeek balance directly and stays within a mobile viewport', async ({ context, page }) => {
+  test('renders a verified balance inside the shared gauge at desktop and mobile sizes', async ({ context, page }) => {
     await setupAuthSession(context);
     await stubQuotaObservation(page, { balance: 20.18, currency: 'USD', remaining_percent: null });
-    await page.setViewportSize({ width: 390, height: 844 });
     await page.goto('/dashboard');
     await waitForAppMounted(page);
 
     const card = page.locator('app-analog-gauge', { hasText: 'DeepSeek' });
-    await expect(card.getByTestId('gauge-text-value')).toHaveText('$20.18 USD');
-    await expect(card.getByTestId('gauge-text-value')).not.toContainText('%');
-    await expect(card.getByTestId('gauge-text-value')).not.toContainText('—');
-    await expect(page.locator('body')).toHaveJSProperty('scrollWidth', 390);
+    const value = card.getByTestId('gauge-text-value');
+    const gauge = card.locator('svg');
+    const codexCard = page.locator('app-analog-gauge', { hasText: 'Codex' });
+    const codexGauge = codexCard.locator('svg');
+
+    for (const viewport of [{ width: 1280, height: 800 }, { width: 390, height: 844 }]) {
+      await page.setViewportSize(viewport);
+      await expect(value).toHaveText('$20.18 USD');
+      await expect(value).not.toContainText('%');
+      await expect(value).not.toContainText('—');
+      await expect(gauge).toBeVisible();
+      await expect(codexGauge).toBeVisible();
+      await expect(codexCard.getByTestId('gauge-text-value')).toHaveText('42%');
+      const [deepseekWidth, codexWidth] = await Promise.all([
+        gauge.evaluate(element => element.getBoundingClientRect().width),
+        codexGauge.evaluate(element => element.getBoundingClientRect().width),
+      ]);
+      expect(deepseekWidth).toBe(codexWidth);
+      const progressOffset = await gauge.locator('path').nth(1).evaluate(element =>
+        Number.parseFloat((element as SVGPathElement).style.strokeDashoffset),
+      );
+      expect(progressOffset).toBeCloseTo(179.07, 2);
+      await expect(page.locator('body')).toHaveJSProperty('scrollWidth', viewport.width);
+    }
   });
 
   test('keeps an unverified DeepSeek capacity unknown', async ({ context, page }) => {
@@ -51,6 +78,7 @@ test.describe('Dashboard capacity balance', () => {
 
     const card = page.locator('app-analog-gauge', { hasText: 'DeepSeek' });
     await expect(card.getByText('—')).toBeVisible();
+    await expect(card.locator('svg')).toBeVisible();
     await expect(card).not.toContainText('$0.00');
     await expect(card).not.toContainText('%');
   });
