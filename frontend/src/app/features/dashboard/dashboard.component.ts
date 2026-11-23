@@ -70,6 +70,7 @@ import type { OrchestrationRun, QuotaObservation } from '../../core/models';
             color="amber"
             [value]="deepseekValue"
             [max]="100"
+            [textValue]="deepseekTextValue"
             [sublabel]="deepseekSublabel">
           </app-analog-gauge>
 
@@ -357,15 +358,25 @@ export class DashboardComponent {
 
   get deepseekValue(): number | null {
     const q = this.getQuota('deepseek');
-    return q?.remaining_percent ?? null;
+    return q?.remaining_percent !== null && q?.remaining_percent !== undefined && Number.isFinite(q.remaining_percent)
+      ? q.remaining_percent
+      : null;
+  }
+
+  get deepseekTextValue(): string | null {
+    const q = this.getQuota('deepseek');
+    if (this.deepseekValue !== null || !q || q.balance === null || q.balance === undefined || !Number.isFinite(q.balance) || !q.currency?.trim()) {
+      return null;
+    }
+    return `$${q.balance.toFixed(2)} ${q.currency.trim()}`;
   }
 
   get deepseekSublabel(): string {
     const q = this.getQuota('deepseek');
-    if (q?.balance !== null && q?.balance !== undefined) {
-      return `$${q.balance.toFixed(2)} ${q.currency || 'USD'} observado; porcentaje no disponible; ${this.observationDetails(q)}`;
+    if (this.deepseekTextValue) {
+      return `${this.deepseekTextValue} observado; porcentaje no disponible; ${this.observationDetails(q!)}`;
     }
-    return q ? `Estado observado: ${q.state}; saldo no disponible; ${this.observationDetails(q)}` : 'No disponible (sin telemetría)';
+    return q ? `Estado observado: ${q.state}; capacidad no disponible; ${this.observationDetails(q)}` : 'No disponible (sin telemetría)';
   }
 
   get openrouterValue(): number | null {
