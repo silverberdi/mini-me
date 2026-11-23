@@ -17,7 +17,7 @@ test.describe('Project Pause and Resume Lifecycle', () => {
     await waitForAppMounted(page);
 
     // 2. Select the E2E project card if not already focused
-    const projectCard = page.locator('div', { hasText: 'E2E Test Project' }).first();
+    const projectCard = page.getByRole('heading', { name: 'E2E Test Project', exact: true });
     await expect(projectCard).toBeVisible({ timeout: 10000 });
     await projectCard.click();
 
