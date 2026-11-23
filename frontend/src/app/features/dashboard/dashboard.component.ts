@@ -26,7 +26,7 @@ import type { OrchestrationRun, QuotaObservation } from '../../core/models';
             ⚠️
           </div>
           <div>
-            <h3 class="text-base font-bold text-white">Atención Requerida (HUMAN_REQUIRED)</h3>
+            <h3 class="text-base font-bold text-white">Atención Humana Requerida (HUMAN_REQUIRED)</h3>
             <p class="text-xs text-slate-300 mt-0.5">
               El orquestador autónomo se encuentra detenido esperando una decisión, aclaración o confirmación del operador en el Run
               <span class="font-mono font-bold text-sky-300">{{ refresh.humanRequiredRun()?.run_id }}</span>.
