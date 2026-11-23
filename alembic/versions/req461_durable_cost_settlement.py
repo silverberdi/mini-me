@@ -31,20 +31,34 @@ def upgrade() -> None:
 
 def downgrade() -> None:
     bind = op.get_bind()
-    if "uq_budget_ledger_usage_identity" in _unique_constraint_names(bind):
+    constraints = _unique_constraint_names(bind)
+    if not constraints or "uq_budget_ledger_usage_identity" in constraints:
         op.drop_constraint("uq_budget_ledger_usage_identity", "budget_ledger", type_="unique")
+    cols = _column_names(bind)
     for name in ("observed_at", "source", "usage_identity"):
-        if name in _column_names(bind):
+        if not cols or name in cols:
             op.drop_column("budget_ledger", name)
 
 
 def _column_names(bind) -> set[str]:
-    return {column["name"] for column in sa.inspect(bind).get_columns("budget_ledger")}
+    try:
+        inspector = sa.inspect(bind)
+        if inspector is None:
+            return set()
+        return {column["name"] for column in inspector.get_columns("budget_ledger")}
+    except Exception:
+        return set()
 
 
 def _unique_constraint_names(bind) -> set[str]:
-    return {
-        constraint["name"]
-        for constraint in sa.inspect(bind).get_unique_constraints("budget_ledger")
-        if constraint.get("name")
-    }
+    try:
+        inspector = sa.inspect(bind)
+        if inspector is None:
+            return set()
+        return {
+            constraint["name"]
+            for constraint in inspector.get_unique_constraints("budget_ledger")
+            if constraint.get("name")
+        }
+    except Exception:
+        return set()

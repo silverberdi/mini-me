@@ -120,6 +120,7 @@ def seed_e2e_state() -> None:
             project.execution_policy = {"effective_pause": False}
             project.agent_profiles = profiles
             project.updated_at = now
+        session.flush()
 
         # 3.b Ensure managed repository binding exists for e2e-project
         os.makedirs("/tmp/e2e-project-repo", exist_ok=True)
@@ -229,6 +230,7 @@ def seed_e2e_state() -> None:
             e2e_run.stop_details = {"human_payload": human_payload}
             e2e_run.is_active = True
             e2e_run.updated_at = now
+        session.flush()
 
         # 6. Ensure sample budget ledger entries exist for e2e-project
         from decimal import Decimal
@@ -262,6 +264,7 @@ def seed_e2e_state() -> None:
                 created_at=now,
             )
             session.add(snapshot)
+        session.flush()
 
         res1 = session.execute(
             select(BudgetReservationModel).where(BudgetReservationModel.id == "res-e2e-1")
@@ -304,6 +307,8 @@ def seed_e2e_state() -> None:
                 updated_at=now,
             )
             session.add(res2)
+
+        session.flush()
 
         ledger1 = session.execute(
             select(BudgetLedgerModel).where(BudgetLedgerModel.id == "ledger-e2e-1")
