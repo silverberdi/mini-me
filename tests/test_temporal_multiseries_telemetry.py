@@ -156,3 +156,41 @@ def test_autonomy_derived_from_stage_events_when_metrics_absent() -> None:
     point = projection.series[1].points[0]
     # 3 productive / (3 + 1) = 75.0%
     assert point.value == 75.0
+
+
+def test_autonomy_penalizes_failed_abandoned_and_human_required_events() -> None:
+    uow, service = _service()
+    run = _run("event-penalties", "p1", 1)
+    uow.orchestration_runs.save(run)
+    # 4 completed stages
+    for _ in range(4):
+        uow.orchestration_stage_events.save(OrchestrationStageEvent(
+            event_type="STAGE_INVOCATION_COMPLETED",
+            run_id=run.run_id, to_stage=OrchestrationStage.IMPLEMENTING,
+            from_stage=OrchestrationStage.IMPLEMENTING,
+            created_at=run.created_at,
+            evidence_references={"status": "COMPLETE", "recovery_count": 0},
+        ))
+    # 1 failed, 1 abandoned, 1 human required
+    uow.orchestration_stage_events.save(OrchestrationStageEvent(
+        event_type="STAGE_INVOCATION_FAILED",
+        run_id=run.run_id, to_stage=OrchestrationStage.PROPOSING,
+        from_stage=OrchestrationStage.PROPOSING,
+        created_at=run.created_at,
+    ))
+    uow.orchestration_stage_events.save(OrchestrationStageEvent(
+        event_type="STAGE_INVOCATION_ABANDONED",
+        run_id=run.run_id, to_stage=OrchestrationStage.PROPOSING,
+        from_stage=OrchestrationStage.PROPOSING,
+        created_at=run.created_at,
+    ))
+    uow.orchestration_stage_events.save(OrchestrationStageEvent(
+        event_type="STAGE_INVOCATION_HUMAN_REQUIRED",
+        run_id=run.run_id, to_stage=OrchestrationStage.PROPOSING,
+        from_stage=OrchestrationStage.PROPOSING,
+        created_at=run.created_at,
+    ))
+    projection = service.project("autonomy")
+    point = projection.series[1].points[0]
+    # 4 productive / (4 + 3 penalties) = 4 / 7 = 57.143%
+    assert point.value == 57.143
