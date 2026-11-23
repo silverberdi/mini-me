@@ -8391,41 +8391,58 @@ class NativeOrchestrationCoordinator:
     async def _code_review_input(
         self, worktree_path: Path, diff_range: str
     ) -> tuple[str, dict[str, Any]]:
-        """Build a review diff, excluding only generated files explicitly marked by Git."""
+        """Build a bounded review diff while retaining source trees and excluding build output."""
         names_result = await self._git_run(
             worktree_path, ["diff", "--name-only", "-z", diff_range, "--"]
         )
         changed = [name for name in names_result.stdout.split("\0") if name]
         lockfiles = {"package-lock.json", "poetry.lock", "pnpm-lock.yaml", "yarn.lock"}
         candidates = [name for name in changed if Path(name).name not in lockfiles]
-        generated: set[str] = set()
-        if candidates:
-            attrs = await self._git_run(
-                worktree_path,
-                ["check-attr", "-z", "linguist-generated", "--", *candidates],
-            )
-            fields = attrs.stdout.split("\0")
-            generated = {
-                fields[index]
-                for index in range(0, len(fields) - 2, 3)
-                if fields[index + 1] == "linguist-generated"
-                and fields[index + 2].strip().lower() in {"set", "true"}
-            }
-        included = [name for name in candidates if name not in generated]
+        generated_reasons = {
+            name: reason
+            for name in candidates
+            if (reason := self._generated_review_path_reason(name)) is not None
+        }
+        included = [name for name in candidates if name not in generated_reasons]
         diff = ""
         if included:
+            exclusions = [
+                ":(exclude,glob)src/*/static/**",
+                ":(exclude,glob)frontend/dist/**",
+                ":(exclude,glob)**/*.map",
+                ":(exclude,glob)**/*.min.js",
+                *(
+                    f":(exclude,glob)**/{lockfile}"
+                    for lockfile in sorted(lockfiles)
+                ),
+            ]
             diff_result = await self._git_run(
-                worktree_path, ["diff", diff_range, "--", *included]
+                worktree_path, ["diff", diff_range, "--", ".", *exclusions]
             )
             diff = diff_result.stdout
         return diff, {
             "changed_files": len(changed),
             "included_files": len(included),
             "excluded_lockfiles": len(changed) - len(candidates),
-            "excluded_generated_files": sorted(generated),
+            "excluded_generated_files": sorted(generated_reasons),
+            "generated_file_reasons": dict(sorted(generated_reasons.items())),
             "binary_bodies": "omitted by git diff",
             "source_coverage_complete": True,
         }
+
+    @staticmethod
+    def _generated_review_path_reason(path: str) -> str | None:
+        """Classify build outputs from the repository's deployment paths."""
+        normalized = Path(path).as_posix()
+        if re.fullmatch(r"src/[^/]+/static(?:/.*)?", normalized):
+            return "project-static-build-output"
+        if normalized.startswith("frontend/dist/"):
+            return "frontend-dist-build-output"
+        if normalized.endswith(".map"):
+            return "source-map"
+        if normalized.endswith(".min.js"):
+            return "minified-javascript"
+        return None
 
     @staticmethod
     def _partition_review_diff(diff: str, byte_budget: int) -> tuple[list[str], str | None]:

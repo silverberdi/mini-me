@@ -12,9 +12,9 @@
 
 ## 3. Reviewer input and transport
 
-- [x] 3.1 Identify the actual failure mode for large review prompts and classify generated output using repository evidence; preserve authored source and project assets.
+- [x] 3.1 Identify the actual failure mode for large review prompts; use the release workflow's `src/minime/static` rebuild from `frontend/dist` as evidence and fixed Git pathspec exclusions to bound command arguments while retaining authored frontend sources.
 - [x] 3.2 Keep large prompts out of process arguments using the configured transport and preserve review coverage when provider context requires partitioning; report any incomplete coverage explicitly.
-- [x] 3.3 Add tests for generated-output filtering, authored-file retention, transport selection, bounded partitioning, and no silent truncation.
+- [x] 3.3 Add tests for the specified build-output exclusions, authored frontend source retention, transport selection, bounded partitioning, and no silent truncation.
 
 ## 4. GitHub merge response handling
 

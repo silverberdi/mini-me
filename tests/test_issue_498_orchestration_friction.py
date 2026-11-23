@@ -64,19 +64,30 @@ async def test_explore_failure_and_empty_response_remain_actionable(tmp_path, re
 
 
 @pytest.mark.asyncio
-async def test_review_input_excludes_only_git_marked_generated_files_and_keeps_assets(tmp_path):
+async def test_review_input_excludes_build_outputs_and_keeps_authored_frontend_source(tmp_path):
     _git_repo(tmp_path)
-    (tmp_path / ".gitattributes").write_text("generated.js linguist-generated=true\n")
     (tmp_path / "source.py").write_text("value = 1\n")
-    (tmp_path / "assets").mkdir()
-    (tmp_path / "assets/logo.svg").write_text("<svg>authored asset</svg>\n")
-    (tmp_path / "generated.js").write_text("bundle one\n")
+    (tmp_path / "authored.js").write_text("const answer = 1;\n")
+    (tmp_path / "frontend/src").mkdir(parents=True)
+    (tmp_path / "frontend/src/app.ts").write_text("export const value = 1;\n")
+    (tmp_path / "src/minime/static/js").mkdir(parents=True)
+    (tmp_path / "src/minime/static/js/app.js").write_text("authored app source in copied static tree\n")
+    (tmp_path / "src/minime/static/main-AB12CD34.js").write_text("generated bundle one\n")
+    (tmp_path / "frontend/dist/app.js").mkdir(parents=True)
+    (tmp_path / "frontend/dist/app.js/index.js").write_text("generated dist output one\n")
+    (tmp_path / "app.js.map").write_text("generated source map one\n")
+    (tmp_path / "app.min.js").write_text("generated minified output one\n")
     (tmp_path / "package-lock.json").write_text("{}\n")
     subprocess.run(["git", "-C", str(tmp_path), "add", "."], check=True)
     subprocess.run(["git", "-C", str(tmp_path), "commit", "-qm", "base"], check=True)
     (tmp_path / "source.py").write_text("value = 2\n")
-    (tmp_path / "assets/logo.svg").write_text("<svg>updated authored asset</svg>\n")
-    (tmp_path / "generated.js").write_text("bundle two\n")
+    (tmp_path / "frontend/src/app.ts").write_text("export const value = 2;\n")
+    (tmp_path / "src/minime/static/js/app.js").write_text("changed copied static output\n")
+    (tmp_path / "src/minime/static/main-AB12CD34.js").write_text("generated bundle two\n")
+    (tmp_path / "frontend/dist/app.js/index.js").write_text("generated dist output two\n")
+    (tmp_path / "app.js.map").write_text("generated source map two\n")
+    (tmp_path / "app.min.js").write_text("generated minified output two\n")
+    (tmp_path / "authored.js").write_text("const answer = 2;\n")
     (tmp_path / "package-lock.json").write_text("changed lock\n")
     subprocess.run(["git", "-C", str(tmp_path), "add", "."], check=True)
     subprocess.run(["git", "-C", str(tmp_path), "commit", "-qm", "candidate"], check=True)
@@ -84,10 +95,23 @@ async def test_review_input_excludes_only_git_marked_generated_files_and_keeps_a
     diff, evidence = await _coordinator()._code_review_input(tmp_path, "HEAD~1..HEAD")
 
     assert "value = 2" in diff
-    assert "updated authored asset" in diff
-    assert "bundle two" not in diff
+    assert "const answer = 2" in diff
+    assert "export const value = 2" in diff
+    assert "changed copied static output" not in diff
+    assert "generated bundle two" not in diff
+    assert "generated dist output two" not in diff
+    assert "generated source map two" not in diff
+    assert "generated minified output two" not in diff
     assert "changed lock" not in diff
-    assert evidence["excluded_generated_files"] == ["generated.js"]
+    assert evidence["excluded_generated_files"] == [
+        "app.js.map",
+        "app.min.js",
+        "frontend/dist/app.js/index.js",
+        "src/minime/static/js/app.js",
+        "src/minime/static/main-AB12CD34.js",
+    ]
+    assert evidence["generated_file_reasons"]["src/minime/static/js/app.js"] == "project-static-build-output"
+    assert evidence["excluded_lockfiles"] == 1
     assert evidence["source_coverage_complete"] is True
 
 

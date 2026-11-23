@@ -40,8 +40,6 @@ async def test_code_review_prompt_includes_verdict_first_rule_and_excludes_lockf
                 returncode=0,
                 stdout="a.js\0package-lock.json\0poetry.lock\0pnpm-lock.yaml\0yarn.lock\0",
             )
-        if args[0] == "check-attr":
-            return SimpleNamespace(returncode=0, stdout="a.js\0linguist-generated\0unspecified\0")
         return SimpleNamespace(returncode=0, stdout=diff)
 
     coordinator._git_run = fake_git_run
@@ -56,10 +54,18 @@ async def test_code_review_prompt_includes_verdict_first_rule_and_excludes_lockf
     assert "REGLA OBLIGATORIA DE FORMATO (VERDICT-FIRST):" in prompt
     assert "- Tu respuesta DEBE iniciar directamente con el único bloque JSON estructurado" in prompt
 
-    # Verify lockfile pathspec exclusions in diff command
+    # Keep the Git argument vector fixed, independent of the changed-file count.
     diff_calls = [args for args in git_calls if args[0] == "diff"]
     assert diff_calls[0][:3] == ["diff", "--name-only", "-z"]
-    assert diff_calls[1] == ["diff", "abc1234..HEAD", "--", "a.js"]
+    assert diff_calls[1][:4] == ["diff", "abc1234..HEAD", "--", "."]
+    assert ":(exclude,glob)src/*/static/**" in diff_calls[1]
+    assert ":(exclude,glob)frontend/dist/**" in diff_calls[1]
+    assert ":(exclude,glob)**/*.map" in diff_calls[1]
+    assert ":(exclude,glob)**/*.min.js" in diff_calls[1]
+    assert all(f":(exclude,glob)**/{name}" in diff_calls[1] for name in (
+        "package-lock.json", "poetry.lock", "pnpm-lock.yaml", "yarn.lock"
+    ))
+    assert "a.js" not in diff_calls[1]
 
 
 @pytest.mark.asyncio

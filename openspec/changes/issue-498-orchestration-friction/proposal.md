@@ -7,7 +7,7 @@ Issue #498 groups several observed orchestration dead ends: agent output formatt
 - Base Explore and workflow completion decisions on observable native OpenSpec results and resulting artifacts, not brittle prose sentinels or a required agent-authored completion token; retain genuine human questions and fail-closed behavior for missing or invalid artifacts.
 - Ensure a blocked stage caused by missing recovery authorization exposes the current reason and an actionable, authorized recovery path through the existing gate/API flow.
 - Allow Apply to re-enter on the same candidate when verified review corrections authorize remediation, while retaining stage-invocation, candidate-identity, retry, and regression safeguards.
-- Make reviewer input bounded and useful for large diffs: exclude irrelevant generated/static output where safely identifiable, preserve review-relevant source changes, and respect the configured prompt transport. Verify the actual failure mode instead of assuming every oversized prompt is an OS `ARG_MAX` failure.
+- Make reviewer input bounded and useful for large diffs: exclude `src/*/static/**`, `frontend/dist/**`, source maps, and minified JavaScript as build output, while retaining review-relevant sources such as `frontend/src/**`; respect the configured prompt transport and verify the actual failure mode instead of assuming every oversized prompt is an OS `ARG_MAX` failure.
 - Treat GitHub merge HTTP 405 as retryable only when a read-back shows mergeability is still unknown/transient; use bounded retry and preserve immediate fail-closed handling for branch protection, conflicts, or other permanent rejection.
 - Keep the existing autonomy/time metrics work in Issue #489 out of this Change.
 
