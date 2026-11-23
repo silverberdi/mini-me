@@ -2580,8 +2580,9 @@ class NativeOrchestrationCoordinator:
             recovery_needed = (
                 stored_explore is not None and not (same_context or authorized_clarification)
             ) or (stored_explore is None and stage_before_explore == OrchestrationStage.EXPLORING)
+            effective_explore_recovery_id = explore_recovery_authorization_id or operator_action_id
             if recovery_needed:
-                if not explore_recovery_authorization_id:
+                if not effective_explore_recovery_id:
                     return OrchestrationCoordinationResult(
                         status="PAUSED",
                         run_id=active_run.run_id,
@@ -2593,7 +2594,7 @@ class NativeOrchestrationCoordinator:
                     )
                 prior = getattr(uow, "operator_actions", None)
                 existing = (
-                    prior.get_by_request_id(explore_recovery_authorization_id)
+                    prior.get_by_request_id(effective_explore_recovery_id)
                     if prior is not None
                     else None
                 )
@@ -2628,7 +2629,7 @@ class NativeOrchestrationCoordinator:
                         ),
                     },
                     is_recovery=recovery_needed,
-                    recovery_authorization_id=explore_recovery_authorization_id,
+                    recovery_authorization_id=effective_explore_recovery_id,
                 )
                 if dispatch is None:
                     return OrchestrationCoordinationResult(
@@ -6383,10 +6384,13 @@ class NativeOrchestrationCoordinator:
                 if line.strip().startswith(("- ", "• "))
             ][:20]
             if not options:
-                return {
-                    "status": "FAILED",
-                    "message": "Explore requested human input without concrete options.",
-                }
+                options = [
+                    "Proceder a la propuesta según los requisitos normalizados",
+                    "Aclarar el requerimiento mediante respuesta del operador",
+                ]
+                options_es = list(options)
+            elif not options_es or len(options_es) != len(options):
+                options_es = list(options)
             return {
                 "status": "HUMAN_REQUIRED",
                 "human_payload": self._safe_human_payload(
@@ -6394,7 +6398,7 @@ class NativeOrchestrationCoordinator:
                         "question": f"¿Cómo debe resolverse la ambigüedad en el Issue #{issue_number}?",
                         "question_es": f"¿Cómo debe resolverse la ambigüedad en el Issue #{issue_number}?",
                         "options": options,
-                        "options_es": options_es if len(options_es) == len(options) else [],
+                        "options_es": options_es,
                         "agent_output": output[:1000],
                     }
                 ),
