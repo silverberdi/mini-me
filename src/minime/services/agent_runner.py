@@ -927,37 +927,10 @@ class CliAgentRunner:
             if schema_path:
                 schema_path.unlink(missing_ok=True)
 
-        # Ask the agent once, in the original dispatch, whether it finished.
-        # Explore, Apply, and Verify each have their own authoritative evidence:
-        # Explore/Verify return structured verdicts, and Apply is judged by the
-        # worktree state (tasks.md fully checked) plus the native Verify gate that
-        # follows it — never by a free-text handoff token. Only the planning and
-        # bookkeeping workflows (propose/continue/sync/archive) have no equivalent
-        # artifact and still need the explicit handoff.
-        handoff_required = bool(
-            workflow is not None
-            and workflow.operation in {"propose", "continue"}
-            and output_schema is None
-        )
-        if handoff_required:
-            prompt_context += (
-                "\n\nAt the end of this SAME agent invocation, report whether your "
-                "OpenSpec work finished. Add exactly one standalone line "
-                "starting MINIME_WORKFLOW_RESULT: followed by a compact single-line JSON "
-                'object with exactly these keys: {"status":"COMPLETE|INCOMPLETE|HUMAN_REQUIRED",'
-                '"summary":"brief factual explanation in the source language",'
-                '"summary_es":"faithful Spanish rendering of summary",'
-                '"pending":["specific remaining work or question in the source language"],'
-                '"pending_es":["faithful Spanish rendering in the same order"]}. '
-                "Use an empty pending array ONLY for COMPLETE. For INCOMPLETE and "
-                "HUMAN_REQUIRED include at least one concrete pending item. For HUMAN_REQUIRED, "
-                "include one faithful Spanish pending_es item for each original pending item. "
-                "Do not invent or alter workflow options; preserve their order and meaning. "
-                "COMPLETE means "
-                "you finished the requested workflow, not that OpenSpec validation passed; "
-                "the coordinator will ask the installed OpenSpec CLI separately. "
-                "Do not invent successful actions, tests, or evidence. No second model call.\n"
-            )
+        # Native OpenSpec artifacts and CLI status/validation are authoritative for
+        # planning completion. A model-authored handoff token is optional context,
+        # never a prerequisite for dispatch or completion.
+        handoff_required = False
         cmd = self._command_for_prompt(prompt_context, profile)
         if not cmd:
             cleanup_structured_output()

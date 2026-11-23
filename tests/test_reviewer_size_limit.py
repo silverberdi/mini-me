@@ -1,9 +1,11 @@
-import pytest
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
+
+import pytest
+
 from minime.services.agent_runner import AgentExecutionResult
 from minime.services.orchestration_coordinator import NativeOrchestrationCoordinator
-from minime.services.review_verdict_parser import parse_review_verdict, MalformedReviewOutputError
+from minime.services.review_verdict_parser import parse_review_verdict
 
 
 @pytest.mark.asyncio
@@ -33,6 +35,11 @@ async def test_code_review_prompt_includes_verdict_first_rule_and_excludes_lockf
         git_calls.append(args)
         if args[0] == "merge-base":
             return SimpleNamespace(returncode=0, stdout="abc1234\n")
+        if args[:3] == ["diff", "--name-only", "-z"]:
+            return SimpleNamespace(
+                returncode=0,
+                stdout="a.js\0package-lock.json\0poetry.lock\0pnpm-lock.yaml\0yarn.lock\0",
+            )
         return SimpleNamespace(returncode=0, stdout=diff)
 
     coordinator._git_run = fake_git_run
@@ -47,13 +54,18 @@ async def test_code_review_prompt_includes_verdict_first_rule_and_excludes_lockf
     assert "REGLA OBLIGATORIA DE FORMATO (VERDICT-FIRST):" in prompt
     assert "- Tu respuesta DEBE iniciar directamente con el único bloque JSON estructurado" in prompt
 
-    # Verify lockfile pathspec exclusions in diff command
-    diff_call = [args for args in git_calls if args[0] == "diff"][0]
-    assert ":!package-lock.json" in diff_call
-    assert ":!poetry.lock" in diff_call
-    assert ":!pnpm-lock.yaml" in diff_call
-    assert ":!yarn.lock" in diff_call
-    assert "abc1234..HEAD" in diff_call
+    # Keep the Git argument vector fixed, independent of the changed-file count.
+    diff_calls = [args for args in git_calls if args[0] == "diff"]
+    assert diff_calls[0][:3] == ["diff", "--name-only", "-z"]
+    assert diff_calls[1][:4] == ["diff", "abc1234..HEAD", "--", "."]
+    assert ":(exclude,glob)src/*/static/**" in diff_calls[1]
+    assert ":(exclude,glob)frontend/dist/**" in diff_calls[1]
+    assert ":(exclude,glob)**/*.map" in diff_calls[1]
+    assert ":(exclude,glob)**/*.min.js" in diff_calls[1]
+    assert all(f":(exclude,glob)**/{name}" in diff_calls[1] for name in (
+        "package-lock.json", "poetry.lock", "pnpm-lock.yaml", "yarn.lock"
+    ))
+    assert "a.js" not in diff_calls[1]
 
 
 @pytest.mark.asyncio

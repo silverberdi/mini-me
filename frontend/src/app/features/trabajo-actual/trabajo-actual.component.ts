@@ -369,6 +369,18 @@ import {
           </div>
         </div>
 
+        <section *ngIf="canRecoverNativeStage()" class="p-5 rounded-2xl bg-amber-500/10 border border-amber-500/30 space-y-3" role="status" data-testid="native-stage-recovery">
+          <h3 class="text-sm font-bold text-white">Recuperación de {{ nativeRecoveryStageLabel() }}</h3>
+          <p class="text-sm text-slate-200">{{ nativeRecoveryHold()?.['reason'] }}</p>
+          <p class="text-xs text-slate-400">{{ nativeRecoveryHold()?.['action'] }}</p>
+          <button type="button" (click)="recoverNativeStage()" [disabled]="isRecoveringNativeStage()"
+                  class="px-4 py-2 rounded-xl bg-amber-600 hover:bg-amber-500 disabled:opacity-50 text-white text-xs font-semibold">
+            {{ isRecoveringNativeStage() ? 'Autorizando…' : 'Autorizar y reanudar este Run' }}
+          </button>
+          <p *ngIf="nativeRecoveryMessage()" [ngClass]="nativeRecoverySuccess() ? 'text-emerald-300' : 'text-rose-300'"
+             class="text-xs" aria-live="polite">{{ nativeRecoveryMessage() }}</p>
+        </section>
+
         <!-- Technical Identity & Evidence Grid -->
         <div class="grid grid-cols-1 md:grid-cols-2 gap-6">
           <div class="bg-slate-800/40 rounded-2xl border border-slate-700/50 p-6 backdrop-blur-sm space-y-4">
@@ -431,6 +443,9 @@ export class TrabajoActualComponent {
   readonly isRecoveringProposalReview = signal<boolean>(false);
   readonly proposalReviewRecoveryMessage = signal<string | null>(null);
   readonly proposalReviewRecoverySuccess = signal<boolean>(false);
+  readonly isRecoveringNativeStage = signal<boolean>(false);
+  readonly nativeRecoveryMessage = signal<string | null>(null);
+  readonly nativeRecoverySuccess = signal<boolean>(false);
   readonly cancellationReason = signal<string>('');
   readonly isCancelling = signal<boolean>(false);
   readonly cancellationMessage = signal<string | null>(null);
@@ -688,6 +703,55 @@ export class TrabajoActualComponent {
       await this.refresh.refreshRuns();
     } finally {
       this.isRecoveringProposalReview.set(false);
+    }
+  }
+
+  nativeRecoveryHold(): Record<string, any> | null {
+    const hold = this.targetRun()?.stop_details?.['recovery_hold'];
+    return hold && typeof hold === 'object' ? hold : null;
+  }
+
+  canRecoverNativeStage(): boolean {
+    const run = this.targetRun();
+    const stage = this.nativeRecoveryHold()?.['stage'];
+    return !!run?.is_active && (stage === 'explore' || stage === 'propose')
+      && run.stage === (stage === 'explore' ? 'EXPLORING' : 'PROPOSING');
+  }
+
+  nativeRecoveryStageLabel(): string {
+    return this.nativeRecoveryHold()?.['stage'] === 'explore' ? 'Explore' : 'Propose';
+  }
+
+  async recoverNativeStage(): Promise<void> {
+    const run = this.targetRun();
+    const hold = this.nativeRecoveryHold();
+    const stage = hold?.['stage'];
+    if (!run || !this.canRecoverNativeStage() || this.isRecoveringNativeStage()) return;
+    this.isRecoveringNativeStage.set(true);
+    this.nativeRecoveryMessage.set(null);
+    try {
+      const endpoint = stage === 'explore' ? 'explore' : 'propose';
+      const authorization = await this.api.post<{ action_request_id: string }>(
+        `/api/v1/projects/${encodeURIComponent(run.project_id)}/runs/${encodeURIComponent(run.run_id)}/${endpoint}-recovery-authorizations`,
+        { prior_attempt_id: hold?.['attempt_id'] || null }
+      );
+      if (!authorization.ok || !authorization.data?.action_request_id) {
+        throw new Error(authorization.error || `No se autorizó la recuperación de ${endpoint}`);
+      }
+      const resumed = await this.api.post(
+        `/api/v1/projects/${encodeURIComponent(run.project_id)}/requests/run`,
+        { target_run_id: run.run_id, [`${endpoint}_recovery_authorization_id`]: authorization.data.action_request_id }
+      );
+      if (!resumed.ok) throw new Error(resumed.error || 'No se pudo reanudar el Run');
+      this.nativeRecoverySuccess.set(true);
+      this.nativeRecoveryMessage.set(`Autorización de ${endpoint} registrada; se reanuda el mismo Run.`);
+      await this.refresh.refreshRuns();
+    } catch (error: any) {
+      this.nativeRecoverySuccess.set(false);
+      this.nativeRecoveryMessage.set(error?.message || 'No se pudo recuperar la etapa');
+      await this.refresh.refreshRuns();
+    } finally {
+      this.isRecoveringNativeStage.set(false);
     }
   }
 

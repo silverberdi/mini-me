@@ -262,6 +262,10 @@ async def test_partial_propose_requires_one_use_authorization_and_continues_nati
     )
     assert blocked.status == "PAUSED"
     assert "authorization" in blocked.message
+    persisted_hold = uow.orchestration_runs.get_by_id(run.run_id).stop_details["recovery_hold"]
+    assert persisted_hold["stage"] == "propose"
+    assert persisted_hold["attempt_id"] is None
+    assert persisted_hold["action"]
     coordinator.agent_runner.run.assert_not_awaited()
 
     authorization_id = "propose-recovery-1"
@@ -558,9 +562,12 @@ async def test_explore_checkpoint_survives_reentry_without_paid_repeat(mock_env)
         reviewer_provider="antigravity",
     )
     assert second.run_id == first.run_id
+    assert second.status == "PAUSED"
     assert second.current_stage == OrchestrationStage.PROPOSING
     coordinator._run_explore.assert_not_awaited()
     assert coordinator.agent_runner.run.await_count == 1
+    persisted = uow.orchestration_runs.get_by_id(first.run_id)
+    assert persisted.stop_details["recovery_hold"]["stage"] == "propose"
 
 
 @pytest.mark.asyncio
@@ -681,6 +688,10 @@ async def test_explore_checkpoint_rejects_forged_or_mismatched_workflow_sha(mock
     assert rejected.run_id == first.run_id
     assert rejected.current_stage == OrchestrationStage.EXPLORING
     assert "recovery authorization" in rejected.message
+    persisted_hold = uow.orchestration_runs.get_by_id(first.run_id).stop_details["recovery_hold"]
+    assert persisted_hold["stage"] == "explore"
+    assert persisted_hold["attempt_id"]
+    assert persisted_hold["action"]
     coordinator._run_explore.assert_not_awaited()
     assert coordinator.agent_runner.run.await_count == 1
 
@@ -1051,7 +1062,11 @@ async def test_agent_reports_incomplete_propose_without_false_completion(mock_en
             workflow_handoff=AgentWorkflowHandoff(
                 "INCOMPLETE", "Work remains", ("design.md", "tasks.md")
             ),
+            workflow=MagicMock(operation="propose"),
         )
+    )
+    coordinator.openspec_adapter.planning_status = MagicMock(
+        return_value={"status": "INCOMPLETE", "reason": "canonical artifacts pending", "pending": ["design.md", "tasks.md"]}
     )
     result = await coordinator._run_propose(
         worktree_path=repo_dir,

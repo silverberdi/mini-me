@@ -369,9 +369,35 @@ class OpenCodeAdapter:
         extra_env = {"SHELL": "/bin/bash"}
         if self.config.api_key_env and self.config.api_key_env in os.environ:
             extra_env[self.config.api_key_env] = os.environ[self.config.api_key_env]
+        prompt_attachment: Path | None = None
+        if role == "independent_review" and self._argv_exceeds_limit(executable, args, extra_env):
+            try:
+                minime_dir = worktree / ".minime"
+                minime_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
+                fd, raw_path = tempfile.mkstemp(prefix="review-input-", suffix=".md", dir=minime_dir)
+                prompt_attachment = Path(raw_path)
+                with os.fdopen(fd, "w", encoding="utf-8") as stream:
+                    stream.write(effective_prompt)
+                args = [arg for arg in args if arg != effective_prompt]
+                args.extend([
+                    "--file", str(prompt_attachment),
+                    "Review the attached complete candidate evidence. Preserve its full coverage; do not assume omitted files.",
+                ])
+            except OSError as exc:
+                if prompt_attachment:
+                    prompt_attachment.unlink(missing_ok=True)
+                return self._refuse(request, f"REVIEW_INPUT_ATTACHMENT_FAILED:{type(exc).__name__}")
+
         preflight = self._preflight or _default_preflight
-        result = await preflight(executable, tuple(args))
+        try:
+            result = await preflight(executable, tuple(args))
+        except Exception as exc:
+            if prompt_attachment:
+                prompt_attachment.unlink(missing_ok=True)
+            return self._refuse(request, f"PREFLIGHT_FAILED:{type(exc).__name__}")
         if not result.ok:
+            if prompt_attachment:
+                prompt_attachment.unlink(missing_ok=True)
             return self._refuse(request, result.reason or "PREFLIGHT_FAILED")
         confinement = self._confinement_factory(allowed_worktree_path=str(worktree))
         try:
@@ -396,7 +422,12 @@ class OpenCodeAdapter:
                     [executable, *args], **call_kwargs
                 )
         except (AgentConfinementError, OSError) as exc:
+            if prompt_attachment:
+                prompt_attachment.unlink(missing_ok=True)
             return self._refuse(request, f"DISPATCH_FAILED:{type(exc).__name__}")
+        finally:
+            if prompt_attachment:
+                prompt_attachment.unlink(missing_ok=True)
         stdout = tuple(redact_secrets(line) for line in process.stdout.decode(errors="replace").splitlines())
         stderr = tuple(redact_secrets(line) for line in process.stderr.decode(errors="replace").splitlines())
         artifacts = _git_artifacts(worktree)
@@ -417,3 +448,23 @@ class OpenCodeAdapter:
             ),
         )
         return OpenCodeOutcome(success, evidence)
+
+    @staticmethod
+    def _argv_exceeds_limit(executable: str, args: list[str], extra_env: dict[str, str]) -> bool:
+        """Detect the real platform argv+environment limit before spawning a reviewer."""
+        try:
+            limit = int(os.sysconf("SC_ARG_MAX"))
+        except (AttributeError, OSError, ValueError):
+            return False
+        argv_bytes = sum(len(os.fsencode(value)) + 1 for value in (executable, *args))
+        env_bytes = sum(
+            len(os.fsencode(key)) + len(os.fsencode(value)) + 2
+            for key, value in os.environ.items()
+        )
+        env_bytes += sum(
+            len(os.fsencode(key)) + len(os.fsencode(value)) + 2
+            for key, value in extra_env.items()
+            if key not in os.environ
+        )
+        # Keep headroom for the runtime's own environment and shell metadata.
+        return argv_bytes + env_bytes >= limit - 8192

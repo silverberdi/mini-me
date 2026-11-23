@@ -13,7 +13,7 @@ from minime.services.agent_confinement import AgentProcessConfinement, AgentProc
 from minime.services.cli_preflight import PreflightResult
 from minime.services.opencode_adapter import OpenCodeAdapter, OpenCodeRequest
 
-TRUE_BIN = shutil.which("true") or TRUE_BIN
+TRUE_BIN = shutil.which("true") or "true"
 
 
 def _can_bwrap_create_namespaces() -> bool:
@@ -121,6 +121,41 @@ async def test_independent_review_is_read_only_and_cannot_self_review(tmp_path, 
     assert outcome.accepted
     assert FakeConfinement.calls[-1][1]["read_only_worktree"] is True
     assert outcome.evidence.lifecycle_authority is False
+
+
+@pytest.mark.asyncio
+async def test_large_review_prompt_uses_file_attachment_instead_of_argv(tmp_path, monkeypatch):
+    sha = _git_worktree(tmp_path)
+    FakeConfinement.calls.clear()
+    monkeypatch.setattr("minime.services.opencode_adapter.shutil.which", lambda _: TRUE_BIN)
+    monkeypatch.setattr(OpenCodeAdapter, "_argv_exceeds_limit", staticmethod(lambda *_: True))
+    async def preflight(executable, args):
+        return PreflightResult(ok=True)
+    adapter = OpenCodeAdapter(
+        OpenCodeCapabilityConfig(enabled=True, roles=["independent_review"]),
+        project_id="p", managed_worktree_path=tmp_path,
+        confinement_factory=FakeConfinement, preflight=preflight,
+    )
+    captured_attachment = []
+    original_run = FakeConfinement.run_confined_async_subprocess
+    async def capture_attachment(self, command, **kwargs):
+        attached = Path(command[command.index("--file") + 1])
+        captured_attachment.append(attached.read_text(encoding="utf-8"))
+        return await original_run(self, command, **kwargs)
+    monkeypatch.setattr(FakeConfinement, "run_confined_async_subprocess", capture_attachment)
+    prompt = "complete candidate diff\n" + ("authored source line\n" * 100)
+    outcome = await adapter.dispatch(OpenCodeRequest(
+        "p", "independent_review", "apply", tmp_path, sha,
+        candidate_author="implementer", reviewer_identity="reviewer", prompt=prompt,
+    ))
+
+    assert outcome.accepted
+    command = FakeConfinement.calls[-1][0]
+    assert "--file" in command
+    attached = Path(command[command.index("--file") + 1])
+    assert not attached.exists()
+    assert prompt not in command
+    assert captured_attachment == [prompt]
 
 
 @pytest.mark.asyncio

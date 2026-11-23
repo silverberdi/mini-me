@@ -218,17 +218,16 @@ async def test_code_review_prompt_includes_complete_diff_and_convergence_guidanc
         ),
     )
     diff = "diff --git a/module.py b/module.py\n" + "x" * 4_500 + "\nEND_OF_DIFF_SENTINEL"
-    coordinator._git_run = AsyncMock(return_value=SimpleNamespace(stdout=diff))
+    coordinator._code_review_input = AsyncMock(
+        return_value=(diff, {"source_coverage_complete": True})
+    )
 
     result = await coordinator._run_code_review(
         tmp_path, "codex", "change", candidate_sha="candidate-sha"
     )
 
     assert result["status"] == "approved"
-    coordinator._git_run.assert_awaited_once_with(
-        tmp_path,
-        ["diff", "HEAD~1..HEAD", "--", ".", ":!package-lock.json", ":!poetry.lock", ":!pnpm-lock.yaml", ":!yarn.lock"],
-    )
+    coordinator._code_review_input.assert_awaited_once_with(tmp_path, "HEAD~1..HEAD")
     call = coordinator.agent_runner.run.await_args
     prompt = call.kwargs["prompt_context"]
     assert len(diff) > 4_000
@@ -249,7 +248,7 @@ def test_canonical_explore_verdict_accepts_spaces_and_underscores():
     parse = NativeOrchestrationCoordinator._explore_disposition
     assert parse("READY TO PROPOSE\nSin dudas")[0] == "READY_TO_PROPOSE"
     assert parse("READY_TO_PROPOSE\nSin dudas")[0] == "READY_TO_PROPOSE"
-    assert parse("READY TO PROPOSE\nHUMAN REQUIRED\n- Conflicto")[0] is None
+    assert parse("READY TO PROPOSE\nHUMAN REQUIRED\n- Conflicto")[0] == "AMBIGUOUS"
 
 
 def test_response_output_rejects_incidental_stdout_when_final_response_missing():
