@@ -10,6 +10,7 @@ Extensión de OpenSpec propose/design/apply/verify. Consulta `AGENTS.md`, `opens
 - TECHNICAL_PASS: unit/integration/static para el contrato aislado.
 - E2E_PASS: conducta externa real; **agente real usando su workflow OpenSpec instalado**, Git y GitHub reales cuando se afirma generar software/PR.
 - El despliegue y la verificación postdeploy pertenecen al CI/CD del proyecto y solo se exigen cuando el Change los incluye explícitamente.
+- Ejecuta las pruebas de base de datos en el stage más temprano que tenga el perfil de prueba aislado del proyecto (`test_database` y referencia host `_TEST_DATABASE_URL`). No solicites una respuesta humana para ejecutar una prueba automatizable. Solo difiere una prueba cuando el entorno requerido no está disponible en Apply/Verify y el proyecto la ejecuta en un check de PR explícitamente identificado, contra una base de pruebas aislada; conserva ese check y el SHA exacto como pendiente hasta el resultado concluyente de GitHub. Una configuración ausente o insegura y una cobertura CI ausente son fallos, no diferimientos.
 
 ## Evidencia mínima por escenario
 `scenario_id`, input/operator action, inicio/fin, run/job/attempt, environment, project/repo, base/head SHA, workflow y versión OpenSpec, agente/modelo/rol, capabilities y versiones, artefactos/diff, checks/exit, reviewer independiente, URL PR, evidencia de side effects, digest deploy, verificación de feature, resultado, política/cuota y logs redactados.

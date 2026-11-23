@@ -56,9 +56,13 @@ test.describe('Dashboard capacity balance', () => {
     await expect(providerCard(page, 'Codex').getByTestId('gauge-text-value')).toHaveText('73%');
     await expect(providerCard(page, 'Antigravity').getByTestId('gauge-text-value')).toHaveText('75%');
     await expect(providerCard(page, 'DeepSeek').getByTestId('gauge-text-value')).toHaveText('50%');
-    await expect(providerCard(page, 'Antigravity').getByTestId('capacity-secondary-detail')).toContainText('$15.00 USD');
-    await expect(providerCard(page, 'DeepSeek').getByTestId('capacity-secondary-detail')).toContainText('$10.00 USD');
-    await expect(providerCard(page, 'DeepSeek').getByTestId('capacity-secondary-detail')).toContainText('referencia USD 20 = 100%');
+    const deepseek = providerCard(page, 'DeepSeek');
+    await deepseek.hover();
+    await expect(deepseek.getByTestId('capacity-detail-panel')).toBeVisible();
+    await expect(deepseek.getByTestId('capacity-detail-content')).toContainText('$10.00 USD');
+    await expect(deepseek.getByTestId('capacity-detail-content')).toContainText('referencia USD 20 = 100%');
+    await expect(providerCard(page, 'Antigravity').getByTestId('capacity-detail-panel')).toContainText('$15.00 USD');
+    await expect(page.locator('[data-testid="capacity-secondary-detail"]')).toHaveCount(0);
     await expect(providerCard(page, 'OpenRouter').getByTestId('gauge-text-value')).toHaveText('42%');
     expect(await arcOffset(providerCard(page, 'DeepSeek'))).toBeCloseTo(89.535, 2);
     expect(await arcOffset(providerCard(page, 'Antigravity'))).toBeCloseTo(44.7675, 2);
@@ -67,8 +71,9 @@ test.describe('Dashboard capacity balance', () => {
     await page.setViewportSize({ width: 390, height: 844 });
     const mobileDeepSeek = providerCard(page, 'DeepSeek');
     await expect(mobileDeepSeek.getByTestId('gauge-text-value')).toBeVisible();
-    await expect(mobileDeepSeek.getByTestId('capacity-secondary-detail')).toBeVisible();
-    await expect(mobileDeepSeek.getByTestId('capacity-secondary-detail')).toContainText('referencia USD 20 = 100%');
+    await mobileDeepSeek.focus();
+    await expect(mobileDeepSeek.getByTestId('capacity-detail-panel')).toBeVisible();
+    await expect(mobileDeepSeek.getByTestId('capacity-detail-panel')).toContainText('referencia USD 20 = 100%');
     await expect(page.locator('body')).toHaveJSProperty('scrollWidth', 390);
   });
 
@@ -96,7 +101,8 @@ test.describe('Dashboard capacity balance', () => {
       const card = providerCard(page, 'DeepSeek');
       const expectedPercent = Math.min(100, Math.max(0, Math.round(balance / 20 * 100)));
       await expect(card.getByTestId('gauge-text-value')).toHaveText(`${expectedPercent}%`);
-      await expect(card.getByTestId('capacity-secondary-detail')).toContainText(`$${balance.toFixed(2)} USD`);
+      await card.hover();
+      await expect(card.getByTestId('capacity-detail-content')).toContainText(`$${balance.toFixed(2)} USD`);
       expect(await arcOffset(card)).toBeCloseTo(179.07 * (1 - expectedPercent / 100), 2);
     }
   });
@@ -111,7 +117,8 @@ test.describe('Dashboard capacity balance', () => {
 
     const deepseek = providerCard(page, 'DeepSeek');
     await expect(deepseek.getByTestId('gauge-text-value')).toHaveText('—');
-    await expect(deepseek.getByTestId('capacity-secondary-detail')).toContainText('10.00 EUR');
+    await deepseek.hover();
+    await expect(deepseek.getByTestId('capacity-detail-content')).toContainText('10.00 EUR');
     expect(await arcOffset(deepseek)).toBeCloseTo(179.07, 2);
 
     const openrouter = providerCard(page, 'OpenRouter');
