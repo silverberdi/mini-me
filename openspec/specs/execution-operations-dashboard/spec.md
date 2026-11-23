@@ -162,11 +162,12 @@ The Dashboard SHALL present cost data only from verifiable liquidated entries in
 - **THEN** a real end-to-end verification observes the ledger records, invokes the Dashboard read path, and demonstrates the corresponding provider/model costs in the rendered visualization
 
 ### Requirement: Compact Active Change summary on Dashboard
-The Dashboard SHALL replace its dense recent-run and open-request lists with one compact, responsive summary of the active Run for the selected project. The summary SHALL use the existing Run and Request data, show the Change name, linked Request number and title when available, current stage and execution status, the official illustration for a recognized current stage, a visual stage-progress indicator, and a direct link to Trabajo Actual. It SHALL show only progress supported by the current persisted stage; it SHALL NOT invent a numeric percentage or a separate orchestration state.
+The Dashboard SHALL replace its dense recent-run and open-request lists with one compact, responsive summary of the active Run for the selected project. The summary SHALL use the existing Run and Request data, show the Change name, linked Request number and title when available, current stage and execution status, the official illustration for a recognized current stage, a visual stage-progress indicator rendered with the same stage-card structure as Trabajo Actual, and a direct link to Trabajo Actual. The stage cards SHALL show each stage's number and label, with the same completed/current/pending colors and presentation classes used in Trabajo Actual. The summary SHALL show only progress supported by the current persisted stage; it SHALL NOT invent a numeric percentage or a separate orchestration state.
 
 #### Scenario: Active Change is visible without a human gate
 - **WHEN** the selected project has an active Run and no human gate is present
 - **THEN** the Dashboard summary displays that Run's Change name, current stage, execution status, official stage illustration, and stage-progress indicator
+- **AND** each stage is displayed as a labeled card using the same visual state as Trabajo Actual
 - **AND** it provides a direct link to Trabajo Actual for that Run
 
 #### Scenario: Linked Request is available
@@ -190,7 +191,7 @@ The Dashboard SHALL replace its dense recent-run and open-request lists with one
 
 #### Scenario: Responsive Dashboard presentation
 - **WHEN** the operator views the Dashboard on mobile or desktop
-- **THEN** the active Change name, stage, status, progress indicator, and navigation link remain legible and operable without horizontal page overflow
+- **THEN** the active Change name, stage, status, labeled stage cards, and navigation link remain legible and operable without horizontal page overflow
 
 #### Scenario: Existing work views remain authoritative
 - **WHEN** the Dashboard summary is rendered
