@@ -28,7 +28,7 @@ test.describe('Observable Error Feedback and Runtime Resilience', () => {
     await waitForAppMounted(page);
 
     // 4. Select project card and locate pause button
-    const projectCard = page.locator('div', { hasText: 'E2E Test Project' }).first();
+    const projectCard = page.getByRole('heading', { name: 'E2E Test Project', exact: true });
     await expect(projectCard).toBeVisible({ timeout: 10000 });
     await projectCard.click();
 

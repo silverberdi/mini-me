@@ -36,7 +36,7 @@ export async function resetProjectState(request: APIRequestContext, projectId = 
     });
     if (res.ok()) {
       const data = await res.json();
-      expect(data.status).toBe('ACTIVE');
+      expect(data.status).toBe('RESUMED');
     }
   } catch (err) {
     console.warn(`[E2E Helper] Project reset warning for ${projectId}:`, err);
