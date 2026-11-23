@@ -806,6 +806,9 @@ class BudgetLedgerModel(Base):
     total_tokens: Mapped[int | None] = mapped_column(Integer, nullable=True)
     amount_usd: Mapped[Decimal] = mapped_column(Numeric(10, 6), nullable=False)
     entry_type: Mapped[str] = mapped_column(String(32), nullable=False)
+    usage_identity: Mapped[str | None] = mapped_column(String(256), nullable=True, unique=True)
+    source: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    observed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=utc_now, nullable=False, index=True
     )

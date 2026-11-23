@@ -706,6 +706,9 @@ def budget_ledger_model_to_domain(model: BudgetLedgerModel) -> BudgetLedgerEntry
         total_tokens=model.total_tokens,
         amount_usd=_to_decimal(model.amount_usd),
         entry_type=model.entry_type,
+        usage_identity=model.usage_identity,
+        source=model.source,
+        observed_at=model.observed_at,
         created_at=model.created_at,
     )
 
@@ -2475,6 +2478,9 @@ class PostgresBudgetLedgerRepository(BudgetLedgerRepositoryInterface):
                 total_tokens=entry.total_tokens,
                 amount_usd=entry.amount_usd,
                 entry_type=entry.entry_type,
+                usage_identity=entry.usage_identity,
+                source=entry.source,
+                observed_at=entry.observed_at,
                 created_at=entry.created_at,
             )
         )
@@ -2486,6 +2492,12 @@ class PostgresBudgetLedgerRepository(BudgetLedgerRepositoryInterface):
                 select(BudgetLedgerModel).where(BudgetLedgerModel.project_id == project_id)
             ).all()
         ]
+
+    def get_by_usage_identity(self, usage_identity: str) -> BudgetLedgerEntry | None:
+        model = self.session.scalars(
+            select(BudgetLedgerModel).where(BudgetLedgerModel.usage_identity == usage_identity)
+        ).first()
+        return budget_ledger_model_to_domain(model) if model else None
 
 
 class PostgresJobAttemptRepository(JobAttemptRepositoryInterface):

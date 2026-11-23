@@ -1044,7 +1044,10 @@ class OperationsDashboardService:
             return False
         entry_type = str(getattr(entry, "entry_type", "")).upper()
         if entry_type in {"SETTLEMENT", "BREACH_SETTLEMENT"}:
-            liquidated = bool(getattr(entry, "reservation_id", None))
+            liquidated = bool(
+                getattr(entry, "reservation_id", None)
+                or getattr(entry, "usage_identity", None)
+            )
         else:
             liquidated = (
                 entry_type == "USAGE"
@@ -1062,7 +1065,7 @@ class OperationsDashboardService:
 
     @staticmethod
     def _ledger_timestamp(entry: BudgetLedgerEntry) -> datetime | None:
-        timestamp = getattr(entry, "created_at", None)
+        timestamp = getattr(entry, "observed_at", None) or getattr(entry, "created_at", None)
         if not isinstance(timestamp, datetime):
             return None
         return timestamp.replace(tzinfo=UTC) if timestamp.tzinfo is None else timestamp

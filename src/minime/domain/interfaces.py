@@ -454,6 +454,9 @@ class BudgetLedgerRepositoryInterface(ABC):
     @abstractmethod
     def list_by_project(self, project_id: str) -> list[BudgetLedgerEntry]: ...
 
+    @abstractmethod
+    def get_by_usage_identity(self, usage_identity: str) -> BudgetLedgerEntry | None: ...
+
 
 class JobAttemptRepositoryInterface(ABC):
     @abstractmethod

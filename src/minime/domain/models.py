@@ -803,6 +803,9 @@ class BudgetLedgerEntry(BaseModel):
     total_tokens: int | None = None
     amount_usd: Decimal
     entry_type: str
+    usage_identity: str | None = None
+    source: str | None = None
+    observed_at: datetime | None = None
     created_at: datetime = Field(default_factory=utc_now)
 
 

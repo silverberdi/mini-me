@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import datetime
 from decimal import Decimal
 from typing import Any
 from uuid import NAMESPACE_URL, uuid5
@@ -30,6 +31,95 @@ class UnreservedCodeReviewUsageAudit:
     attributed_reviews: dict[str, Review]
     unresolved_entries: tuple[BudgetLedgerEntry, ...]
     complete: bool = True
+
+
+@dataclass(frozen=True)
+class ObservedCost:
+    """Provider evidence accepted by the durable settlement boundary."""
+
+    project_id: str
+    job_id: str
+    change_id: str
+    provider: str
+    amount_usd: Decimal
+    usage_identity: str
+    observed_at: datetime
+    model: str | None = None
+    source: str = "provider"
+    role: str = "execution"
+    billing_origin: str | None = None
+    prompt_tokens: int | None = None
+    completion_tokens: int | None = None
+    total_tokens: int | None = None
+
+
+class ObservedCostSettlementService:
+    """Persist only authoritative provider costs, idempotently, in the ledger.
+
+    The caller owns the unit-of-work transaction.  This keeps the ledger write
+    atomic with its completion outcome instead of committing a second command.
+    """
+
+    _KNOWN_PROVIDERS = {"codex", "deepseek", "openrouter"}
+
+    def __init__(self, uow: PersistenceUnitOfWork):
+        self.uow = uow
+
+    def settle(self, observed: ObservedCost) -> BudgetLedgerEntry:
+        provider = observed.provider.strip().lower()
+        if provider not in self._KNOWN_PROVIDERS:
+            raise ValueError("provider identity is not verified")
+        if not observed.usage_identity.strip():
+            raise ValueError("usage identity is required")
+        if not observed.source.strip():
+            raise ValueError("cost source is required")
+        if observed.observed_at.tzinfo is None:
+            raise ValueError("observed timestamp must include timezone")
+        try:
+            amount = Decimal(str(observed.amount_usd))
+        except Exception as exc:
+            raise ValueError("cost amount is required") from exc
+        if not amount.is_finite() or amount <= 0:
+            raise ValueError("cost amount must be an authoritative positive value")
+        existing = self.uow.budget_ledger.get_by_usage_identity(observed.usage_identity)
+        if existing:
+            if (
+                existing.project_id != observed.project_id
+                or existing.provider != provider
+                or existing.amount_usd != amount
+            ):
+                raise ValueError("usage identity conflicts with existing settlement")
+            return existing
+        tokens = (observed.prompt_tokens, observed.completion_tokens, observed.total_tokens)
+        if any(value is not None and (type(value) is not int or value < 0) for value in tokens):
+            raise ValueError("token usage is invalid")
+        if (
+            observed.total_tokens is not None
+            and observed.prompt_tokens is not None
+            and observed.completion_tokens is not None
+            and observed.total_tokens != observed.prompt_tokens + observed.completion_tokens
+        ):
+            raise ValueError("token usage total is inconsistent")
+        entry = BudgetLedgerEntry(
+            project_id=observed.project_id,
+            job_id=observed.job_id,
+            change_id=observed.change_id,
+            provider=provider,
+            billing_origin=observed.billing_origin or provider,
+            role=observed.role,
+            canonical_model_identity=(observed.model or ""),
+            prompt_tokens=observed.prompt_tokens,
+            completion_tokens=observed.completion_tokens,
+            total_tokens=observed.total_tokens,
+            amount_usd=amount,
+            entry_type="SETTLEMENT",
+            usage_identity=observed.usage_identity,
+            source=observed.source,
+            observed_at=observed.observed_at,
+            created_at=observed.observed_at,
+        )
+        self.uow.budget_ledger.save(entry)
+        return entry
 
 
 class BudgetService:
