@@ -6,7 +6,13 @@ Mejora la PWA con una representación compacta y accesible de capacidad y una ú
 ## Requirements
 
 ### Requirement: Compact capacity cards
-The PWA SHALL display each verified provider/model capacity in the same compact, accessible analog-gauge card structure, with its active model, observed value, status (`Normal`, `En ventana`, or `Crítico`), reset time when known, and an explicit unknown state when not verified. A verified provider-reported `remaining_percent` SHALL control the gauge arc and retain the current percentage presentation. When a verified monetary `balance` and `currency` exist without a verified `remaining_percent`, the card SHALL show the actual balance and currency as its primary center value. For a USD balance, the gauge SHALL use USD 20 as a visual reference equal to 100%, computing `balance / 20 * 100` and clamping only the arc to the range 0–100%. The UI SHALL visibly identify this USD 20 reference as a display scale, not provider-reported quota, spending limit, budget, or authorization. A monetary balance in another currency SHALL remain visible but SHALL NOT be converted to a progress value without a defined reference. When neither a verified percentage nor a supported balance is available, the gauge SHALL show an explicit unknown value and a neutral arc. All four provider cards SHALL use the same shared gauge structure and the same precedence rules; provider-specific data acquisition SHALL NOT create provider-specific rendering branches.
+The PWA SHALL display each verified provider/model capacity in the same compact, accessible analog-gauge card structure, with its active model, primary value, status (`Normal`, `En ventana`, or `Crítico`), reset time when known, and an explicit unknown state when not verified. A finite provider-reported `remaining_percent` SHALL control both the gauge arc and the central percentage value. If no verified percentage exists but a verified USD balance does, the card SHALL calculate `balance / 20 * 100`, clamp the displayed projected percentage and arc to 0–100%, and show that projected percentage as the central value. The actual balance and the explicit visual-only nature of the USD 20 reference SHALL remain available in the card's secondary detail. A balance in another currency SHALL NOT be converted into a percentage without a defined reference; it may appear only as secondary detail with a neutral central value and arc. When neither a verified percentage nor a supported USD balance exists, the gauge SHALL show an explicit unknown value and neutral arc. All four provider cards SHALL use the same shared gauge structure and precedence rules; provider-specific data acquisition SHALL NOT create provider-specific rendering branches.
+
+#### Scenario: Provider-reported percentage is the primary value
+- **WHEN** a verified observation includes a finite `remaining_percent`
+- **THEN** the center displays that percentage with a percent sign
+- **AND** the arc represents the same percentage
+- **AND** any balance remains secondary detail
 
 #### Scenario: Responsive verified provider percentage
 - **WHEN** a verified provider observation includes a finite `remaining_percent` on desktop or mobile
@@ -15,48 +21,42 @@ The PWA SHALL display each verified provider/model capacity in the same compact,
 
 #### Scenario: Responsive verified quota card
 - **WHEN** a verified five-hour observation is available on desktop or mobile
-- **THEN** the card presents its provider/model, real remaining value, status, and reset countdown within the shared analog-gauge structure
+- **THEN** the card presents its provider/model, primary percentage when available, status, and reset countdown within the shared analog-gauge structure
 
-#### Scenario: Unknown quota is truthful
-- **WHEN** no verified capacity observation is available
-- **THEN** the card displays an unavailable/unknown state and no fabricated percentage, balance, or reset countdown
-
-#### Scenario: USD balance maps to visual progress when percentage is absent
+#### Scenario: USD balance projects to a central percentage
 - **WHEN** a verified observation has `balance: 10.00`, `currency: USD`, and `remaining_percent: null`
-- **THEN** the card visibly presents `$10.00 USD` in the center of the shared gauge
-- **AND** the gauge arc represents 50% progress
-- **AND** the UI identifies USD 20 as the visual 100% reference
+- **THEN** the center displays `50%`
+- **AND** the arc represents 50%
+- **AND** the actual `$10.00 USD` balance remains secondary detail
+- **AND** the detail identifies USD 20 as a visual reference, not provider-reported quota or a spending limit
 
 #### Scenario: Verified monetary balance is the primary DeepSeek value
 - **WHEN** a verified DeepSeek observation contains `balance: 20.18`, `currency: USD`, and `remaining_percent: null`
-- **THEN** the capacity card visibly presents `$20.18 USD` in the center of its gauge
-- **AND** it does not present `—` or a percentage in place of that balance
+- **THEN** the capacity card displays a projected percentage in the center of its gauge
+- **AND** it presents the actual `$20.18 USD` only in secondary detail
 
-#### Scenario: USD balance at or above the visual reference
-- **WHEN** a verified observation has a USD balance of 20.00 or more and no verified percentage
-- **THEN** the card presents the exact reported monetary balance in its center
-- **AND** the gauge arc is full but does not exceed 100%
-- **AND** the balance text is not clamped or altered
+#### Scenario: Projected percentage is consistent and clamped
+- **WHEN** a verified observation has a USD balance greater than or equal to 20 and no verified percentage
+- **THEN** the center displays at most `100%`
+- **AND** the arc is full and does not exceed 100%
+- **AND** the actual observed balance remains unchanged in secondary detail
 
 #### Scenario: Monetary balance does not invent a gauge denominator
 - **WHEN** DeepSeek reports a USD balance without a provider-reported maximum limit or verified percentage
-- **THEN** the card uses only the explicitly agreed USD 20 display reference for the arc
+- **THEN** the card uses only the explicitly agreed USD 20 display reference for its projected percentage
 - **AND** it identifies the reference as visual only, not as a provider limit or spending policy
 - **AND** it does not infer a provider quota or alter the actual balance
 
 #### Scenario: Zero USD balance
 - **WHEN** a verified observation has `balance: 0.00`, `currency: USD`, and no verified percentage
-- **THEN** the card presents `$0.00 USD`
-- **AND** the gauge arc shows 0% progress
+- **THEN** the center displays `0%`
+- **AND** the arc is empty
+- **AND** the actual `$0.00 USD` balance remains in secondary detail
 
-#### Scenario: Other currencies do not use the USD reference
+#### Scenario: Unsupported currency does not invent a percentage
 - **WHEN** a verified observation has a monetary balance in a currency other than USD and no verified percentage
-- **THEN** the card presents the actual balance and currency
-- **AND** the gauge arc remains neutral because no visual reference for that currency is defined
-
-#### Scenario: Balance remains legible without hover
-- **WHEN** a verified monetary balance is displayed on desktop, touch, or mobile
-- **THEN** the balance and currency are readable directly inside the capacity card without requiring a mouse hover
+- **THEN** the balance and currency may appear in secondary detail
+- **AND** the center and arc remain neutral/unknown
 
 #### Scenario: Unknown quota is truthful and consistent
 - **WHEN** no verified percentage or supported monetary balance is available
@@ -67,9 +67,19 @@ The PWA SHALL display each verified provider/model capacity in the same compact,
 - **WHEN** a DeepSeek observation has no verified `balance` and no verified `remaining_percent`
 - **THEN** the card displays an explicit unavailable/unknown state and does not invent a monetary value, percentage, or maximum
 
+#### Scenario: Shared percentage presentation works on mobile
+- **WHEN** provider capacity cards render at mobile and desktop viewport sizes
+- **THEN** the central percentage remains readable without horizontal overflow
+- **AND** the secondary balance/reference detail remains accessible without relying on hover
+
+#### Scenario: Balance remains legible without hover
+- **WHEN** a verified monetary balance is displayed on desktop, touch, or mobile
+- **THEN** the balance, currency, and projection explanation are readable in secondary detail without requiring a mouse hover
+
 #### Scenario: Shared gauge remains usable on mobile
 - **WHEN** the Dashboard displays provider capacity cards on a mobile viewport
-- **THEN** all four cards retain the same gauge dimensions and readable primary values without horizontal overflow
+- **THEN** all four cards retain the same gauge dimensions and readable primary percentages without horizontal overflow
+- **AND** the secondary balance/reference detail remains accessible without relying on hover
 
 ### Requirement: Single reactive run projection
 The PWA SHALL derive `activeRun`, `nextEligible`, and related view state from one current server snapshot so an active Run cannot also be shown as next work.
