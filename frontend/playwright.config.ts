@@ -37,6 +37,10 @@ export default defineConfig({
     url: `${BASE_URL}/health/live`,
     cwd: '..',
     env: {
+      MINIME_DATABASE_URL:
+        process.env['MINIME_DATABASE_URL'] ||
+        process.env['MINIME_TEST_DATABASE_URL'] ||
+        'postgresql+psycopg://minime_app:360bedbc1f64cd48bbb04f7934ee13bb3ed76ee368aa4a774a23be987587639c@192.168.0.194:5432/minime_test',
       PYTHONPATH: [SOURCE_ROOT, process.env['PYTHONPATH']].filter(Boolean).join(':'),
     },
     reuseExistingServer: !process.env['CI'],
