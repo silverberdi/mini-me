@@ -53,6 +53,9 @@ import { CommonModule } from '@angular/common';
       <div class="mt-2 text-xs font-semibold uppercase tracking-wider text-slate-300 text-center">
         {{ label }}
       </div>
+      <div *ngIf="detail" class="mt-1 max-w-48 break-words text-center text-[10px] leading-tight text-slate-400" data-testid="capacity-secondary-detail">
+        {{ detail }}
+      </div>
     </div>
   `
 })
@@ -63,6 +66,7 @@ export class AnalogGaugeComponent {
   @Input() max: number = 100;
   @Input() unit: string = '%';
   @Input() textValue: string | null = null;
+  @Input() detail: string | null = null;
   @Input() color: 'sky' | 'emerald' | 'amber' | 'rose' = 'sky';
 
   get percent(): number {

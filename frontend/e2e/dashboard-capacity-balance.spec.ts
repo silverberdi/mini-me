@@ -54,19 +54,25 @@ test.describe('Dashboard capacity balance', () => {
     await expect(page.getByTestId('capacity-reference-note')).toContainText('$20 como referencia visual del 100%');
     await expect(page.locator('app-analog-gauge')).toHaveCount(4);
     await expect(providerCard(page, 'Codex').getByTestId('gauge-text-value')).toHaveText('73%');
-    await expect(providerCard(page, 'Antigravity').getByTestId('gauge-text-value')).toHaveText('$15.00 USD');
-    await expect(providerCard(page, 'DeepSeek').getByTestId('gauge-text-value')).toHaveText('$10.00 USD');
+    await expect(providerCard(page, 'Antigravity').getByTestId('gauge-text-value')).toHaveText('75%');
+    await expect(providerCard(page, 'DeepSeek').getByTestId('gauge-text-value')).toHaveText('50%');
+    await expect(providerCard(page, 'Antigravity').getByTestId('capacity-secondary-detail')).toContainText('$15.00 USD');
+    await expect(providerCard(page, 'DeepSeek').getByTestId('capacity-secondary-detail')).toContainText('$10.00 USD');
+    await expect(providerCard(page, 'DeepSeek').getByTestId('capacity-secondary-detail')).toContainText('referencia USD 20 = 100%');
     await expect(providerCard(page, 'OpenRouter').getByTestId('gauge-text-value')).toHaveText('42%');
     expect(await arcOffset(providerCard(page, 'DeepSeek'))).toBeCloseTo(89.535, 2);
     expect(await arcOffset(providerCard(page, 'Antigravity'))).toBeCloseTo(44.7675, 2);
     expect(await arcOffset(providerCard(page, 'OpenRouter'))).toBeCloseTo(103.8606, 2);
 
     await page.setViewportSize({ width: 390, height: 844 });
-    await expect(providerCard(page, 'DeepSeek').getByTestId('gauge-text-value')).toBeVisible();
+    const mobileDeepSeek = providerCard(page, 'DeepSeek');
+    await expect(mobileDeepSeek.getByTestId('gauge-text-value')).toBeVisible();
+    await expect(mobileDeepSeek.getByTestId('capacity-secondary-detail')).toBeVisible();
+    await expect(mobileDeepSeek.getByTestId('capacity-secondary-detail')).toContainText('referencia USD 20 = 100%');
     await expect(page.locator('body')).toHaveJSProperty('scrollWidth', 390);
   });
 
-  test('maps USD 0, 10 and above-reference balances without changing displayed amounts', async ({ context, page }) => {
+  test('maps USD 0, 10 and above-reference balances to matching center percentages and arcs', async ({ context, page }) => {
     await setupAuthSession(context);
     const balances = [0, 10, 20.18];
     let currentBalance = balances[0];
@@ -88,8 +94,10 @@ test.describe('Dashboard capacity balance', () => {
       currentBalance = balance;
       if (balance !== balances[0]) await page.reload();
       const card = providerCard(page, 'DeepSeek');
-      await expect(card.getByTestId('gauge-text-value')).toHaveText(`$${balance.toFixed(2)} USD`);
-      expect(await arcOffset(card)).toBeCloseTo(179.07 * (1 - Math.min(balance / 20, 1)), 2);
+      const expectedPercent = Math.min(100, Math.max(0, Math.round(balance / 20 * 100)));
+      await expect(card.getByTestId('gauge-text-value')).toHaveText(`${expectedPercent}%`);
+      await expect(card.getByTestId('capacity-secondary-detail')).toContainText(`$${balance.toFixed(2)} USD`);
+      expect(await arcOffset(card)).toBeCloseTo(179.07 * (1 - expectedPercent / 100), 2);
     }
   });
 
@@ -102,7 +110,8 @@ test.describe('Dashboard capacity balance', () => {
     await waitForAppMounted(page);
 
     const deepseek = providerCard(page, 'DeepSeek');
-    await expect(deepseek.getByTestId('gauge-text-value')).toHaveText('10.00 EUR');
+    await expect(deepseek.getByTestId('gauge-text-value')).toHaveText('—');
+    await expect(deepseek.getByTestId('capacity-secondary-detail')).toContainText('10.00 EUR');
     expect(await arcOffset(deepseek)).toBeCloseTo(179.07, 2);
 
     const openrouter = providerCard(page, 'OpenRouter');
