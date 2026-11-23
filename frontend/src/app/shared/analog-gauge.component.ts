@@ -6,12 +6,13 @@ import { CommonModule } from '@angular/common';
   standalone: true,
   imports: [CommonModule],
   template: `
-    <div class="group relative flex flex-col items-center justify-center p-4 bg-slate-800/60 rounded-xl border border-slate-700/60 shadow-inner hover:border-slate-500/80 transition-all cursor-pointer">
-      <!-- Floating Tooltip / Popover -->
-      <div *ngIf="sublabel"
-           class="pointer-events-none absolute -top-9 left-1/2 -translate-x-1/2 opacity-0 group-hover:opacity-100 group-hover:pointer-events-auto transition-all duration-200 z-50 bg-slate-950 text-slate-200 text-xs px-3 py-1.5 rounded-lg border border-slate-700 shadow-xl whitespace-nowrap">
-        <span>{{ sublabel }}</span>
-        <div class="absolute top-full left-1/2 -translate-x-1/2 -mt-[1px] border-4 border-transparent border-t-slate-700"></div>
+    <div tabindex="0" class="group relative flex flex-col items-center justify-center p-4 bg-slate-800/60 rounded-xl border border-slate-700/60 shadow-inner hover:border-slate-500/80 focus-within:border-slate-500/80 transition-all cursor-pointer outline-none">
+      <!-- Shared floating detail panel: it has its own space and never replaces primary gauge content. -->
+      <div *ngIf="sublabel || detail"
+           class="pointer-events-none absolute left-1/2 top-full mt-2 w-[min(18rem,calc(100vw-2rem))] -translate-x-1/2 rounded-lg border border-slate-700 bg-slate-950 px-3 py-2 text-center text-xs leading-relaxed text-slate-200 opacity-0 shadow-xl transition-all duration-200 group-hover:pointer-events-auto group-hover:opacity-100 group-focus-within:pointer-events-auto group-focus-within:opacity-100 z-50"
+           data-testid="capacity-detail-panel">
+        <div *ngIf="sublabel" class="font-semibold text-slate-100">{{ sublabel }}</div>
+        <div *ngIf="detail" class="mt-1 break-words text-slate-300" data-testid="capacity-detail-content">{{ detail }}</div>
       </div>
 
       <!-- 270-degree Arc SVG Gauge -->
@@ -52,9 +53,6 @@ import { CommonModule } from '@angular/common';
       <!-- Minimal Provider Title (Codex, Antigravity, DeepSeek, OpenRouter) -->
       <div class="mt-2 text-xs font-semibold uppercase tracking-wider text-slate-300 text-center">
         {{ label }}
-      </div>
-      <div *ngIf="detail" class="mt-1 max-w-48 break-words text-center text-[10px] leading-tight text-slate-400" data-testid="capacity-secondary-detail">
-        {{ detail }}
       </div>
     </div>
   `

@@ -22,7 +22,12 @@ test('reported percent wins; USD fallback projects one clamped percentage for ce
   assert.match(dashboardSrc, /balance\.amount\.toFixed\(2\)/);
   assert.match(dashboardSrc, /return balance\?\.currency === 'USD' \? `\$\{this\.capacityGaugeValue\(provider\)\}%` : null/);
   assert.match(dashboardSrc, /capacitySecondaryDetail\(provider: string\)/);
-  assert.match(gaugeSrc, /data-testid="capacity-secondary-detail"/);
+  assert.match(gaugeSrc, /data-testid="capacity-detail-panel"/);
+  assert.match(gaugeSrc, /data-testid="capacity-detail-content"/);
+  assert.match(gaugeSrc, /group-hover:opacity-100/);
+  assert.match(gaugeSrc, /group-focus-within:opacity-100/);
+  assert.match(gaugeSrc, /w-\[min\(18rem,calc\(100vw-2rem\)\)\]/);
+  assert.doesNotMatch(gaugeSrc, /capacity-secondary-detail/);
 });
 
 test('the shared gauge always renders the same arc and centered primary value', () => {
