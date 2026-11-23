@@ -115,3 +115,44 @@ def test_cost_requires_liquidated_settlement_and_ignores_tokens() -> None:
     uow.budget_ledger = type(uow.budget_ledger)()
     projection = service.project("cost")
     assert projection.no_data is True
+
+
+def test_time_recognizes_duration_ms_key() -> None:
+    uow, service = _service()
+    run = _run("timed-duration", "p1", 1)
+    uow.orchestration_runs.save(run)
+    uow.orchestration_stage_events.save(OrchestrationStageEvent(
+        run_id=run.run_id, to_stage=OrchestrationStage.IMPLEMENTING,
+        from_stage=OrchestrationStage.IMPLEMENTING,
+        created_at=run.created_at,
+        evidence_references={"duration_ms": 180000},
+    ))
+    projection = service.project("time")
+    point = projection.series[1].points[0]
+    assert point.value == 3.0
+
+
+def test_autonomy_derived_from_stage_events_when_metrics_absent() -> None:
+    uow, service = _service()
+    run = _run("event-autonomy", "p1", 1)
+    uow.orchestration_runs.save(run)
+    # 3 completed stages, 1 recovery penalty
+    for _ in range(3):
+        uow.orchestration_stage_events.save(OrchestrationStageEvent(
+            event_type="STAGE_INVOCATION_COMPLETED",
+            run_id=run.run_id, to_stage=OrchestrationStage.IMPLEMENTING,
+            from_stage=OrchestrationStage.IMPLEMENTING,
+            created_at=run.created_at,
+            evidence_references={"status": "COMPLETE", "recovery_count": 0},
+        ))
+    uow.orchestration_stage_events.save(OrchestrationStageEvent(
+        event_type="STAGE_INVOCATION_COMPLETED",
+        run_id=run.run_id, to_stage=OrchestrationStage.PROPOSING,
+        from_stage=OrchestrationStage.PROPOSING,
+        created_at=run.created_at,
+        evidence_references={"status": "FAILED", "recovery_count": 0},
+    ))
+    projection = service.project("autonomy")
+    point = projection.series[1].points[0]
+    # 3 productive / (3 + 1) = 75.0%
+    assert point.value == 75.0
