@@ -745,6 +745,7 @@ def scheduler_run_cmd(
                     # Check if there is an active run
                     active_runs = uow.orchestration_runs.list_runs(project_id=project_id, is_active=True)
                     accepted_doc_action = None
+                    accepted_recovery_action = None
                     if active_runs:
                         active_run = active_runs[0]
                         actions = getattr(uow, "operator_actions", None)
@@ -790,10 +791,15 @@ def scheduler_run_cmd(
                                 and action.parameters_json.get("gate_fingerprint") == gate_fingerprint
                                 and isinstance(action.parameters_json.get("accepted_response"), str)
                             ), None)
+                        accepted_recovery_action = next((action for action in run_actions
+                            if action.action_type == OperatorActionType.RETRY
+                            and getattr(action.status, "value", action.status) == OperatorActionStatus.ACCEPTED.value
+                            and action.parameters_json.get("stage") in {"explore", "propose", "proposal_review", "code_review"}
+                        ), None)
                         if getattr(active_run, "human_gate", None) in (
                             "NEEDS_HUMAN",
                             "READY_FOR_HUMAN_MERGE",
-                        ) and accepted_doc_action is None:
+                        ) and accepted_doc_action is None and accepted_recovery_action is None:
                             # Awaiting human attention (human_gate is the HumanGate enum,
                             # whose values are NEEDS_HUMAN / READY_FOR_HUMAN_MERGE — not
                             # the legacy "HUMAN_REQUIRED" string, which never matched).
@@ -820,6 +826,10 @@ def scheduler_run_cmd(
                     )
 
                     typer.echo(f"[{project_id}] Checking / executing eligible request...")
+                    recovery_stage = (
+                        accepted_recovery_action.parameters_json.get("stage")
+                        if accepted_recovery_action else None
+                    )
                     result = asyncio.run(
                         coordinator.execute_project_request(
                             project_id=project_id,
@@ -829,12 +839,37 @@ def scheduler_run_cmd(
                             ),
                             operator_action_id=(
                                 accepted_doc_action.action_request_id
-                                if accepted_doc_action else None
+                                if accepted_doc_action else (
+                                    accepted_recovery_action.action_request_id
+                                    if accepted_recovery_action else None
+                                )
+                            ),
+                            explore_recovery_authorization_id=(
+                                accepted_recovery_action.action_request_id
+                                if recovery_stage == "explore" else None
+                            ),
+                            propose_recovery_authorization_id=(
+                                accepted_recovery_action.action_request_id
+                                if recovery_stage == "propose" else None
+                            ),
+                            proposal_review_recovery_authorization_id=(
+                                accepted_recovery_action.action_request_id
+                                if recovery_stage == "proposal_review" else None
+                            ),
+                            code_review_recovery_authorization_id=(
+                                accepted_recovery_action.action_request_id
+                                if recovery_stage == "code_review" else None
                             ),
                             thinker_provider=agent_runner.provider_for_role("thinker"),
                             implementer_provider=agent_runner.provider_for_role("implementer"),
                             reviewer_provider=agent_runner.provider_for_role("reviewer"),
-                            target_run_id=(accepted_doc_action.run_id if accepted_doc_action else None),
+                            target_run_id=(
+                                accepted_doc_action.run_id
+                                if accepted_doc_action else (
+                                    accepted_recovery_action.run_id
+                                    if accepted_recovery_action else None
+                                )
+                            ),
                         )
                     )
                     if accepted_doc_action is not None:
@@ -848,6 +883,17 @@ def scheduler_run_cmd(
                             "human_payload": result.human_payload,
                         }
                         uow.operator_actions.save(accepted_doc_action)
+                        uow.commit()
+                    if accepted_recovery_action is not None and result.status != "PAUSED":
+                        accepted_recovery_action.status = OperatorActionStatus.COMPLETED
+                        accepted_recovery_action.summary = f"Accepted {recovery_stage} recovery processed by Scheduler."
+                        accepted_recovery_action.result_payload_json = {
+                            "status": result.status,
+                            "run_id": result.run_id,
+                            "current_stage": result.current_stage.value if result.current_stage else None,
+                            "message": result.message,
+                        }
+                        uow.operator_actions.save(accepted_recovery_action)
                         uow.commit()
                     typer.echo(f"[{project_id}] Result: status={result.status}, run_id={result.run_id}, message={result.message}")
 

@@ -167,6 +167,24 @@ import type { OrchestrationRun, QuotaObservation, TemporalTelemetryProjection, T
               />
 
               <!-- Data Point Circles and Labels -->
+              <ng-container *ngFor="let series of visibleSeries">
+                <circle
+                  *ngFor="let point of series.points"
+                  [attr.cx]="pointX(point.timestamp)"
+                  [attr.cy]="pointY(point.value)"
+                  r="4"
+                  [attr.fill]="series.color"
+                  stroke="#0f172a"
+                  stroke-width="1.5"
+                  [attr.opacity]="hoveredSeriesId && hoveredSeriesId !== series.series_id ? 0.22 : 1"
+                  [attr.data-point-id]="series.series_id + ':' + point.timestamp"
+                  class="cursor-pointer transition-transform hover:scale-125"
+                  (mouseenter)="hoveredSeriesId = series.series_id"
+                  (mouseleave)="hoveredSeriesId = null"
+                >
+                  <title>{{ series.label }}: {{ point.value }} {{ currentProjection?.units || currentDimensionUnit }} ({{ point.timestamp }})</title>
+                </circle>
+              </ng-container>
             </svg>
           </div>
 
@@ -479,6 +497,20 @@ export class DashboardComponent {
       const y = Math.max(20, Math.round(145 - Math.min(1, point.value / max) * 125));
       return `${x},${y}`;
     }).join(' ');
+  }
+
+  pointX(timestamp: string): number {
+    const projection = this.currentProjection;
+    if (!projection || projection.axis.length < 1) return 300;
+    const index = projection.axis.indexOf(timestamp);
+    return projection.axis.length === 1 ? 300 : Math.round(70 + (index * 500 / (projection.axis.length - 1)));
+  }
+
+  pointY(value: number): number {
+    const projection = this.currentProjection;
+    if (!projection) return 145;
+    const max = Math.max(...projection.series.flatMap(item => item.points.map(point => point.value)), 1);
+    return Math.max(20, Math.round(145 - Math.min(1, value / max) * 125));
   }
 
   get yMaxLabel(): string {
