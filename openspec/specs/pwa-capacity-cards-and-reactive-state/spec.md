@@ -6,11 +6,11 @@ Mejora la PWA con una representación compacta y accesible de capacidad y una ú
 ## Requirements
 
 ### Requirement: Compact capacity cards
-The PWA SHALL display each verified provider/model capacity as a compact card with a horizontal progress bar or balance treatment, active model, real value, status (`Normal`, `En ventana`, or `Crítico`), reset time when known, and an explicit unknown state when not verified. When a verified observation provides a finite monetary `balance` and `currency` but no `remaining_percent`, the card SHALL present the monetary balance as its primary visible value with the reported currency, SHALL NOT append `%`, and SHALL NOT derive a progress fraction from an invented maximum.
+The PWA SHALL display each verified provider/model capacity in the same compact, accessible analog-gauge card structure, with its active model, observed value, status (`Normal`, `En ventana`, or `Crítico`), reset time when known, and an explicit unknown state when not verified. When a verified observation provides a finite monetary `balance` and `currency` but no `remaining_percent`, the card SHALL present the monetary balance as its primary visible value with the reported currency inside the gauge, SHALL NOT append `%`, SHALL NOT derive a progress fraction from an invented maximum, and SHALL keep the gauge arc neutral. When a verified percentage is available, the gauge SHALL continue to represent that percentage. The PWA SHALL NOT imply measured progress when no verified percentage exists.
 
 #### Scenario: Responsive verified quota card
 - **WHEN** a verified five-hour observation is available on desktop or mobile
-- **THEN** the card presents its provider/model, real remaining value, status, and reset countdown without using a semicircular gauge
+- **THEN** the card presents its provider/model, real remaining value, status, and reset countdown within the shared analog-gauge structure
 
 #### Scenario: Unknown quota is truthful
 - **WHEN** no verified capacity observation is available
@@ -18,12 +18,14 @@ The PWA SHALL display each verified provider/model capacity as a compact card wi
 
 #### Scenario: Verified monetary balance is the primary DeepSeek value
 - **WHEN** a verified DeepSeek observation contains `balance: 20.18`, `currency: USD`, and `remaining_percent: null`
-- **THEN** the capacity card visibly presents `$20.18 USD` as its primary value
+- **THEN** the capacity card visibly presents `$20.18 USD` in the center of its gauge
 - **AND** it does not present `—` or a percentage in place of that balance
 
 #### Scenario: Monetary balance does not invent a gauge denominator
-- **WHEN** DeepSeek reports a monetary balance without a provider-reported maximum limit
-- **THEN** the card presents the balance treatment without calculating a percentage, artificial maximum, or synthetic needle position
+- **WHEN** DeepSeek reports a monetary balance without a provider-reported maximum limit or verified percentage
+- **THEN** the card presents the balance within the shared gauge structure
+- **AND** its gauge arc remains neutral
+- **AND** it does not calculate a percentage, artificial maximum, or synthetic progress position
 
 #### Scenario: Balance remains legible without hover
 - **WHEN** a verified monetary balance is displayed on desktop, touch, or mobile
