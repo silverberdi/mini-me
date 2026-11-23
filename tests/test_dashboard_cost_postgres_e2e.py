@@ -130,6 +130,9 @@ def _seed_cost_rows(session: Session, project_id: str, job_id: str) -> list[Budg
             amount_usd=Decimal("0.123456"),
             entry_type="SETTLEMENT",
             reservation_id=reservation_ids[0],
+            usage_identity="deepseek:dashboard-cost:1",
+            source="provider-response",
+            observed_at=datetime(2026, 8, 1, 9, 0, tzinfo=UTC),
             created_at=datetime(2026, 8, 1, 9, 0, tzinfo=UTC),
         ),
         BudgetLedgerEntry(
@@ -144,6 +147,9 @@ def _seed_cost_rows(session: Session, project_id: str, job_id: str) -> list[Budg
             amount_usd=Decimal("1.200000"),
             entry_type="SETTLEMENT",
             reservation_id=reservation_ids[1],
+            usage_identity="openrouter:dashboard-cost:1",
+            source="provider-response",
+            observed_at=datetime(2026, 8, 1, 9, 15, tzinfo=UTC),
             created_at=datetime(2026, 8, 1, 9, 15, tzinfo=UTC),
         ),
         BudgetLedgerEntry(
@@ -158,6 +164,9 @@ def _seed_cost_rows(session: Session, project_id: str, job_id: str) -> list[Budg
             amount_usd=Decimal("0.010000"),
             entry_type="SETTLEMENT",
             reservation_id=reservation_ids[2],
+            usage_identity="openrouter:dashboard-cost:2",
+            source="provider-response",
+            observed_at=datetime(2026, 8, 1, 9, 30, tzinfo=UTC),
             created_at=datetime(2026, 8, 1, 9, 30, tzinfo=UTC),
         ),
         BudgetLedgerEntry(
@@ -172,6 +181,9 @@ def _seed_cost_rows(session: Session, project_id: str, job_id: str) -> list[Budg
             amount_usd=Decimal("0.010000"),
             entry_type="SETTLEMENT",
             reservation_id=reservation_ids[3],
+            usage_identity="openrouter:dashboard-cost:3",
+            source="provider-response",
+            observed_at=datetime(2026, 8, 1, 9, 45, tzinfo=UTC),
             created_at=datetime(2026, 8, 1, 9, 45, tzinfo=UTC),
         ),
     ]
@@ -183,6 +195,17 @@ def _seed_cost_rows(session: Session, project_id: str, job_id: str) -> list[Budg
 
 def test_postgres_ledger_rows_flow_through_dashboard_api_and_ui_contract(postgres_cost_uow, tmp_path: Path):
     engine, session_factory, project_id, job_id = postgres_cost_uow
+    with session_factory() as session:
+        empty_uow = PostgresPersistenceUnitOfWork(session)
+        app.dependency_overrides[get_uow] = lambda: empty_uow
+        app.dependency_overrides[get_current_operator] = lambda: AuthorizedOperator(email="e2e@example.com")
+        try:
+            empty_response = TestClient(app).get(f"/api/v1/dashboard/overview?project_id={project_id}")
+        finally:
+            app.dependency_overrides.clear()
+    assert empty_response.status_code == 200
+    assert empty_response.json()["cost"] == {"status": "no_data", "providers": [], "series": []}
+
     with session_factory() as session:
         seeded = _seed_cost_rows(session, project_id, job_id)
 
