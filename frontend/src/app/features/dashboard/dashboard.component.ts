@@ -54,6 +54,7 @@ import type { OrchestrationRun, QuotaObservation } from '../../core/models';
             [value]="capacityGaugeValue('codex')"
             [max]="100"
             [textValue]="capacityTextValue('codex')"
+            [detail]="capacitySecondaryDetail('codex')"
             [sublabel]="capacitySublabel('codex', 'Codex')">
           </app-analog-gauge>
 
@@ -64,6 +65,7 @@ import type { OrchestrationRun, QuotaObservation } from '../../core/models';
             [value]="capacityGaugeValue('antigravity')"
             [max]="100"
             [textValue]="capacityTextValue('antigravity')"
+            [detail]="capacitySecondaryDetail('antigravity')"
             [sublabel]="capacitySublabel('antigravity', 'Antigravity')">
           </app-analog-gauge>
 
@@ -74,6 +76,7 @@ import type { OrchestrationRun, QuotaObservation } from '../../core/models';
             [value]="capacityGaugeValue('deepseek')"
             [max]="100"
             [textValue]="capacityTextValue('deepseek')"
+            [detail]="capacitySecondaryDetail('deepseek')"
             [sublabel]="capacitySublabel('deepseek', 'DeepSeek')">
           </app-analog-gauge>
 
@@ -84,6 +87,7 @@ import type { OrchestrationRun, QuotaObservation } from '../../core/models';
             [value]="capacityGaugeValue('openrouter')"
             [max]="100"
             [textValue]="capacityTextValue('openrouter')"
+            [detail]="capacitySecondaryDetail('openrouter')"
             [sublabel]="capacitySublabel('openrouter', 'OpenRouter')">
           </app-analog-gauge>
         </div>
@@ -368,7 +372,7 @@ export class DashboardComponent {
     if (reportedPercent !== null) return reportedPercent;
 
     const balance = this.quotaBalance(quota);
-    if (balance?.currency === 'USD') return (balance.amount / 20) * 100;
+    if (balance?.currency === 'USD') return Math.min(100, Math.max(0, Math.round((balance.amount / 20) * 100)));
     return null;
   }
 
@@ -377,7 +381,19 @@ export class DashboardComponent {
     if (this.quotaPercent(quota) !== null) return null;
 
     const balance = this.quotaBalance(quota);
-    return balance ? this.formatQuotaBalance(balance) : null;
+    return balance?.currency === 'USD' ? `${this.capacityGaugeValue(provider)}%` : null;
+  }
+
+  capacitySecondaryDetail(provider: string): string | null {
+    const quota = this.getQuota(provider);
+    const balance = this.quotaBalance(quota);
+    if (!balance) return null;
+
+    if (balance.currency !== 'USD') return `${this.formatQuotaBalance(balance)} observado; sin escala porcentual definida`;
+    const projection = this.quotaPercent(quota) === null
+      ? 'porcentaje visual con referencia USD 20 = 100%'
+      : 'saldo observado; porcentaje informado por el proveedor';
+    return `${this.formatQuotaBalance(balance)} observado; ${projection}`;
   }
 
   capacitySublabel(provider: string, fallbackModel: string): string {

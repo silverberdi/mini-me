@@ -14,11 +14,15 @@ test('all four provider cards use the same capacity projection', () => {
   assert.doesNotMatch(dashboardSrc, /get (codex|antigravity|deepseek|openrouter)Value/);
 });
 
-test('reported percent wins; otherwise only USD uses the explicit balance reference', () => {
+test('reported percent wins; USD fallback projects one clamped percentage for center and arc', () => {
   assert.match(dashboardSrc, /if \(reportedPercent !== null\) return reportedPercent/);
   assert.match(dashboardSrc, /balance\?\.currency === 'USD'/);
   assert.match(dashboardSrc, /balance\.amount \/ 20/);
+  assert.match(dashboardSrc, /Math\.round\(\(balance\.amount \/ 20\) \* 100\)/);
   assert.match(dashboardSrc, /balance\.amount\.toFixed\(2\)/);
+  assert.match(dashboardSrc, /return balance\?\.currency === 'USD' \? `\$\{this\.capacityGaugeValue\(provider\)\}%` : null/);
+  assert.match(dashboardSrc, /capacitySecondaryDetail\(provider: string\)/);
+  assert.match(gaugeSrc, /data-testid="capacity-secondary-detail"/);
 });
 
 test('the shared gauge always renders the same arc and centered primary value', () => {
