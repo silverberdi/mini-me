@@ -34,19 +34,27 @@ The system SHALL execute the complementary reviewer CLI/subprocess inside the ca
 - **THEN** the candidate worktree SHALL remain unmodified (no new files, commits, or task checkbox changes) by the reviewer.
 
 ### Requirement: Verdict-first prompt formatting and diff hygiene
-The system SHALL compose the reviewer prompt instructing that the structured review verdict JSON payload be emitted as the first line of output, and SHALL exclude dependency lockfiles and binary assets from the diff passed to the independent reviewer.
+The system SHALL compose reviewer prompts that request the structured review verdict JSON as the first output line. Review input SHALL exclude dependency lockfiles, binary payloads, `src/*/static/**`, `frontend/dist/**`, source maps, and minified JavaScript; sources such as `frontend/src/**` SHALL remain represented. Large inputs SHALL use the configured prompt transport rather than placing an unbounded payload in process arguments. If provider context limits still require partitioning, the system SHALL preserve coverage of every review-relevant changed file and clearly identify the portions supplied to the reviewer; it SHALL NOT silently truncate the diff or claim complete review when relevant changes were omitted. Diff base SHALL resolve from the verified remote tracking base commit (`merge-base`), not an unsynchronized local branch reference.
 
 #### Scenario: Review prompt mandates JSON verdict first
 - **WHEN** the orchestrator builds the prompt for independent proposal or code review
-- **THEN** the prompt explicitly instructs the reviewer to output the single structured JSON verdict object immediately as its very first output line before any narrative remarks.
+- **THEN** it instructs the reviewer to emit one structured JSON verdict object as its first output line before narrative remarks.
 
 #### Scenario: Code review diff excludes non-code lockfiles
-- **WHEN** the orchestrator extracts the git diff for a candidate change
-- **THEN** package lockfiles (`package-lock.json`, `poetry.lock`, `pnpm-lock.yaml`, `yarn.lock`) are excluded from the review diff payload to preserve reviewer context budget.
+- **GIVEN** a candidate diff includes dependency lockfiles, binary payloads, files under `src/*/static/**` or `frontend/dist/**`, source maps, and minified JavaScript alongside authored frontend source
+- **WHEN** the reviewer input is prepared
+- **THEN** the build output and non-reviewable payloads are excluded or represented with concise metadata and provenance
+- **AND** authored source under `frontend/src/**` remains included or otherwise explicitly covered by the review evidence.
+
+#### Scenario: Large reviewer input respects transport and context limits
+- **GIVEN** a candidate reviewer input exceeds the configured safe size for direct process arguments or a single provider context
+- **WHEN** mini me prepares the review invocation
+- **THEN** it uses the configured non-argument prompt transport and, if necessary, partitions the relevant changed-file evidence without silently dropping files
+- **AND** it reports a concrete transport or provider limit if full relevant coverage cannot be achieved.
 
 #### Scenario: Code review diff resolves against remote merge base
 - **WHEN** the orchestrator determines the base ancestor for the review diff
-- **THEN** it resolves the diff against the remote tracking base commit (`merge-base`) rather than a potentially un-synchronized local branch reference.
+- **THEN** it resolves the diff against the verified remote tracking base commit using `merge-base`, not a potentially unsynchronized local branch reference.
 
 ### Requirement: Reviewer findings are grounded in observable test evidence
 The complementary reviewer SHALL evaluate test and database-isolation claims using the exact candidate SHA, repository configuration, executed commands, redacted results, and any matching project CI checks. Narrative disclaimers or agent assertions alone SHALL NOT establish that a test was run, passed, failed, or is impossible; the reviewer SHALL identify a concrete contradiction or missing observable evidence before treating a test claim as a blocking finding. Pending deferred checks SHALL remain pending until conclusive same-SHA CI evidence exists.
