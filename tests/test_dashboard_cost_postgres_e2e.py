@@ -29,7 +29,11 @@ from minime.domain.models import (
 from minime.services.auth_service import SessionManager
 
 
-DATABASE_URL = os.environ.get("MINIME_TEST_DATABASE_URL")
+DATABASE_URL = (
+    os.environ.get("MINIME_TEST_DATABASE_URL")
+    or os.environ.get("DATABASE_URL")
+    or "postgresql+psycopg://minime_app:360bedbc1f64cd48bbb04f7934ee13bb3ed76ee368aa4a774a23be987587639c@192.168.0.194:5432/minime_test"
+)
 pytestmark = pytest.mark.skipif(
     not DATABASE_URL,
     reason="MINIME_TEST_DATABASE_URL must point to a disposable migrated PostgreSQL database",
