@@ -154,7 +154,8 @@ class TemporalMultiseriesTelemetryService:
                 events_repo = getattr(self.uow, "orchestration_stage_events", None)
                 events = list(events_repo.list_by_run(_value(run, "run_id"))) if events_repo and hasattr(events_repo, "list_by_run") else []
                 for event in events:
-                    if _value(event, "event_type") == "STAGE_INVOCATION_COMPLETED":
+                    ev_type = str(_value(event, "event_type") or "").upper()
+                    if ev_type == "STAGE_INVOCATION_COMPLETED":
                         refs = _value(event, "evidence_references", {}) or {}
                         st = str(refs.get("status") or "").upper()
                         rec = int(refs.get("recovery_count", 0) or 0)
@@ -163,6 +164,10 @@ class TemporalMultiseriesTelemetryService:
                         elif st in {"FAILED", "ABANDONED", "PARTIAL"}:
                             penalty += 1
                         penalty += rec
+                    elif ev_type in {"STAGE_INVOCATION_FAILED", "STAGE_INVOCATION_ABANDONED", "STAGE_INVOCATION_HUMAN_REQUIRED"}:
+                        penalty += 1
+                if bool(_value(run, "human_gate")):
+                    penalty += 1
             if productive + penalty == 0:
                 return None
             return timestamp, round(max(0.0, min(100.0, productive * 100.0 / (productive + penalty))), 3), [_iso(timestamp)], 0
