@@ -1736,6 +1736,8 @@ class GitHubAdapter(GitHubAdapterInterface):
                 "node_id": data.get("node_id"),
                 "url": data.get("html_url"),
                 "state": data.get("state"),
+                "mergeable": data.get("mergeable"),
+                "mergeable_state": data.get("mergeable_state"),
                 "is_merged": bool(data.get("merged", False)),
                 "merged_at": data.get("merged_at"),
                 "merged_by": merged_by,
@@ -2023,7 +2025,22 @@ class GitHubAdapter(GitHubAdapterInterface):
             payload["commit_message"] = commit_message
 
         try:
-            response = self._request("PUT", f"/repos/{repo}/pulls/{pr_number}/merge", json=payload)
+            response = None
+            readback = None
+            for attempt in range(3):
+                response = self._request("PUT", f"/repos/{repo}/pulls/{pr_number}/merge", json=payload)
+                if response.status_code != 405:
+                    break
+                readback = self.get_pull_request_details(repository, pr_number)
+                state = readback.data if readback.outcome is ExternalOutcome.SUCCESS else None
+                mergeability_unknown = isinstance(state, dict) and (
+                    state.get("mergeable") is None
+                    or str(state.get("mergeable_state") or "").lower() == "unknown"
+                )
+                if not mergeability_unknown:
+                    break
+                if attempt < 2:
+                    time.sleep(0.2 * (attempt + 1))
             if response.status_code == 200:
                 data = response.json()
                 return ExternalActionResult(
@@ -2044,6 +2061,28 @@ class GitHubAdapter(GitHubAdapterInterface):
                     error_message=f"GitHub App is unauthorized to merge pull request #{pr_number}.",
                 )
             if response.status_code == 405:
+                state = readback.data if readback.outcome is ExternalOutcome.SUCCESS else None
+                if readback.outcome is not ExternalOutcome.SUCCESS or not isinstance(state, dict):
+                    return ExternalActionResult(
+                        outcome=ExternalOutcome.UNKNOWN,
+                        source_adapter="github_rest",
+                        reason_code=ExternalReasonCode.UNOBSERVABLE,
+                        retry_safety=RetrySafety.SAFE,
+                        provider_detail=f"HTTP 405; PR read-back was unobservable: {readback.error_message or readback.provider_detail or 'no details'}",
+                        error_message=f"GitHub rejected merge of pull request #{pr_number}, but its current mergeability could not be observed. No retry was attempted.",
+                    )
+                if isinstance(state, dict) and (
+                    state.get("mergeable") is None
+                    or str(state.get("mergeable_state") or "").lower() == "unknown"
+                ):
+                    return ExternalActionResult(
+                        outcome=ExternalOutcome.UNKNOWN,
+                        source_adapter="github_rest",
+                        reason_code=ExternalReasonCode.UNOBSERVABLE,
+                        retry_safety=RetrySafety.SAFE,
+                        provider_detail=f"HTTP 405 after bounded retries; mergeability remains unknown: {response.text}",
+                        error_message=f"GitHub has not determined whether pull request #{pr_number} is mergeable; safe retry limit reached.",
+                    )
                 return ExternalActionResult(
                     outcome=ExternalOutcome.FAILURE,
                     source_adapter="github_rest",

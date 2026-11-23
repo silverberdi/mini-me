@@ -12,8 +12,8 @@ import re
 import signal
 from dataclasses import dataclass
 from dataclasses import replace as dataclass_replace
-from decimal import Decimal
 from datetime import datetime
+from decimal import Decimal
 from pathlib import Path
 from typing import Any
 from uuid import uuid4
@@ -54,7 +54,6 @@ from minime.services.agent_runner import (
     NativeOpenSpecWorkflowUnavailable,
     ResolvedWorkflow,
 )
-from minime.services.budget_service import ObservedCost, ObservedCostSettlementService
 from minime.services.apply_checkpoint_recovery import (
     REBASELINE_RESPONSE,
     RECOVERY_GATE,
@@ -62,6 +61,7 @@ from minime.services.apply_checkpoint_recovery import (
     human_gate_fingerprint,
     recovery_gate_payload,
 )
+from minime.services.budget_service import ObservedCost, ObservedCostSettlementService
 from minime.services.openspec_tasks import OpenSpecTaskTracker
 from minime.services.pr_preparer_service import PrPreparationInput, PrPreparerService
 from minime.services.proposal_feasibility import ProposalFeasibilityEvaluator
@@ -1015,6 +1015,20 @@ class NativeOrchestrationCoordinator:
             json.dumps(payload, sort_keys=True).encode()
         ).hexdigest()
         return payload
+
+    @staticmethod
+    def _review_correction_identity_mismatches(
+        review: dict[str, Any], run_id: str, change_name: str, candidate: dict[str, Any]
+    ) -> list[str]:
+        """Keep a review correction bound to the Run, Change, and exact workspace candidate."""
+        bindings = (
+            ("Run", review.get("candidate_run_id"), run_id),
+            ("Change", review.get("candidate_change_name"), change_name),
+            ("candidate SHA", review.get("candidate_sha"), candidate.get("candidate_sha")),
+            ("branch", review.get("candidate_branch"), candidate.get("branch")),
+            ("worktree", review.get("candidate_worktree"), candidate.get("worktree")),
+        )
+        return [label for label, expected, actual in bindings if expected and expected != actual]
 
     async def _candidate_file_fingerprints(self, worktree_path: Path) -> dict[str, str]:
         """Hash tracked and untracked candidate files for narrow Update scope checks."""
@@ -2705,6 +2719,14 @@ class NativeOrchestrationCoordinator:
             effective_explore_recovery_id = explore_recovery_authorization_id or operator_action_id
             if recovery_needed:
                 if not effective_explore_recovery_id:
+                    details = dict(active_run.stop_details or {})
+                    details["recovery_hold"] = {
+                        "stage": "explore",
+                        "reason": "La evidencia previa de Explore está incompleta o no se pudo verificar.",
+                        "action": "Autorizar una única repetición de Explore para este Run.",
+                        "attempt_id": (details.get("explore_attempt") or {}).get("attempt_id"),
+                    }
+                    self._persist_run_stop_details(active_run, details)
                     return OrchestrationCoordinationResult(
                         status="PAUSED",
                         run_id=active_run.run_id,
@@ -2880,7 +2902,11 @@ class NativeOrchestrationCoordinator:
             complete_proposal = (
                 isinstance(planning, dict) and planning.get("status") == "PASS"
             ) or (planning is None and self._proposal_artifacts_present(worktree_path, change_name))
-            propose_recovery_needed = (
+            retryable_propose_attempt = (
+                isinstance(stored_propose_attempt, dict)
+                and stored_propose_attempt.get("status") in {"FAILED", "AMBIGUOUS", "IN_PROGRESS"}
+            )
+            propose_recovery_needed = retryable_propose_attempt or (
                 active_run.current_stage == OrchestrationStage.PROPOSING
                 and (
                     stored_propose_attempt is not None
@@ -2918,6 +2944,14 @@ class NativeOrchestrationCoordinator:
                 and not propose_recovery_authorization_id
                 and not pending_revision
             ):
+                details = dict(active_run.stop_details or {})
+                details["recovery_hold"] = {
+                    "stage": "propose",
+                    "reason": "Propose quedó incompleto y requiere autorización explícita para continuar.",
+                    "action": "Autorizar una única continuación de Propose para este Run y Change.",
+                    "attempt_id": (details.get("propose_attempt") or {}).get("attempt_id"),
+                }
+                self._persist_run_stop_details(active_run, details)
                 return OrchestrationCoordinationResult(
                     status="PAUSED",
                     run_id=active_run.run_id,
@@ -3694,6 +3728,24 @@ class NativeOrchestrationCoordinator:
             pending_corrections = list(
                 (active_run.stop_details or {}).get("pending_corrections") or []
             )
+            review_evidence = (active_run.stop_details or {}).get("code_review") or {}
+            if pending_corrections and review_evidence.get("status") == "changes_required":
+                apply_identity = await self._stage_candidate_identity(
+                    active_run, worktree_path, "APPLY"
+                )
+                identity_mismatches = self._review_correction_identity_mismatches(
+                    review_evidence, active_run.run_id, change_name, apply_identity
+                )
+                if identity_mismatches:
+                    return OrchestrationCoordinationResult(
+                        status="PAUSED", run_id=active_run.run_id,
+                        current_stage=OrchestrationStage.IMPLEMENTING,
+                        message=(
+                            "Reviewer corrections are bound to a different "
+                            + ", ".join(identity_mismatches)
+                            + ". The correction findings were preserved; no Apply was dispatched."
+                        ),
+                    )
             prior = (active_run.stop_details or {}).get("apply_snapshot")
             if accepted_checkpoint_recovery_response:
                 prior = (
@@ -3845,6 +3897,7 @@ class NativeOrchestrationCoordinator:
                 invocation = await self._begin_stage_invocation(
                     uow, active_run, worktree_path, "APPLY",
                     allow_human_resume=bool(operator_clarification),
+                    authorized_retry=bool(pending_corrections),
                     operator_action_id=(operator_action_id if accepted_apply_gate_response else None),
                 )
                 if invocation is None:
@@ -4335,6 +4388,11 @@ class NativeOrchestrationCoordinator:
                 details["code_review"] = {
                     "attempt_id": attempt_id,
                     **c_dict,
+                    "candidate_run_id": active_run.run_id,
+                    "candidate_change_name": active_run.change_name,
+                    "candidate_branch": review_invocation.candidate.get("branch"),
+                    "candidate_worktree": review_invocation.candidate.get("worktree"),
+                    "candidate_fingerprint": review_invocation.candidate.get("candidate_fingerprint"),
                     "round": prior_round,
                 }
                 active_run.stop_details = details
@@ -5602,9 +5660,11 @@ class NativeOrchestrationCoordinator:
         if result is None or getattr(result, "exit_code", None) != 0:
             return False
         if getattr(result, "workflow_handoff_required", False):
-            report = getattr(result, "workflow_handoff", None)
-            if report is None or getattr(report, "status", None) != "COMPLETE":
-                return False
+            operation = getattr(getattr(result, "workflow", None), "operation", None)
+            if operation not in {"propose", "continue"}:
+                report = getattr(result, "workflow_handoff", None)
+                if report is None or getattr(report, "status", None) != "COMPLETE":
+                    return False
         if getattr(result, "timed_out", False) or getattr(result, "preflight_error", None):
             return False
         if getattr(result, "environment_error", False):
@@ -5677,6 +5737,9 @@ class NativeOrchestrationCoordinator:
         attempt_id = str(uuid4())
         action_key = f"{operation}:{run.run_id}:{attempt_id}"
         details = dict(run.stop_details or {})
+        recovery_hold = details.get("recovery_hold")
+        if isinstance(recovery_hold, dict) and recovery_hold.get("stage") == operation:
+            details.pop("recovery_hold", None)
         previous_attempt = details.get(f"{operation}_attempt") or {}
         details[f"{operation}_attempt"] = {
             "attempt_id": attempt_id,
@@ -6447,13 +6510,11 @@ class NativeOrchestrationCoordinator:
         if operator_clarification:
             prompt += f"\nOperator Clarification Provided:\n{operator_clarification}\n"
         prompt += (
-            "\nIn your final response use exactly one standalone disposition line: "
-            "READY_TO_PROPOSE if no material questions remain, or HUMAN REQUIRED "
-            "if an unresolved decision genuinely blocks Propose. For HUMAN REQUIRED "
-            "include all original options as bullets, then a standalone OPCIONES_ES: "
-            "line and faithful Spanish bullets in the exact same order. Preserve "
-            "technical identifiers and response values. Mentions of "
-            "historical gates must not be presented as disposition lines.\n"
+            "\nReport any unresolved decision that genuinely blocks Propose as a clear "
+            "question with its original options and faithful Spanish translations in the "
+            "same order. Otherwise summarize the Explore findings. Do not emit a special "
+            "success token; completion is determined from the successful invocation and "
+            "its final response. Mentions of historical gates are not current questions.\n"
         )
 
         res = await self.agent_runner.run(
@@ -6469,7 +6530,8 @@ class NativeOrchestrationCoordinator:
         if not self._execution_is_successful(res):
             return {
                 "status": "FAILED",
-                "message": "Explore failed or has no complete authoritative final response.",
+                "message": self._native_stage_failure_message("Explore", res),
+                "execution": res,
             }
 
         # Interpret ONLY explicit, standalone dispositions from the provider's
@@ -6477,10 +6539,11 @@ class NativeOrchestrationCoordinator:
         # misclassify READY_TO_PROPOSE when prior HUMAN REQUIRED gates are quoted.
         output = self._explore_final_message(res.response_output)
         disposition, marker_line = self._explore_disposition(output)
-        if disposition is None:
+        if disposition == "AMBIGUOUS":
             return {
                 "status": "FAILED",
-                "message": "Explore verdict missing or ambiguous; Propose is blocked.",
+                "message": "Explore returned conflicting human-gate signals; Propose is blocked until the response is clarified.",
+                "execution": res,
             }
         if disposition == "HUMAN_REQUIRED":
             lines = output.splitlines()
@@ -6576,12 +6639,28 @@ class NativeOrchestrationCoordinator:
         return provider_response
 
     @staticmethod
+    def _native_stage_failure_message(stage: str, result: Any) -> str:
+        """Expose observed process failure details without treating prose as completion evidence."""
+        if getattr(result, "timed_out", False):
+            return f"{stage} timed out before producing a complete response. The Run is preserved for recovery."
+        reason = getattr(result, "preflight_error", None)
+        if reason:
+            return f"{stage} could not start: {redact_secrets(str(reason))[:400]}. The Run is preserved."
+        if getattr(result, "exit_code", None) not in (0, None):
+            stderr = getattr(result, "stderr", None) or []
+            detail = " | ".join(str(line) for line in stderr[-3:])[:400]
+            return f"{stage} process exited with code {result.exit_code}" + (f": {redact_secrets(detail)}" if detail else ".")
+        if getattr(result, "final_response_status", None) != "COMPLETE":
+            return f"{stage} did not produce a complete final response (status: {getattr(result, 'final_response_status', 'unknown')}). The Run is preserved."
+        return f"{stage} execution failed its process or environment checks. The Run is preserved."
+
+    @staticmethod
     def _explore_disposition(response: str) -> tuple[str | None, int]:
-        """Require exactly one verdict marker, not incidental status mentions.
+        """Recognize an explicit human hold; success is established by execution evidence.
 
         Quoted instructions, tool diagnostics, code blocks and narrative about
-        prior HUMAN REQUIRED gates are not valid new human checkpoints.
-        Competing explicit markers fail closed rather than silently advancing.
+        prior HUMAN REQUIRED gates are not valid new human checkpoints. A success token
+        is not required; conflicting live signals remain ambiguous and fail closed.
         """
         pattern = re.compile(
             r"^(?:#{1,6}\s+)?(?:\*\*)?"
@@ -6601,7 +6680,13 @@ class NativeOrchestrationCoordinator:
             if found:
                 status = found.group(1).replace(" ", "_")
                 matches.append((status, index))
-        return matches[0] if len(matches) == 1 else (None, -1)
+        human_matches = [item for item in matches if item[0] == "HUMAN_REQUIRED"]
+        ready_matches = [item for item in matches if item[0] == "READY_TO_PROPOSE"]
+        if human_matches and ready_matches:
+            return "AMBIGUOUS", -1
+        if human_matches:
+            return human_matches[0]
+        return ("READY_TO_PROPOSE", ready_matches[0][1]) if ready_matches else ("READY_TO_PROPOSE", -1)
 
     @staticmethod
     def _proposal_revision_prompt(revision: dict[str, Any] | None) -> str:
@@ -6743,9 +6828,8 @@ class NativeOrchestrationCoordinator:
         )
         report = getattr(res, "workflow_handoff", None)
         if (
-            getattr(res, "workflow_handoff_required", False)
-            and report is not None
-            and report.status != "COMPLETE"
+            report is not None
+            and report.status == "HUMAN_REQUIRED"
             and getattr(res, "exit_code", None) == 0
             and not getattr(res, "timed_out", False)
             and not getattr(res, "preflight_error", None)
@@ -6774,7 +6858,6 @@ class NativeOrchestrationCoordinator:
                     ),
                     "execution": res,
                 }
-            return {"status": "INCOMPLETE", "message": message}
         if not self._execution_is_successful(res):
             if self._proposal_artifacts_present(worktree_path, change_name):
                 logger.info(
@@ -7499,7 +7582,7 @@ class NativeOrchestrationCoordinator:
             return _REVIEW_ADVANCE if stored.get("verdict") == "READY_TO_MERGE" else _REVIEW_CORRUPT
         if status == "changes_required":
             return _REVIEW_REJECTED
-        if status in {"provider_error", "invalid_response"}:
+        if status in {"provider_error", "invalid_response", "coverage_incomplete"}:
             return _REVIEW_TECHNICAL_FAILURE
         return _REVIEW_AMBIGUOUS
 
@@ -7511,6 +7594,8 @@ class NativeOrchestrationCoordinator:
             return f"Independent {kind} review requested changes: {result.get('summary', 'see findings')}. Worktree preserved."
         if status == "provider_error":
             return f"Independent {kind} review provider failed: {result.get('error', 'unknown error')}. Worktree preserved."
+        if status == "coverage_incomplete":
+            return f"Independent {kind} review could not cover the complete candidate: {result.get('error', 'context limit exceeded')}. Worktree preserved."
         if status == "invalid_response":
             err = result.get("error", "malformed output")
             diag = result.get("raw_diagnostic")
@@ -8303,6 +8388,141 @@ class NativeOrchestrationCoordinator:
         except MalformedReviewOutputError:
             return VerifyOutcome("FAILED", "Native Verify returned an invalid structured result.")
 
+    async def _code_review_input(
+        self, worktree_path: Path, diff_range: str
+    ) -> tuple[str, dict[str, Any]]:
+        """Build a review diff, excluding only generated files explicitly marked by Git."""
+        names_result = await self._git_run(
+            worktree_path, ["diff", "--name-only", "-z", diff_range, "--"]
+        )
+        changed = [name for name in names_result.stdout.split("\0") if name]
+        lockfiles = {"package-lock.json", "poetry.lock", "pnpm-lock.yaml", "yarn.lock"}
+        candidates = [name for name in changed if Path(name).name not in lockfiles]
+        generated: set[str] = set()
+        if candidates:
+            attrs = await self._git_run(
+                worktree_path,
+                ["check-attr", "-z", "linguist-generated", "--", *candidates],
+            )
+            fields = attrs.stdout.split("\0")
+            generated = {
+                fields[index]
+                for index in range(0, len(fields) - 2, 3)
+                if fields[index + 1] == "linguist-generated"
+                and fields[index + 2].strip().lower() in {"set", "true"}
+            }
+        included = [name for name in candidates if name not in generated]
+        diff = ""
+        if included:
+            diff_result = await self._git_run(
+                worktree_path, ["diff", diff_range, "--", *included]
+            )
+            diff = diff_result.stdout
+        return diff, {
+            "changed_files": len(changed),
+            "included_files": len(included),
+            "excluded_lockfiles": len(changed) - len(candidates),
+            "excluded_generated_files": sorted(generated),
+            "binary_bodies": "omitted by git diff",
+            "source_coverage_complete": True,
+        }
+
+    @staticmethod
+    def _partition_review_diff(diff: str, byte_budget: int) -> tuple[list[str], str | None]:
+        """Split a complete Git diff at file/hunk boundaries without dropping bytes."""
+        if byte_budget <= 0:
+            return [], "The configured reviewer context leaves no room for diff evidence."
+        if not diff:
+            return [""], None
+
+        sections = re.split(r"(?=^diff --git )", diff, flags=re.MULTILINE)
+        partitions: list[str] = []
+        current = ""
+
+        def size(value: str) -> int:
+            return len(value.encode("utf-8"))
+
+        for section in sections:
+            if not section:
+                continue
+            pieces = [section]
+            if size(section) > byte_budget:
+                hunk_starts = [match.start() for match in re.finditer(r"^@@ ", section, re.MULTILINE)]
+                if not hunk_starts:
+                    return [], f"A changed-file diff section exceeds the context budget: {section.splitlines()[0]}"
+                header = section[: hunk_starts[0]]
+                hunks = [
+                    section[start : hunk_starts[index + 1] if index + 1 < len(hunk_starts) else len(section)]
+                    for index, start in enumerate(hunk_starts)
+                ]
+                pieces = []
+                hunk_group = ""
+                for hunk in hunks:
+                    candidate = header + hunk_group + hunk
+                    if size(header + hunk) > byte_budget:
+                        return [], f"A single diff hunk exceeds the context budget: {section.splitlines()[0]}"
+                    if hunk_group and size(candidate) > byte_budget:
+                        pieces.append(header + hunk_group)
+                        hunk_group = hunk
+                    else:
+                        hunk_group += hunk
+                if hunk_group:
+                    pieces.append(header + hunk_group)
+
+            for piece in pieces:
+                if size(piece) > byte_budget:
+                    return [], f"A changed-file diff section exceeds the context budget: {section.splitlines()[0]}"
+                if current and size(current + piece) > byte_budget:
+                    partitions.append(current)
+                    current = piece
+                else:
+                    current += piece
+
+        if current:
+            partitions.append(current)
+        def changed_hunks(value: str) -> list[str]:
+            result: list[str] = []
+            for file_section in re.split(r"(?=^diff --git )", value, flags=re.MULTILINE):
+                starts = [match.start() for match in re.finditer(r"^@@ ", file_section, re.MULTILINE)]
+                result.extend(
+                    file_section[start : starts[index + 1] if index + 1 < len(starts) else len(file_section)]
+                    for index, start in enumerate(starts)
+                )
+            return result
+
+        original_files = set(re.findall(r"^diff --git .+$", diff, re.MULTILINE))
+        partition_files = set(re.findall(r"^diff --git .+$", "".join(partitions), re.MULTILINE))
+        if not original_files.issubset(partition_files) or changed_hunks("".join(partitions)) != changed_hunks(diff):
+            return [], "The reviewer diff could not be partitioned without losing changed-file evidence."
+        return partitions, None
+
+    @classmethod
+    def _configured_review_context_tokens(cls, uow: Any, project_id: str | None) -> int | None:
+        """Return a model context limit only when the project's exact model is registered."""
+        if not uow or not project_id:
+            return None
+        project = uow.projects.get_by_id(project_id) if hasattr(uow, "projects") else None
+        profiles = getattr(project, "agent_profiles", {}) if project else {}
+        raw = profiles.get("independent_review") if isinstance(profiles, dict) else None
+        if hasattr(raw, "model_dump"):
+            raw = raw.model_dump()
+        if not isinstance(raw, dict):
+            return None
+        identity = (
+            str(raw.get("provider_id") or "").strip(),
+            str(raw.get("harness_id") or "").strip(),
+            str(raw.get("model_id") or "").strip(),
+        )
+        registry = getattr(uow, "provider_model_registry", None)
+        if not all(identity) or registry is None or not hasattr(registry, "get"):
+            return None
+        try:
+            model = registry.get(*identity)
+        except (LookupError, ValueError):
+            return None
+        limit = getattr(model, "max_context_tokens", None)
+        return limit if isinstance(limit, int) and not isinstance(limit, bool) and limit > 0 else None
+
     async def _run_code_review(
         self,
         worktree_path: Path,
@@ -8327,97 +8547,145 @@ class NativeOrchestrationCoordinator:
                 except Exception:
                     pass
 
-        diff_cmd = [
-            "diff",
-            diff_range,
-            "--",
-            ".",
-            ":!package-lock.json",
-            ":!poetry.lock",
-            ":!pnpm-lock.yaml",
-            ":!yarn.lock",
-        ]
-        diff_result = await self._git_run(worktree_path, diff_cmd)
-        diff = diff_result.stdout
-        prompt = (
-            f"You are the independent reviewer agent (read-only). Perform code review on OpenSpec change '{change_name}'.\n\n"
-            f"{_REVIEW_VERDICT_SCHEMA_HINT}\n\n"
-            f"Candidate Diff:\n{diff}\n\n"
-            f"Evaluate only substantive correctness, security, and scope defects. "
-            f"Do NOT request wording or formatting changes. "
-            f"A BLOCKER means the change cannot be implemented safely at all; a MAJOR means a real "
-            f"correctness or security gap; a MINOR is a nit that must not block. Do not re-flag a "
-            f"requirement that is already covered by an existing task; report only findings that "
-            f"are new and material.\n"
-            "Do not use APPROVED prose."
-        )
+        diff, review_input = await self._code_review_input(worktree_path, diff_range)
         model = (
             self._configured_model(uow, project_id, "reviewer") if (uow and project_id) else None
         )
         reviewer_id = f"{provider}:{model or 'reviewer'}"
-        res = await self.agent_runner.run(
-            worktree_path=worktree_path,
-            prompt_context=prompt,
-            project_id=project_id,
-            role="reviewer",
-            provider=provider,
-            reviewer_identity=reviewer_id,
-            process_start_observer=process_start_observer,
+        prompt_prefix = (
+            f"You are the independent reviewer agent (read-only). Perform code review on OpenSpec change '{change_name}'.\n\n"
+            f"{_REVIEW_VERDICT_SCHEMA_HINT}\n\n"
+            "Evaluate only substantive correctness, security, and scope defects. "
+            "Do NOT request wording or formatting changes. "
+            "A BLOCKER means the change cannot be implemented safely at all; a MAJOR means a real "
+            "correctness or security gap; a MINOR is a nit that must not block. Do not re-flag a "
+            "requirement that is already covered by an existing task; report only findings that "
+            "are new and material.\n"
+            "Do not use APPROVED prose.\n\nCandidate Diff:\n"
         )
-        base_record = {
-            "reviewer_provider": provider,
-            "reviewer_model": model,
-            "candidate_sha": candidate_sha,
-            "recorded_at": utc_now().isoformat(),
-        }
-        if not self._execution_is_successful(res):
-            return ReviewResult(
-                {
-                    **base_record,
+        prompt_suffix = "\n\n"
+        context_limit = self._configured_review_context_tokens(uow, project_id)
+        review_input["provider_context_limit_tokens"] = context_limit
+        partitions = [diff]
+        partition_error = None
+        if context_limit:
+            # UTF-8 byte count is a conservative upper bound for tokenizer input;
+            # reserve 35% of the configured context for system prompt and response.
+            prompt_byte_budget = (context_limit * 65) // 100
+            def partition_note(index: int, total: int) -> str:
+                return (
+                    f"Partition {index} of {total} for the same candidate. Review this complete partition; "
+                    "the coordinator combines all partition findings and will not approve if any partition is incomplete.\n\n"
+                )
+
+            max_partition_count = max(
+                1,
+                len(re.findall(r"^diff --git ", diff, re.MULTILINE))
+                + len(re.findall(r"^@@ ", diff, re.MULTILINE)),
+            )
+            diff_byte_budget = prompt_byte_budget - len(
+                (prompt_prefix + prompt_suffix + partition_note(max_partition_count, max_partition_count)).encode("utf-8")
+            )
+            partitions, partition_error = self._partition_review_diff(diff, diff_byte_budget)
+        if partition_error:
+            review_input.update({
+                "coverage_complete": False,
+                "partition_count": 0,
+                "coverage_error": partition_error,
+            })
+            return ReviewResult({
+                "reviewer_provider": provider,
+                "reviewer_model": model,
+                "candidate_sha": candidate_sha,
+                "review_input": review_input,
+                "recorded_at": utc_now().isoformat(),
+                "status": "coverage_incomplete",
+                "verdict": None,
+                "findings": [],
+                "error": partition_error,
+            })
+
+        review_input["partition_count"] = len(partitions)
+        parsed_partitions = []
+        for index, partition in enumerate(partitions, start=1):
+            note = partition_note(index, len(partitions)) if len(partitions) > 1 else ""
+            res = await self.agent_runner.run(
+                worktree_path=worktree_path,
+                prompt_context=f"{prompt_prefix}{note}{partition}{prompt_suffix}",
+                project_id=project_id,
+                role="reviewer",
+                provider=provider,
+                reviewer_identity=reviewer_id,
+                process_start_observer=process_start_observer,
+            )
+            if not self._execution_is_successful(res):
+                review_input.update({"coverage_complete": False, "completed_partitions": index - 1})
+                return ReviewResult({
+                    "reviewer_provider": provider,
+                    "reviewer_model": model,
+                    "candidate_sha": candidate_sha,
+                    "review_input": review_input,
+                    "recorded_at": utc_now().isoformat(),
                     "status": "provider_error",
                     "verdict": None,
                     "findings": [],
                     "error": self._review_failure_error(res),
-                }
-            )
-        try:
-            parsed = parse_review_verdict(res.response_output)
-            findings_data = [
-                f.model_dump() if hasattr(f, "model_dump") else dict(f) for f in parsed.findings
-            ]
-            if parsed.verdict.value == "READY_TO_MERGE":
-                return ReviewResult(
-                    {
-                        **base_record,
-                        "status": "approved",
-                        "verdict": parsed.verdict.value,
-                        "findings": [],
-                    }
-                )
-            return ReviewResult(
-                {
-                    **base_record,
-                    "status": "changes_required",
-                    "verdict": parsed.verdict.value,
-                    "findings": findings_data,
-                    "summary": parsed.summary,
-                }
-            )
-        except MalformedReviewOutputError as exc:
-            raw_text = res.response_output or ("\n".join(res.stdout) if res.stdout else "")
-            diag_prefix = raw_text[:500]
-            diag_suffix = raw_text[-500:] if len(raw_text) > 500 else ""
-            raw_diagnostic = f"Prefix: {diag_prefix!r} | Suffix: {diag_suffix!r}" if raw_text else "Empty response"
-            return ReviewResult(
-                {
-                    **base_record,
+                })
+            try:
+                parsed_partitions.append(parse_review_verdict(res.response_output))
+            except MalformedReviewOutputError as exc:
+                review_input.update({"coverage_complete": False, "completed_partitions": index - 1})
+                raw_text = res.response_output or ("\n".join(res.stdout) if res.stdout else "")
+                return ReviewResult({
+                    "reviewer_provider": provider,
+                    "reviewer_model": model,
+                    "candidate_sha": candidate_sha,
+                    "review_input": review_input,
+                    "recorded_at": utc_now().isoformat(),
                     "status": "invalid_response",
                     "verdict": None,
                     "findings": [],
                     "error": str(exc),
-                    "raw_diagnostic": raw_diagnostic,
-                }
-            )
+                    "raw_diagnostic": raw_text[:500],
+                })
+
+        base_record = {
+            "reviewer_provider": provider,
+            "reviewer_model": model,
+            "candidate_sha": candidate_sha,
+            "review_input": review_input,
+            "recorded_at": utc_now().isoformat(),
+        }
+        findings_data = [
+            f.model_dump() if hasattr(f, "model_dump") else dict(f)
+            for parsed in parsed_partitions
+            for f in parsed.findings
+        ]
+        unique_findings = {
+            json.dumps(finding, ensure_ascii=False, sort_keys=True): finding
+            for finding in findings_data
+        }
+        findings_data = list(unique_findings.values())
+        review_input["coverage_complete"] = True
+        review_input["completed_partitions"] = len(parsed_partitions)
+        summary = "Revisión completa." if len(parsed_partitions) == 1 else (
+            f"Revisión completa en {len(parsed_partitions)} partes del mismo candidato."
+        )
+        if findings_data:
+            return ReviewResult({
+                **base_record,
+                "status": "changes_required",
+                "verdict": "CHANGES_REQUIRED",
+                "findings": findings_data,
+                "summary": summary,
+            })
+        return ReviewResult({
+            **base_record,
+            "status": "approved",
+            "verdict": "READY_TO_MERGE",
+            "findings": [],
+            "summary": summary,
+        })
 
     async def _run_sync_and_archive(
         self,

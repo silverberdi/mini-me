@@ -1146,8 +1146,12 @@ async def test_code_review_changes_required_with_findings_rewinds_to_apply(base_
             path=candidate_worktree, branch_name="feature/f5", base_sha="base_sha_123"
         )
     )
-    coordinator._get_git_head_sha = AsyncMock(return_value="sha123456")
-    coordinator._git_run = AsyncMock(return_value=MagicMock(stdout="diff content"))
+    actual_sha = subprocess.check_output(
+        ["git", "-C", str(candidate_worktree), "rev-parse", "HEAD"], text=True
+    ).strip()
+    run.stop_details["code_review"]["candidate_sha"] = actual_sha
+    uow.orchestration_runs.save(run)
+    coordinator._get_git_head_sha = AsyncMock(return_value=actual_sha)
     coordinator._run_apply = AsyncMock(return_value=False)
 
     res = await coordinator.execute_project_request("mini-me")
@@ -1242,7 +1246,7 @@ async def test_apply_injects_pending_corrections(base_setup):
     call = coordinator.agent_runner.run.call_args
     assert call is not None
     prompt = call.kwargs["prompt_context"]
-    assert "CHANGES_REQUIRED" in prompt
+    assert "evidence-backed findings" in prompt.lower()
     assert "Missing tests" in prompt
     assert "Add tests" in prompt
     assert "[BLOCKER] src/x.py" in prompt

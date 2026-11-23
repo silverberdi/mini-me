@@ -354,3 +354,92 @@ def test_git_push_error_redacts_project_installation_token(tmp_path, monkeypatch
     assert result.outcome == ExternalOutcome.FAILURE
     assert "raw-test-access-token" not in (result.error_message or "")
     assert "raw-test-access-token" not in (result.provider_detail or "")
+
+
+def test_merge_retries_405_only_while_github_mergeability_is_unknown(monkeypatch):
+    merge_calls = []
+    sleep_calls = []
+
+    def handler(request):
+        if request.method == "PUT":
+            merge_calls.append(request)
+            if len(merge_calls) == 1:
+                return httpx.Response(405, text="Mergeability is being computed")
+            return httpx.Response(200, json={"merged": True, "sha": "merge-sha"})
+        if request.method == "GET":
+            return httpx.Response(200, json={
+                "number": 42, "state": "open", "merged": False,
+                "mergeable": None, "mergeable_state": "unknown",
+                "head": {"sha": "candidate-sha", "ref": "feature"},
+                "base": {"sha": "base-sha", "ref": "main"},
+            })
+        return httpx.Response(404)
+
+    monkeypatch.setattr("minime.adapters.github.time.sleep", sleep_calls.append)
+    result = GitHubAdapter(auth=_StaticAuth(handler)).merge_pull_request(
+        "owner/repo", 42, candidate_sha="candidate-sha"
+    )
+
+    assert result.outcome == ExternalOutcome.SUCCESS
+    assert len(merge_calls) == 2
+    assert sleep_calls == [0.2]
+
+
+def test_merge_does_not_retry_405_when_readback_confirms_policy_block():
+    methods = []
+
+    def handler(request):
+        methods.append(request.method)
+        if request.method == "PUT":
+            return httpx.Response(405, text="Protected branch")
+        if request.method == "GET":
+            return httpx.Response(200, json={
+                "number": 42, "state": "open", "merged": False,
+                "mergeable": False, "mergeable_state": "blocked",
+                "head": {"sha": "candidate-sha", "ref": "feature"},
+                "base": {"sha": "base-sha", "ref": "main"},
+            })
+        return httpx.Response(404)
+
+    result = GitHubAdapter(auth=_StaticAuth(handler)).merge_pull_request("owner/repo", 42)
+
+    assert result.outcome == ExternalOutcome.FAILURE
+    assert result.reason_code.value == "POLICY_DENIED"
+    assert methods == ["PUT", "GET"]
+
+
+def test_merge_bounds_retries_when_github_mergeability_stays_unknown(monkeypatch):
+    methods = []
+    delays = []
+
+    def handler(request):
+        methods.append(request.method)
+        if request.method == "PUT":
+            return httpx.Response(405, text="Mergeability pending")
+        return httpx.Response(200, json={
+            "number": 42, "state": "open", "merged": False,
+            "mergeable": None, "mergeable_state": "unknown",
+            "head": {"sha": "candidate", "ref": "feature"},
+            "base": {"sha": "base", "ref": "main"},
+        })
+
+    monkeypatch.setattr("minime.adapters.github.time.sleep", delays.append)
+    result = GitHubAdapter(auth=_StaticAuth(handler)).merge_pull_request("owner/repo", 42)
+
+    assert result.outcome == ExternalOutcome.UNKNOWN
+    assert methods == ["PUT", "GET", "PUT", "GET", "PUT", "GET"]
+    assert delays == [0.2, 0.4]
+
+
+def test_merge_405_with_unobservable_readback_is_not_misreported_as_policy_denial():
+    methods = []
+
+    def handler(request):
+        methods.append(request.method)
+        return httpx.Response(405, text="Cannot merge") if request.method == "PUT" else httpx.Response(503)
+
+    result = GitHubAdapter(auth=_StaticAuth(handler)).merge_pull_request("owner/repo", 42)
+
+    assert result.outcome == ExternalOutcome.UNKNOWN
+    assert result.reason_code.value == "UNOBSERVABLE"
+    assert methods == ["PUT", "GET"]

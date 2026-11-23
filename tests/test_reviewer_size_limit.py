@@ -1,9 +1,11 @@
-import pytest
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
+
+import pytest
+
 from minime.services.agent_runner import AgentExecutionResult
 from minime.services.orchestration_coordinator import NativeOrchestrationCoordinator
-from minime.services.review_verdict_parser import parse_review_verdict, MalformedReviewOutputError
+from minime.services.review_verdict_parser import parse_review_verdict
 
 
 @pytest.mark.asyncio
@@ -33,6 +35,13 @@ async def test_code_review_prompt_includes_verdict_first_rule_and_excludes_lockf
         git_calls.append(args)
         if args[0] == "merge-base":
             return SimpleNamespace(returncode=0, stdout="abc1234\n")
+        if args[:3] == ["diff", "--name-only", "-z"]:
+            return SimpleNamespace(
+                returncode=0,
+                stdout="a.js\0package-lock.json\0poetry.lock\0pnpm-lock.yaml\0yarn.lock\0",
+            )
+        if args[0] == "check-attr":
+            return SimpleNamespace(returncode=0, stdout="a.js\0linguist-generated\0unspecified\0")
         return SimpleNamespace(returncode=0, stdout=diff)
 
     coordinator._git_run = fake_git_run
@@ -48,12 +57,9 @@ async def test_code_review_prompt_includes_verdict_first_rule_and_excludes_lockf
     assert "- Tu respuesta DEBE iniciar directamente con el único bloque JSON estructurado" in prompt
 
     # Verify lockfile pathspec exclusions in diff command
-    diff_call = [args for args in git_calls if args[0] == "diff"][0]
-    assert ":!package-lock.json" in diff_call
-    assert ":!poetry.lock" in diff_call
-    assert ":!pnpm-lock.yaml" in diff_call
-    assert ":!yarn.lock" in diff_call
-    assert "abc1234..HEAD" in diff_call
+    diff_calls = [args for args in git_calls if args[0] == "diff"]
+    assert diff_calls[0][:3] == ["diff", "--name-only", "-z"]
+    assert diff_calls[1] == ["diff", "abc1234..HEAD", "--", "a.js"]
 
 
 @pytest.mark.asyncio

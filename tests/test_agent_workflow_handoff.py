@@ -6,11 +6,11 @@ import sys
 from types import SimpleNamespace
 
 import pytest
+
 from minime.config import CliInvocationProfile
 from minime.domain.enums import ExternalOutcome
 from minime.services import agent_runner as agent_runner_module
 from minime.services.agent_confinement import AgentProcessResult
-
 from minime.services.agent_runner import (
     AgentExecutionResult,
     AgentWorkflowHandoff,
@@ -233,11 +233,11 @@ def test_codex_terminal_handoff_is_not_read_from_tool_diagnostics():
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
-    ("operation", "handoff_required"),
-    [("sync", False), ("archive", False), ("propose", True), ("continue", True)],
+    "operation",
+    ["sync", "archive", "propose", "continue"],
 )
-async def test_sync_and_archive_completion_token_is_optional_but_native_handoff_is_parsed(
-    tmp_path, monkeypatch, operation, handoff_required
+async def test_completion_tokens_are_optional_and_human_handoffs_are_parsed(
+    tmp_path, monkeypatch, operation
 ):
     human_required = (
         'MINIME_WORKFLOW_RESULT: {"status":"HUMAN_REQUIRED",'
@@ -284,8 +284,8 @@ async def test_sync_and_archive_completion_token_is_optional_but_native_handoff_
         tmp_path, "Run the native workflow", provider="codex", role="thinker", workflow=workflow
     )
 
-    assert result.workflow_handoff_required is handoff_required
-    assert ("MINIME_WORKFLOW_RESULT:" in FakeConfinement.prompt) is handoff_required
+    assert result.workflow_handoff_required is False
+    assert "MINIME_WORKFLOW_RESULT:" not in FakeConfinement.prompt
     assert result.workflow_handoff is not None
     assert result.workflow_handoff.status == "HUMAN_REQUIRED"
     assert result.workflow_handoff.pending_es == ("Opción A",)
