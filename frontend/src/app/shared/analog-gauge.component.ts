@@ -14,12 +14,6 @@ import { CommonModule } from '@angular/common';
         <div class="absolute top-full left-1/2 -translate-x-1/2 -mt-[1px] border-4 border-transparent border-t-slate-700"></div>
       </div>
 
-      <!-- A monetary balance is a value, not a percentage scale. -->
-      <div *ngIf="textValue; else scaledGauge" class="min-h-28 flex items-center justify-center px-2">
-        <span class="text-2xl font-bold tracking-tight text-white text-center break-words" data-testid="gauge-text-value">{{ textValue }}</span>
-      </div>
-
-      <ng-template #scaledGauge>
       <!-- 270-degree Arc SVG Gauge -->
       <div class="relative w-28 h-28 flex items-center justify-center">
         <svg class="w-28 h-28" viewBox="0 0 100 100">
@@ -48,10 +42,11 @@ import { CommonModule } from '@angular/common';
 
         <!-- Centered Value Display -->
         <div class="absolute inset-0 flex flex-col items-center justify-center pointer-events-none">
-          <span class="text-2xl font-bold tracking-tight text-white">{{ value === null ? '—' : value }}{{ value === null ? '' : unit }}</span>
+          <span class="text-2xl font-bold tracking-tight text-white text-center break-words px-2" data-testid="gauge-text-value">
+            {{ textValue ?? (value === null ? '—' : value + unit) }}
+          </span>
         </div>
       </div>
-      </ng-template>
 
       <!-- Minimal Provider Title (Codex, Antigravity, DeepSeek, OpenRouter) -->
       <div class="mt-2 text-xs font-semibold uppercase tracking-wider text-slate-300 text-center">

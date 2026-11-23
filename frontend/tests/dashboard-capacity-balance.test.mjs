@@ -15,10 +15,11 @@ test('DeepSeek prioritizes a finite observed balance only when percentage is una
   assert.match(dashboardSrc, /\[textValue\]="deepseekTextValue"/);
 });
 
-test('balance presentation is unscaled while percentage presentation keeps the gauge path', () => {
-  assert.match(gaugeSrc, /\*ngIf="textValue; else scaledGauge"/);
+test('balance presentation remains inside the shared gauge while unverified progress stays neutral', () => {
+  assert.doesNotMatch(gaugeSrc, /\*ngIf="textValue; else scaledGauge"/);
+  assert.match(gaugeSrc, /<!-- 270-degree Arc SVG Gauge -->/);
   assert.match(gaugeSrc, /data-testid="gauge-text-value"/);
-  assert.match(gaugeSrc, /<ng-template #scaledGauge>/);
+  assert.match(gaugeSrc, /textValue \?\? \(value === null \? '—' : value \+ unit\)/);
   assert.match(gaugeSrc, /@Input\(\) textValue: string \| null = null/);
   assert.match(gaugeSrc, /stroke-dashoffset/);
   assert.match(gaugeSrc, /value === null \? '—' : value/);
