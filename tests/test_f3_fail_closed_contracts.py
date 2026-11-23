@@ -779,6 +779,20 @@ async def test_explore_verdict_uses_exact_provider_disposition_not_context(
 
 
 @pytest.mark.asyncio
+async def test_explore_human_required_without_bullets_provides_fallback_gate_options(tmp_path):
+    runner = ScriptedRunner("HUMAN REQUIRED\n¿Cómo debemos proceder con el alcance?")
+    resolved = await coordinator(tmp_path, runner)._run_explore(
+        tmp_path, "codex", 461, "F5", "Gherkin", project_id="mini-me"
+    )
+    assert resolved["status"] == "HUMAN_REQUIRED"
+    assert "human_payload" in resolved
+    payload = resolved["human_payload"]
+    assert len(payload["options"]) >= 2
+    assert payload["options"] == payload["options_es"]
+    assert "Proceder a la propuesta" in payload["options"][0]
+
+
+@pytest.mark.asyncio
 async def test_explore_codex_ndjson_uses_final_agent_message_not_tool_logs(tmp_path):
     import json
 
