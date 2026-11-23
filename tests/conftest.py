@@ -1214,6 +1214,10 @@ class InMemoryBudgetLedgerRepository:
     def list_by_project(self, project_id: str) -> list[BudgetLedgerEntry]:
         return [e.model_copy(deep=True) for e in self._store if e.project_id == project_id]
 
+    def get_by_usage_identity(self, usage_identity: str) -> BudgetLedgerEntry | None:
+        entry = next((e for e in self._store if e.usage_identity == usage_identity), None)
+        return entry.model_copy(deep=True) if entry else None
+
 
 class InMemoryJobAttemptRepository(JobAttemptRepositoryInterface):
     def __init__(self):

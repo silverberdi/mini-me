@@ -33,7 +33,7 @@ export default defineConfig({
     },
   ],
   webServer: {
-    command: process.env['E2E_SERVER_CMD'] || `python -m uvicorn minime.api.app:app --host 127.0.0.1 --port ${PORT}`,
+    command: process.env['E2E_SERVER_CMD'] || `python3 -m uvicorn minime.api.app:app --host 127.0.0.1 --port ${PORT}`,
     url: `${BASE_URL}/health/live`,
     cwd: '..',
     env: {

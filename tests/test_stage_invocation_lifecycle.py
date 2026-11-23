@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import subprocess
+from datetime import UTC, datetime
+from decimal import Decimal
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
@@ -76,6 +78,73 @@ async def test_active_claim_suppresses_duplicate_and_completed_verify_reentry(tm
         "STAGE_INVOCATION_COMPLETED",
     ]
     assert events[1].evidence_references["duration_ms"] >= 0
+
+
+@pytest.mark.asyncio
+async def test_completed_stage_settles_explicit_provider_cost_in_same_terminal_event(tmp_path):
+    uow = InMemoryPersistenceUnitOfWork()
+    run = OrchestrationRun(
+        project_id="project-cost-test",
+        change_name="cost-settlement",
+        base_sha="main",
+        current_stage=OrchestrationStage.IMPLEMENTING,
+    )
+    candidate = tmp_path / "candidate"
+    _git_candidate(candidate)
+    coordinator = _coordinator(uow)
+    invocation = await coordinator._begin_stage_invocation(uow, run, candidate, "APPLY")
+    assert invocation is not None
+
+    await coordinator._finish_stage_invocation(
+        uow,
+        run,
+        invocation,
+        "COMPLETE",
+        {
+            "cost_evidence": {
+                "provider": "openrouter",
+                "model": "openrouter/deepseek/deepseek-r1",
+                "amount_usd": Decimal("0.120001"),
+                "usage_identity": "apply:cost-settlement:1",
+                "observed_at": datetime(2026, 11, 23, 12, 0, tzinfo=UTC),
+                "source": "provider-response",
+            }
+        },
+    )
+
+    rows = uow.budget_ledger.list_by_project(run.project_id)
+    events = uow.orchestration_stage_events.list_by_run(run.run_id)
+    assert len(rows) == 1
+    assert rows[0].amount_usd == Decimal("0.120001")
+    assert events[-1].evidence_references["settlement"]["status"] == "SETTLED"
+
+
+@pytest.mark.asyncio
+async def test_completed_stage_without_authoritative_cost_is_explicitly_unsettled(tmp_path):
+    uow = InMemoryPersistenceUnitOfWork()
+    run = OrchestrationRun(
+        project_id="project-unsettled-test",
+        change_name="unsettled-cost",
+        base_sha="main",
+        current_stage=OrchestrationStage.IMPLEMENTING,
+    )
+    candidate = tmp_path / "candidate"
+    _git_candidate(candidate)
+    coordinator = _coordinator(uow)
+    invocation = await coordinator._begin_stage_invocation(uow, run, candidate, "APPLY")
+    assert invocation is not None
+
+    await coordinator._finish_stage_invocation(
+        uow, run, invocation, "COMPLETE", {"cost_evidence": {"usage_identity": "tokens-only"}}
+    )
+
+    assert uow.budget_ledger.list_by_project(run.project_id) == []
+    event = uow.orchestration_stage_events.list_by_run(run.run_id)[-1]
+    assert event.evidence_references["settlement"] == {
+        "status": "UNSETTLED",
+        "reason": "provider_cost_evidence_incomplete",
+        "usage_identity": "tokens-only",
+    }
 
 
 @pytest.mark.asyncio

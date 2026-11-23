@@ -9,6 +9,8 @@ import os
 import re
 import shutil
 from dataclasses import dataclass, replace
+from datetime import datetime
+from decimal import Decimal
 from pathlib import Path
 from typing import Any
 
@@ -144,6 +146,17 @@ class AgentExecutionResult:
     provider_used: str | None = None
     profile_used: str | None = None
     model_used: str | None = None
+    # Monetary data is optional and must be supplied by a provider adapter as
+    # observed evidence. Token counters alone are never converted into cost.
+    observed_cost_usd: Decimal | None = None
+    usage_identity: str | None = None
+    observed_at: datetime | None = None
+    cost_source: str | None = None
+    cost_model: str | None = None
+    cost_provider: str | None = None
+    prompt_tokens: int | None = None
+    completion_tokens: int | None = None
+    total_tokens: int | None = None
 
     @property
     def full_output(self) -> str:

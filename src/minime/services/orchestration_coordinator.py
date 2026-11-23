@@ -12,6 +12,8 @@ import re
 import signal
 from dataclasses import dataclass
 from dataclasses import replace as dataclass_replace
+from decimal import Decimal
+from datetime import datetime
 from pathlib import Path
 from typing import Any
 from uuid import uuid4
@@ -52,6 +54,7 @@ from minime.services.agent_runner import (
     NativeOpenSpecWorkflowUnavailable,
     ResolvedWorkflow,
 )
+from minime.services.budget_service import ObservedCost, ObservedCostSettlementService
 from minime.services.apply_checkpoint_recovery import (
     REBASELINE_RESPONSE,
     RECOVERY_GATE,
@@ -1035,7 +1038,8 @@ class NativeOrchestrationCoordinator:
         return fingerprints
 
     def _save_stage_invocation_event(
-        self, uow: Any, run: OrchestrationRun, event_type: str, evidence: dict[str, Any]
+        self, uow: Any, run: OrchestrationRun, event_type: str, evidence: dict[str, Any],
+        *, commit: bool = True,
     ) -> None:
         repository = getattr(uow, "orchestration_stage_events", None)
         if repository is None or not callable(getattr(repository, "save", None)):
@@ -1049,7 +1053,87 @@ class NativeOrchestrationCoordinator:
                 evidence_references=redact_secrets(evidence),
             )
         )
-        uow.commit()
+        if commit:
+            uow.commit()
+
+    @staticmethod
+    def _execution_cost_evidence(result: Any) -> dict[str, Any] | None:
+        """Return only explicit provider-reported monetary evidence."""
+        if isinstance(result, dict) and isinstance(result.get("cost_evidence"), dict):
+            return dict(result["cost_evidence"])
+        execution = result.get("execution") if isinstance(result, dict) else result
+        if execution is None:
+            return None
+        observed = getattr(execution, "observed_cost", None)
+        if isinstance(observed, dict):
+            return dict(observed)
+        amount = getattr(execution, "observed_cost_usd", None)
+        identity = getattr(execution, "usage_identity", None)
+        observed_at = getattr(execution, "observed_at", None)
+        if amount is None and identity is None and observed_at is None:
+            return None
+        return {
+            "amount_usd": amount,
+            "usage_identity": identity,
+            "observed_at": observed_at,
+            "provider": getattr(execution, "cost_provider", None)
+            or getattr(execution, "provider_used", None),
+            "model": getattr(execution, "cost_model", None)
+            or getattr(execution, "model_used", None),
+            "source": getattr(execution, "cost_source", None),
+            "prompt_tokens": getattr(execution, "prompt_tokens", None),
+            "completion_tokens": getattr(execution, "completion_tokens", None),
+            "total_tokens": getattr(execution, "total_tokens", None),
+        }
+
+    def _settle_stage_cost(
+        self, uow: Any, run: OrchestrationRun, stage: str, result: Any
+    ) -> dict[str, Any]:
+        evidence = self._execution_cost_evidence(result)
+        if not evidence:
+            return {"status": "UNSETTLED", "reason": "provider_cost_not_observed"}
+        amount = evidence.get("amount_usd")
+        identity = evidence.get("usage_identity")
+        observed_at = evidence.get("observed_at")
+        if amount is None or not identity or not isinstance(observed_at, datetime):
+            return {
+                "status": "UNSETTLED",
+                "reason": "provider_cost_evidence_incomplete",
+                "usage_identity": identity,
+            }
+        try:
+            entry = ObservedCostSettlementService(uow).settle(
+                ObservedCost(
+                    project_id=run.project_id,
+                    job_id=run.active_job_id or run.run_id,
+                    change_id=run.change_name,
+                    provider=str(evidence.get("provider") or ""),
+                    model=evidence.get("model"),
+                    amount_usd=Decimal(str(amount)),
+                    usage_identity=str(identity),
+                    observed_at=observed_at,
+                    source=str(evidence.get("source") or "provider"),
+                    role="execution",
+                    prompt_tokens=evidence.get("prompt_tokens"),
+                    completion_tokens=evidence.get("completion_tokens"),
+                    total_tokens=evidence.get("total_tokens"),
+                )
+            )
+        except Exception as exc:
+            return {
+                "status": "UNSETTLED",
+                "reason": "ledger_commit_required",
+                "error": redact_secrets(str(exc))[:500],
+                "usage_identity": str(identity),
+            }
+        return {
+            "status": "SETTLED",
+            "entry_id": entry.entry_id,
+            "usage_identity": entry.usage_identity,
+            "amount_usd": str(entry.amount_usd),
+            "provider": entry.provider,
+            "stage": stage,
+        }
 
     async def _begin_stage_invocation(
         self, uow: Any, run: OrchestrationRun, worktree_path: Path, stage: str,
@@ -1309,16 +1393,53 @@ class NativeOrchestrationCoordinator:
             "COMPLETE": "STAGE_INVOCATION_COMPLETED",
             "HUMAN_REQUIRED": "STAGE_INVOCATION_HUMAN_REQUIRED",
         }.get(status, "STAGE_INVOCATION_FAILED")
+        settlement = self._settle_stage_cost(uow, run, invocation.stage if hasattr(invocation, "stage") else run.current_stage, result)
+        settlement_failed = settlement["status"] == "UNSETTLED" and settlement.get("reason") == "ledger_commit_required"
+        if settlement_failed and callable(getattr(uow, "rollback", None)):
+            uow.rollback()
+            event_type = "STAGE_INVOCATION_FAILED"
+            status = "FAILED"
         self._save_stage_invocation_event(
             uow, run, event_type, {
                 "attempt_id": invocation.attempt_id, "claim_key": invocation.claim_key,
                 "fence_token": claim.fence_token, "candidate": invocation.candidate,
                 "status": status, "finished_at": utc_now().isoformat(),
                 "duration_ms": elapsed_ms, "result": redact_secrets(result),
+                "settlement": settlement,
             },
+            commit=False,
         )
         uow.claims.release_claim(claim)
-        uow.commit()
+        try:
+            uow.commit()
+        except Exception as exc:
+            # A transaction containing both the terminal event and settlement
+            # must fail closed. Roll back the ledger insert, then persist only
+            # an explicit unresolved terminal outcome for reconciliation.
+            if callable(getattr(uow, "rollback", None)):
+                uow.rollback()
+            failed_evidence = {
+                "attempt_id": invocation.attempt_id,
+                "claim_key": invocation.claim_key,
+                "fence_token": claim.fence_token,
+                "candidate": invocation.candidate,
+                "status": "FAILED",
+                "finished_at": utc_now().isoformat(),
+                "duration_ms": elapsed_ms,
+                "result": redact_secrets(result),
+                "settlement": {
+                    "status": "UNSETTLED",
+                    "reason": "ledger_commit_failed",
+                    "error": redact_secrets(str(exc))[:500],
+                },
+            }
+            self._save_stage_invocation_event(
+                uow, run, "STAGE_INVOCATION_FAILED", failed_evidence, commit=False
+            )
+            uow.commit()
+            raise RuntimeError("Provider invocation completed but durable cost settlement failed") from exc
+        if settlement_failed:
+            raise RuntimeError("Provider invocation completed but durable cost settlement failed")
 
     async def _close_preflight_failed_invocation(
         self,
@@ -1450,6 +1571,7 @@ class NativeOrchestrationCoordinator:
                 "status": invocation_status,
                 "message": result.get("message") if isinstance(result, dict) else None,
                 "human_payload": result.get("human_payload") if isinstance(result, dict) else None,
+                "cost_evidence": self._execution_cost_evidence(result),
             },
         )
         self._finish_native_dispatch(

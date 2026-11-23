@@ -17,6 +17,10 @@ from minime.db.models import (
     ProjectManagedRepositoryBindingModel,
     ProjectModel,
     ProviderModelRegistryModel,
+    JobModel,
+    OpenRouterPricingSnapshotModel,
+    BudgetReservationModel,
+    BudgetLedgerModel,
 )
 from minime.db.session import db_manager
 
@@ -225,6 +229,121 @@ def seed_e2e_state() -> None:
             e2e_run.stop_details = {"human_payload": human_payload}
             e2e_run.is_active = True
             e2e_run.updated_at = now
+
+        # 6. Ensure sample budget ledger entries exist for e2e-project
+        from decimal import Decimal
+        job = session.execute(select(JobModel).where(JobModel.id == "e2e-job")).scalar_one_or_none()
+        if job is None:
+            job = JobModel(
+                id="e2e-job",
+                project_id="e2e-project",
+                change_name="e2e-change",
+                status="COMPLETED",
+                implementer_role="codex",
+                created_at=now,
+                updated_at=now,
+            )
+            session.add(job)
+
+        snapshot = session.execute(
+            select(OpenRouterPricingSnapshotModel).where(OpenRouterPricingSnapshotModel.id == "snapshot-e2e-project")
+        ).scalar_one_or_none()
+        if snapshot is None:
+            snapshot = OpenRouterPricingSnapshotModel(
+                id="snapshot-e2e-project",
+                canonical_model_identity="dashboard-cost-fixture",
+                routed_model_identity="dashboard-cost-fixture",
+                prompt_price_per_token=Decimal("0.000001"),
+                output_price_per_token=Decimal("0.000001"),
+                source="operator_verified",
+                provider="deepseek",
+                billing_origin="deepseek_direct",
+                observed_at=now,
+                created_at=now,
+            )
+            session.add(snapshot)
+
+        res1 = session.execute(
+            select(BudgetReservationModel).where(BudgetReservationModel.id == "res-e2e-1")
+        ).scalar_one_or_none()
+        if res1 is None:
+            res1 = BudgetReservationModel(
+                id="res-e2e-1",
+                project_id="e2e-project",
+                job_id="e2e-job",
+                change_id="e2e-change",
+                role="execution",
+                canonical_model_identity="dashboard-cost-fixture",
+                reserved_amount_usd=Decimal("2.000000"),
+                status="SETTLED",
+                pricing_snapshot_id="snapshot-e2e-project",
+                provider="deepseek",
+                billing_origin="deepseek_direct",
+                created_at=now,
+                updated_at=now,
+            )
+            session.add(res1)
+
+        res2 = session.execute(
+            select(BudgetReservationModel).where(BudgetReservationModel.id == "res-e2e-2")
+        ).scalar_one_or_none()
+        if res2 is None:
+            res2 = BudgetReservationModel(
+                id="res-e2e-2",
+                project_id="e2e-project",
+                job_id="e2e-job",
+                change_id="e2e-change",
+                role="execution",
+                canonical_model_identity="dashboard-cost-fixture",
+                reserved_amount_usd=Decimal("2.000000"),
+                status="SETTLED",
+                pricing_snapshot_id="snapshot-e2e-project",
+                provider="openrouter",
+                billing_origin="openrouter",
+                created_at=now,
+                updated_at=now,
+            )
+            session.add(res2)
+
+        ledger1 = session.execute(
+            select(BudgetLedgerModel).where(BudgetLedgerModel.id == "ledger-e2e-1")
+        ).scalar_one_or_none()
+        if ledger1 is None:
+            ledger1 = BudgetLedgerModel(
+                id="ledger-e2e-1",
+                project_id="e2e-project",
+                job_id="e2e-job",
+                change_id="e2e-change",
+                provider="deepseek",
+                billing_origin="deepseek_direct",
+                role="execution",
+                canonical_model_identity="deepseek/deepseek-flash",
+                amount_usd=Decimal("0.123456"),
+                entry_type="SETTLEMENT",
+                reservation_id="res-e2e-1",
+                created_at=now,
+            )
+            session.add(ledger1)
+
+        ledger2 = session.execute(
+            select(BudgetLedgerModel).where(BudgetLedgerModel.id == "ledger-e2e-2")
+        ).scalar_one_or_none()
+        if ledger2 is None:
+            ledger2 = BudgetLedgerModel(
+                id="ledger-e2e-2",
+                project_id="e2e-project",
+                job_id="e2e-job",
+                change_id="e2e-change",
+                provider="openrouter",
+                billing_origin="openrouter",
+                role="execution",
+                canonical_model_identity="openrouter/deepseek/deepseek-r1-0528",
+                amount_usd=Decimal("1.220000"),
+                entry_type="SETTLEMENT",
+                reservation_id="res-e2e-2",
+                created_at=now,
+            )
+            session.add(ledger2)
 
         session.commit()
         logger.info("E2E database seeding completed successfully.")
