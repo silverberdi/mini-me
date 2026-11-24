@@ -316,6 +316,7 @@ class NativeOrchestrationCoordinator:
         pr_preparer: PrPreparerService | None = None,
         semantic_pr_agent: bool = False,
         max_correction_attempts: int = 3,
+        watchdog_mechanical_remediation: bool = False,
     ) -> None:
         self.uow_factory = uow_factory
         self.github_adapter = github_adapter
@@ -328,6 +329,7 @@ class NativeOrchestrationCoordinator:
         self.pr_preparer = pr_preparer or PrPreparerService()
         self.semantic_pr_agent = semantic_pr_agent
         self.max_correction_attempts = max_correction_attempts
+        self.watchdog_mechanical_remediation = watchdog_mechanical_remediation
 
     @staticmethod
     def _safe_human_payload(payload: Any) -> dict[str, Any]:
@@ -601,6 +603,103 @@ class NativeOrchestrationCoordinator:
         if hasattr(uow, "commit"):
             uow.commit()
         return active_payload
+
+    def _record_watchdog_escalation(
+        self,
+        uow: Any,
+        run: OrchestrationRun,
+        *,
+        reason: str,
+        evidence: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        hold_response = "__WATCHDOG_HOLD_AND_PRESERVE__"
+        options = [
+            {
+                "id": "retry_same_candidate",
+                "label": "Autorizar un nuevo intento sobre el mismo candidato",
+                "response_text": "Autorizo reanudar una vez el mismo Run y candidato después del diagnóstico Watchdog.",
+                "consequence": "El coordinador nativo volverá a evaluar el claim y la identidad del candidato antes de reanudar.",
+            },
+            {
+                "id": "preserve_and_hold",
+                "label": "Mantener detenido y conservar el worktree",
+                "response_text": hold_response,
+                "consequence": "El Run permanece detenido y la evidencia se conserva para inspección.",
+            },
+        ]
+        question = (
+            f"Watchdog detectó una detención en {run.current_stage.value}. "
+            f"No pudo completar una recuperación mecánica segura: {reason}. "
+            "¿Cómo quieres continuar?"
+        )
+        payload = self._record_current_human_gate(
+            uow,
+            run,
+            gate="watchdog_escalation",
+            question=question,
+            options=options,
+            question_es=question,
+            options_es=[option["label"] for option in options],
+            payload={"watchdog_evidence": redact_secrets(evidence or {})},
+        )
+        self._save_stage_invocation_event(
+            uow,
+            run,
+            "WATCHDOG_ESCALATED_TO_HUMAN",
+            {
+                "run_id": run.run_id,
+                "stage": run.current_stage.value,
+                "candidate_sha": run.current_candidate_sha,
+                "reason": reason[:1000],
+                "evidence": redact_secrets(evidence or {}),
+                "gate_id": payload.get("gate_id"),
+            },
+            commit=False,
+        )
+        watchdog_repo = getattr(uow, "watchdog", None)
+        if watchdog_repo is not None:
+            diagnosis = watchdog_repo.get_by_run_stage_generation(
+                run.run_id, run.current_stage.value, int(run.current_generation or 1)
+            )
+            if diagnosis:
+                watchdog_repo.save_diagnosis({
+                    **diagnosis,
+                    "status": "ESCALATED",
+                    "action": "human_gate",
+                    "action_result": {
+                        "status": "NEEDS_HUMAN",
+                        "reason": reason[:1000],
+                        "gate_id": payload.get("gate_id"),
+                    },
+                })
+        if hasattr(uow, "commit"):
+            uow.commit()
+        return payload
+
+    def _escalate_observed_watchdog_stall(
+        self,
+        uow: Any,
+        run: OrchestrationRun,
+        *,
+        reason: str,
+        evidence: dict[str, Any] | None = None,
+    ) -> dict[str, Any] | None:
+        """Create an operator gate only for a persisted Watchdog observation."""
+        if not self.watchdog_mechanical_remediation:
+            return None
+        watchdog_repo = getattr(uow, "watchdog", None)
+        if watchdog_repo is None:
+            return None
+        diagnosis = watchdog_repo.get_by_run_stage_generation(
+            run.run_id, run.current_stage.value, int(run.current_generation or 1)
+        )
+        if not diagnosis or diagnosis.get("status") not in {"OBSERVED", "DIAGNOSING"}:
+            return None
+        observed_evidence = dict(diagnosis.get("evidence") or {})
+        observed_evidence.update(evidence or {})
+        return self._record_watchdog_escalation(
+            uow, run, reason=reason, evidence=observed_evidence
+        )
 
     async def _check_stage_feasibility(
         self,
@@ -1335,10 +1434,296 @@ class NativeOrchestrationCoordinator:
             logger.exception("DOC_CLOSING invocation recovery did not complete; preserving fail-closed state.")
             return True, None
 
+    async def _recover_orphaned_stage_index_lock(
+        self, uow: Any, run: OrchestrationRun, worktree_path: Path, stage: str
+    ) -> tuple[RecoveryClaimContext | None, dict[str, Any] | None]:
+        """Recover only a lock owned by one proven-abandoned invocation."""
+        claims = getattr(uow, "claims", None)
+        events_repo = getattr(uow, "orchestration_stage_events", None)
+        recover_lock = getattr(self.worktree_manager, "recover_orphaned_index_lock", None)
+        if (
+            not callable(recover_lock)
+            or not run.active_job_id
+            or claims is None
+            or events_repo is None
+            or not callable(getattr(events_repo, "list_by_run", None))
+        ):
+            return None, None
+
+        prefix = f"stage-invocation:{run.run_id}:{stage}:"
+        starts: dict[str, dict[str, Any]] = {}
+        terminal: set[str] = set()
+        process_events: dict[str, dict[str, Any]] = {}
+        for event in events_repo.list_by_run(run.run_id):
+            evidence = event.evidence_references or {}
+            attempt_id = str(evidence.get("attempt_id") or "")
+            if event.event_type == "STAGE_INVOCATION_STARTED" and str(
+                evidence.get("claim_key") or ""
+            ).startswith(prefix):
+                starts[attempt_id] = evidence
+            elif event.event_type == "STAGE_INVOCATION_PROCESS_STARTED":
+                process_events[attempt_id] = evidence
+            elif event.event_type in {
+                "STAGE_INVOCATION_COMPLETED",
+                "STAGE_INVOCATION_HUMAN_REQUIRED",
+                "STAGE_INVOCATION_FAILED",
+                "STAGE_INVOCATION_ABANDONED",
+            }:
+                terminal.add(attempt_id)
+        incomplete = [
+            (attempt_id, evidence)
+            for attempt_id, evidence in starts.items()
+            if attempt_id and attempt_id not in terminal
+        ]
+        if len(incomplete) != 1:
+            return None, None
+
+        prior_attempt_id, prior_start = incomplete[0]
+        prior_candidate = prior_start.get("candidate") or {}
+        if not (
+            prior_candidate.get("run_id") == run.run_id
+            and prior_candidate.get("stage") == stage
+            and prior_candidate.get("worktree") == str(worktree_path.resolve())
+            and prior_candidate.get("generation") == int(run.current_generation or 0)
+            and prior_candidate.get("candidate_sha")
+            and prior_start.get("recovery_count", 0) == 0
+        ):
+            return None, None
+
+        prior_claim_key = str(prior_start.get("claim_key") or "")
+        prior_claim = claims.get_by_key(prior_claim_key)
+        if not prior_claim or prior_claim.is_active:
+            return None, None
+        process_event = process_events.get(prior_attempt_id) or {}
+        child_process = process_event.get("process_identity")
+        if not self._stage_recovery_is_safe(
+            prior_start.get("coordinator_process"),
+            child_process,
+            process_identity(),
+            candidate_matches=True,
+            recovery_count=int(prior_start.get("recovery_count", 0)),
+        ):
+            return None, None
+
+        owner_id = f"watchdog-index-lock:{stage}:{uuid4()}"
+        claim = claims.acquire_or_reacquire(
+            claim_key=prior_claim_key, owner_instance_id=owner_id, lease_seconds=120
+        )
+        if claim is None:
+            return None, None
+        claim_context = RecoveryClaimContext(
+            claim_key=claim.claim_key,
+            owner_instance_id=claim.owner_instance_id,
+            fence_token=claim.fence_token,
+            lease_expires_at=claim.lease_expires_at,
+        )
+        try:
+            evidence = await recover_lock(
+                worktree_path,
+                project_id=run.project_id,
+                job_id=run.active_job_id,
+                run_id=run.run_id,
+                change_name=run.change_name,
+                candidate_sha=str(prior_candidate["candidate_sha"]),
+                process_absence_proven=True,
+            )
+            if evidence is None:
+                claims.release_claim(claim_context)
+                uow.commit()
+                return None, None
+            if not claims.validate_cas(
+                claim_context.claim_key,
+                claim_context.owner_instance_id,
+                claim_context.fence_token,
+            ):
+                raise RuntimeError("Watchdog lock recovery lost its fenced claim.")
+            self._save_stage_invocation_event(
+                uow,
+                run,
+                "WORKTREE_LOCK_RECOVERED",
+                {
+                    "attempt_id": prior_attempt_id,
+                    "claim_key": claim_context.claim_key,
+                    "fence_token": claim_context.fence_token,
+                    "candidate_sha": prior_candidate["candidate_sha"],
+                    "lock": evidence,
+                    "recovery_proof": "expired_claim_and_process_group_absent",
+                    "recovery_count": 1,
+                },
+                commit=False,
+            )
+            uow.commit()
+            return claim_context, evidence
+        except Exception:
+            try:
+                claims.release_claim(claim_context)
+                uow.commit()
+            except Exception:
+                if callable(getattr(uow, "rollback", None)):
+                    uow.rollback()
+            logger.exception("Watchdog could not prove or recover the orphaned Git index lock.")
+            return None, None
+
+    async def _recover_abandoned_verify_outputs(
+        self, uow: Any, run: OrchestrationRun, worktree_path: Path
+    ) -> tuple[RecoveryClaimContext | None, dict[str, Any] | None]:
+        """Preserve eligible Verify outputs, then restore only attributed generated files."""
+        if not self.watchdog_mechanical_remediation or not run.active_job_id:
+            return None, None
+        claims = getattr(uow, "claims", None)
+        events_repo = getattr(uow, "orchestration_stage_events", None)
+        recover_outputs = getattr(self.worktree_manager, "recover_verify_generated_outputs", None)
+        recover_lock = getattr(self.worktree_manager, "recover_orphaned_index_lock", None)
+        if (
+            claims is None
+            or events_repo is None
+            or not callable(getattr(events_repo, "list_by_run", None))
+            or not callable(recover_outputs)
+            or not callable(recover_lock)
+        ):
+            return None, None
+
+        verify_candidate = (run.stop_details or {}).get("verify_candidate")
+        expected_sha = verify_candidate.get("sha") if isinstance(verify_candidate, dict) else None
+        if not expected_sha or run.current_candidate_sha != expected_sha:
+            return None, None
+        prefix = f"stage-invocation:{run.run_id}:VERIFY:"
+        starts: dict[str, dict[str, Any]] = {}
+        terminals: set[str] = set()
+        process_events: dict[str, dict[str, Any]] = {}
+        for event in events_repo.list_by_run(run.run_id):
+            evidence = event.evidence_references or {}
+            attempt_id = str(evidence.get("attempt_id") or "")
+            if event.event_type == "STAGE_INVOCATION_STARTED" and str(
+                evidence.get("claim_key") or ""
+            ).startswith(prefix):
+                starts[attempt_id] = evidence
+            elif event.event_type == "STAGE_INVOCATION_PROCESS_STARTED":
+                process_events[attempt_id] = evidence
+            elif event.event_type in {
+                "STAGE_INVOCATION_COMPLETED",
+                "STAGE_INVOCATION_HUMAN_REQUIRED",
+                "STAGE_INVOCATION_FAILED",
+                "STAGE_INVOCATION_ABANDONED",
+            }:
+                terminals.add(attempt_id)
+        incomplete = [
+            (attempt_id, evidence)
+            for attempt_id, evidence in starts.items()
+            if attempt_id and attempt_id not in terminals
+        ]
+        if len(incomplete) != 1:
+            return None, None
+        attempt_id, prior_start = incomplete[0]
+        identity = prior_start.get("candidate") or {}
+        if not (
+            identity.get("run_id") == run.run_id
+            and identity.get("stage") == "VERIFY"
+            and identity.get("worktree") == str(worktree_path.resolve())
+            and identity.get("generation") == int(run.current_generation or 0)
+            and identity.get("candidate_sha") == expected_sha
+            and int(prior_start.get("recovery_count", 0)) == 0
+        ):
+            return None, None
+        prior_claim = claims.get_by_key(str(prior_start.get("claim_key") or ""))
+        if not prior_claim or prior_claim.is_active:
+            return None, None
+        process_event = process_events.get(attempt_id) or {}
+        child_process = process_event.get("process_identity")
+        if not self._stage_recovery_is_safe(
+            prior_start.get("coordinator_process"),
+            child_process,
+            process_identity(),
+            candidate_matches=True,
+            recovery_count=int(prior_start.get("recovery_count", 0)),
+        ):
+            return None, None
+
+        claim = claims.acquire_or_reacquire(
+            claim_key=str(prior_start["claim_key"]),
+            owner_instance_id=f"watchdog-verify:{uuid4()}",
+            lease_seconds=120,
+        )
+        if claim is None:
+            return None, None
+        claim_context = RecoveryClaimContext(
+            claim_key=claim.claim_key,
+            owner_instance_id=claim.owner_instance_id,
+            fence_token=claim.fence_token,
+            lease_expires_at=claim.lease_expires_at,
+        )
+        try:
+            lock_evidence = await recover_lock(
+                worktree_path,
+                project_id=run.project_id,
+                job_id=run.active_job_id,
+                run_id=run.run_id,
+                change_name=run.change_name,
+                candidate_sha=str(expected_sha),
+                process_absence_proven=True,
+            )
+            if lock_evidence:
+                self._save_stage_invocation_event(
+                    uow,
+                    run,
+                    "WORKTREE_LOCK_RECOVERED",
+                    {
+                        "attempt_id": attempt_id,
+                        "claim_key": claim_context.claim_key,
+                        "fence_token": claim_context.fence_token,
+                        "candidate_sha": expected_sha,
+                        "lock": lock_evidence,
+                        "recovery_proof": "expired_claim_and_process_group_absent",
+                        "recovery_count": 1,
+                    },
+                    commit=False,
+                )
+            current_status = await self._git_run(
+                worktree_path, ["status", "--porcelain=v1", "--untracked-files=all"]
+            )
+            output_evidence = None
+            if current_status.stdout.strip():
+                output_evidence = await recover_outputs(
+                    worktree_path,
+                    project_id=run.project_id,
+                    job_id=run.active_job_id,
+                    run_id=run.run_id,
+                    change_name=run.change_name,
+                    candidate_sha=str(expected_sha),
+                    attempt_id=attempt_id,
+                )
+            if lock_evidence or output_evidence and output_evidence.get("outputs"):
+                if not claims.validate_cas(
+                    claim_context.claim_key,
+                    claim_context.owner_instance_id,
+                    claim_context.fence_token,
+                ):
+                    raise RuntimeError("Verify output recovery lost its fenced claim.")
+                uow.commit()
+                return claim_context, {
+                    "lock": lock_evidence,
+                    "verify_outputs": output_evidence,
+                    "prior_attempt_id": attempt_id,
+                    "candidate_sha": expected_sha,
+                }
+            claims.release_claim(claim_context)
+            uow.commit()
+            return None, None
+        except Exception:
+            try:
+                claims.release_claim(claim_context)
+                uow.commit()
+            except Exception:
+                if callable(getattr(uow, "rollback", None)):
+                    uow.rollback()
+            logger.exception("Watchdog Verify recovery was not fully proven; preserving the worktree.")
+            return None, None
+
     async def _begin_stage_invocation(
         self, uow: Any, run: OrchestrationRun, worktree_path: Path, stage: str,
         *, allow_human_resume: bool = False, authorized_retry: bool = False,
         operator_action_id: str | None = None, allow_doc_sync_replay: bool = False,
+        preclaimed_recovery: RecoveryClaimContext | None = None,
     ) -> StageInvocation | None:
         claims = getattr(uow, "claims", None)
         if claims is None or not all(
@@ -1351,12 +1736,32 @@ class NativeOrchestrationCoordinator:
         )
         if recovery_handled:
             return recovered_invocation
+        recovery_claim, _recovered_lock = (
+            (preclaimed_recovery, None)
+            if preclaimed_recovery is not None
+            else (
+            await self._recover_orphaned_stage_index_lock(uow, run, worktree_path, stage)
+            if self.watchdog_mechanical_remediation
+            else (None, None)
+            )
+        )
+
+        def release_recovery_claim() -> None:
+            if recovery_claim is not None:
+                claims.release_claim(recovery_claim)
+                uow.commit()
+
         candidate = await self._stage_candidate_identity(run, worktree_path, stage)
         claim_prefix = f"stage-invocation:{run.run_id}:{stage}:"
         claim_key = f"{claim_prefix}{candidate['fingerprint']}"
+        if recovery_claim is not None and recovery_claim.claim_key != claim_key:
+            claims.release_claim(recovery_claim)
+            uow.commit()
+            return None
         prior_claim = claims.get_by_key(claim_key)
         events_repo = getattr(uow, "orchestration_stage_events", None)
         if events_repo is None or not callable(getattr(events_repo, "list_by_run", None)):
+            release_recovery_claim()
             return None
         prior_events = events_repo.list_by_run(run.run_id)
         all_stage_events = [
@@ -1390,6 +1795,7 @@ class NativeOrchestrationCoordinator:
         ):
             # One durable operator response can authorize at most one native
             # stage invocation, even when a second scheduler observes it late.
+            release_recovery_claim()
             return None
         recovery_count = 0
         recovered_from_attempt_id: str | None = None
@@ -1407,6 +1813,7 @@ class NativeOrchestrationCoordinator:
             and latest_terminal_result.get("preflight_failure_proven") is True
             and starts.get(latest_terminal_attempt_id or "", {}).get("candidate") != candidate
         ):
+            release_recovery_claim()
             return None
         prior_finished = [
             terminal_status.get(attempt_id, "") for attempt_id in starts
@@ -1418,8 +1825,10 @@ class NativeOrchestrationCoordinator:
             if last_status == "COMPLETE" and not (
                 authorized_retry or allow_human_resume or allow_doc_sync_replay
             ):
+                release_recovery_claim()
                 return None
             if last_status == "HUMAN_REQUIRED" and not allow_human_resume:
+                release_recovery_claim()
                 return None
             if last_status in {"FAILED", "PARTIAL"} and not (
                 authorized_retry
@@ -1453,19 +1862,22 @@ class NativeOrchestrationCoordinator:
                     and previous_attempt_id is not None
                 )
                 if not safe_preflight_retry:
+                    release_recovery_claim()
                     return None
                 recovery_count = 1
                 recovered_from_attempt_id = previous_attempt_id
         incomplete = [item for key, item in starts.items() if key not in terminal]
         abandoned_attempt: dict[str, Any] | None = None
-        if prior_claim is not None and prior_claim.is_active:
+        if prior_claim is not None and prior_claim.is_active and recovery_claim is None:
             return None
         if prior_claim is not None and incomplete:
             previous = incomplete[-1]
             if previous.get("candidate") != candidate:
+                release_recovery_claim()
                 return None
             previous_claim_key = str(previous.get("claim_key") or "")
             if previous_claim_key != claim_key:
+                release_recovery_claim()
                 return None
             prior_attempt_id = previous.get("attempt_id")
             process_event = next(
@@ -1485,18 +1897,21 @@ class NativeOrchestrationCoordinator:
                 candidate_matches=previous.get("candidate") == candidate,
                 recovery_count=prior_recovery_count,
             ):
+                release_recovery_claim()
                 return None
             recovery_count = prior_recovery_count + 1
             abandoned_attempt = previous
         elif incomplete:
             # A different candidate cannot bypass an active or ambiguous
             # run/stage attempt merely by producing a different fingerprint.
+            release_recovery_claim()
             return None
         owner = f"stage:{stage}:{uuid4()}"
-        claim = claims.acquire_or_reacquire(
+        claim = recovery_claim or claims.acquire_or_reacquire(
             claim_key=claim_key, owner_instance_id=owner, lease_seconds=120
         )
         if claim is None:
+            release_recovery_claim()
             return None
         context = RecoveryClaimContext(
             claim_key=claim.claim_key,
@@ -2528,6 +2943,20 @@ class NativeOrchestrationCoordinator:
             active_run.human_gate == HumanGate.NEEDS_HUMAN
             or active_run.stop_outcome == OrchestrationStopOutcome.NEEDS_HUMAN
         )
+        if (
+            gate_pending
+            and isinstance(pending_gate, dict)
+            and pending_gate.get("gate") == "watchdog_escalation"
+            and isinstance(operator_clarification, str)
+            and operator_clarification.strip() == "__WATCHDOG_HOLD_AND_PRESERVE__"
+        ):
+            return OrchestrationCoordinationResult(
+                status="HUMAN_REQUIRED",
+                run_id=active_run.run_id,
+                current_stage=active_run.current_stage,
+                message=str(pending_gate.get("question") or "El Run sigue detenido; se conserva el worktree."),
+                human_payload=self._safe_human_payload(pending_gate),
+            )
         recovery = (active_run.stop_details or {}).get("apply_checkpoint_recovery") or {}
         if (
             operator_action_id
@@ -4095,6 +4524,18 @@ class NativeOrchestrationCoordinator:
                     operator_action_id=(operator_action_id if accepted_apply_gate_response else None),
                 )
                 if invocation is None:
+                    gate = self._escalate_observed_watchdog_stall(
+                        uow,
+                        active_run,
+                        reason="El coordinador nativo no pudo adquirir de forma segura la invocación Apply.",
+                        evidence={"candidate_sha": active_run.current_candidate_sha},
+                    )
+                    if gate:
+                        return OrchestrationCoordinationResult(
+                            status="HUMAN_REQUIRED", run_id=active_run.run_id,
+                            current_stage=OrchestrationStage.IMPLEMENTING,
+                            message=gate["question"], human_payload=gate,
+                        )
                     return OrchestrationCoordinationResult(
                         status="PAUSED", run_id=active_run.run_id,
                         current_stage=OrchestrationStage.IMPLEMENTING,
@@ -4282,6 +4723,9 @@ class NativeOrchestrationCoordinator:
 
         if active_run.current_stage == OrchestrationStage.VERIFYING:
             verify_candidate = (active_run.stop_details or {}).get("verify_candidate")
+            watchdog_recovery_claim, watchdog_recovery_evidence = (
+                await self._recover_abandoned_verify_outputs(uow, active_run, worktree_path)
+            )
             current_sha = await self._get_git_head_sha(worktree_path)
             current_status = await self._git_run(
                 worktree_path, ["status", "--porcelain", "--untracked-files=all"]
@@ -4292,6 +4736,25 @@ class NativeOrchestrationCoordinator:
                 or active_run.current_candidate_sha != current_sha
                 or current_status.stdout.strip()
             ):
+                if watchdog_recovery_claim is not None and getattr(uow, "claims", None):
+                    uow.claims.release_claim(watchdog_recovery_claim)
+                    uow.commit()
+                gate = self._escalate_observed_watchdog_stall(
+                    uow,
+                    active_run,
+                    reason="Verify dejó cambios que no se pueden atribuir con seguridad al intento abandonado; se preserva el worktree.",
+                    evidence={
+                        "candidate_sha": current_sha,
+                        "verify_candidate_sha": verify_candidate.get("sha") if isinstance(verify_candidate, dict) else None,
+                        "dirty_paths_present": bool(current_status.stdout.strip()),
+                    },
+                )
+                if gate:
+                    return OrchestrationCoordinationResult(
+                        status="HUMAN_REQUIRED", run_id=active_run.run_id,
+                        current_stage=OrchestrationStage.VERIFYING,
+                        message=gate["question"], human_payload=gate,
+                    )
                 return OrchestrationCoordinationResult(
                     status="PAUSED", run_id=active_run.run_id,
                     current_stage=OrchestrationStage.VERIFYING,
@@ -4308,6 +4771,9 @@ class NativeOrchestrationCoordinator:
                 operator_clarification=operator_clarification,
             )
             if feasibility_gate is not None:
+                if watchdog_recovery_claim is not None and getattr(uow, "claims", None):
+                    uow.claims.release_claim(watchdog_recovery_claim)
+                    uow.commit()
                 return feasibility_gate
             has_valid_candidate = bool(
                 isinstance(verify_candidate, dict)
@@ -4319,13 +4785,60 @@ class NativeOrchestrationCoordinator:
                 uow, active_run, worktree_path, "VERIFY",
                 allow_human_resume=bool(operator_clarification),
                 authorized_retry=has_valid_candidate,
+                preclaimed_recovery=watchdog_recovery_claim,
             )
             if invocation is None:
+                if watchdog_recovery_claim is not None and getattr(uow, "claims", None):
+                    uow.claims.release_claim(watchdog_recovery_claim)
+                    uow.commit()
+                gate = self._escalate_observed_watchdog_stall(
+                    uow, active_run,
+                    reason="El coordinador nativo no pudo adquirir de forma segura la invocación Verify.",
+                    evidence={"candidate_sha": current_sha, "recovery_evidence": watchdog_recovery_evidence},
+                )
+                if gate:
+                    return OrchestrationCoordinationResult(
+                        status="HUMAN_REQUIRED", run_id=active_run.run_id,
+                        current_stage=OrchestrationStage.VERIFYING,
+                        message=gate["question"], human_payload=gate,
+                    )
                 return OrchestrationCoordinationResult(
                     status="PAUSED", run_id=active_run.run_id,
                     current_stage=OrchestrationStage.VERIFYING,
                     message="Verify invocation is already active or recovery evidence is ambiguous. Worktree preserved.",
                 )
+            if watchdog_recovery_evidence:
+                self._save_stage_invocation_event(
+                    uow,
+                    active_run,
+                    "WATCHDOG_REMEDIATION_SUCCEEDED",
+                    {
+                        **watchdog_recovery_evidence,
+                        "recovery_attempt_id": invocation.attempt_id,
+                        "action": "preserve_verify_outputs_and_resume_same_candidate",
+                        "result": "canonical_verify_invocation_started",
+                    },
+                    commit=False,
+                )
+                watchdog_repo = getattr(uow, "watchdog", None)
+                if watchdog_repo is not None:
+                    diagnosis = watchdog_repo.get_by_run_stage_generation(
+                        active_run.run_id,
+                        "VERIFYING",
+                        int(active_run.current_generation or 1),
+                    )
+                    if diagnosis:
+                        watchdog_repo.save_diagnosis({
+                            **diagnosis,
+                            "status": "RECOVERED",
+                            "action": "preserve_verify_outputs_and_resume_same_candidate",
+                            "action_result": {
+                                "status": "SUCCEEDED",
+                                **watchdog_recovery_evidence,
+                                "recovery_attempt_id": invocation.attempt_id,
+                            },
+                        })
+                uow.commit()
             try:
                 verify_outcome = await self._run_claimed(
                     uow, invocation.claim,
@@ -4334,6 +4847,7 @@ class NativeOrchestrationCoordinator:
                         project_id=project_id,
                         candidate_sha=current_sha,
                         operator_response=operator_clarification,
+                        attempt_id=invocation.attempt_id,
                         process_start_observer=self._observe_stage_process(
                             uow, active_run, invocation
                         ),
@@ -8468,6 +8982,7 @@ class NativeOrchestrationCoordinator:
         candidate_sha: str | None = None,
         process_start_observer: Any = None,
         operator_response: str | None = None,
+        attempt_id: str | None = None,
     ) -> VerifyOutcome:
         """Dispatch the SAME implementer agent to execute native OpenSpec Verify workflow."""
         wf = self.agent_runner.resolve_workflow(
@@ -8497,7 +9012,9 @@ class NativeOrchestrationCoordinator:
         )
         if operator_response and operator_response.strip():
             prompt += "\n\nAccepted operator response for the current gate (context only):\n" + operator_response.strip()
-        attempt_dir = worktree_path / ".minime" / "verify-attempts" / str(uuid4())
+        attempt_dir = worktree_path / ".minime" / "verify-attempts" / (
+            attempt_id or str(uuid4())
+        )
         response_path = attempt_dir / "last-message.json"
         res = await self.agent_runner.run(
             worktree_path=worktree_path,

@@ -1,5 +1,6 @@
 import { CommonModule } from '@angular/common';
 import { Component, OnInit } from '@angular/core';
+import { FormsModule } from '@angular/forms';
 import { ApiService } from '../../core/api.service';
 
 interface RegistryModel {
@@ -21,6 +22,15 @@ interface ProviderCatalog {
   models: RegistryModel[];
 }
 
+interface WatchdogSettings {
+  provider_id: string | null;
+  harness_id: string | null;
+  canonical_model_id: string | null;
+  inactivity_threshold_minutes: number;
+  mode: 'diagnostic_only' | 'mechanical_remediation';
+  updated_at?: string | null;
+}
+
 interface HarnessResult {
   harness_id: string;
   status: string;
@@ -31,7 +41,7 @@ interface HarnessResult {
 @Component({
   selector: 'app-admin-models',
   standalone: true,
-  imports: [CommonModule],
+  imports: [CommonModule, FormsModule],
   template: `
     <section class="space-y-6 text-slate-100">
       <header class="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
@@ -47,6 +57,46 @@ interface HarnessResult {
 
       <p *ngIf="errorMessage" role="alert" class="rounded-lg border border-rose-500/30 bg-rose-500/10 p-3 text-sm text-rose-200">{{ errorMessage }}</p>
       <p *ngIf="successMessage" role="status" class="rounded-lg border border-emerald-500/30 bg-emerald-500/10 p-3 text-sm text-emerald-200">{{ successMessage }}</p>
+
+      <section aria-labelledby="watchdog-heading" class="space-y-4 rounded-xl border border-slate-700 bg-slate-800/40 p-4 sm:p-5">
+        <div>
+          <h2 id="watchdog-heading" class="text-lg font-semibold">Watchdog / SRE global</h2>
+          <p class="mt-1 text-sm text-slate-400">Configuración transversal de diagnóstico y recuperación mecánica.</p>
+        </div>
+        <div *ngIf="watchdogSettings" class="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
+          <label class="space-y-1 text-sm">
+            <span class="block text-slate-300">Proveedor y modelo</span>
+            <select [value]="selectedWatchdogModelId" (change)="selectWatchdogModel($any($event.target).value)"
+                    class="w-full rounded-lg border border-slate-600 bg-slate-900 px-3 py-2 text-slate-100">
+              <option value="">Sin modelo asignado</option>
+              <option *ngFor="let model of availableModels()" [value]="model.id">
+                {{ model.provider_id }} / {{ model.canonical_model_id }}
+              </option>
+            </select>
+          </label>
+          <label class="space-y-1 text-sm">
+            <span class="block text-slate-300">Umbral de inactividad (minutos)</span>
+            <input type="number" min="1" step="1" [(ngModel)]="watchdogThresholdMinutes"
+                   class="w-full rounded-lg border border-slate-600 bg-slate-900 px-3 py-2 text-slate-100">
+          </label>
+          <label class="space-y-1 text-sm">
+            <span class="block text-slate-300">Modo</span>
+            <select [(ngModel)]="watchdogMode" class="w-full rounded-lg border border-slate-600 bg-slate-900 px-3 py-2 text-slate-100">
+              <option value="diagnostic_only">Solo diagnóstico</option>
+              <option value="mechanical_remediation">Auto-remediación mecánica</option>
+            </select>
+          </label>
+        </div>
+        <div class="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
+          <p *ngIf="watchdogSettings" class="text-xs text-slate-500">
+            Guardado: {{ watchdogSettings.provider_id || 'sin modelo' }} · {{ watchdogSettings.inactivity_threshold_minutes }} min · {{ watchdogSettings.mode === 'diagnostic_only' ? 'Solo diagnóstico' : 'Auto-remediación mecánica' }}
+          </p>
+          <button type="button" (click)="saveWatchdogSettings()" [disabled]="savingWatchdog || !watchdogSettings"
+                  class="rounded-lg border border-sky-500/30 bg-sky-500/10 px-4 py-2 text-sm font-semibold text-sky-200 disabled:opacity-50">
+            {{ savingWatchdog ? 'Guardando…' : 'Guardar Watchdog' }}
+          </button>
+        </div>
+      </section>
 
       <section aria-labelledby="harness-heading" class="space-y-3">
         <h2 id="harness-heading" class="text-lg font-semibold">Harnesses instalados</h2>
@@ -96,16 +146,71 @@ export class AdminModelsComponent implements OnInit {
   refreshingHarnesses = false;
   errorMessage = '';
   successMessage = '';
+  watchdogSettings: WatchdogSettings | null = null;
+  selectedWatchdogModelId = '';
+  watchdogThresholdMinutes = 15;
+  watchdogMode: WatchdogSettings['mode'] = 'diagnostic_only';
+  savingWatchdog = false;
 
   constructor(private readonly api: ApiService) {}
 
   async ngOnInit(): Promise<void> {
-    const catalogResponse = await this.api.get<ProviderCatalog>('/api/v1/admin/providers/catalog');
-    if (!catalogResponse.ok || !catalogResponse.data) {
+    const [catalogResponse, watchdogResponse] = await Promise.all([
+      this.api.get<ProviderCatalog>('/api/v1/admin/providers/catalog'),
+      this.api.get<WatchdogSettings>('/api/v1/admin/watchdog/settings')
+    ]);
+    if (catalogResponse.ok && catalogResponse.data) {
+      this.catalog = catalogResponse.data;
+    } else {
       this.errorMessage = 'No se pudo cargar el catálogo de proveedores y modelos.';
-      return;
     }
-    this.catalog = catalogResponse.data;
+    if (watchdogResponse.ok && watchdogResponse.data) {
+      this.watchdogSettings = watchdogResponse.data;
+      this.watchdogThresholdMinutes = watchdogResponse.data.inactivity_threshold_minutes;
+      this.watchdogMode = watchdogResponse.data.mode;
+      const selected = this.availableModels().find(model =>
+        model.provider_id === watchdogResponse.data!.provider_id &&
+        model.harness_id === watchdogResponse.data!.harness_id &&
+        model.canonical_model_id === watchdogResponse.data!.canonical_model_id
+      );
+      this.selectedWatchdogModelId = selected?.id || '';
+    } else if (!this.errorMessage) {
+      this.errorMessage = 'No se pudo cargar la configuración global del Watchdog.';
+    }
+  }
+
+  availableModels(): RegistryModel[] {
+    return (this.catalog?.models || []).filter(model =>
+      model.discovery_status === 'available' && model.is_enabled
+    );
+  }
+
+  selectWatchdogModel(modelId: string): void {
+    this.selectedWatchdogModelId = modelId;
+  }
+
+  async saveWatchdogSettings(): Promise<void> {
+    if (!this.watchdogSettings || this.savingWatchdog) return;
+    const selected = this.availableModels().find(model => model.id === this.selectedWatchdogModelId);
+    this.savingWatchdog = true;
+    this.errorMessage = '';
+    this.successMessage = '';
+    const response = await this.api.patch<WatchdogSettings>('/api/v1/admin/watchdog/settings', {
+      provider_id: selected?.provider_id || null,
+      harness_id: selected?.harness_id || null,
+      canonical_model_id: selected?.canonical_model_id || null,
+      inactivity_threshold_minutes: Number(this.watchdogThresholdMinutes),
+      mode: this.watchdogMode
+    });
+    if (response.ok && response.data) {
+      this.watchdogSettings = response.data;
+      this.watchdogThresholdMinutes = response.data.inactivity_threshold_minutes;
+      this.watchdogMode = response.data.mode;
+      this.successMessage = 'La configuración global del Watchdog quedó guardada.';
+    } else {
+      this.errorMessage = `No se pudo guardar Watchdog: ${response.error || 'error del servidor'}`;
+    }
+    this.savingWatchdog = false;
   }
 
   harnessCards(): Array<{ harness_id: string; status: string; summary: string }> {

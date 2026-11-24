@@ -86,10 +86,16 @@ class TemporalMultiseriesTelemetryService:
         projects = list(getattr(self.uow.projects, "list_all", lambda: [])())
         project_ids = [str(_value(p, "project_id")) for p in projects if _value(p, "project_id")]
         runs = list(getattr(self.uow.orchestration_runs, "list_runs", lambda: [])())
-        runs = [r for r in runs if _timestamp(_value(r, "created_at")) and _timestamp(_value(r, "created_at")).date() >= start]
         observations: dict[str, dict[str, list[tuple[datetime, float, list[str]]]]] = defaultdict(lambda: defaultdict(list))
         excluded: dict[str, int] = defaultdict(int)
         for run in runs:
+            observation_time = (
+                _timestamp(_value(run, "completed_at"))
+                or _timestamp(_value(run, "updated_at"))
+                or _timestamp(_value(run, "created_at"))
+            )
+            if observation_time is None or observation_time.date() < start:
+                continue
             observed = self._observation(run, dimension)
             if observed is None:
                 excluded["unverified_or_incomplete"] += 1
@@ -103,7 +109,11 @@ class TemporalMultiseriesTelemetryService:
         axis = self._axis(start, now.date(), granularity)
         series: list[TemporalTelemetrySeriesDTO] = []
         for index, project_id in enumerate(project_ids):
-            points = self._points(observations.get(project_id, {}), axis)
+            points = self._points(
+                observations.get(project_id, {}),
+                axis,
+                percentage=dimension == "autonomy",
+            )
             series.append(TemporalTelemetrySeriesDTO(
                 series_id=f"project:{project_id}",
                 label=self._project_label(projects, project_id),
@@ -119,7 +129,9 @@ class TemporalMultiseriesTelemetryService:
                 item for project in observations.values() for item in project.get(bucket, [])
             ]
             if values:
-                global_points.append(self._point(bucket, values))
+                global_points.append(
+                    self._point(bucket, values, percentage=dimension == "autonomy")
+                )
         series.insert(0, TemporalTelemetrySeriesDTO(
             series_id="global",
             label="Global (Todos los proyectos)",
@@ -143,34 +155,30 @@ class TemporalMultiseriesTelemetryService:
         if timestamp is None:
             return None
         if dimension == "autonomy":
-            metrics = self._metrics(run)
-            productive = int(_value(metrics, "productive_attempt_count", 0) or 0) if metrics else 0
-            penalty = int(_value(metrics, "no_progress_attempt_count", 0) or 0) if metrics else 0
-            if metrics:
-                penalty += int(_value(metrics, "same_sha_retry_count", 0) or 0)
-                penalty += int(_value(metrics, "corrective_retry_count", 0) or 0)
-                penalty += int(_value(metrics, "reassignments_count", 0) or 0)
-            if productive + penalty == 0:
-                events_repo = getattr(self.uow, "orchestration_stage_events", None)
-                events = list(events_repo.list_by_run(_value(run, "run_id"))) if events_repo and hasattr(events_repo, "list_by_run") else []
-                for event in events:
-                    ev_type = str(_value(event, "event_type") or "").upper()
-                    if ev_type == "STAGE_INVOCATION_COMPLETED":
-                        refs = _value(event, "evidence_references", {}) or {}
-                        st = str(refs.get("status") or "").upper()
-                        rec = int(refs.get("recovery_count", 0) or 0)
-                        if st == "COMPLETE":
-                            productive += 1
-                        elif st in {"FAILED", "ABANDONED", "PARTIAL"}:
-                            penalty += 1
-                        penalty += rec
-                    elif ev_type in {"STAGE_INVOCATION_FAILED", "STAGE_INVOCATION_ABANDONED", "STAGE_INVOCATION_HUMAN_REQUIRED"}:
-                        penalty += 1
-                if bool(_value(run, "human_gate")):
-                    penalty += 1
-            if productive + penalty == 0:
+            if _value(run, "is_active", True):
                 return None
-            return timestamp, round(max(0.0, min(100.0, productive * 100.0 / (productive + penalty))), 3), [_iso(timestamp)], 0
+            stage = _value(_value(run, "current_stage"), "value", _value(run, "current_stage"))
+            outcome = _value(_value(run, "stop_outcome"), "value", _value(run, "stop_outcome"))
+            if str(stage).upper() != "COMPLETED" and str(outcome).upper() != "COMPLETED":
+                return None
+            events_repo = getattr(self.uow, "orchestration_stage_events", None)
+            events = (
+                list(events_repo.list_by_run(_value(run, "run_id")))
+                if events_repo and hasattr(events_repo, "list_by_run") else []
+            )
+            details = _value(run, "stop_details", {}) or {}
+            resolved_gates = details.get("resolved_human_gates")
+            if not events or not isinstance(resolved_gates, list):
+                return None
+            actions_repo = getattr(self.uow, "operator_actions", None)
+            actions = (
+                list(actions_repo.list_by_run(_value(run, "run_id")))
+                if actions_repo and hasattr(actions_repo, "list_by_run") else []
+            )
+            source_times = [
+                _iso(_timestamp(_value(event, "created_at")) or timestamp) for event in events
+            ]
+            return timestamp, 0.0 if resolved_gates or actions else 1.0, source_times, 0
         if dimension == "time":
             duration, sources, excluded = self._machine_duration(run)
             if duration is None:
@@ -257,12 +265,37 @@ class TemporalMultiseriesTelemetryService:
         return result
 
     @staticmethod
-    def _points(values: dict[str, list[tuple[datetime, float, list[str]]]], axis: list[str]) -> list[TemporalTelemetryPointDTO]:
-        return [TemporalMultiseriesTelemetryService._point(bucket, values[bucket]) for bucket in axis if bucket in values]
+    def _points(
+        values: dict[str, list[tuple[datetime, float, list[str]]]],
+        axis: list[str],
+        *,
+        percentage: bool = False,
+    ) -> list[TemporalTelemetryPointDTO]:
+        return [
+            TemporalMultiseriesTelemetryService._point(
+                bucket, values[bucket], percentage=percentage
+            )
+            for bucket in axis
+            if bucket in values
+        ]
 
     @staticmethod
-    def _point(bucket: str, values: list[tuple[datetime, float, list[str]]]) -> TemporalTelemetryPointDTO:
-        return TemporalTelemetryPointDTO(timestamp=bucket, value=round(sum(v for _, v, _ in values) / len(values), 3), source_timestamps=sorted({source for _, _, sources in values for source in sources}))
+    def _point(
+        bucket: str,
+        values: list[tuple[datetime, float, list[str]]],
+        *,
+        percentage: bool = False,
+    ) -> TemporalTelemetryPointDTO:
+        average = sum(value for _, value, _ in values) / len(values)
+        if percentage:
+            average *= 100
+        return TemporalTelemetryPointDTO(
+            timestamp=bucket,
+            value=round(average, 3),
+            source_timestamps=sorted(
+                {source for _, _, sources in values for source in sources}
+            ),
+        )
 
     @staticmethod
     def _project_label(projects: Iterable[Any], project_id: str) -> str:

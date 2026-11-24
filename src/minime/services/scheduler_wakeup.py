@@ -15,7 +15,7 @@ from minime.db.notifications import SCHEDULER_WAKEUP_CHANNEL, SCHEDULER_WAKEUP_M
 
 logger = logging.getLogger(__name__)
 
-_VALID_WAKEUP_REASONS = frozenset({"accepted_action"})
+_VALID_WAKEUP_REASONS = frozenset({"accepted_action", "watchdog_diagnosis"})
 
 
 @dataclass(frozen=True)

@@ -29,6 +29,58 @@ def _coordinator(uow):
     )
 
 
+def test_watchdog_only_escalates_persisted_stalls_through_current_human_gate():
+    uow = InMemoryPersistenceUnitOfWork()
+    run = OrchestrationRun(
+        project_id="watchdog-gate-test",
+        change_name="watchdog-gate",
+        base_sha="main",
+        current_stage=OrchestrationStage.IMPLEMENTING,
+        current_candidate_sha="a" * 40,
+    )
+    uow.orchestration_runs.save(run)
+    diagnosis = {
+        "status": "OBSERVED",
+        "evidence": {"inactive_seconds": 1200},
+    }
+    saved_diagnoses = []
+    uow.watchdog = SimpleNamespace(
+        get_by_run_stage_generation=lambda *_args: diagnosis,
+        save_diagnosis=lambda value: saved_diagnoses.append(value),
+    )
+    coordinator = _coordinator(uow)
+    coordinator.watchdog_mechanical_remediation = True
+
+    gate = coordinator._escalate_observed_watchdog_stall(
+        uow, run, reason="ambiguous recovery evidence", evidence={"candidate_sha": "a" * 40}
+    )
+
+    assert run.human_gate.value == "NEEDS_HUMAN"
+    assert gate["gate"] == "watchdog_escalation"
+    assert len(gate["options"]) == 2
+    assert uow.orchestration_stage_events.list_by_run(run.run_id)[0].event_type == "WATCHDOG_ESCALATED_TO_HUMAN"
+    assert saved_diagnoses[0]["status"] == "ESCALATED"
+
+
+def test_watchdog_does_not_create_escalation_without_observed_diagnosis():
+    uow = InMemoryPersistenceUnitOfWork()
+    run = OrchestrationRun(
+        project_id="watchdog-no-gate-test",
+        change_name="watchdog-no-gate",
+        base_sha="main",
+        current_stage=OrchestrationStage.IMPLEMENTING,
+    )
+    uow.orchestration_runs.save(run)
+    uow.watchdog = SimpleNamespace(get_by_run_stage_generation=lambda *_args: None)
+    coordinator = _coordinator(uow)
+    coordinator.watchdog_mechanical_remediation = True
+
+    assert coordinator._escalate_observed_watchdog_stall(
+        uow, run, reason="unrelated failure"
+    ) is None
+    assert run.human_gate is None
+
+
 def _git_candidate(path):
     path.mkdir()
     subprocess.run(["git", "init", "-q", str(path)], check=True)

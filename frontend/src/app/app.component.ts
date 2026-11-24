@@ -231,6 +231,10 @@ import { VersionService } from './core/version.service';
             <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 10V3L4 14h7v7l9-11h-7z"/></svg>
             Trabajo Actual
           </a>
+          <a routerLink="/mejora-continua" routerLinkActive="bg-sky-500/10 text-sky-400 border-sky-500/30"
+             class="flex items-center gap-2 rounded-lg border border-transparent px-3 py-2 text-sm text-slate-300 hover:bg-slate-800 hover:text-white">
+            <span>Mejora Continua</span>
+          </a>
 
           <a routerLink="/proyectos" routerLinkActive="bg-sky-500/10 text-sky-400 border-sky-500/30"
              class="flex items-center gap-3 px-3.5 py-2.5 rounded-xl text-sm font-medium text-slate-400 hover:text-white hover:bg-slate-800/60 border border-transparent transition-colors">

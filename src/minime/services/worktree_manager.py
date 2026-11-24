@@ -1653,6 +1653,222 @@ class WorktreeManager:
         found = {p for p in found if "minime_worktree_ownership.json" not in p}
         return tuple(sorted(found))
 
+    async def recover_orphaned_index_lock(
+        self,
+        worktree_path: str | Path,
+        *,
+        project_id: str,
+        job_id: str,
+        run_id: str,
+        change_name: str,
+        candidate_sha: str,
+        process_absence_proven: bool,
+    ) -> dict[str, Any] | None:
+        """Remove only the lock in an exactly owned worktree after process proof."""
+        if not process_absence_proven:
+            raise RuntimeError("Refusing Git lock recovery without proven process absence.")
+        if not re.fullmatch(r"[0-9a-f]{40,64}", candidate_sha, re.IGNORECASE):
+            raise RuntimeError("Refusing Git lock recovery without an immutable candidate SHA.")
+
+        path = Path(worktree_path).resolve()
+        ownership_repo = getattr(self.uow, "orchestration_worktree_ownerships", None)
+        ownership = ownership_repo.get_by_canonical_path(str(path)) if ownership_repo else None
+        if ownership is None or (
+            ownership.project_id != project_id
+            or ownership.job_id != job_id
+            or ownership.run_id != run_id
+            or ownership.change_name != change_name
+            or str(Path(ownership.canonical_worktree_path).resolve()) != str(path)
+        ):
+            raise RuntimeError("Refusing Git lock recovery without matching durable worktree ownership.")
+
+        self._authorize_mutating_operation(
+            project_id,
+            path,
+            WorkspaceOperation.GIT_INDEX_LOCK_RECOVERY,
+            require_created_ownership=True,
+            job_id=job_id,
+        )
+        await self._verify_worktree_adoption_proof(
+            path=path,
+            job_id=job_id,
+            eff_project_id=project_id,
+            eff_run_id=run_id,
+            eff_change_name=change_name,
+            expected_branch=ownership.branch,
+            require_clean=False,
+            worktree_kind="Watchdog recovery worktree",
+        )
+        actual_sha = (await self.current_sha(path)).strip()
+        if actual_sha != candidate_sha:
+            raise RuntimeError("Refusing Git lock recovery because the candidate SHA changed.")
+
+        git_dir = Path(
+            (await self._git(["rev-parse", "--absolute-git-dir"], cwd=path)).strip()
+        ).resolve()
+        lock_output = (await self._git(["rev-parse", "--git-path", "index.lock"], cwd=path)).strip()
+        lock_path = Path(lock_output)
+        if not lock_path.is_absolute():
+            lock_path = git_dir / lock_path
+        lock_path = lock_path.resolve(strict=False)
+        expected_lock = (git_dir / "index.lock").resolve(strict=False)
+        if lock_path != expected_lock:
+            raise RuntimeError("Git reported an unexpected index lock path.")
+        if not lock_path.exists():
+            return None
+        if lock_path.is_symlink() or not lock_path.is_file():
+            raise RuntimeError("Refusing Git lock recovery because the lock is not a regular file.")
+
+        lock_bytes = lock_path.read_bytes()
+        digest = hashlib.sha256(lock_bytes).hexdigest()
+        size_bytes = len(lock_bytes)
+        lock_path.unlink()
+        if lock_path.exists():
+            raise RuntimeError("Git index lock remained after the recovery attempt.")
+        return {
+            "lock_path": str(lock_path),
+            "lock_sha256": digest,
+            "size_bytes": size_bytes,
+            "candidate_sha": candidate_sha,
+        }
+
+    async def recover_verify_generated_outputs(
+        self,
+        worktree_path: str | Path,
+        *,
+        project_id: str,
+        job_id: str,
+        run_id: str,
+        change_name: str,
+        candidate_sha: str,
+        attempt_id: str,
+    ) -> dict[str, Any]:
+        """Preserve and remove only recognized test outputs from a proven Verify attempt."""
+        if not re.fullmatch(r"[0-9a-f]{40,64}", candidate_sha, re.IGNORECASE):
+            raise RuntimeError("Verify output recovery requires an immutable candidate SHA.")
+        if not re.fullmatch(r"[A-Za-z0-9_-]{1,128}", attempt_id):
+            raise RuntimeError("Verify output recovery requires an exact attempt identity.")
+
+        path = Path(worktree_path).resolve()
+        ownership_repo = getattr(self.uow, "orchestration_worktree_ownerships", None)
+        ownership = ownership_repo.get_by_canonical_path(str(path)) if ownership_repo else None
+        if ownership is None or (
+            ownership.project_id != project_id
+            or ownership.job_id != job_id
+            or ownership.run_id != run_id
+            or ownership.change_name != change_name
+            or str(Path(ownership.canonical_worktree_path).resolve()) != str(path)
+        ):
+            raise RuntimeError("Verify output recovery requires matching durable worktree ownership.")
+        self._authorize_mutating_operation(
+            project_id,
+            path,
+            WorkspaceOperation.GIT_COMMIT,
+            require_created_ownership=True,
+            job_id=job_id,
+        )
+        await self._verify_worktree_adoption_proof(
+            path=path,
+            job_id=job_id,
+            eff_project_id=project_id,
+            eff_run_id=run_id,
+            eff_change_name=change_name,
+            expected_branch=ownership.branch,
+            require_clean=False,
+            worktree_kind="Watchdog Verify worktree",
+        )
+        if (await self.current_sha(path)).strip() != candidate_sha:
+            raise RuntimeError("Verify output recovery refused a different candidate SHA.")
+
+        staged = await self._git(["diff", "--cached", "--name-only", "-z"], cwd=path)
+        if staged:
+            raise RuntimeError("Verify output recovery refuses staged changes.")
+        tracked = await self._git(["diff", "--name-only", "-z", "HEAD"], cwd=path)
+        untracked = await self._git(
+            ["ls-files", "--others", "--exclude-standard", "-z"], cwd=path
+        )
+        tracked_paths = {entry for entry in tracked.split("\0") if entry}
+        untracked_paths = {entry for entry in untracked.split("\0") if entry}
+        all_paths = sorted(tracked_paths | untracked_paths)
+        if not all_paths:
+            return {"candidate_sha": candidate_sha, "attempt_id": attempt_id, "outputs": []}
+
+        captured_root = path / ".minime" / "verify-attempts" / attempt_id / "captured"
+        output_manifest: list[dict[str, Any]] = []
+        restore_tracked: list[str] = []
+        for relative in all_paths:
+            pure = PurePosixPath(relative)
+            if pure.is_absolute() or ".." in pure.parts or not self._is_verify_generated_output(relative):
+                raise RuntimeError(
+                    f"Verify left an unattributed path '{relative}'; preserving the worktree."
+                )
+            candidate_path = path.joinpath(*pure.parts)
+            resolved = candidate_path.resolve(strict=False)
+            if path not in resolved.parents or candidate_path.is_symlink():
+                raise RuntimeError("Verify output path escapes the owned worktree or is a symlink.")
+            if relative in tracked_paths:
+                restore_tracked.append(relative)
+            elif candidate_path.exists() and not candidate_path.is_file():
+                raise RuntimeError("Verify output recovery accepts files only.")
+
+            digest = None
+            size = 0
+            if candidate_path.is_file():
+                content = candidate_path.read_bytes()
+                digest = hashlib.sha256(content).hexdigest()
+                size = len(content)
+                captured_path = captured_root.joinpath(*pure.parts)
+                captured_path.parent.mkdir(parents=True, exist_ok=True)
+                captured_path.write_bytes(content)
+                os.chmod(captured_path, stat.S_IMODE(candidate_path.stat().st_mode))
+            output_manifest.append(
+                {"path": relative, "sha256": digest, "size_bytes": size, "tracked": relative in tracked_paths}
+            )
+
+        if restore_tracked:
+            await self._git(
+                [
+                    "restore",
+                    "--worktree",
+                    "--source",
+                    candidate_sha,
+                    "--",
+                    *(f":(literal){relative}" for relative in restore_tracked),
+                ],
+                cwd=path,
+                job_id=job_id,
+                project_id=project_id,
+                operation_type="watchdog_verify_output_restore",
+                managed_worktree_path=path,
+            )
+        for relative in sorted(untracked_paths):
+            candidate_path = path.joinpath(*PurePosixPath(relative).parts)
+            if candidate_path.is_file() and not candidate_path.is_symlink():
+                candidate_path.unlink()
+
+        remaining = await self._git(
+            ["status", "--porcelain=v1", "--untracked-files=all"], cwd=path
+        )
+        if remaining.strip():
+            raise RuntimeError("Verify outputs were preserved, but the worktree is still dirty.")
+        if (await self.current_sha(path)).strip() != candidate_sha:
+            raise RuntimeError("Verify output recovery changed the immutable candidate SHA.")
+        return {"candidate_sha": candidate_sha, "attempt_id": attempt_id, "outputs": output_manifest}
+
+    @staticmethod
+    def _is_verify_generated_output(relative: str) -> bool:
+        path = PurePosixPath(relative)
+        name = path.name.lower()
+        parts = {part.lower() for part in path.parts}
+        return (
+            relative == ".coverage"
+            or name.startswith(".coverage.")
+            or name.endswith(".junit.xml")
+            or name in {"junit.xml", "test-results.xml"}
+            or bool(parts & {"coverage", "test-results", "playwright-report", ".pytest_cache"})
+            or ("__pycache__" in parts and name.endswith((".pyc", ".pyo")))
+        )
+
     async def _verify_worktree_adoption_proof(
         self,
         *,

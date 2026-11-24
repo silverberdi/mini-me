@@ -12,7 +12,7 @@ from contextlib import asynccontextmanager
 from dataclasses import asdict
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Annotated, Any, Generator
+from typing import Annotated, Any, Generator, Literal
 from urllib.parse import urlparse
 from uuid import uuid4
 
@@ -28,7 +28,7 @@ from fastapi.responses import (
     StreamingResponse,
 )
 from fastapi.staticfiles import StaticFiles
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 
 from minime.adapters.provider_adapter import (
     PROVIDER_DIAGNOSTIC_TIMEOUT_SECONDS,
@@ -36,6 +36,7 @@ from minime.adapters.provider_adapter import (
     get_provider_adapter,
 )
 from minime.config import load_config
+from minime.db.notifications import notify_scheduler_wakeup
 from minime.db.repository import PostgresPersistenceUnitOfWork
 from minime.db.session import db_manager
 from minime.domain.enums import (
@@ -552,6 +553,208 @@ def administrative_provider_catalog(
 ) -> dict[str, Any]:
     """Return the durable non-secret provider/model catalog."""
     return catalog_payload(uow.provider_model_registry.list())
+
+
+class WatchdogSettingsPayload(BaseModel):
+    model_config = {"extra": "forbid"}
+
+    provider_id: str | None = None
+    harness_id: str | None = None
+    canonical_model_id: str | None = None
+    inactivity_threshold_minutes: int = Field(gt=0)
+    mode: Literal["diagnostic_only", "mechanical_remediation"]
+
+    @field_validator("provider_id", "harness_id", "canonical_model_id")
+    @classmethod
+    def normalize_watchdog_identity(cls, value: str | None) -> str | None:
+        return value.strip().lower() if isinstance(value, str) else None
+
+    @model_validator(mode="after")
+    def complete_model_selection(self) -> "WatchdogSettingsPayload":
+        identities = (self.provider_id, self.harness_id, self.canonical_model_id)
+        if any(identities) and not all(identities):
+            raise ValueError("provider, harness, and model must be selected together")
+        return self
+
+
+class WatchdogSuggestionStatusPayload(BaseModel):
+    model_config = {"extra": "forbid"}
+    status: Literal["converted", "discarded"]
+
+
+@app.get("/api/v1/admin/watchdog/settings", tags=["admin-watchdog"])
+def get_watchdog_settings(_operator: AuthenticatedOperatorDep, uow: UowDep) -> dict[str, Any]:
+    return uow.watchdog.get_settings()
+
+
+@app.patch("/api/v1/admin/watchdog/settings", tags=["admin-watchdog"])
+def update_watchdog_settings(
+    payload: WatchdogSettingsPayload, _operator: AuthenticatedOperatorDep, uow: UowDep
+) -> dict[str, Any]:
+    if payload.provider_id is not None:
+        matching = next((
+            model for model in uow.provider_model_registry.list()
+            if model.provider_id == payload.provider_id
+            and model.harness_id == payload.harness_id
+            and model.canonical_model_id == payload.canonical_model_id
+        ), None)
+        if matching is None or matching.discovery_status != "available" or not matching.is_enabled:
+            raise HTTPException(status_code=409, detail="Watchdog provider/model must be enabled and available in the catalog.")
+    try:
+        saved = uow.watchdog.save_settings(payload.model_dump())
+        uow.commit()
+        return saved
+    except Exception:
+        uow.rollback()
+        raise
+
+
+@app.get("/api/v1/admin/watchdog/diagnoses", tags=["admin-watchdog"])
+def list_watchdog_suggestions(
+    _operator: AuthenticatedOperatorDep, uow: UowDep,
+    project_id: str | None = None,
+    status_filter: Literal["pending", "converted", "discarded"] | None = None,
+) -> dict[str, Any]:
+    records = uow.watchdog.list_diagnoses(
+        project_id=project_id, suggestion_status=status_filter, suggestions_only=True,
+    )
+    recurrences: dict[str, int] = {}
+    for record in records:
+        key = f"{record['root_cause']}:{record['affected_component']}"
+        recurrences[key] = recurrences.get(key, 0) + 1
+    return {"items": records, "recurrences": recurrences}
+
+
+@app.patch("/api/v1/admin/watchdog/diagnoses/{diagnosis_id}/suggestion", tags=["admin-watchdog"])
+def update_watchdog_suggestion_status(
+    diagnosis_id: str, payload: WatchdogSuggestionStatusPayload,
+    _operator: AuthenticatedOperatorDep, uow: UowDep,
+) -> dict[str, Any]:
+    record = uow.watchdog.set_suggestion_status(diagnosis_id, payload.status)
+    if record is None:
+        raise HTTPException(status_code=404, detail="Suggestion not found")
+    uow.commit()
+    return record
+
+
+@app.get("/api/v1/projects/{project_id}/runs/{run_id}/watchdog", tags=["admin-watchdog"])
+def get_run_watchdog_records(
+    project_id: str, run_id: str, _operator: AuthenticatedOperatorDep, uow: UowDep,
+) -> dict[str, Any]:
+    run = uow.orchestration_runs.get_by_id(run_id)
+    if run is None or run.project_id != project_id:
+        raise HTTPException(status_code=404, detail="Run not found")
+    events = uow.orchestration_stage_events.list_by_run(run_id)
+    logs = uow.job_logs.list_by_job(run.active_job_id, limit=500) if run.active_job_id and getattr(uow, "job_logs", None) else []
+    current_stage = getattr(run.current_stage, "value", run.current_stage)
+    stage_events = [event for event in events if getattr(getattr(event, "to_stage", None), "value", event.to_stage) == current_stage]
+    activity = [event.created_at for event in events] + [log.timestamp for log in logs]
+    last_activity = max(activity, default=None)
+    stage_started = max((event.created_at for event in stage_events), default=None)
+    settings = uow.watchdog.get_settings()
+    now = datetime.now(UTC)
+    if last_activity is not None:
+        comparable_activity = last_activity.replace(tzinfo=UTC) if last_activity.tzinfo is None else last_activity
+        elapsed_seconds = max(0, int((now - comparable_activity).total_seconds()))
+        activity_state = "recent" if elapsed_seconds < settings["inactivity_threshold_minutes"] * 60 else "stalled"
+    else:
+        elapsed_seconds = None
+        activity_state = "unknown"
+    comparable_stage_start = (
+        stage_started.replace(tzinfo=UTC) if stage_started and stage_started.tzinfo is None else stage_started
+    )
+    return {
+        "run_id": run_id,
+        "project_id": project_id,
+        "stage": current_stage,
+        "stage_started_at": stage_started,
+        "last_activity_at": last_activity,
+        "elapsed_stage_seconds": max(0, int((now - comparable_stage_start).total_seconds())) if comparable_stage_start else None,
+        "activity_state": activity_state,
+        "inactive_threshold_minutes": settings["inactivity_threshold_minutes"],
+        "elapsed_activity_seconds": elapsed_seconds,
+        "items": list(reversed(uow.watchdog.list_diagnoses(run_id=run_id, limit=50))),
+    }
+
+
+@app.post("/api/v1/projects/{project_id}/runs/{run_id}/watchdog/diagnose", tags=["admin-watchdog"])
+async def request_run_watchdog_diagnosis(
+    project_id: str, run_id: str, _operator: AuthenticatedOperatorDep, uow: UowDep,
+) -> dict[str, Any]:
+    from minime.services.watchdog_service import WatchdogObservationService
+
+    run = uow.orchestration_runs.get_by_id(run_id)
+    if run is None or run.project_id != project_id:
+        raise HTTPException(status_code=404, detail="Run not found")
+    if not run.is_active:
+        raise HTTPException(status_code=409, detail="Run is not active")
+    settings = uow.watchdog.get_settings()
+    events = uow.orchestration_stage_events.list_by_run(run_id)
+    logs = uow.job_logs.list_by_job(run.active_job_id, limit=500) if run.active_job_id and getattr(uow, "job_logs", None) else []
+    result = WatchdogObservationService().observe(run, events, job_logs=logs, threshold_minutes=settings["inactivity_threshold_minutes"])
+    if result is None:
+        return {"status": "completed", "result": "no_stall_observed", "run_id": run_id}
+    existing = uow.watchdog.get_by_run_stage_generation(run_id, result["stage"], result["candidate_generation"])
+    if existing:
+        should_request_recovery = (
+            settings.get("mode") == "mechanical_remediation"
+            and existing.get("status") == "OBSERVED"
+        )
+        if should_request_recovery:
+            notify_scheduler_wakeup(
+                uow.session,
+                project_id=project_id,
+                run_id=run_id,
+                action_id=existing["id"],
+                reason="watchdog_diagnosis",
+            )
+            uow.commit()
+            return {
+                "status": "accepted",
+                "result": "recovery_queued",
+                "run_id": run_id,
+                "diagnosis": existing,
+            }
+        return {
+            "status": "completed",
+            "result": "diagnosis_persisted",
+            "diagnosis": existing,
+            "mode": settings.get("mode"),
+        }
+    owner_repo = getattr(uow, "orchestration_worktree_ownerships", None)
+    owner = owner_repo.get_by_job_id(run.active_job_id) if owner_repo and run.active_job_id else None
+    result = await WatchdogObservationService().add_semantic_diagnosis(
+        result, settings,
+        worktree_path=owner.canonical_worktree_path if owner else None,
+    )
+    record = uow.watchdog.save_diagnosis(result)
+    should_request_recovery = (
+        settings.get("mode") == "mechanical_remediation"
+        and record.get("status") == "OBSERVED"
+    )
+    if should_request_recovery:
+        notify_scheduler_wakeup(
+            uow.session,
+            project_id=project_id,
+            run_id=run_id,
+            action_id=record["id"],
+            reason="watchdog_diagnosis",
+        )
+    uow.commit()
+    if should_request_recovery:
+        return {
+            "status": "accepted",
+            "result": "recovery_queued",
+            "run_id": run_id,
+            "diagnosis": record,
+        }
+    return {
+        "status": "completed",
+        "result": "diagnosis_persisted",
+        "run_id": run_id,
+        "diagnosis": record,
+        "mode": settings.get("mode"),
+    }
 
 
 @app.post("/api/v1/admin/providers/{provider}/test", tags=["admin-providers"])
@@ -2558,14 +2761,9 @@ def list_orchestration_runs(
                 tokens = sum(e.total_tokens or 0 for e in entries)
         d["tokens"] = tokens
 
-        # Autonomy: if human gate was required or recovery blocked, autonomy is degraded
-        has_human_gate = bool(r.human_gate or is_human_required)
-        reassignments = getattr(r, "reassignment_count", 0)
-        retries = getattr(r, "retry_count", 0)
-        if has_human_gate or reassignments > 0 or retries > 1:
-            d["autonomy_percent"] = 50.0 if not has_human_gate else 0.0
-        else:
-            d["autonomy_percent"] = 100.0 if not r.is_active else None
+        # Autonomy is an aggregate telemetry measure; per-run 0/50/100 values
+        # fabricate meaning from retry counts and incomplete intervention data.
+        d["autonomy_percent"] = None
 
         if is_human_required:
             d["status"] = "HUMAN_REQUIRED"

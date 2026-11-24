@@ -5482,6 +5482,9 @@ class PostgresPersistenceUnitOfWork(PersistenceUnitOfWork):
         self.recovery_decisions = PostgresRecoveryDecisionRepository(session)
         self.external_action_attempts = PostgresExternalActionAttemptRepository(session)
         self.provider_model_registry = PostgresProviderModelRegistryRepository(session)
+        from minime.services.watchdog_repository import PostgresWatchdogRepository
+
+        self.watchdog = PostgresWatchdogRepository(session)
 
     def commit(self) -> None:
         self.session.commit()
