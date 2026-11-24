@@ -27,10 +27,15 @@ export async function setupAuthSession(
 /**
  * Resets the project to ACTIVE state via API request before or after tests.
  */
-export async function resetProjectState(request: APIRequestContext, projectId = TEST_PROJECT_ID): Promise<void> {
+export async function resetProjectState(
+  request: APIRequestContext,
+  projectId = TEST_PROJECT_ID,
+  options: { preserveActiveRunIds?: readonly string[] } = {},
+): Promise<void> {
   if (projectId !== TEST_PROJECT_ID) {
     throw new Error(`E2E reset is restricted to ${TEST_PROJECT_ID}; received ${projectId}.`);
   }
+  const preservedRunIds = new Set(options.preserveActiveRunIds ?? []);
   const headers = { Authorization: `Bearer ${E2E_SESSION_TOKEN}` };
   const runsResponse = await request.get(
     `/api/v1/orchestration/runs?project_id=${encodeURIComponent(TEST_PROJECT_ID)}&is_active=true`,
@@ -45,6 +50,7 @@ export async function resetProjectState(request: APIRequestContext, projectId = 
     if (!run?.run_id || run.project_id !== TEST_PROJECT_ID || run.is_active !== true) {
       throw new Error('Active-run response contained an unexpected or incomplete E2E run identity.');
     }
+    if (preservedRunIds.has(run.run_id)) continue;
     if (run.active_job_id) {
       throw new Error(`Cannot reset ${TEST_PROJECT_ID}: run ${run.run_id} still has active job ${run.active_job_id}; left it untouched.`);
     }
@@ -75,8 +81,19 @@ export async function resetProjectState(request: APIRequestContext, projectId = 
     throw new Error(`Unable to verify E2E run cleanup (${remainingResponse.status()}): ${await remainingResponse.text()}`);
   }
   const remainingRuns = await remainingResponse.json();
-  if (!Array.isArray(remainingRuns) || remainingRuns.length > 0) {
-    throw new Error('E2E project still has active runs after the cleanup pass.');
+  if (!Array.isArray(remainingRuns)) {
+    throw new Error('Active-run response is not a list after the cleanup pass.');
+  }
+  for (const run of remainingRuns) {
+    if (
+      !run?.run_id ||
+      run.project_id !== TEST_PROJECT_ID ||
+      run.is_active !== true ||
+      !preservedRunIds.has(run.run_id) ||
+      run.active_job_id
+    ) {
+      throw new Error(`E2E project still has an unexpected active run after cleanup: ${JSON.stringify(run)}`);
+    }
   }
 
   const resumeResponse = await request.post(

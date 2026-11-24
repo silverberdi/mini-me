@@ -122,33 +122,6 @@ def seed_e2e_state() -> None:
             project.updated_at = now
         session.flush()
 
-        # Keep the human-gate fixture separate from project lifecycle E2E cleanup.
-        human_gate_project = session.execute(
-            select(ProjectModel).where(ProjectModel.id == "e2e-human-gate-project")
-        ).scalar_one_or_none()
-        if human_gate_project is None:
-            logger.info("Creating e2e-human-gate-project in database...")
-            human_gate_project = ProjectModel(
-                id="e2e-human-gate-project",
-                display_name="E2E Human Gate Fixture",
-                repository="test-owner/e2e-human-gate-project",
-                project_type="BROWNFIELD",
-                base_branch="main",
-                provider_connections={"tickets": {}, "git_pr": {}},
-                agent_profiles=profiles,
-                execution_policy={"effective_pause": False},
-                status="ACTIVE",
-                created_at=now,
-                updated_at=now,
-            )
-            session.add(human_gate_project)
-        else:
-            human_gate_project.status = "ACTIVE"
-            human_gate_project.execution_policy = {"effective_pause": False}
-            human_gate_project.agent_profiles = profiles
-            human_gate_project.updated_at = now
-        session.flush()
-
         # 3.b Ensure managed repository binding exists for e2e-project
         os.makedirs("/tmp/e2e-project-repo", exist_ok=True)
         os.makedirs("/tmp/e2e-project-worktrees", exist_ok=True)
@@ -234,7 +207,7 @@ def seed_e2e_state() -> None:
             logger.info("Creating e2e-human-gate-run in database...")
             e2e_run = OrchestrationRunModel(
                 id="e2e-human-gate-run",
-                project_id="e2e-human-gate-project",
+                project_id="e2e-project",
                 change_name="issue-321-human-gate-test",
                 base_sha="0274272890abcdef1234567890abcdef12345678",
                 current_stage="EXPLORING",
@@ -250,7 +223,6 @@ def seed_e2e_state() -> None:
             session.add(e2e_run)
         else:
             logger.info("Resetting e2e-human-gate-run to initial HUMAN_REQUIRED state...")
-            e2e_run.project_id = "e2e-human-gate-project"
             e2e_run.current_stage = "EXPLORING"
             e2e_run.resumable_stage = "EXPLORING"
             e2e_run.stop_outcome = "NEEDS_HUMAN"
