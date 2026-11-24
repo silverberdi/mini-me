@@ -8,13 +8,13 @@ from typing import Any
 
 import sqlalchemy as sa
 from sqlalchemy import (
+    JSON,
     Boolean,
     CheckConstraint,
     DateTime,
     Float,
     ForeignKey,
     Index,
-    JSON,
     Integer,
     Numeric,
     String,
@@ -22,8 +22,8 @@ from sqlalchemy import (
     UniqueConstraint,
     text,
 )
-from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
 from sqlalchemy.dialects.postgresql import JSONB
+from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
 
 
 class Base(DeclarativeBase):
@@ -1493,6 +1493,61 @@ class RecoveryDecisionModel(Base):
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=utc_now, onupdate=utc_now, nullable=False
     )
+
+
+class WatchdogSettingsModel(Base):
+    """Single global, non-secret Watchdog configuration."""
+
+    __tablename__ = "watchdog_settings"
+    __table_args__ = (
+        CheckConstraint("settings_id = 'global'", name="ck_watchdog_settings_singleton"),
+        CheckConstraint("inactivity_threshold_minutes > 0", name="ck_watchdog_threshold_positive"),
+        CheckConstraint("mode IN ('diagnostic_only', 'mechanical_remediation')", name="ck_watchdog_mode"),
+        CheckConstraint(
+            "(provider_id IS NULL AND harness_id IS NULL AND canonical_model_id IS NULL) OR "
+            "(provider_id IS NOT NULL AND harness_id IS NOT NULL AND canonical_model_id IS NOT NULL)",
+            name="ck_watchdog_model_selection_complete",
+        ),
+    )
+
+    settings_id: Mapped[str] = mapped_column(String(16), primary_key=True, default="global")
+    provider_id: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    harness_id: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    canonical_model_id: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    inactivity_threshold_minutes: Mapped[int] = mapped_column(Integer, nullable=False, default=15, server_default="15")
+    mode: Mapped[str] = mapped_column(String(32), nullable=False, default="diagnostic_only", server_default="diagnostic_only")
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now, onupdate=utc_now, nullable=False)
+
+
+class WatchdogDiagnosisModel(Base):
+    """Sanitized, candidate-bound diagnosis and optional improvement draft."""
+
+    __tablename__ = "watchdog_diagnoses"
+    __table_args__ = (
+        UniqueConstraint("run_id", "stage", "candidate_generation", name="uq_watchdog_run_stage_generation"),
+        CheckConstraint("suggestion_status IN ('pending', 'converted', 'discarded')", name="ck_watchdog_suggestion_status"),
+        Index("ix_watchdog_diagnoses_feed", "project_id", "suggestion_status", "created_at"),
+        Index("ix_watchdog_diagnoses_run", "run_id", "created_at"),
+    )
+
+    id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    project_id: Mapped[str] = mapped_column(String(64), ForeignKey("projects.id", ondelete="CASCADE"), nullable=False)
+    run_id: Mapped[str] = mapped_column(String(64), ForeignKey("orchestration_runs.id", ondelete="CASCADE"), nullable=False)
+    change_name: Mapped[str] = mapped_column(String(128), nullable=False)
+    stage: Mapped[str] = mapped_column(String(32), nullable=False)
+    candidate_sha: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    candidate_generation: Mapped[int] = mapped_column(Integer, nullable=False)
+    status: Mapped[str] = mapped_column(String(32), nullable=False)
+    root_cause: Mapped[str] = mapped_column(String(128), nullable=False)
+    affected_component: Mapped[str] = mapped_column(String(128), nullable=False, index=True)
+    summary: Mapped[str] = mapped_column(Text, nullable=False)
+    evidence: Mapped[dict[str, Any]] = mapped_column(JSON, nullable=False, default=dict)
+    action: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    action_result: Mapped[dict[str, Any]] = mapped_column(JSON, nullable=False, default=dict)
+    improvement_suggestion: Mapped[str | None] = mapped_column(Text, nullable=True)
+    suggestion_status: Mapped[str] = mapped_column(String(16), nullable=False, default="pending", server_default="pending")
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now, nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now, onupdate=utc_now, nullable=False)
 
 
 class ExternalActionAttemptModel(Base):

@@ -22,6 +22,9 @@ def _payload(**overrides: str) -> str:
 
 def test_scheduler_wakeup_payload_is_strict_and_separate_from_sse():
     assert parse_scheduler_wakeup(SCHEDULER_WAKEUP_CHANNEL, _payload()).run_id == "run-1"
+    assert parse_scheduler_wakeup(
+        SCHEDULER_WAKEUP_CHANNEL, _payload(reason="watchdog_diagnosis")
+    ).reason == "watchdog_diagnosis"
     assert parse_scheduler_wakeup("minime_run_transition", _payload()) is None
     assert parse_scheduler_wakeup(SCHEDULER_WAKEUP_CHANNEL, "{}") is None
     assert parse_scheduler_wakeup(SCHEDULER_WAKEUP_CHANNEL, _payload(reason="scheduler_transition")) is None

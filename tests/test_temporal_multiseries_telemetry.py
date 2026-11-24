@@ -5,7 +5,9 @@ from decimal import Decimal
 
 import pytest
 from pydantic import ValidationError
+from tests.conftest import InMemoryPersistenceUnitOfWork
 
+from minime.domain.enums import OrchestrationStage
 from minime.domain.models import (
     BudgetLedgerEntry,
     OrchestrationRun,
@@ -13,13 +15,10 @@ from minime.domain.models import (
     Project,
     ProviderEfficiencyMetrics,
 )
-from minime.domain.enums import OrchestrationStage
 from minime.services.temporal_multiseries_telemetry_service import (
     TemporalMultiseriesTelemetryService,
     TemporalTelemetryPointDTO,
 )
-from tests.conftest import InMemoryPersistenceUnitOfWork
-
 
 NOW = datetime.now(UTC).replace(microsecond=0)
 
@@ -50,12 +49,22 @@ def test_point_rejects_missing_timestamp_or_verifiable_source() -> None:
         TemporalTelemetryPointDTO(timestamp="", value=1, source_timestamps=[])
 
 
-def test_autonomy_is_bounded_and_rework_lowers_score() -> None:
+def test_autonomy_is_completed_run_share_and_retries_do_not_change_it() -> None:
     uow, service = _service()
     clean = _run("clean", "p1", 2)
     retry = _run("retry", "p2", 1)
+    clean.stop_details = {"resolved_human_gates": []}
+    retry.stop_details = {"resolved_human_gates": []}
     uow.orchestration_runs.save(clean)
     uow.orchestration_runs.save(retry)
+    for run in (clean, retry):
+        uow.orchestration_stage_events.save(OrchestrationStageEvent(
+            run_id=run.run_id,
+            from_stage=OrchestrationStage.IMPLEMENTING,
+            to_stage=OrchestrationStage.COMPLETED,
+            created_at=run.created_at,
+            event_type="RUN_COMPLETED",
+        ))
     uow.provider_efficiency.save(ProviderEfficiencyMetrics(
         run_id="clean", project_id="p1", change_name=clean.change_name,
         productive_attempt_count=4,
@@ -68,10 +77,28 @@ def test_autonomy_is_bounded_and_rework_lowers_score() -> None:
 
     projection = service.project("autonomy")
     values = {s.project_id: s.points[0].value for s in projection.series if s.project_id}
-    assert 0 <= values["p1"] <= 100
-    assert 0 <= values["p2"] <= 100
-    assert values["p2"] < values["p1"]
+    assert values == {"p1": 100.0, "p2": 100.0}
     assert projection.series[0].label == "Global (Todos los proyectos)"
+
+
+def test_autonomy_window_uses_completion_time_for_long_running_runs() -> None:
+    uow, service = _service()
+    run = _run("long-running", "p1", 60)
+    run.updated_at = NOW - timedelta(days=1)
+    run.stop_details = {"resolved_human_gates": []}
+    uow.orchestration_runs.save(run)
+    uow.orchestration_stage_events.save(OrchestrationStageEvent(
+        run_id=run.run_id,
+        from_stage=OrchestrationStage.IMPLEMENTING,
+        to_stage=OrchestrationStage.COMPLETED,
+        created_at=run.updated_at,
+        event_type="RUN_COMPLETED",
+    ))
+
+    projection = service.project("autonomy", window_days=30)
+
+    assert projection.no_data is False
+    assert projection.series[1].points[-1].value == 100.0
 
 
 def test_time_excludes_human_gate_wait_and_orders_axis() -> None:
@@ -135,8 +162,9 @@ def test_time_recognizes_duration_ms_key() -> None:
 def test_autonomy_derived_from_stage_events_when_metrics_absent() -> None:
     uow, service = _service()
     run = _run("event-autonomy", "p1", 1)
+    run.stop_details = {"resolved_human_gates": []}
     uow.orchestration_runs.save(run)
-    # 3 completed stages, 1 recovery penalty
+    # Retries and failed stage attempts are not operator-intervention counts.
     for _ in range(3):
         uow.orchestration_stage_events.save(OrchestrationStageEvent(
             event_type="STAGE_INVOCATION_COMPLETED",
@@ -154,13 +182,13 @@ def test_autonomy_derived_from_stage_events_when_metrics_absent() -> None:
     ))
     projection = service.project("autonomy")
     point = projection.series[1].points[0]
-    # 3 productive / (3 + 1) = 75.0%
-    assert point.value == 75.0
+    assert point.value == 100.0
 
 
 def test_autonomy_penalizes_failed_abandoned_and_human_required_events() -> None:
     uow, service = _service()
     run = _run("event-penalties", "p1", 1)
+    run.stop_details = {"resolved_human_gates": [{"gate_id": "gate-1", "response": "continue"}]}
     uow.orchestration_runs.save(run)
     # 4 completed stages
     for _ in range(4):
@@ -192,5 +220,23 @@ def test_autonomy_penalizes_failed_abandoned_and_human_required_events() -> None
     ))
     projection = service.project("autonomy")
     point = projection.series[1].points[0]
-    # 4 productive / (4 + 3 penalties) = 4 / 7 = 57.143%
-    assert point.value == 57.143
+    assert point.value == 0.0
+
+
+def test_autonomy_returns_no_data_when_completed_run_lacks_intervention_evidence() -> None:
+    uow, service = _service()
+    run = _run("ambiguous-autonomy", "p1", 1)
+    uow.orchestration_runs.save(run)
+    uow.orchestration_stage_events.save(OrchestrationStageEvent(
+        event_type="RUN_COMPLETED",
+        run_id=run.run_id,
+        to_stage=OrchestrationStage.COMPLETED,
+        from_stage=OrchestrationStage.IMPLEMENTING,
+        created_at=run.created_at,
+    ))
+
+    projection = service.project("autonomy")
+
+    assert projection.no_data is True
+    assert projection.series[0].no_data is True
+    assert projection.excluded["unverified_or_incomplete"] == 1

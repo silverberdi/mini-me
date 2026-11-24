@@ -11,6 +11,19 @@ import {
   PIPELINE_STAGES,
 } from '../../shared/pipeline-stage-presentation';
 
+interface RunWatchdogData {
+  run_id: string;
+  project_id: string;
+  stage: string;
+  stage_started_at: string | null;
+  last_activity_at: string | null;
+  elapsed_stage_seconds: number | null;
+  elapsed_activity_seconds: number | null;
+  activity_state: 'recent' | 'stalled' | 'unknown';
+  inactive_threshold_minutes: number;
+  items: Array<{ id: string; status: string; root_cause: string; summary: string; action: string | null; action_result: Record<string, unknown>; created_at: string }>;
+}
+
 @Component({
   selector: 'app-trabajo-actual',
   standalone: true,
@@ -407,6 +420,30 @@ import {
 
           <div class="bg-slate-800/40 rounded-2xl border border-slate-700/50 p-6 backdrop-blur-sm space-y-4">
             <h3 class="text-base font-semibold text-white">Diagnóstico & Supervisión</h3>
+            <div class="flex flex-wrap items-center justify-between gap-3 text-xs text-slate-300">
+              <div *ngIf="watchdogData() as supervision" class="space-y-1">
+                <div>Etapa: <span class="font-mono">{{ supervision.stage_started_at ? (supervision.elapsed_stage_seconds || 0) + ' s' : 'Sin evidencia' }}</span></div>
+                <div class="flex items-center gap-2">Pulso de actividad:
+                  <span class="h-2 w-2 rounded-full" [ngClass]="supervision.activity_state === 'recent' ? 'bg-emerald-400 animate-pulse' : supervision.activity_state === 'stalled' ? 'bg-amber-400' : 'bg-slate-500'"></span>
+                  <span>{{ supervision.activity_state === 'recent' ? 'Reciente' : supervision.activity_state === 'stalled' ? 'Sin actividad durante ' + (supervision.elapsed_activity_seconds || 0) + ' s' : 'Sin evidencia' }}</span>
+                </div>
+                <div>Última actividad: <span class="font-mono">{{ supervision.last_activity_at ? (supervision.last_activity_at | date:'medium') : 'Sin evidencia' }}</span></div>
+              </div>
+              <div class="flex gap-3">
+                <a routerLink="/mejora-continua" class="text-sky-300 underline">Mejora Continua</a>
+                <button type="button" (click)="requestWatchdogDiagnosis()" [disabled]="watchdogRequestState() === 'running'"
+                        class="rounded border border-slate-600 px-3 py-1.5 disabled:opacity-50">{{ watchdogRequestState() === 'running' ? 'Diagnosticando…' : 'Diagnosticar y destrabar ahora' }}</button>
+              </div>
+            </div>
+            <p *ngIf="watchdogRequestMessage()" role="status" aria-live="polite" class="text-xs text-sky-200">{{ watchdogRequestMessage() }}</p>
+            <div *ngIf="watchdogData()?.items?.length" class="space-y-2" data-testid="watchdog-timeline">
+              <h4 class="text-xs font-semibold uppercase tracking-wide text-slate-400">Intervenciones Watchdog de este Run</h4>
+              <article *ngFor="let item of watchdogData()?.items" class="rounded-lg border border-slate-700 bg-slate-900/60 p-3 text-xs">
+                <div class="flex justify-between gap-2"><strong>{{ item.root_cause }}</strong><span>{{ item.created_at | date:'short' }}</span></div>
+                <p class="mt-1 text-slate-300">{{ item.summary }}</p>
+                <p class="mt-1 text-slate-500">{{ item.action || 'Solo diagnóstico' }} · {{ item.status }}</p>
+              </article>
+            </div>
             <div *ngIf="targetRun()?.error_detail" class="p-4 rounded-xl bg-rose-500/10 border border-rose-500/20 text-rose-300 text-xs font-mono whitespace-pre-wrap">
               {{ targetRun()?.error_detail }}
             </div>
@@ -450,6 +487,10 @@ export class TrabajoActualComponent {
   readonly isCancelling = signal<boolean>(false);
   readonly cancellationMessage = signal<string | null>(null);
   readonly cancellationSuccess = signal<boolean>(false);
+  readonly watchdogData = signal<RunWatchdogData | null>(null);
+  readonly watchdogRequestState = signal<'idle' | 'running' | 'accepted' | 'completed' | 'error'>('idle');
+  readonly watchdogRequestMessage = signal<string | null>(null);
+  private watchdogFetchKey = '';
 
   readonly pipelineStages = PIPELINE_STAGES;
 
@@ -493,6 +534,17 @@ export class TrabajoActualComponent {
 
   constructor() {
     effect(() => {
+      const run = this.targetRun();
+      const key = run ? `${run.project_id}:${run.run_id}:${run.updated_at || ''}` : '';
+      if (key === this.watchdogFetchKey) return;
+      this.watchdogFetchKey = key;
+      if (!run) {
+        this.watchdogData.set(null);
+        return;
+      }
+      void this.loadWatchdogData(run.project_id, run.run_id);
+    });
+    effect(() => {
       const pending = this.pendingGateAcknowledgement();
       if (!pending) return;
 
@@ -503,6 +555,40 @@ export class TrabajoActualComponent {
         this.submissionSuccess.set(false);
       }
     });
+  }
+
+  private async loadWatchdogData(projectId: string, runId: string): Promise<void> {
+    const response = await this.api.get<RunWatchdogData>(`/api/v1/projects/${encodeURIComponent(projectId)}/runs/${encodeURIComponent(runId)}/watchdog`);
+    if (response.ok && response.data && response.data.run_id === runId && response.data.project_id === projectId) {
+      this.watchdogData.set(response.data);
+    } else {
+      this.watchdogData.set(null);
+    }
+  }
+
+  async requestWatchdogDiagnosis(): Promise<void> {
+    const run = this.targetRun();
+    if (!run || this.watchdogRequestState() === 'running') return;
+    this.watchdogRequestState.set('running');
+    this.watchdogRequestMessage.set('Enviando solicitud de diagnóstico…');
+    const response = await this.api.post<{ status: string; result: string; mode?: string; diagnosis?: RunWatchdogData['items'][number] }>(
+      `/api/v1/projects/${encodeURIComponent(run.project_id)}/runs/${encodeURIComponent(run.run_id)}/watchdog/diagnose`, {}
+    );
+    if (!response.ok || !response.data || !['accepted', 'completed'].includes(response.data.status)) {
+      this.watchdogRequestState.set('error');
+      this.watchdogRequestMessage.set(`El diagnóstico falló: ${response.error || 'sin resultado confirmado'}`);
+      return;
+    }
+    const requestState = response.data.status === 'accepted' ? 'accepted' : 'completed';
+    this.watchdogRequestState.set(requestState);
+    this.watchdogRequestMessage.set(response.data.result === 'no_stall_observed'
+      ? 'Diagnóstico completado: no se observó un bloqueo.'
+      : response.data.result === 'recovery_queued'
+        ? 'Diagnóstico persistido; el coordinador evaluará la recuperación con sus controles de seguridad.'
+        : response.data.mode === 'diagnostic_only'
+          ? 'Diagnóstico persistido. El modo Solo diagnóstico no solicita recuperación automática.'
+          : 'Diagnóstico completado y persistido.');
+    await this.loadWatchdogData(run.project_id, run.run_id);
   }
 
   private hasHumanGate(run: any): boolean {

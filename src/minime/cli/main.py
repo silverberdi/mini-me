@@ -699,6 +699,7 @@ def scheduler_run_cmd(
     from minime.services.capacity_lifecycle_service import CapacityLifecycleService
     from minime.services.orchestration_coordinator import NativeOrchestrationCoordinator
     from minime.services.scheduler_wakeup import SchedulerWakeupBridge
+    from minime.services.watchdog_service import WatchdogObservationService
     from minime.services.worktree_manager import WorktreeManager
 
     iterations = 0
@@ -751,15 +752,54 @@ def scheduler_run_cmd(
 
                     # Check if there is an active run
                     active_runs = uow.orchestration_runs.list_runs(project_id=project_id, is_active=True)
-                    accepted_doc_action = None
+                    watchdog_settings = None
+                    watchdog_observation = None
+                    accepted_gate_action = None
                     accepted_recovery_action = None
                     if active_runs:
                         active_run = active_runs[0]
+                        watchdog_repo = getattr(uow, "watchdog", None)
+                        stage_events_repo = getattr(uow, "orchestration_stage_events", None)
+                        if watchdog_repo is not None and stage_events_repo is not None:
+                            settings = watchdog_repo.get_settings()
+                            watchdog_settings = settings
+                            stage_events = stage_events_repo.list_by_run(active_run.run_id)
+                            job_logs = (
+                                uow.job_logs.list_by_job(active_run.active_job_id, limit=500)
+                                if active_run.active_job_id and getattr(uow, "job_logs", None)
+                                else []
+                            )
+                            observation = WatchdogObservationService().observe(
+                                active_run,
+                                stage_events,
+                                job_logs=job_logs,
+                                threshold_minutes=settings["inactivity_threshold_minutes"],
+                            )
+                            watchdog_observation = observation
+                            if observation and not watchdog_repo.get_by_run_stage_generation(
+                                active_run.run_id,
+                                observation["stage"],
+                                observation["candidate_generation"],
+                            ):
+                                owner_repo = getattr(uow, "orchestration_worktree_ownerships", None)
+                                owner = (
+                                    owner_repo.get_by_job_id(active_run.active_job_id)
+                                    if owner_repo and active_run.active_job_id else None
+                                )
+                                observation = asyncio.run(
+                                    WatchdogObservationService().add_semantic_diagnosis(
+                                        observation,
+                                        settings,
+                                        worktree_path=(owner.canonical_worktree_path if owner else None),
+                                    )
+                                )
+                                watchdog_repo.save_diagnosis(observation)
+                                uow.commit()
                         actions = getattr(uow, "operator_actions", None)
                         run_actions = actions.list_by_run(active_run.run_id, limit=100) if actions else []
                         gate_payload = (active_run.stop_details or {}).get("human_payload")
                         gate_fingerprint = None
-                        if active_run.current_stage == OrchestrationStage.DOC_CLOSING and isinstance(gate_payload, dict):
+                        if isinstance(gate_payload, dict):
                             gate_fingerprint = hashlib.sha256(json.dumps({
                                 "run_id": active_run.run_id,
                                 "stage": active_run.current_stage.value,
@@ -790,11 +830,11 @@ def scheduler_run_cmd(
                                 stale_doc_actions.append(action)
                         if stale_doc_actions:
                             uow.commit()
-                        if active_run.current_stage == OrchestrationStage.DOC_CLOSING:
-                            accepted_doc_action = next((action for action in run_actions
+                        if gate_fingerprint is not None:
+                            accepted_gate_action = next((action for action in run_actions
                                 if action.action_type == OperatorActionType.RESOLVE_GATE
                                 and getattr(action.status, "value", action.status) == OperatorActionStatus.ACCEPTED.value
-                                and action.precondition_stage == OrchestrationStage.DOC_CLOSING.value
+                                and action.precondition_stage == active_run.current_stage.value
                                 and action.parameters_json.get("gate_fingerprint") == gate_fingerprint
                                 and isinstance(action.parameters_json.get("accepted_response"), str)
                             ), None)
@@ -806,7 +846,7 @@ def scheduler_run_cmd(
                         if getattr(active_run, "human_gate", None) in (
                             "NEEDS_HUMAN",
                             "READY_FOR_HUMAN_MERGE",
-                        ) and accepted_doc_action is None and accepted_recovery_action is None:
+                        ) and accepted_gate_action is None and accepted_recovery_action is None:
                             # Awaiting human attention (human_gate is the HumanGate enum,
                             # whose values are NEEDS_HUMAN / READY_FOR_HUMAN_MERGE — not
                             # the legacy "HUMAN_REQUIRED" string, which never matched).
@@ -830,6 +870,11 @@ def scheduler_run_cmd(
                         worktree_manager=wt_manager,
                         agent_runner=agent_runner,
                         semantic_pr_agent=True,
+                        watchdog_mechanical_remediation=bool(
+                            watchdog_observation
+                            and watchdog_settings
+                            and watchdog_settings.get("mode") == "mechanical_remediation"
+                        ),
                     )
 
                     typer.echo(f"[{project_id}] Checking / executing eligible request...")
@@ -841,12 +886,12 @@ def scheduler_run_cmd(
                         coordinator.execute_project_request(
                             project_id=project_id,
                             operator_clarification=(
-                                accepted_doc_action.parameters_json["accepted_response"]
-                                if accepted_doc_action else None
+                                accepted_gate_action.parameters_json["accepted_response"]
+                                if accepted_gate_action else None
                             ),
                             operator_action_id=(
-                                accepted_doc_action.action_request_id
-                                if accepted_doc_action else (
+                                accepted_gate_action.action_request_id
+                                if accepted_gate_action else (
                                     accepted_recovery_action.action_request_id
                                     if accepted_recovery_action else None
                                 )
@@ -871,25 +916,25 @@ def scheduler_run_cmd(
                             implementer_provider=agent_runner.provider_for_role("implementer"),
                             reviewer_provider=agent_runner.provider_for_role("reviewer"),
                             target_run_id=(
-                                accepted_doc_action.run_id
-                                if accepted_doc_action else (
+                                accepted_gate_action.run_id
+                                if accepted_gate_action else (
                                     accepted_recovery_action.run_id
                                     if accepted_recovery_action else None
                                 )
                             ),
                         )
                     )
-                    if accepted_doc_action is not None:
-                        accepted_doc_action.status = OperatorActionStatus.COMPLETED
-                        accepted_doc_action.summary = "Accepted DOC_CLOSING response processed by Scheduler."
-                        accepted_doc_action.result_payload_json = {
+                    if accepted_gate_action is not None:
+                        accepted_gate_action.status = OperatorActionStatus.COMPLETED
+                        accepted_gate_action.summary = "Accepted response for the current human gate processed by Scheduler."
+                        accepted_gate_action.result_payload_json = {
                             "status": result.status,
                             "run_id": result.run_id,
                             "current_stage": result.current_stage.value if result.current_stage else None,
                             "message": result.message,
                             "human_payload": result.human_payload,
                         }
-                        uow.operator_actions.save(accepted_doc_action)
+                        uow.operator_actions.save(accepted_gate_action)
                         uow.commit()
                     if accepted_recovery_action is not None and result.status != "PAUSED":
                         accepted_recovery_action.status = OperatorActionStatus.COMPLETED
