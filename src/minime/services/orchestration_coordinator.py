@@ -4115,10 +4115,16 @@ class NativeOrchestrationCoordinator:
             )
             if feasibility_gate is not None:
                 return feasibility_gate
+            has_valid_candidate = bool(
+                isinstance(verify_candidate, dict)
+                and verify_candidate.get("sha") == current_sha
+                and not current_status.stdout.strip()
+            )
             # Step 8: Verify Stage (Executed by implementer)
             invocation = await self._begin_stage_invocation(
                 uow, active_run, worktree_path, "VERIFY",
                 allow_human_resume=bool(operator_clarification),
+                authorized_retry=has_valid_candidate,
             )
             if invocation is None:
                 return OrchestrationCoordinationResult(
