@@ -12,7 +12,11 @@ export const E2E_SESSION_TOKEN = 'e2e-session-token-32-chars-long-xxx';
 export async function setupAuthSession(
   context: BrowserContext,
   token = E2E_SESSION_TOKEN,
+  selectedProjectId = TEST_PROJECT_ID,
 ): Promise<void> {
+  await context.addInitScript((projectId) => {
+    localStorage.setItem('minime_selected_project_id', projectId);
+  }, selectedProjectId);
   await context.addCookies([
     {
       name: 'minime_session',

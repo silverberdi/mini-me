@@ -39,10 +39,7 @@ test.describe('PWA Reactive Interaction and Form Stability', () => {
 
   test('human gate dismissal is optimistic and shows immediate inline processing feedback', async ({ context, page }) => {
     // 1. Setup authenticated session
-    await setupAuthSession(context);
-    await context.addInitScript((projectId) => {
-      localStorage.setItem('minime_selected_project_id', projectId);
-    }, PWA_GATE_PROJECT_ID);
+    await setupAuthSession(context, undefined, PWA_GATE_PROJECT_ID);
 
     // 2. Navigate to trabajo-actual with the isolated PWA human-gate fixture
     await page.goto('/trabajo-actual?run=e2e-pwa-human-gate-run');
@@ -61,7 +58,9 @@ test.describe('PWA Reactive Interaction and Form Stability', () => {
     await submitBtn.click();
 
     // Optimistic assertion: processing feedback is immediately rendered
-    const processingFeedback = page.locator('[role="status"]', { hasText: /Respuesta enviada, procesando/i });
+    const processingFeedback = page.locator('[role="status"]', {
+      hasText: /Respuesta aceptada\. Esperando la actualización del Run/i,
+    });
     await expect(processingFeedback).toBeVisible({ timeout: 5000 });
 
     // The previous yellow gate card should now be dismissed / hidden
