@@ -188,6 +188,7 @@ jobs:
         working-directory: frontend
         env:
           MINIME_DATABASE_URL: postgresql+psycopg://postgres:postgrespassword@localhost:5432/minime_test
+          MINIME_TEST_DATABASE_URL: postgresql+psycopg://postgres:postgrespassword@localhost:5432/minime_test
           DATABASE_URL: postgresql+psycopg://postgres:postgrespassword@localhost:5432/minime_test
           MINIME_JWT_SECRET: test-secret-key-for-pr-validation-only-not-for-prod
           CI: 'true'
