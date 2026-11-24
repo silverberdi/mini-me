@@ -3,11 +3,11 @@ import { resetProjectState, setupAuthSession, waitForAppMounted, TEST_PROJECT_ID
 
 test.describe('Observable Error Feedback and Runtime Resilience', () => {
   test.beforeEach(async ({ request }) => {
-    await resetProjectState(request, TEST_PROJECT_ID, { preserveActiveRunIds: ['e2e-human-gate-run'] });
+    await resetProjectState(request, TEST_PROJECT_ID);
   });
 
   test.afterEach(async ({ request }) => {
-    await resetProjectState(request, TEST_PROJECT_ID, { preserveActiveRunIds: ['e2e-human-gate-run'] });
+    await resetProjectState(request, TEST_PROJECT_ID);
   });
 
   test('displays observable error notification upon API failure without crashing Angular shell', async ({ context, page }) => {

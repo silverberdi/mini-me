@@ -1,6 +1,8 @@
 import { APIRequestContext, BrowserContext, Page, expect } from '@playwright/test';
 
 export const TEST_PROJECT_ID = 'e2e-project';
+export const HUMAN_GATE_PROJECT_ID = 'e2e-human-gate-project';
+export const PWA_GATE_PROJECT_ID = 'e2e-pwa-gate-project';
 export const TEST_MODEL_ID = 'static-deepseek-chat';
 export const E2E_SESSION_TOKEN = 'e2e-session-token-32-chars-long-xxx';
 
@@ -30,12 +32,10 @@ export async function setupAuthSession(
 export async function resetProjectState(
   request: APIRequestContext,
   projectId = TEST_PROJECT_ID,
-  options: { preserveActiveRunIds?: readonly string[] } = {},
 ): Promise<void> {
   if (projectId !== TEST_PROJECT_ID) {
     throw new Error(`E2E reset is restricted to ${TEST_PROJECT_ID}; received ${projectId}.`);
   }
-  const preservedRunIds = new Set(options.preserveActiveRunIds ?? []);
   const headers = { Authorization: `Bearer ${E2E_SESSION_TOKEN}` };
   const runsResponse = await request.get(
     `/api/v1/orchestration/runs?project_id=${encodeURIComponent(TEST_PROJECT_ID)}&is_active=true`,
@@ -50,7 +50,6 @@ export async function resetProjectState(
     if (!run?.run_id || run.project_id !== TEST_PROJECT_ID || run.is_active !== true) {
       throw new Error('Active-run response contained an unexpected or incomplete E2E run identity.');
     }
-    if (preservedRunIds.has(run.run_id)) continue;
     if (run.active_job_id) {
       throw new Error(`Cannot reset ${TEST_PROJECT_ID}: run ${run.run_id} still has active job ${run.active_job_id}; left it untouched.`);
     }
@@ -89,7 +88,6 @@ export async function resetProjectState(
       !run?.run_id ||
       run.project_id !== TEST_PROJECT_ID ||
       run.is_active !== true ||
-      !preservedRunIds.has(run.run_id) ||
       run.active_job_id
     ) {
       throw new Error(`E2E project still has an unexpected active run after cleanup: ${JSON.stringify(run)}`);

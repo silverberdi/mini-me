@@ -1,10 +1,13 @@
 import { test, expect } from '@playwright/test';
-import { setupAuthSession, waitForAppMounted } from './helpers';
+import { HUMAN_GATE_PROJECT_ID, setupAuthSession, waitForAppMounted } from './helpers';
 
 test.describe('Human Gate Lifecycle and Observability', () => {
   test('renders Spanish explanation, provides actionable options, submits response, and eliminates zombie gates on reload', async ({ context, page }) => {
     // 1. Setup authenticated session
     await setupAuthSession(context);
+    await context.addInitScript((projectId) => {
+      localStorage.setItem('minime_selected_project_id', projectId);
+    }, HUMAN_GATE_PROJECT_ID);
 
     // 2. Navigate to /trabajo-actual?run=e2e-human-gate-run
     await page.goto('/trabajo-actual?run=e2e-human-gate-run');

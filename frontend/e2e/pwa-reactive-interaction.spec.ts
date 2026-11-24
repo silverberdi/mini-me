@@ -1,5 +1,5 @@
 import { test, expect } from '@playwright/test';
-import { setupAuthSession, waitForAppMounted } from './helpers';
+import { PWA_GATE_PROJECT_ID, setupAuthSession, waitForAppMounted } from './helpers';
 
 test.describe('PWA Reactive Interaction and Form Stability', () => {
   test('configuration form inputs and modals remain stable over time without background polling resets', async ({ context, page }) => {
@@ -40,29 +40,32 @@ test.describe('PWA Reactive Interaction and Form Stability', () => {
   test('human gate dismissal is optimistic and shows immediate inline processing feedback', async ({ context, page }) => {
     // 1. Setup authenticated session
     await setupAuthSession(context);
+    await context.addInitScript((projectId) => {
+      localStorage.setItem('minime_selected_project_id', projectId);
+    }, PWA_GATE_PROJECT_ID);
 
-    // 2. Navigate to trabajo-actual with mock human gate run
-    await page.goto('/trabajo-actual?run=e2e-human-gate-run');
+    // 2. Navigate to trabajo-actual with the isolated PWA human-gate fixture
+    await page.goto('/trabajo-actual?run=e2e-pwa-human-gate-run');
     await waitForAppMounted(page);
 
     // 3. Verify gate card is initially visible
     const gateCard = page.locator('h3', { hasText: 'Atención Humana Requerida (HUMAN_REQUIRED)' });
-    if (await gateCard.isVisible()) {
-      // Choose option or enter response
-      const textarea = page.locator('textarea#clarificationInput');
-      await textarea.fill('Confirmado mediante reactividad optimista');
+    await expect(gateCard).toBeVisible();
 
-      // Click submit
-      const submitBtn = page.getByRole('button', { name: /Enviar respuesta y continuar/i });
-      await submitBtn.click();
+    // Choose option or enter response
+    const textarea = page.locator('textarea#clarificationInput');
+    await textarea.fill('Confirmado mediante reactividad optimista');
 
-      // Optimistic assertion: processing feedback is immediately rendered
-      const processingFeedback = page.locator('[role="status"]', { hasText: /Respuesta enviada, procesando/i });
-      await expect(processingFeedback).toBeVisible({ timeout: 5000 });
+    // Click submit
+    const submitBtn = page.getByRole('button', { name: /Enviar respuesta y continuar/i });
+    await submitBtn.click();
 
-      // The previous yellow gate card should now be dismissed / hidden
-      await expect(gateCard).toBeHidden();
-    }
+    // Optimistic assertion: processing feedback is immediately rendered
+    const processingFeedback = page.locator('[role="status"]', { hasText: /Respuesta enviada, procesando/i });
+    await expect(processingFeedback).toBeVisible({ timeout: 5000 });
+
+    // The previous yellow gate card should now be dismissed / hidden
+    await expect(gateCard).toBeHidden();
   });
 
   test('application shell maintains stable connection badge and omits manual refresh and test connection controls', async ({ context, page }) => {
