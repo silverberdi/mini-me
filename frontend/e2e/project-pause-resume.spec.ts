@@ -29,7 +29,14 @@ test.describe('Project Pause and Resume Lifecycle', () => {
     await expect(pauseButton).toContainText('Pausar');
 
     // 4. Click to pause the project
+    const pauseResponsePromise = page.waitForResponse((response) =>
+      response.url().includes(`/api/v1/projects/${TEST_PROJECT_ID}/pause`) &&
+      response.request().method() === 'POST',
+    );
     await pauseButton.click();
+    const pauseResponse = await pauseResponsePromise;
+    expect(pauseResponse.ok()).toBe(true);
+    expect(await pauseResponse.json()).toMatchObject({ status: 'PAUSED', project_id: TEST_PROJECT_ID });
 
     // 5. Verify reactive DOM updates without page refresh
     // The button transitions to "▶ Reanudar"

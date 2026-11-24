@@ -122,6 +122,35 @@ def seed_e2e_state() -> None:
             project.updated_at = now
         session.flush()
 
+        # Keep gate-response fixtures out of the project lifecycle reset target.
+        gate_projects = ("e2e-human-gate-project", "e2e-pwa-gate-project")
+        for gate_project_id in gate_projects:
+            gate_project = session.execute(
+                select(ProjectModel).where(ProjectModel.id == gate_project_id)
+            ).scalar_one_or_none()
+            if gate_project is None:
+                logger.info("Creating %s in database...", gate_project_id)
+                gate_project = ProjectModel(
+                    id=gate_project_id,
+                    display_name=gate_project_id.replace("-", " ").title(),
+                    repository=f"test-owner/{gate_project_id}",
+                    project_type="BROWNFIELD",
+                    base_branch="main",
+                    provider_connections={"tickets": {}, "git_pr": {}},
+                    agent_profiles=profiles,
+                    execution_policy={"effective_pause": False},
+                    status="ACTIVE",
+                    created_at=now,
+                    updated_at=now,
+                )
+                session.add(gate_project)
+            else:
+                gate_project.status = "ACTIVE"
+                gate_project.execution_policy = {"effective_pause": False}
+                gate_project.agent_profiles = profiles
+                gate_project.updated_at = now
+        session.flush()
+
         # 3.b Ensure managed repository binding exists for e2e-project
         os.makedirs("/tmp/e2e-project-repo", exist_ok=True)
         os.makedirs("/tmp/e2e-project-worktrees", exist_ok=True)
@@ -154,6 +183,39 @@ def seed_e2e_state() -> None:
             binding.is_valid = True
             binding.updated_at = now
 
+        for gate_project_id in gate_projects:
+            managed_root = f"/tmp/{gate_project_id}-repo"
+            worktree_root = f"/tmp/{gate_project_id}-worktrees"
+            os.makedirs(managed_root, exist_ok=True)
+            os.makedirs(worktree_root, exist_ok=True)
+            gate_binding = session.execute(
+                select(ProjectManagedRepositoryBindingModel).where(
+                    ProjectManagedRepositoryBindingModel.project_id == gate_project_id
+                )
+            ).scalar_one_or_none()
+            if gate_binding is None:
+                gate_binding = ProjectManagedRepositoryBindingModel(
+                    id=f"{gate_project_id}-binding",
+                    project_id=gate_project_id,
+                    canonical_repository_identity=f"github.com/test-owner/{gate_project_id}",
+                    remote_name="origin",
+                    managed_repository_root=managed_root,
+                    worktree_parent_dir=worktree_root,
+                    default_base_branch="main",
+                    ownership_marker_filename=".minime-managed-project.json",
+                    is_valid=True,
+                    mismatch_reasons=[],
+                    created_at=now,
+                    updated_at=now,
+                )
+                session.add(gate_binding)
+            else:
+                gate_binding.managed_repository_root = managed_root
+                gate_binding.worktree_parent_dir = worktree_root
+                gate_binding.is_valid = True
+                gate_binding.mismatch_reasons = []
+                gate_binding.updated_at = now
+
         # 4. Ensure deepseek-chat provider model is active and enabled
         model = session.execute(
             select(ProviderModelRegistryModel).where(
@@ -185,13 +247,7 @@ def seed_e2e_state() -> None:
             model.discovery_status = "available"
             model.updated_at = now
 
-        # 5. Ensure an active OrchestrationRun with HUMAN_REQUIRED exists for human-gate E2E test
-        e2e_run = session.execute(
-            select(OrchestrationRunModel).where(
-                OrchestrationRunModel.id == "e2e-human-gate-run"
-            )
-        ).scalar_one_or_none()
-
+        # 5. Seed independent active human-gate fixtures for each browser flow.
         human_payload = {
             "gate": "explore_clarification",
             "stage": "EXPLORING",
@@ -203,33 +259,42 @@ def seed_e2e_state() -> None:
             "explanation_es": "El agente en etapa Explore requiere aclarar la estrategia de persistencia.",
         }
 
-        if e2e_run is None:
-            logger.info("Creating e2e-human-gate-run in database...")
-            e2e_run = OrchestrationRunModel(
-                id="e2e-human-gate-run",
-                project_id="e2e-project",
-                change_name="issue-321-human-gate-test",
-                base_sha="0274272890abcdef1234567890abcdef12345678",
-                current_stage="EXPLORING",
-                resumable_stage="EXPLORING",
-                stop_outcome="NEEDS_HUMAN",
-                human_gate="NEEDS_HUMAN",
-                stop_reason="Clarification required",
-                stop_details={"human_payload": human_payload},
-                is_active=True,
-                created_at=now,
-                updated_at=now,
-            )
-            session.add(e2e_run)
-        else:
-            logger.info("Resetting e2e-human-gate-run to initial HUMAN_REQUIRED state...")
-            e2e_run.current_stage = "EXPLORING"
-            e2e_run.resumable_stage = "EXPLORING"
-            e2e_run.stop_outcome = "NEEDS_HUMAN"
-            e2e_run.human_gate = "NEEDS_HUMAN"
-            e2e_run.stop_details = {"human_payload": human_payload}
-            e2e_run.is_active = True
-            e2e_run.updated_at = now
+        for run_id, gate_project_id in (
+            ("e2e-human-gate-run", "e2e-human-gate-project"),
+            ("e2e-pwa-human-gate-run", "e2e-pwa-gate-project"),
+        ):
+            e2e_run = session.execute(
+                select(OrchestrationRunModel).where(OrchestrationRunModel.id == run_id)
+            ).scalar_one_or_none()
+            if e2e_run is None:
+                logger.info("Creating %s in database...", run_id)
+                e2e_run = OrchestrationRunModel(
+                    id=run_id,
+                    project_id=gate_project_id,
+                    change_name="issue-321-human-gate-test",
+                    base_sha="0274272890abcdef1234567890abcdef12345678",
+                    current_stage="EXPLORING",
+                    resumable_stage="EXPLORING",
+                    stop_outcome="NEEDS_HUMAN",
+                    human_gate="NEEDS_HUMAN",
+                    stop_reason="Clarification required",
+                    stop_details={"human_payload": human_payload},
+                    is_active=True,
+                    created_at=now,
+                    updated_at=now,
+                )
+                session.add(e2e_run)
+            else:
+                logger.info("Resetting %s to initial HUMAN_REQUIRED state...", run_id)
+                e2e_run.project_id = gate_project_id
+                e2e_run.current_stage = "EXPLORING"
+                e2e_run.resumable_stage = "EXPLORING"
+                e2e_run.stop_outcome = "NEEDS_HUMAN"
+                e2e_run.human_gate = "NEEDS_HUMAN"
+                e2e_run.stop_reason = "Clarification required"
+                e2e_run.stop_details = {"human_payload": human_payload}
+                e2e_run.is_active = True
+                e2e_run.updated_at = now
         session.flush()
 
         # 6. Ensure sample budget ledger entries exist for e2e-project

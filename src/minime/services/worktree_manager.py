@@ -3278,12 +3278,60 @@ class WorktreeManager:
             job_id=job_id,
             recovery_snapshot_sha=recovery_snapshot_sha,
         )
+        await self._link_installed_node_dependencies(path)
 
         return WorktreeInfo(
             path=path,
             branch_name=branch_name,
             base_sha=recreation_source_base or base_sha,
         )
+
+    async def _link_installed_node_dependencies(self, worktree_path: Path) -> None:
+        """Expose already-installed repo dependencies in a new worktree without fetching."""
+        canonical_root = self.project_root.resolve()
+        for package_rel in (Path("."), Path("frontend")):
+            package_source = canonical_root if package_rel == Path(".") else canonical_root / package_rel
+            package_target = worktree_path if package_rel == Path(".") else worktree_path / package_rel
+            if not (package_target / "package.json").is_file():
+                continue
+            source = package_source / "node_modules"
+            target = package_target / "node_modules"
+            if not source.is_dir():
+                continue
+            resolved_source = source.resolve()
+            if canonical_root not in resolved_source.parents:
+                raise RuntimeError("Installed node_modules resolves outside the registered repository.")
+            if not (target.exists() or target.is_symlink()):
+                os.symlink(resolved_source, target, target_is_directory=True)
+
+            relative_target = target.relative_to(worktree_path).as_posix()
+            try:
+                await self._git(
+                    ["check-ignore", "--quiet", "--no-index", "--", relative_target],
+                    cwd=worktree_path,
+                )
+            except Exception as exc:
+                raise RuntimeError(
+                    f"Dependency path '{relative_target}' is not ignored by Git; refusing candidate dispatch."
+                ) from exc
+            try:
+                await self._git(
+                    ["ls-files", "--error-unmatch", "--", relative_target], cwd=worktree_path
+                )
+            except Exception:
+                pass
+            else:
+                raise RuntimeError(
+                    f"Dependency path '{relative_target}' is tracked; refusing candidate dispatch."
+                )
+            status = await self._git(
+                ["status", "--porcelain", "--untracked-files=all", "--", relative_target],
+                cwd=worktree_path,
+            )
+            if status:
+                raise RuntimeError(
+                    f"Dependency path '{relative_target}' appears in candidate Git status."
+                )
 
     async def current_sha(self, worktree_path: str | Path) -> str:
         return await self._git(["rev-parse", "HEAD"], cwd=Path(worktree_path))
@@ -4342,15 +4390,30 @@ class WorktreeManager:
         project_id: str,
         issue_number: int,
         issue_title: str,
+        change_name: str | None = None,
         base_branch: str = "main",
         remote: str = "origin",
         reuse_existing: bool = True,
         run_id: str | None = None,
     ) -> WorktreeInfo:
         """Create fresh documentation worktree rooted at the latest merged main commit."""
+        if not run_id:
+            raise ValueError("A durable Run identity is required for documentation worktree ownership.")
+        run_repo = getattr(self.uow, "orchestration_runs", None)
+        run = run_repo.get_by_id(run_id) if run_repo else None
+        if (
+            run is None
+            or run.project_id != project_id
+            or run.current_stage != OrchestrationStage.DOC_CLOSING
+            or (change_name and run.change_name != change_name)
+        ):
+            raise RuntimeError("Documentation worktree Run, Change, or DOC_CLOSING stage is not durably confirmed.")
+        change_name = run.change_name
         branch_name = self.format_documentation_branch_name(issue_number, issue_title)
         parent_dir = self.resolve_worktree_parent_dir(project_id)
         worktree_path = (parent_dir / branch_name).resolve()
+        if parent_dir.resolve() not in worktree_path.parents:
+            raise ValueError(f"Documentation worktree path escapes managed root: {worktree_path}")
 
         if self.workspace_guard:
             self._authorize_mutating_operation(project_id, worktree_path, WorkspaceOperation.WORKTREE_CREATE)
@@ -4368,12 +4431,44 @@ class WorktreeManager:
         if not base_sha_str:
             base_sha_str = (await self._git(["rev-parse", base_branch], project_id=project_id)).strip()
 
+        binding_repo = getattr(self.uow, "project_managed_repository_bindings", None)
+        binding = binding_repo.get_by_project_id(project_id) if binding_repo else None
+        if not binding or not getattr(binding, "canonical_repository_identity", None):
+            raise RuntimeError("Documentation worktree source repository identity is not verified.")
+        ownership_repo = getattr(self.uow, "orchestration_worktree_ownerships", None)
+        if ownership_repo is None:
+            raise RuntimeError("Durable documentation worktree ownership repository is unavailable.")
+        canonical_path = str(worktree_path)
+        ownership = ownership_repo.get_by_canonical_path(canonical_path)
+
         if worktree_path.exists() and reuse_existing:
+            if ownership is None:
+                ownership = await self._adopt_legacy_documentation_worktree(
+                    project_id=project_id,
+                    run_id=run_id,
+                    change_name=change_name,
+                    worktree_path=worktree_path,
+                    branch_name=branch_name,
+                    repository_identity=binding.canonical_repository_identity,
+                )
+            self._validate_documentation_worktree_owner(
+                ownership, project_id, run_id, change_name, worktree_path,
+                branch_name, binding.canonical_repository_identity,
+            )
+            if ownership.creation_state != WorktreeCreationState.CREATED:
+                raise RuntimeError("Existing documentation worktree ownership is not CREATED.")
+            await self._verify_creation_postconditions(
+                worktree_path, ownership, expected_branch=branch_name
+            )
             return WorktreeInfo(
                 path=worktree_path,
                 branch_name=branch_name,
-                base_sha=base_sha_str,
+                base_sha=ownership.source_base_sha,
             )
+        if worktree_path.exists() or worktree_path.is_symlink():
+            raise RuntimeError("Documentation worktree path already exists and cannot be safely reused.")
+        if ownership and ownership.creation_state != WorktreeCreationState.DELETED:
+            raise RuntimeError("Documentation worktree ownership exists without its physical worktree.")
 
         branch_exists = False
         try:
@@ -4383,13 +4478,232 @@ class WorktreeManager:
         except Exception:
             branch_exists = False
 
+        worktree_base_sha = base_sha_str
+        if branch_exists:
+            worktree_base_sha = (await self._git(["rev-parse", branch_name], project_id=project_id)).strip()
+            if not worktree_base_sha:
+                raise RuntimeError("Existing documentation branch has no verifiable HEAD.")
+
+        ownership = self._persist_pending_ownership(
+            job_id=run_id,
+            project_id=project_id,
+            path=worktree_path,
+            branch=branch_name,
+            run_id=run_id,
+            change_name=change_name,
+            source_repository_identity=binding.canonical_repository_identity,
+            source_base_sha=worktree_base_sha,
+        )
+        self._flush_uow()
+        self.uow.commit()
+
         if branch_exists:
             await self._git(["worktree", "add", str(worktree_path), branch_name], project_id=project_id)
         else:
             await self._git(["worktree", "add", "-b", branch_name, str(worktree_path), base_sha_str], project_id=project_id)
 
+        self._write_ownership_marker(worktree_path, ownership)
+        await self._verify_creation_postconditions(
+            worktree_path, ownership, expected_branch=branch_name,
+            expected_head_sha=worktree_base_sha,
+        )
+        self._finalize_created_ownership(ownership)
+        self.uow.commit()
+
         return WorktreeInfo(
             path=worktree_path,
             branch_name=branch_name,
-            base_sha=base_sha_str,
+            base_sha=worktree_base_sha,
         )
+
+    def _validate_documentation_worktree_owner(
+        self,
+        ownership: OrchestrationWorktreeOwnership,
+        project_id: str,
+        run_id: str,
+        change_name: str,
+        path: Path,
+        branch: str,
+        repository_identity: str,
+    ) -> None:
+        expected = (
+            ownership.project_id == project_id,
+            ownership.run_id == run_id,
+            ownership.job_id == run_id,
+            ownership.change_name == change_name,
+            str(Path(ownership.canonical_worktree_path).resolve()) == str(path.resolve()),
+            ownership.branch == branch,
+            ownership.source_repository_identity == repository_identity,
+            bool(ownership.source_base_sha),
+        )
+        if not all(expected):
+            raise RuntimeError("Documentation worktree durable ownership does not match the requested Run identity.")
+
+    async def _adopt_legacy_documentation_worktree(
+        self,
+        *,
+        project_id: str,
+        run_id: str,
+        change_name: str,
+        worktree_path: Path,
+        branch_name: str,
+        repository_identity: str,
+    ) -> OrchestrationWorktreeOwnership:
+        events_repo = getattr(self.uow, "orchestration_stage_events", None)
+        if events_repo is None or not callable(getattr(events_repo, "list_by_run", None)):
+            raise RuntimeError("Legacy documentation worktree has no observable stage-invocation evidence.")
+        current_head = (await self._git(["rev-parse", "HEAD"], cwd=worktree_path)).strip()
+        actual_branch = (await self._git(["branch", "--show-current"], cwd=worktree_path)).strip()
+        worktrees = await self._git(["worktree", "list", "--porcelain"], cwd=self.project_root)
+        listed_paths = {
+            str(Path(line[9:].strip()).resolve())
+            for line in worktrees.splitlines() if line.startswith("worktree ")
+        }
+        if actual_branch != branch_name or str(worktree_path.resolve()) not in listed_paths:
+            raise RuntimeError("Legacy documentation path is not the expected Git worktree and branch.")
+
+        starts: dict[str, dict[str, Any]] = {}
+        terminal: set[str] = set()
+        for event in events_repo.list_by_run(run_id):
+            evidence = event.evidence_references or {}
+            attempt_id = str(evidence.get("attempt_id") or "")
+            claim_key = str(evidence.get("claim_key") or "")
+            recorded_stage = getattr(event.from_stage, "value", event.from_stage)
+            if event.event_type == "STAGE_INVOCATION_STARTED" and (
+                recorded_stage == OrchestrationStage.DOC_CLOSING.value
+                and claim_key.startswith((
+                    f"stage-invocation:{run_id}:SYNC:",
+                    f"stage-invocation:{run_id}:ARCHIVE:",
+                ))
+            ):
+                starts[attempt_id] = evidence
+            elif event.event_type in {
+                "STAGE_INVOCATION_COMPLETED", "STAGE_INVOCATION_HUMAN_REQUIRED",
+                "STAGE_INVOCATION_FAILED", "STAGE_INVOCATION_ABANDONED",
+            }:
+                terminal.add(attempt_id)
+
+        generation = int(run_generation if (run_generation := getattr(
+            self.uow.orchestration_runs.get_by_id(run_id), "current_generation", 0
+        )) else 0)
+        matching = []
+        for attempt_id, evidence in starts.items():
+            candidate = evidence.get("candidate") or {}
+            if (
+                attempt_id not in terminal
+                and candidate.get("run_id") == run_id
+                and candidate.get("worktree") == str(worktree_path.resolve())
+                and candidate.get("branch") == branch_name
+                and candidate.get("generation") == generation
+                and candidate.get("candidate_sha") == current_head
+            ):
+                matching.append(candidate)
+        if len(matching) != 1:
+            raise RuntimeError("Legacy documentation worktree identity is absent or ambiguous; preserving it.")
+
+        marker_path = worktree_path / ".minime_worktree_ownership.json"
+        source_base_sha = current_head
+        if marker_path.exists():
+            try:
+                marker = json.loads(marker_path.read_text(encoding="utf-8"))
+            except Exception as exc:
+                raise RuntimeError("Legacy documentation ownership marker is unreadable.") from exc
+            if (
+                marker.get("worktree_id") != f"wt-{run_id}"
+                or marker.get("project_id") != project_id
+                or marker.get("job_id") != run_id
+                or marker.get("run_id") != run_id
+                or marker.get("change_name") != change_name
+                or str(Path(marker.get("canonical_worktree_path", "")).resolve()) != str(worktree_path.resolve())
+                or marker.get("branch") != branch_name
+                or marker.get("source_repository_identity") != repository_identity
+                or not marker.get("source_base_sha")
+            ):
+                raise RuntimeError("Legacy documentation ownership marker conflicts with persisted invocation evidence.")
+            source_base_sha = str(marker["source_base_sha"])
+            try:
+                await self._git(
+                    ["merge-base", "--is-ancestor", source_base_sha, current_head],
+                    cwd=worktree_path,
+                )
+            except Exception as exc:
+                raise RuntimeError("Legacy documentation base commit is not an ancestor of its recorded HEAD.") from exc
+
+        ownership = self._persist_pending_ownership(
+            job_id=run_id,
+            project_id=project_id,
+            path=worktree_path,
+            branch=branch_name,
+            run_id=run_id,
+            change_name=change_name,
+            source_repository_identity=repository_identity,
+            source_base_sha=source_base_sha,
+        )
+        self._flush_uow()
+        self.uow.commit()
+        self._write_ownership_marker(worktree_path, ownership)
+        await self._verify_creation_postconditions(
+            worktree_path, ownership, expected_branch=branch_name,
+            expected_head_sha=current_head,
+        )
+        self._finalize_created_ownership(ownership)
+        self.uow.commit()
+        return ownership
+
+    async def reset_abandoned_documentation_worktree(
+        self,
+        *,
+        project_id: str,
+        run_id: str,
+        change_name: str,
+        path: str | Path,
+        branch: str,
+        expected_head_sha: str,
+    ) -> None:
+        target = Path(path)
+        if target.is_symlink():
+            raise RuntimeError("Refusing recovery cleanup through a symlinked worktree path.")
+        canonical = target.resolve()
+        parent = self.resolve_worktree_parent_dir(project_id).resolve()
+        if parent not in canonical.parents:
+            raise RuntimeError("Refusing DOC_CLOSING recovery outside the registered worktree parent.")
+        owner_repo = getattr(self.uow, "orchestration_worktree_ownerships", None)
+        owner = owner_repo.get_by_canonical_path(str(canonical)) if owner_repo else None
+        binding_repo = getattr(self.uow, "project_managed_repository_bindings", None)
+        binding = binding_repo.get_by_project_id(project_id) if binding_repo else None
+        if not owner or not binding:
+            raise RuntimeError("DOC_CLOSING recovery ownership or project binding is unavailable.")
+        self._validate_documentation_worktree_owner(
+            owner, project_id, run_id, change_name, canonical, branch,
+            binding.canonical_repository_identity,
+        )
+        if owner.creation_state != WorktreeCreationState.CREATED:
+            raise RuntimeError("DOC_CLOSING recovery requires CREATED durable worktree ownership.")
+        head = (await self._git(["rev-parse", "HEAD"], cwd=canonical)).strip()
+        actual_branch = (await self._git(["branch", "--show-current"], cwd=canonical)).strip()
+        worktrees = await self._git(["worktree", "list", "--porcelain"], cwd=self.project_root)
+        listed_paths = {
+            str(Path(line[9:].strip()).resolve())
+            for line in worktrees.splitlines() if line.startswith("worktree ")
+        }
+        if head != expected_head_sha or actual_branch != branch or str(canonical) not in listed_paths:
+            raise RuntimeError("DOC_CLOSING recovery worktree HEAD, branch, or Git registration changed.")
+        self._authorize_mutating_operation(
+            project_id, canonical, WorkspaceOperation.EDIT,
+            require_created_ownership=True, job_id=owner.job_id,
+        )
+        await self._git(
+            ["reset", "--hard", "HEAD"], cwd=canonical, job_id=owner.job_id,
+            project_id=project_id, operation_type="doc_closing_recovery_reset",
+            managed_worktree_path=canonical,
+        )
+        await self._git(
+            ["clean", "-fd"], cwd=canonical, job_id=owner.job_id,
+            project_id=project_id, operation_type="doc_closing_recovery_clean",
+            managed_worktree_path=canonical,
+        )
+        final_status = await self._git(
+            ["status", "--porcelain", "--untracked-files=all"], cwd=canonical
+        )
+        if final_status:
+            raise RuntimeError("DOC_CLOSING recovery cleanup left tracked or untracked changes.")

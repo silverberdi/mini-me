@@ -37,7 +37,7 @@ test-results/
 
 # Local runtime/logs
 logs/
-node_modules/
+node_modules
 minime-capability-*.lock
 pytest-of-minime/
 /.angular

@@ -4,6 +4,14 @@ import { resolve } from 'node:path';
 const PORT = process.env['PORT'] || '8788';
 const BASE_URL = `http://127.0.0.1:${PORT}`;
 const SOURCE_ROOT = resolve(process.cwd(), '../src');
+const E2E_DATABASE_URL = process.env['MINIME_TEST_DATABASE_URL'];
+if (!E2E_DATABASE_URL) {
+  throw new Error('Playwright requires MINIME_TEST_DATABASE_URL for its disposable test database.');
+}
+const databaseName = new URL(E2E_DATABASE_URL).pathname.replace(/^\//, '');
+if (!/(^|_)test$/i.test(databaseName)) {
+  throw new Error(`Playwright refuses database '${databaseName}'; the configured database name must end in '_test'.`);
+}
 
 export default defineConfig({
   testDir: './e2e',
@@ -37,13 +45,11 @@ export default defineConfig({
     url: `${BASE_URL}/health/live`,
     cwd: '..',
     env: {
-      MINIME_DATABASE_URL:
-        process.env['MINIME_DATABASE_URL'] ||
-        process.env['MINIME_TEST_DATABASE_URL'] ||
-        'postgresql+psycopg://minime_app:360bedbc1f64cd48bbb04f7934ee13bb3ed76ee368aa4a774a23be987587639c@192.168.0.194:5432/minime_test',
+      MINIME_DATABASE_URL: E2E_DATABASE_URL,
+      MINIME_TEST_DATABASE_URL: E2E_DATABASE_URL,
       PYTHONPATH: [SOURCE_ROOT, process.env['PYTHONPATH']].filter(Boolean).join(':'),
     },
-    reuseExistingServer: !process.env['CI'],
+    reuseExistingServer: false,
     timeout: 30000,
   },
 });

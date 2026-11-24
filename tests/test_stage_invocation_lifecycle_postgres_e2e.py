@@ -8,12 +8,15 @@ import socket
 import subprocess
 import sys
 from datetime import timedelta
+from pathlib import Path
 from uuid import uuid4
 
 import pytest
 from sqlalchemy import create_engine, delete, text, update
 from sqlalchemy.orm import sessionmaker
+from tests.conftest import setup_managed_repository_fixture
 
+from minime.db import repository as repository_module
 from minime.db.models import ProviderHealthModel, RecoveryClaimModel
 from minime.db.repository import PostgresPersistenceUnitOfWork
 from minime.domain.enums import (
@@ -21,19 +24,381 @@ from minime.domain.enums import (
     ProviderHealthStatus,
     ProviderResultClass,
 )
-from minime.domain.models import OrchestrationRun, Project, ProviderHealth, utc_now
+from minime.domain.models import (
+    OrchestrationRun,
+    OrchestrationStageEvent,
+    Project,
+    ProviderHealth,
+    utc_now,
+)
 from minime.services import agent_runner as agent_runner_module
 from minime.services import orchestration_coordinator as coordinator_module
 from minime.services.agent_confinement import process_identity
 from minime.services.agent_runner import CapacityExhaustedError, CliAgentRunner, ResolvedWorkflow
 from minime.services.capacity_lifecycle_service import CapacityLifecycleService
 from minime.services.orchestration_coordinator import NativeOrchestrationCoordinator
+from minime.services.worktree_manager import WorktreeManager
 
 DATABASE_URL = os.environ.get("MINIME_TEST_DATABASE_URL")
 pytestmark = pytest.mark.skipif(
     not DATABASE_URL,
     reason="MINIME_TEST_DATABASE_URL must point to a disposable migrated PostgreSQL database",
 )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("stage", ["SYNC", "ARCHIVE"])
+async def test_postgres_doc_closing_recovers_owned_worktree_before_fingerprinting(
+    tmp_path, monkeypatch, stage,
+):
+    """Use the disposable PostgreSQL DB to prove DOC_CLOSING ownership and fenced reset."""
+    engine = create_engine(DATABASE_URL, pool_pre_ping=True)
+    project_id, run_id = str(uuid4()), str(uuid4())
+    session = sessionmaker(bind=engine, autoflush=False, expire_on_commit=False)()
+    repo = tmp_path / "managed"
+    path = None
+    try:
+        with engine.connect() as connection:
+            assert connection.execute(text("select current_database()")).scalar_one() == "minime_test"
+        uow = PostgresPersistenceUnitOfWork(session)
+        project = Project(
+            project_id=project_id,
+            display_name="DOC_CLOSING recovery integration",
+            repository="org/doc-closing-recovery-test",
+        )
+        uow.projects.save(project)
+        uow.flush()
+        repo.mkdir(parents=True, exist_ok=True)
+        (repo / ".gitignore").write_text("node_modules\n", encoding="utf-8")
+        setup_managed_repository_fixture(
+            uow, project_id, repo, repo / ".minime" / "worktrees",
+            canonical_repository_identity="github.com/org/doc-closing-recovery-test",
+            local_remote=False,
+        )
+        run = OrchestrationRun(
+            run_id=run_id,
+            project_id=project_id,
+            change_name="issue-517-worktree-recovery-test-isolation",
+            base_sha="main",
+            current_stage=OrchestrationStage.DOC_CLOSING,
+        )
+        uow.orchestration_runs.save(run)
+        uow.commit()
+
+        manager = WorktreeManager(repo, uow=uow)
+        original_git = manager._git
+
+        async def no_remote_fetch(args, **kwargs):
+            if args[:2] == ["fetch", "origin"]:
+                raise RuntimeError("network disabled in PostgreSQL recovery test")
+            return await original_git(args, **kwargs)
+
+        manager._git = no_remote_fetch
+        info = await manager.create_documentation_worktree(
+            project_id=project_id,
+            issue_number=517,
+            issue_title="DOC Closing Recovery Integration",
+            change_name=run.change_name,
+            run_id=run_id,
+        )
+        path = info.path
+        owner = uow.orchestration_worktree_ownerships.get_by_canonical_path(str(path.resolve()))
+        assert owner is not None and owner.run_id == run_id
+
+        coordinator = NativeOrchestrationCoordinator(
+            uow_factory=lambda: uow,
+            github_adapter=object(),
+            worktree_manager=manager,
+            agent_runner=object(),
+        )
+        # The interrupted SYNC/ARCHIVE began against this clean candidate;
+        # its dirty output is a side effect that recovery must remove.
+        candidate = await coordinator._stage_candidate_identity(run, path, stage)
+        dirty_file = path / "openspec" / "specs" / "recovery" / "spec.md"
+        dirty_file.parent.mkdir(parents=True)
+        dirty_file.write_text("uncommitted sync effect\n", encoding="utf-8")
+        ignored_file = path / "node_modules" / "retained-cache" / "entry"
+        ignored_file.parent.mkdir(parents=True)
+        ignored_file.write_text("keep ignored dependencies\n", encoding="utf-8")
+        prior_claim = uow.claims.acquire_or_reacquire(
+            claim_key=f"stage-invocation:{run_id}:{stage}:{candidate['fingerprint']}",
+            owner_instance_id="previous-doc-close-worker",
+            lease_seconds=120,
+        )
+        assert prior_claim is not None
+        prior_claim_key = prior_claim.claim_key
+        prior_fence = prior_claim.fence_token
+        competing_during_event_commit: dict[str, object] = {}
+        successor_claim: dict[str, object] = {}
+        old_identity = {
+            "status": "AVAILABLE", "host": socket.gethostname(), "boot_id": "previous-boot",
+            "pid": 2147480000, "pgid": 2147480000, "start_marker": "previous",
+        }
+        current_identity = {**old_identity, "boot_id": "current-boot", "pid": os.getpid()}
+        uow.orchestration_stage_events.save(OrchestrationStageEvent(
+            run_id=run_id,
+            from_stage=OrchestrationStage.DOC_CLOSING,
+            to_stage=OrchestrationStage.DOC_CLOSING,
+            event_type="STAGE_INVOCATION_STARTED",
+            evidence_references={
+                "attempt_id": "abandoned-archive",
+                "claim_key": prior_claim_key,
+                "fence_token": prior_fence,
+                "candidate": candidate,
+                "coordinator_process": old_identity,
+                "recovery_count": 0,
+            },
+        ))
+        uow.orchestration_stage_events.save(OrchestrationStageEvent(
+            run_id=run_id,
+            from_stage=OrchestrationStage.DOC_CLOSING,
+            to_stage=OrchestrationStage.DOC_CLOSING,
+            event_type="STAGE_INVOCATION_PROCESS_STARTED",
+            evidence_references={
+                "attempt_id": "abandoned-archive",
+                "claim_key": prior_claim_key,
+                "process_identity": old_identity,
+            },
+        ))
+        uow.commit()
+        session.execute(
+            update(RecoveryClaimModel)
+            .where(RecoveryClaimModel.claim_key == prior_claim_key)
+            .values(lease_expires_at=utc_now() - timedelta(seconds=1))
+        )
+        session.commit()
+        monkeypatch.setattr(coordinator_module, "process_identity", lambda: current_identity)
+
+        validate_cas = uow.claims.validate_cas
+        validation_count = 0
+
+        def hold_successor_fence(claim_key, owner_instance_id, fence_token, for_update=False):
+            nonlocal validation_count
+            validation_count += 1
+            valid = validate_cas(claim_key, owner_instance_id, fence_token, for_update=for_update)
+            if validation_count == 2:
+                assert claim_key == prior_claim_key
+                assert for_update is True
+                assert valid
+                successor_claim.update(claim_key=claim_key, fence_token=fence_token)
+                real_now = repository_module.utc_now
+                repository_module.utc_now = lambda: real_now() + timedelta(seconds=121)
+                competing = sessionmaker(
+                    bind=engine, autoflush=False, expire_on_commit=False
+                )()
+                try:
+                    competing_uow = PostgresPersistenceUnitOfWork(competing)
+                    competing_during_event_commit["claim"] = competing_uow.claims.acquire_or_reacquire(
+                        claim_key, "competing-before-event-commit", lease_seconds=60
+                    )
+                    competing.rollback()
+                finally:
+                    competing.close()
+                    repository_module.utc_now = real_now
+            return valid
+
+        uow.claims.validate_cas = hold_successor_fence
+
+        recovered = await coordinator._begin_stage_invocation(uow, run, path, stage)
+        assert recovered is not None
+        assert recovered.attempt_id != "abandoned-archive"
+        assert uow.claims.get_by_key(prior_claim_key).fence_token > prior_fence
+        assert recovered.claim.claim_key == prior_claim_key
+        assert recovered.claim.fence_token == successor_claim["fence_token"]
+        assert not dirty_file.exists()
+        assert ignored_file.read_text(encoding="utf-8") == "keep ignored dependencies\n"
+        assert coordinator._doc_archive_reset_requires_sync_replay(
+            uow.orchestration_stage_events.list_by_run(run_id), run_id, path
+        ) is (stage == "ARCHIVE")
+
+        events = uow.orchestration_stage_events.list_by_run(run_id)
+        abandoned = [e for e in events if e.event_type == "STAGE_INVOCATION_ABANDONED"]
+        starts = [e for e in events if e.event_type == "STAGE_INVOCATION_STARTED"]
+        assert len(abandoned) == 1 and len(starts) == 2
+        assert abandoned[0].evidence_references["worktree_reset"] is True
+        assert abandoned[0].evidence_references["recovery_proof"] == "previous_boot"
+        assert starts[-1].evidence_references["candidate"]["candidate_fingerprint"] == recovered.candidate[
+            "candidate_fingerprint"
+        ]
+        # The successor lease expires after its locked validation but before
+        # invocation events commit. A concurrent reacquire must fail until the
+        # transaction containing both events commits, then may advance the fence.
+        assert successor_claim["claim_key"] == recovered.claim.claim_key
+        assert competing_during_event_commit["claim"] is None
+        competitor = sessionmaker(bind=engine, autoflush=False, expire_on_commit=False)()
+        real_now = repository_module.utc_now
+        try:
+            competing_uow = PostgresPersistenceUnitOfWork(competitor)
+            committed_events = competing_uow.orchestration_stage_events.list_by_run(run_id)
+            assert any(event.event_type == "STAGE_INVOCATION_ABANDONED" for event in committed_events)
+            assert any(
+                event.event_type == "STAGE_INVOCATION_STARTED"
+                and event.evidence_references.get("attempt_id") == recovered.attempt_id
+                for event in committed_events
+            )
+            repository_module.utc_now = lambda: real_now() + timedelta(seconds=121)
+            acquired_after_commit = competing_uow.claims.acquire_or_reacquire(
+                recovered.claim.claim_key, "competing-after-commit", lease_seconds=60
+            )
+            repository_module.utc_now = real_now
+            assert acquired_after_commit is not None
+            assert acquired_after_commit.fence_token > recovered.claim.fence_token
+            competitor.commit()
+        finally:
+            repository_module.utc_now = real_now
+            competitor.close()
+    finally:
+        session.rollback()
+        if path is not None and path.exists():
+            subprocess.run(
+                ["git", "worktree", "remove", "--force", str(path)],
+                cwd=repo, check=False, capture_output=True,
+            )
+        session.execute(
+            text("delete from recovery_claims where claim_key like :pattern"),
+            {"pattern": f"stage-invocation:{run_id}:%"},
+        )
+        session.execute(text("delete from orchestration_runs where id = :id"), {"id": run_id})
+        session.execute(text("delete from projects where id = :id"), {"id": project_id})
+        session.commit()
+        session.close()
+        engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_postgres_legacy_doc_worktree_adoption_is_evidence_bound(tmp_path):
+    """Adopt only an exact legacy Git worktree and preserve one without evidence."""
+    engine = create_engine(DATABASE_URL, pool_pre_ping=True)
+    project_id = str(uuid4())
+    run_ids = [str(uuid4()), str(uuid4())]
+    session = sessionmaker(bind=engine, autoflush=False, expire_on_commit=False)()
+    repo = tmp_path / "managed"
+    paths: list[Path] = []
+    try:
+        with engine.connect() as connection:
+            assert connection.execute(text("select current_database()")).scalar_one() == "minime_test"
+        uow = PostgresPersistenceUnitOfWork(session)
+        project = Project(
+            project_id=project_id,
+            display_name="Legacy DOC_CLOSING adoption integration",
+            repository="org/legacy-doc-adoption-test",
+        )
+        uow.projects.save(project)
+        uow.flush()
+        setup_managed_repository_fixture(
+            uow, project_id, repo, repo / ".minime" / "worktrees",
+            canonical_repository_identity="github.com/org/legacy-doc-adoption-test",
+            local_remote=False,
+        )
+        runs = [
+            OrchestrationRun(
+                run_id=run_id,
+                project_id=project_id,
+                change_name=f"issue-517-legacy-adoption-{index}",
+                base_sha="main",
+                current_stage=OrchestrationStage.DOC_CLOSING,
+            )
+            for index, run_id in enumerate(run_ids)
+        ]
+        for run in runs:
+            uow.orchestration_runs.save(run)
+        uow.commit()
+
+        manager = WorktreeManager(repo, uow=uow)
+        original_git = manager._git
+
+        async def no_remote_fetch(args, **kwargs):
+            if args[:2] == ["fetch", "origin"]:
+                raise RuntimeError("network disabled in PostgreSQL adoption test")
+            return await original_git(args, **kwargs)
+
+        manager._git = no_remote_fetch
+
+        def create_legacy_path(issue_number: int, title: str) -> tuple[str, Path]:
+            branch = manager.format_documentation_branch_name(issue_number, title)
+            path = repo / ".minime" / "worktrees" / branch
+            return branch, path
+
+        branch, path = create_legacy_path(518, "Legacy Adoption With Evidence")
+        paths.append(path)
+        subprocess.run(
+            ["git", "worktree", "add", "-b", branch, str(path), "main"],
+            cwd=repo, check=True, capture_output=True,
+        )
+        head = (await manager._git(["rev-parse", "HEAD"], cwd=path)).strip()
+        run = runs[0]
+        candidate = {
+            "run_id": run.run_id,
+            "stage": "SYNC",
+            "worktree": str(path.resolve()),
+            "branch": branch,
+            "generation": int(run.current_generation or 0),
+            "candidate_sha": head,
+        }
+        uow.orchestration_stage_events.save(OrchestrationStageEvent(
+            run_id=run.run_id,
+            from_stage=OrchestrationStage.DOC_CLOSING,
+            to_stage=OrchestrationStage.DOC_CLOSING,
+            event_type="STAGE_INVOCATION_STARTED",
+            evidence_references={
+                "attempt_id": "legacy-doc-adoption",
+                "claim_key": f"stage-invocation:{run.run_id}:SYNC:legacy-fingerprint",
+                "candidate": candidate,
+            },
+        ))
+        uow.commit()
+        adopted = await manager.create_documentation_worktree(
+            project_id=project_id,
+            issue_number=518,
+            issue_title="Legacy Adoption With Evidence",
+            change_name=run.change_name,
+            run_id=run.run_id,
+        )
+        owner = uow.orchestration_worktree_ownerships.get_by_canonical_path(
+            str(adopted.path.resolve())
+        )
+        assert owner is not None and owner.run_id == run.run_id
+        assert (adopted.path / ".minime_worktree_ownership.json").is_file()
+
+        unproven_run = runs[1]
+        unproven_branch, unproven_path = create_legacy_path(
+            519, "Legacy Worktree Without Evidence"
+        )
+        paths.append(unproven_path)
+        subprocess.run(
+            ["git", "worktree", "add", "-b", unproven_branch, str(unproven_path), "main"],
+            cwd=repo, check=True, capture_output=True,
+        )
+        preserved = unproven_path / "preserve.txt"
+        preserved.write_text("fail closed\n", encoding="utf-8")
+        with pytest.raises(RuntimeError, match="identity is absent or ambiguous"):
+            await manager.create_documentation_worktree(
+                project_id=project_id,
+                issue_number=519,
+                issue_title="Legacy Worktree Without Evidence",
+                change_name=unproven_run.change_name,
+                run_id=unproven_run.run_id,
+            )
+        assert preserved.read_text(encoding="utf-8") == "fail closed\n"
+        assert uow.orchestration_worktree_ownerships.get_by_canonical_path(
+            str(unproven_path.resolve())
+        ) is None
+    finally:
+        session.rollback()
+        for path in reversed(paths):
+            if path.exists():
+                subprocess.run(
+                    ["git", "worktree", "remove", "--force", str(path)],
+                    cwd=repo, check=False, capture_output=True,
+                )
+        for run_id in run_ids:
+            session.execute(
+                text("delete from orchestration_runs where id = :id"), {"id": run_id}
+            )
+        session.execute(text("delete from projects where id = :id"), {"id": project_id})
+        session.commit()
+        session.close()
+        engine.dispose()
 
 
 @pytest.mark.asyncio
