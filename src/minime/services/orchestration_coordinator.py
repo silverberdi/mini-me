@@ -1149,10 +1149,195 @@ class NativeOrchestrationCoordinator:
             "stage": stage,
         }
 
+    async def _recover_dirty_documentation_invocation(
+        self, uow: Any, run: OrchestrationRun, worktree_path: Path, stage: str
+    ) -> tuple[bool, StageInvocation | None]:
+        """Recover a proven-abandoned DOC_CLOSING operation before hashing its dirty tree."""
+        stage = stage.upper()
+        if run.current_stage != OrchestrationStage.DOC_CLOSING or stage not in {"SYNC", "ARCHIVE"}:
+            return False, None
+        claims = getattr(uow, "claims", None)
+        events_repo = getattr(uow, "orchestration_stage_events", None)
+        if claims is None or events_repo is None or not callable(getattr(events_repo, "list_by_run", None)):
+            return False, None
+
+        prefix = f"stage-invocation:{run.run_id}:{stage}:"
+        events = events_repo.list_by_run(run.run_id)
+        starts: dict[str, dict[str, Any]] = {}
+        start_stages: dict[str, str] = {}
+        terminal: set[str] = set()
+        process_events: dict[str, dict[str, Any]] = {}
+        for event in events:
+            evidence = event.evidence_references or {}
+            attempt_id = str(evidence.get("attempt_id") or "")
+            if event.event_type == "STAGE_INVOCATION_STARTED" and str(evidence.get("claim_key") or "").startswith(prefix):
+                starts[attempt_id] = evidence
+                start_stages[attempt_id] = getattr(event.from_stage, "value", event.from_stage)
+            elif event.event_type == "STAGE_INVOCATION_PROCESS_STARTED":
+                process_events[attempt_id] = evidence
+            elif event.event_type in {
+                "STAGE_INVOCATION_COMPLETED", "STAGE_INVOCATION_HUMAN_REQUIRED",
+                "STAGE_INVOCATION_FAILED", "STAGE_INVOCATION_ABANDONED",
+            }:
+                terminal.add(attempt_id)
+        incomplete = [
+            (attempt_id, evidence) for attempt_id, evidence in starts.items()
+            if attempt_id not in terminal
+            and start_stages.get(attempt_id) == OrchestrationStage.DOC_CLOSING.value
+        ]
+        if not incomplete:
+            return False, None
+        if len(incomplete) != 1:
+            return True, None
+
+        prior_attempt_id, prior_start = incomplete[0]
+        prior_candidate = prior_start.get("candidate") or {}
+        canonical_path = str(worktree_path.resolve())
+        if not (
+            prior_candidate.get("run_id") == run.run_id
+            and prior_candidate.get("stage") == stage
+            and prior_candidate.get("worktree") == canonical_path
+            and prior_candidate.get("branch")
+            and prior_candidate.get("generation") == int(run.current_generation or 0)
+            and prior_candidate.get("candidate_sha")
+        ):
+            return True, None
+
+        prior_claim_key = str(prior_start.get("claim_key") or "")
+        prior_claim = claims.get_by_key(prior_claim_key) if prior_claim_key else None
+        if prior_claim is None or prior_claim.is_active:
+            return True, None
+        previous_workflow = (process_events.get(prior_attempt_id) or {}).get("process_identity")
+        current = process_identity()
+        if not self._stage_recovery_is_safe(
+            prior_start.get("coordinator_process"), previous_workflow, current,
+            candidate_matches=True,
+            recovery_count=int(prior_start.get("recovery_count", 0)),
+        ):
+            return True, None
+
+        owner_id = f"stage:{stage}:{uuid4()}"
+        acquired = claims.acquire_or_reacquire(
+            claim_key=prior_claim_key, owner_instance_id=owner_id, lease_seconds=120
+        )
+        if acquired is None:
+            return True, None
+        old_context = RecoveryClaimContext(
+            claim_key=acquired.claim_key,
+            owner_instance_id=acquired.owner_instance_id,
+            fence_token=acquired.fence_token,
+            lease_expires_at=acquired.lease_expires_at,
+        )
+        successor_context: RecoveryClaimContext | None = None
+        try:
+            # Commit the fence before Git work so no database row lock spans filesystem operations.
+            uow.commit()
+            reset = getattr(self.worktree_manager, "reset_abandoned_documentation_worktree", None)
+            if not callable(reset):
+                raise RuntimeError("Managed documentation-worktree recovery is unavailable.")
+            await reset(
+                project_id=run.project_id,
+                run_id=run.run_id,
+                change_name=run.change_name,
+                path=canonical_path,
+                branch=str(prior_candidate["branch"]),
+                expected_head_sha=str(prior_candidate["candidate_sha"]),
+            )
+            candidate = await self._stage_candidate_identity(run, worktree_path, stage)
+            if not claims.validate_cas(
+                old_context.claim_key, old_context.owner_instance_id, old_context.fence_token
+            ):
+                raise RuntimeError("DOC_CLOSING cleanup lost its prior claim fence.")
+            claim_key = f"{prefix}{candidate['fingerprint']}"
+            if claim_key == old_context.claim_key:
+                successor_context = old_context
+            else:
+                next_claim = claims.acquire_or_reacquire(
+                    claim_key=claim_key, owner_instance_id=owner_id, lease_seconds=120
+                )
+                if next_claim is None:
+                    claims.release_claim(old_context)
+                    uow.commit()
+                    return True, None
+                successor_context = RecoveryClaimContext(
+                    claim_key=next_claim.claim_key,
+                    owner_instance_id=next_claim.owner_instance_id,
+                    fence_token=next_claim.fence_token,
+                    lease_expires_at=next_claim.lease_expires_at,
+                )
+                # Keep the old fence active until its successor is secured.
+                claims.release_claim(old_context)
+            if successor_context is None:
+                raise RuntimeError("DOC_CLOSING successor claim was not acquired.")
+            if not claims.validate_cas(
+                successor_context.claim_key,
+                successor_context.owner_instance_id,
+                successor_context.fence_token,
+            ):
+                raise RuntimeError("Restored DOC_CLOSING candidate lost its successor claim fence.")
+            context = successor_context
+            recovery_count = int(prior_start.get("recovery_count", 0)) + 1
+            invocation = StageInvocation(
+                attempt_id=str(uuid4()), claim=context, claim_key=claim_key,
+                candidate=candidate, recovery_count=recovery_count,
+                started_monotonic=asyncio.get_running_loop().time(),
+                recovered_from_attempt_id=prior_attempt_id,
+            )
+            previous_coordinator = prior_start.get("coordinator_process") or {}
+            previous_boot = previous_coordinator.get("boot_id") != current.get("boot_id")
+            self._save_stage_invocation_event(
+                uow, run, "STAGE_INVOCATION_ABANDONED", {
+                    "attempt_id": prior_attempt_id,
+                    "claim_key": prior_claim_key,
+                    "fence_token": old_context.fence_token,
+                    "candidate": prior_candidate,
+                    "status": "ABANDONED",
+                    "finished_at": utc_now().isoformat(),
+                    "reason": (
+                        "Prior coordinator and workflow process identities belong to the previous boot on this host."
+                        if previous_boot else "Expired lease; coordinator, workflow process, and process group proven absent."
+                    ),
+                    "recovery_proof": "previous_boot" if previous_boot else "processes_gone",
+                    "worktree_reset": True,
+                    "previous_coordinator_process": previous_coordinator,
+                    "previous_workflow_process": previous_workflow,
+                    "recovery_count": recovery_count,
+                },
+                commit=False,
+            )
+            self._save_stage_invocation_event(
+                uow, run, "STAGE_INVOCATION_STARTED", {
+                    "attempt_id": invocation.attempt_id,
+                    "claim_key": claim_key,
+                    "fence_token": context.fence_token,
+                    "candidate": candidate,
+                    "started_at": utc_now().isoformat(),
+                    "coordinator_process": current,
+                    "recovery_proof": "AWAITING_WORKFLOW_PROCESS_IDENTITY",
+                    "recovery_count": recovery_count,
+                    "recovered_from_attempt_id": prior_attempt_id,
+                    "recovery_reason": "expired_process_proven_absent",
+                },
+                commit=False,
+            )
+            uow.commit()
+            return True, invocation
+        except Exception:
+            try:
+                if successor_context is not None and successor_context != old_context:
+                    claims.release_claim(successor_context)
+                claims.release_claim(old_context)
+                uow.commit()
+            except Exception:
+                if callable(getattr(uow, "rollback", None)):
+                    uow.rollback()
+            logger.exception("DOC_CLOSING invocation recovery did not complete; preserving fail-closed state.")
+            return True, None
+
     async def _begin_stage_invocation(
         self, uow: Any, run: OrchestrationRun, worktree_path: Path, stage: str,
         *, allow_human_resume: bool = False, authorized_retry: bool = False,
-        operator_action_id: str | None = None,
+        operator_action_id: str | None = None, allow_doc_sync_replay: bool = False,
     ) -> StageInvocation | None:
         claims = getattr(uow, "claims", None)
         if claims is None or not all(
@@ -1160,6 +1345,11 @@ class NativeOrchestrationCoordinator:
             for method in ("get_by_key", "acquire_or_reacquire", "validate_cas", "release_claim")
         ):
             return None
+        recovery_handled, recovered_invocation = await self._recover_dirty_documentation_invocation(
+            uow, run, worktree_path, stage
+        )
+        if recovery_handled:
+            return recovered_invocation
         candidate = await self._stage_candidate_identity(run, worktree_path, stage)
         claim_prefix = f"stage-invocation:{run.run_id}:{stage}:"
         claim_key = f"{claim_prefix}{candidate['fingerprint']}"
@@ -1224,7 +1414,9 @@ class NativeOrchestrationCoordinator:
         ]
         if prior_finished:
             last_status = prior_finished[-1]
-            if last_status == "COMPLETE" and not (authorized_retry or allow_human_resume):
+            if last_status == "COMPLETE" and not (
+                authorized_retry or allow_human_resume or allow_doc_sync_replay
+            ):
                 return None
             if last_status == "HUMAN_REQUIRED" and not allow_human_resume:
                 return None
@@ -1359,6 +1551,7 @@ class NativeOrchestrationCoordinator:
                     ),
                     "recovery_count": recovery_count,
                     "operator_action_id": operator_action_id,
+                    "doc_archive_sync_replay": allow_doc_sync_replay,
                     "recovered_from_attempt_id": (
                         abandoned_attempt.get("attempt_id")
                         if abandoned_attempt else invocation.recovered_from_attempt_id
@@ -4668,6 +4861,7 @@ class NativeOrchestrationCoordinator:
                 project_id=project_id,
                 issue_number=issue_number,
                 issue_title=issue_title,
+                change_name=change_name,
                 base_branch=base_branch,
                 run_id=active_run.run_id,
             )
@@ -8710,6 +8904,50 @@ class NativeOrchestrationCoordinator:
             "summary": summary,
         })
 
+    @staticmethod
+    def _doc_archive_reset_requires_sync_replay(
+        events: list[Any], run_id: str, doc_path: Path
+    ) -> bool:
+        """Require native Sync again if an Archive recovery reset removed its effects."""
+        canonical_path = str(doc_path.resolve())
+        archive_prefix = f"stage-invocation:{run_id}:ARCHIVE:"
+        sync_prefix = f"stage-invocation:{run_id}:SYNC:"
+        reset_index: int | None = None
+        for index, event in enumerate(events):
+            evidence = event.evidence_references or {}
+            candidate = evidence.get("candidate") or {}
+            if (
+                event.event_type == "STAGE_INVOCATION_ABANDONED"
+                and evidence.get("worktree_reset") is True
+                and str(evidence.get("claim_key") or "").startswith(archive_prefix)
+                and candidate.get("run_id") == run_id
+                and candidate.get("worktree") == canonical_path
+            ):
+                reset_index = index
+        if reset_index is None:
+            return False
+
+        sync_replay_attempts: set[str] = set()
+        for event in events[reset_index + 1 :]:
+            evidence = event.evidence_references or {}
+            claim_key = str(evidence.get("claim_key") or "")
+            candidate = evidence.get("candidate") or {}
+            if (
+                event.event_type == "STAGE_INVOCATION_STARTED"
+                and claim_key.startswith(sync_prefix)
+                and candidate.get("run_id") == run_id
+                and candidate.get("worktree") == canonical_path
+            ):
+                if evidence.get("doc_archive_sync_replay") is True:
+                    sync_replay_attempts.add(str(evidence.get("attempt_id") or ""))
+            elif (
+                event.event_type == "STAGE_INVOCATION_COMPLETED"
+                and str(evidence.get("attempt_id") or "") in sync_replay_attempts
+                and evidence.get("result", {}).get("effect_verified") is True
+            ):
+                return False
+        return True
+
     async def _run_sync_and_archive(
         self,
         doc_path: Path,
@@ -8741,6 +8979,7 @@ class NativeOrchestrationCoordinator:
             prompt: str,
             *,
             postcondition: Any = None,
+            allow_doc_sync_replay: bool = False,
         ) -> Any:
             if uow is None or run is None:
                 raise RuntimeError("Durable stage invocation context is required for DOC_CLOSING")
@@ -8748,6 +8987,7 @@ class NativeOrchestrationCoordinator:
                 uow, run, doc_path, operation.upper(),
                 allow_human_resume=bool(operator_response),
                 operator_action_id=operator_action_id,
+                allow_doc_sync_replay=allow_doc_sync_replay,
             )
             if invocation is None:
                 raise RuntimeError(f"{operation.title()} invocation is already active or ambiguous")
@@ -8820,25 +9060,30 @@ class NativeOrchestrationCoordinator:
             and bool(operator_response)
         )
         sync_already_completed = False
-        if operator_action_id and uow is not None and run is not None:
+        sync_replay_required = False
+        if uow is not None and run is not None:
             events_repo = getattr(uow, "orchestration_stage_events", None)
             prior_events = events_repo.list_by_run(run.run_id) if events_repo else []
-            sync_starts = {
-                str((event.evidence_references or {}).get("attempt_id"))
-                for event in prior_events
-                if event.event_type == "STAGE_INVOCATION_STARTED"
-                and (event.evidence_references or {}).get("operator_action_id") == operator_action_id
-                and str((event.evidence_references or {}).get("claim_key") or "").startswith(
-                    f"stage-invocation:{run.run_id}:SYNC:"
+            if operator_action_id:
+                sync_starts = {
+                    str((event.evidence_references or {}).get("attempt_id"))
+                    for event in prior_events
+                    if event.event_type == "STAGE_INVOCATION_STARTED"
+                    and (event.evidence_references or {}).get("operator_action_id") == operator_action_id
+                    and str((event.evidence_references or {}).get("claim_key") or "").startswith(
+                        f"stage-invocation:{run.run_id}:SYNC:"
+                    )
+                }
+                sync_already_completed = any(
+                    event.event_type == "STAGE_INVOCATION_COMPLETED"
+                    and str((event.evidence_references or {}).get("attempt_id")) in sync_starts
+                    and (event.evidence_references or {}).get("result", {}).get("effect_verified") is True
+                    for event in prior_events
                 )
-            }
-            sync_already_completed = any(
-                event.event_type == "STAGE_INVOCATION_COMPLETED"
-                and str((event.evidence_references or {}).get("attempt_id")) in sync_starts
-                and (event.evidence_references or {}).get("result", {}).get("effect_verified") is True
-                for event in prior_events
+            sync_replay_required = self._doc_archive_reset_requires_sync_replay(
+                prior_events, run.run_id, doc_path
             )
-        if not archive_resume and not sync_already_completed:
+        if sync_replay_required or (not archive_resume and not sync_already_completed):
             expected_main_specs = self._doc_closing_expected_main_specs(
                 doc_path, change_name
             )
@@ -8859,6 +9104,7 @@ class NativeOrchestrationCoordinator:
                     "Return evidence of the resulting synced specs."
                 ),
                 postcondition=sync_effect_observed,
+                allow_doc_sync_replay=sync_replay_required,
             )
             if not self._execution_is_successful(sync_result, require_response=False):
                 return False

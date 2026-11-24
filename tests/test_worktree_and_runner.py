@@ -90,6 +90,221 @@ async def test_worktree_manager_create_collision_and_cleanup(tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_new_worktree_links_only_ignored_root_and_frontend_dependencies(tmp_path):
+    repo = tmp_path / "repo"
+    frontend = repo / "frontend"
+    frontend.mkdir(parents=True)
+    (repo / ".gitignore").write_text("node_modules\n", encoding="utf-8")
+    (repo / "package.json").write_text('{"name":"root"}\n', encoding="utf-8")
+    (frontend / "package.json").write_text('{"name":"frontend"}\n', encoding="utf-8")
+    (repo / "node_modules" / "root-package").mkdir(parents=True)
+    (frontend / "node_modules" / "frontend-package").mkdir(parents=True)
+    uow = InMemoryPersistenceUnitOfWork()
+    await setup_test_repo(repo, uow, "deps-project")
+    worktree = tmp_path / "candidate"
+    await run(["git", "worktree", "add", "--detach", str(worktree), "HEAD"], repo)
+
+    manager = WorktreeManager(repo, uow=uow)
+    await manager._link_installed_node_dependencies(worktree)
+
+    assert (worktree / "node_modules").is_symlink()
+    assert (worktree / "frontend" / "node_modules").is_symlink()
+    assert (worktree / "node_modules" / "root-package").is_dir()
+    assert (worktree / "frontend" / "node_modules" / "frontend-package").is_dir()
+    assert await manager._git(["status", "--porcelain", "--untracked-files=all"], cwd=worktree) == ""
+    assert await manager._git(["ls-files", "--", "node_modules", "frontend/node_modules"], cwd=worktree) == ""
+
+
+@pytest.mark.asyncio
+async def test_new_worktree_does_not_create_links_for_missing_installs(tmp_path):
+    repo = tmp_path / "repo"
+    (repo / "frontend").mkdir(parents=True)
+    (repo / ".gitignore").write_text("node_modules/\n", encoding="utf-8")
+    (repo / "package.json").write_text('{"name":"root"}\n', encoding="utf-8")
+    (repo / "frontend" / "package.json").write_text('{"name":"frontend"}\n', encoding="utf-8")
+    uow = InMemoryPersistenceUnitOfWork()
+    await setup_test_repo(repo, uow, "missing-deps-project")
+    worktree = tmp_path / "candidate"
+    await run(["git", "worktree", "add", "--detach", str(worktree), "HEAD"], repo)
+
+    await WorktreeManager(repo, uow=uow)._link_installed_node_dependencies(worktree)
+
+    assert not (worktree / "node_modules").exists()
+    assert not (worktree / "frontend" / "node_modules").exists()
+
+
+@pytest.mark.asyncio
+async def test_documentation_worktree_persists_run_ownership_before_return(tmp_path):
+    from minime.domain.enums import OrchestrationStage, WorktreeCreationState
+    from minime.domain.models import OrchestrationRun
+
+    repo = tmp_path / "repo"
+    uow = InMemoryPersistenceUnitOfWork()
+    setup_managed_repository_fixture(
+        uow, "doc-project", repo, repo / ".minime" / "worktrees",
+        canonical_repository_identity="github.com/org/doc-project",
+    )
+    run_record = OrchestrationRun(
+        run_id="doc-run-517",
+        project_id="doc-project",
+        change_name="issue-517-worktree-recovery-test-isolation",
+        base_sha="main",
+        current_stage=OrchestrationStage.DOC_CLOSING,
+    )
+    uow.orchestration_runs.save(run_record)
+    manager = WorktreeManager(repo, uow=uow)
+    original_git = manager._git
+
+    async def no_remote_fetch(args, **kwargs):
+        if args[:2] == ["fetch", "origin"]:
+            raise RuntimeError("network disabled in focused worktree test")
+        return await original_git(args, **kwargs)
+
+    manager._git = no_remote_fetch
+    info = await manager.create_documentation_worktree(
+        project_id="doc-project",
+        issue_number=517,
+        issue_title="Worktree Recovery Test Isolation",
+        change_name=run_record.change_name,
+        run_id=run_record.run_id,
+    )
+
+    owner = uow.orchestration_worktree_ownerships.get_by_canonical_path(str(info.path.resolve()))
+    assert owner is not None
+    assert owner.project_id == run_record.project_id
+    assert owner.run_id == run_record.run_id
+    assert owner.job_id == run_record.run_id
+    assert owner.change_name == run_record.change_name
+    assert owner.branch == info.branch_name
+    assert owner.creation_state == WorktreeCreationState.CREATED
+    assert (info.path / ".minime_worktree_ownership.json").is_file()
+
+
+@pytest.mark.asyncio
+async def test_legacy_documentation_worktree_requires_matching_invocation_to_adopt(tmp_path):
+    import json
+
+    from minime.domain.enums import OrchestrationStage, WorktreeCreationState
+    from minime.domain.models import OrchestrationRun, OrchestrationStageEvent
+
+    repo = tmp_path / "repo"
+    uow = InMemoryPersistenceUnitOfWork()
+    setup_managed_repository_fixture(
+        uow, "legacy-doc-project", repo, repo / ".minime" / "worktrees",
+        canonical_repository_identity="github.com/org/legacy-doc-project",
+    )
+    run_record = OrchestrationRun(
+        run_id="legacy-doc-run-517",
+        project_id="legacy-doc-project",
+        change_name="issue-517-worktree-recovery-test-isolation",
+        base_sha="main",
+        current_stage=OrchestrationStage.DOC_CLOSING,
+    )
+    uow.orchestration_runs.save(run_record)
+    manager = WorktreeManager(repo, uow=uow)
+    branch = manager.format_documentation_branch_name(517, "Worktree Recovery Test Isolation")
+    path = repo / ".minime" / "worktrees" / branch
+    await run(["git", "worktree", "add", "-b", branch, str(path), "main"], repo)
+    head = (await manager._git(["rev-parse", "HEAD"], cwd=path)).strip()
+    candidate = {
+        "run_id": run_record.run_id,
+        "stage": "ARCHIVE",
+        "worktree": str(path.resolve()),
+        "branch": branch,
+        "generation": int(run_record.current_generation or 0),
+        "candidate_sha": head,
+    }
+    (path / ".minime_worktree_ownership.json").write_text(
+        json.dumps({
+            "worktree_id": f"wt-{run_record.run_id}",
+            "project_id": run_record.project_id,
+            "job_id": run_record.run_id,
+            "run_id": run_record.run_id,
+            "change_name": run_record.change_name,
+            "canonical_worktree_path": str(path.resolve()),
+            "branch": branch,
+                "source_repository_identity": uow.project_managed_repository_bindings.get_by_project_id(
+                    run_record.project_id
+                ).canonical_repository_identity,
+            "source_base_sha": head,
+        }),
+        encoding="utf-8",
+    )
+    uow.orchestration_stage_events.save(OrchestrationStageEvent(
+        run_id=run_record.run_id,
+        from_stage=OrchestrationStage.DOC_CLOSING,
+        to_stage=OrchestrationStage.DOC_CLOSING,
+        event_type="STAGE_INVOCATION_STARTED",
+        evidence_references={
+            "attempt_id": "legacy-attempt",
+            "claim_key": f"stage-invocation:{run_record.run_id}:ARCHIVE:old-fingerprint",
+            "candidate": candidate,
+        },
+    ))
+    uow.commit()
+
+    info = await manager.create_documentation_worktree(
+        project_id=run_record.project_id,
+        issue_number=517,
+        issue_title="Worktree Recovery Test Isolation",
+        change_name=run_record.change_name,
+        run_id=run_record.run_id,
+    )
+    owner = uow.orchestration_worktree_ownerships.get_by_canonical_path(str(info.path.resolve()))
+    assert owner is not None
+    assert owner.creation_state == WorktreeCreationState.CREATED
+    assert owner.run_id == run_record.run_id
+    assert info.path == path
+    assert (path / ".minime_worktree_ownership.json").is_file()
+
+
+@pytest.mark.asyncio
+async def test_legacy_documentation_worktree_without_invocation_evidence_is_preserved(tmp_path):
+    from minime.domain.enums import OrchestrationStage
+    from minime.domain.models import OrchestrationRun
+
+    repo = tmp_path / "repo"
+    uow = InMemoryPersistenceUnitOfWork()
+    setup_managed_repository_fixture(
+        uow, "unproven-doc-project", repo, repo / ".minime" / "worktrees",
+        canonical_repository_identity="github.com/org/unproven-doc-project",
+    )
+    run_record = OrchestrationRun(
+        run_id="unproven-doc-run-517",
+        project_id="unproven-doc-project",
+        change_name="issue-517-worktree-recovery-test-isolation",
+        base_sha="main",
+        current_stage=OrchestrationStage.DOC_CLOSING,
+    )
+    uow.orchestration_runs.save(run_record)
+    manager = WorktreeManager(repo, uow=uow)
+    branch = manager.format_documentation_branch_name(517, "Worktree Recovery Test Isolation")
+    path = repo / ".minime" / "worktrees" / branch
+    await run(["git", "worktree", "add", "-b", branch, str(path), "main"], repo)
+    preserved_file = path / "unverified.txt"
+    preserved_file.write_text("preserve this directory\n", encoding="utf-8")
+    original_git = manager._git
+
+    async def no_remote_fetch(args, **kwargs):
+        if args[:2] == ["fetch", "origin"]:
+            raise RuntimeError("network disabled in fail-closed worktree test")
+        return await original_git(args, **kwargs)
+
+    manager._git = no_remote_fetch
+    with pytest.raises(RuntimeError, match="identity is absent or ambiguous"):
+        await manager.create_documentation_worktree(
+            project_id=run_record.project_id,
+            issue_number=517,
+            issue_title="Worktree Recovery Test Isolation",
+            change_name=run_record.change_name,
+            run_id=run_record.run_id,
+        )
+
+    assert preserved_file.read_text(encoding="utf-8") == "preserve this directory\n"
+    assert uow.orchestration_worktree_ownerships.get_by_canonical_path(str(path.resolve())) is None
+
+
+@pytest.mark.asyncio
 async def test_cleanup_worktree_refuses_dirty_worktree_without_deleting_it(tmp_path):
     repo = tmp_path / "repo"
     uow = InMemoryPersistenceUnitOfWork()
