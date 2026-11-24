@@ -20,6 +20,7 @@ The coordinator SHALL recover an incomplete stage invocation only when the durab
 - **WHEN** recovery is authorized to acquire the successor fenced claim
 - **THEN** it SHALL restore that worktree to its current `HEAD` using the approved managed-worktree cleanup boundary
 - **AND** it SHALL recalculate the candidate fingerprint from the restored worktree
+- **AND** it SHALL hold the current successor claim row for update in the same PostgreSQL transaction that persists both invocation events, preventing a competing fence from being acquired between validation and commit
 - **AND** it SHALL persist the old `STAGE_INVOCATION_ABANDONED` event and successor `STAGE_INVOCATION_STARTED` event together in one PostgreSQL transaction after cleanup and current-fence validation
 - **AND** it SHALL dispatch the same native operation for the restored candidate without treating the stale dirty fingerprint as a different active invocation.
 
@@ -47,6 +48,12 @@ The coordinator SHALL recover an incomplete stage invocation only when the durab
 - **WHEN** recovery evaluates the invocation
 - **THEN** it SHALL NOT reset, clean, or dispatch the worktree
 - **AND** it SHALL preserve the existing claim and evidence for safe later reconciliation.
+
+#### Scenario: Competing recovery cannot fence between validation and event commit
+- **GIVEN** recovery has validated an expired DOC_CLOSING invocation under a successor claim whose lease expires before the recovery event transaction commits
+- **WHEN** another scheduler attempts to reacquire that claim after the lease expires
+- **THEN** the row lock held by recovery SHALL prevent the competing fence from being acquired before both `STAGE_INVOCATION_ABANDONED` and successor `STAGE_INVOCATION_STARTED` events commit
+- **AND** after that commit, the existing claim mechanism MAY grant a newer fence to the competing scheduler
 
 #### Scenario: Process identity is live or unknown
 - **GIVEN** an incomplete invocation with an expired claim

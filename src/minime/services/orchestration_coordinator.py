@@ -1273,6 +1273,7 @@ class NativeOrchestrationCoordinator:
                 successor_context.claim_key,
                 successor_context.owner_instance_id,
                 successor_context.fence_token,
+                for_update=True,
             ):
                 raise RuntimeError("Restored DOC_CLOSING candidate lost its successor claim fence.")
             context = successor_context

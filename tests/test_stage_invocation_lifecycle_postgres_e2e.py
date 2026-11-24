@@ -16,6 +16,7 @@ from sqlalchemy import create_engine, delete, text, update
 from sqlalchemy.orm import sessionmaker
 from tests.conftest import setup_managed_repository_fixture
 
+from minime.db import repository as repository_module
 from minime.db.models import ProviderHealthModel, RecoveryClaimModel
 from minime.db.repository import PostgresPersistenceUnitOfWork
 from minime.domain.enums import (
@@ -104,19 +105,21 @@ async def test_postgres_doc_closing_recovers_owned_worktree_before_fingerprintin
         owner = uow.orchestration_worktree_ownerships.get_by_canonical_path(str(path.resolve()))
         assert owner is not None and owner.run_id == run_id
 
-        dirty_file = path / "openspec" / "specs" / "recovery" / "spec.md"
-        dirty_file.parent.mkdir(parents=True)
-        dirty_file.write_text("uncommitted sync effect\n", encoding="utf-8")
-        ignored_file = path / "node_modules" / "retained-cache" / "entry"
-        ignored_file.parent.mkdir(parents=True)
-        ignored_file.write_text("keep ignored dependencies\n", encoding="utf-8")
         coordinator = NativeOrchestrationCoordinator(
             uow_factory=lambda: uow,
             github_adapter=object(),
             worktree_manager=manager,
             agent_runner=object(),
         )
+        # The interrupted SYNC/ARCHIVE began against this clean candidate;
+        # its dirty output is a side effect that recovery must remove.
         candidate = await coordinator._stage_candidate_identity(run, path, stage)
+        dirty_file = path / "openspec" / "specs" / "recovery" / "spec.md"
+        dirty_file.parent.mkdir(parents=True)
+        dirty_file.write_text("uncommitted sync effect\n", encoding="utf-8")
+        ignored_file = path / "node_modules" / "retained-cache" / "entry"
+        ignored_file.parent.mkdir(parents=True)
+        ignored_file.write_text("keep ignored dependencies\n", encoding="utf-8")
         prior_claim = uow.claims.acquire_or_reacquire(
             claim_key=f"stage-invocation:{run_id}:{stage}:{candidate['fingerprint']}",
             owner_instance_id="previous-doc-close-worker",
@@ -125,6 +128,8 @@ async def test_postgres_doc_closing_recovers_owned_worktree_before_fingerprintin
         assert prior_claim is not None
         prior_claim_key = prior_claim.claim_key
         prior_fence = prior_claim.fence_token
+        competing_during_event_commit: dict[str, object] = {}
+        successor_claim: dict[str, object] = {}
         old_identity = {
             "status": "AVAILABLE", "host": socket.gethostname(), "boot_id": "previous-boot",
             "pid": 2147480000, "pgid": 2147480000, "start_marker": "previous",
@@ -164,11 +169,42 @@ async def test_postgres_doc_closing_recovers_owned_worktree_before_fingerprintin
         session.commit()
         monkeypatch.setattr(coordinator_module, "process_identity", lambda: current_identity)
 
+        validate_cas = uow.claims.validate_cas
+        validation_count = 0
+
+        def hold_successor_fence(claim_key, owner_instance_id, fence_token, for_update=False):
+            nonlocal validation_count
+            validation_count += 1
+            valid = validate_cas(claim_key, owner_instance_id, fence_token, for_update=for_update)
+            if validation_count == 2:
+                assert claim_key == prior_claim_key
+                assert for_update is True
+                assert valid
+                successor_claim.update(claim_key=claim_key, fence_token=fence_token)
+                real_now = repository_module.utc_now
+                repository_module.utc_now = lambda: real_now() + timedelta(seconds=121)
+                competing = sessionmaker(
+                    bind=engine, autoflush=False, expire_on_commit=False
+                )()
+                try:
+                    competing_uow = PostgresPersistenceUnitOfWork(competing)
+                    competing_during_event_commit["claim"] = competing_uow.claims.acquire_or_reacquire(
+                        claim_key, "competing-before-event-commit", lease_seconds=60
+                    )
+                    competing.rollback()
+                finally:
+                    competing.close()
+                    repository_module.utc_now = real_now
+            return valid
+
+        uow.claims.validate_cas = hold_successor_fence
+
         recovered = await coordinator._begin_stage_invocation(uow, run, path, stage)
         assert recovered is not None
         assert recovered.attempt_id != "abandoned-archive"
         assert uow.claims.get_by_key(prior_claim_key).fence_token > prior_fence
-        assert recovered.claim.claim_key != prior_claim_key
+        assert recovered.claim.claim_key == prior_claim_key
+        assert recovered.claim.fence_token == successor_claim["fence_token"]
         assert not dirty_file.exists()
         assert ignored_file.read_text(encoding="utf-8") == "keep ignored dependencies\n"
         assert coordinator._doc_archive_reset_requires_sync_replay(
@@ -184,11 +220,33 @@ async def test_postgres_doc_closing_recovers_owned_worktree_before_fingerprintin
         assert starts[-1].evidence_references["candidate"]["candidate_fingerprint"] == recovered.candidate[
             "candidate_fingerprint"
         ]
-        assert uow.claims.validate_cas(
-            recovered.claim.claim_key,
-            recovered.claim.owner_instance_id,
-            recovered.claim.fence_token,
-        )
+        # The successor lease expires after its locked validation but before
+        # invocation events commit. A concurrent reacquire must fail until the
+        # transaction containing both events commits, then may advance the fence.
+        assert successor_claim["claim_key"] == recovered.claim.claim_key
+        assert competing_during_event_commit["claim"] is None
+        competitor = sessionmaker(bind=engine, autoflush=False, expire_on_commit=False)()
+        real_now = repository_module.utc_now
+        try:
+            competing_uow = PostgresPersistenceUnitOfWork(competitor)
+            committed_events = competing_uow.orchestration_stage_events.list_by_run(run_id)
+            assert any(event.event_type == "STAGE_INVOCATION_ABANDONED" for event in committed_events)
+            assert any(
+                event.event_type == "STAGE_INVOCATION_STARTED"
+                and event.evidence_references.get("attempt_id") == recovered.attempt_id
+                for event in committed_events
+            )
+            repository_module.utc_now = lambda: real_now() + timedelta(seconds=121)
+            acquired_after_commit = competing_uow.claims.acquire_or_reacquire(
+                recovered.claim.claim_key, "competing-after-commit", lease_seconds=60
+            )
+            repository_module.utc_now = real_now
+            assert acquired_after_commit is not None
+            assert acquired_after_commit.fence_token > recovered.claim.fence_token
+            competitor.commit()
+        finally:
+            repository_module.utc_now = real_now
+            competitor.close()
     finally:
         session.rollback()
         if path is not None and path.exists():
