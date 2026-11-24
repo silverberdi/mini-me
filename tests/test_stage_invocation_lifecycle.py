@@ -199,6 +199,31 @@ async def test_human_required_blocks_reentry_until_operator_response(tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_failed_verify_allows_retry_when_authorized_retry_is_true(tmp_path):
+    uow = InMemoryPersistenceUnitOfWork()
+    run = OrchestrationRun(
+        project_id="project-stage-test", change_name="stage-lifecycle", base_sha="main",
+        current_stage=OrchestrationStage.VERIFYING,
+    )
+    uow.orchestration_runs.save(run)
+    candidate = tmp_path / "candidate"
+    _git_candidate(candidate)
+    coordinator = _coordinator(uow)
+    invocation = await coordinator._begin_stage_invocation(uow, run, candidate, "VERIFY")
+    await coordinator._finish_stage_invocation(
+        uow, run, invocation, "FAILED",
+        {"findings": [{"severity": "BLOCKER", "location": "tests", "violated_requirement": "clean", "expected_correction": "clean"}]},
+    )
+    # Without authorized_retry or human resume, retry is blocked:
+    assert await coordinator._begin_stage_invocation(uow, run, candidate, "VERIFY") is None
+    # When authorized_retry is True (clean candidate post-Apply), retry is permitted:
+    resumed = await coordinator._begin_stage_invocation(
+        uow, run, candidate, "VERIFY", authorized_retry=True,
+    )
+    assert resumed is not None
+
+
+@pytest.mark.asyncio
 async def test_proven_preflight_failure_closes_claim_and_allows_one_linked_retry(tmp_path):
     uow = InMemoryPersistenceUnitOfWork()
     run = OrchestrationRun(
