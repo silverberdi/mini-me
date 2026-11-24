@@ -24,7 +24,7 @@ test('renders the committed ledger projection and preserves provider/model attri
   await setupAuthSession(context, process.env['MINIME_E2E_AUTH_TOKEN'] || E2E_SESSION_TOKEN);
   await page.route('**/requests', route => route.fulfill({ status: 200, contentType: 'application/json', body: '[]' }));
   await page.route('**/api/v1/providers/quotas', route => route.fulfill({ status: 200, contentType: 'application/json', body: '{"providers":[]}' }));
-  const project = await selectRealProject(page, process.env['MINIME_E2E_PROJECT_ID']);
+  const project = await selectRealProject(page, process.env['MINIME_E2E_PROJECT_ID'] || 'e2e-project');
   const response = page.waitForResponse(response => response.url().includes('/api/v1/dashboard/overview'));
   await page.goto('/dashboard');
   await waitForAppMounted(page);
