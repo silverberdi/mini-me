@@ -30,6 +30,7 @@ import { ModelComboboxComponent, ModelOption } from '../../shared/model-combobox
 
       <!-- Action Feedback Banner -->
       <div *ngIf="actionMsg()"
+           role="status"
            class="p-4 rounded-xl text-xs font-mono flex items-center justify-between"
            [ngClass]="actionOk() ? 'bg-emerald-500/10 text-emerald-400 border border-emerald-500/20' : 'bg-rose-500/10 text-rose-400 border border-rose-500/20'">
         <span>{{ actionMsg() }}</span>

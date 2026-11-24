@@ -349,6 +349,8 @@ async def test_postgres_listener_relays_committed_stage_and_projection_is_author
         response = await api_module.stream_events(authenticated_operator)
         stream = response.body_iterator
         assert await anext(stream) == ": connected\n\n"
+        version_event = await anext(stream)
+        assert version_event.startswith("event: app.version\n")
         listener = PostgresRunEventListener(database_url, broker.publish)
         await listener.start()
         # The listener's initial resync is emitted only after LISTEN is established.
