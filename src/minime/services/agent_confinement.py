@@ -1666,6 +1666,9 @@ class AgentProcessConfinement:
         )
         for key, value in source.items():
             normalized = key.upper()
+            if normalized.endswith("_TEST_DATABASE_URL"):
+                env[key] = value
+                continue
             if normalized.startswith("MINIME_") or any(
                 marker in normalized for marker in secret_markers
             ):
