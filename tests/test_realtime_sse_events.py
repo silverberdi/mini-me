@@ -45,6 +45,8 @@ async def test_successful_project_and_request_mutations_reach_sse(in_memory_uow,
     response = await api_module.stream_events(_operator=None)
     stream = response.body_iterator
     assert await anext(stream) == ": connected\n\n"
+    version_event = await anext(stream)
+    assert version_event.startswith("event: app.version\n")
 
     events = [
         ("project.pause_changed", {"scope": "project", "project_id": "project-a"}, api_module.pause_project, ("project-a", None, in_memory_uow)),
@@ -198,6 +200,8 @@ async def test_gate_acknowledgement_reaches_sse_before_coordinator_finishes(
         initial = await asyncio.wait_for(messages.get(), timeout=2)
         assert start["type"] == "http.response.start" and start["status"] == 200
         assert initial["body"] == b": connected\n\n"
+        version_msg = await asyncio.wait_for(messages.get(), timeout=2)
+        assert version_msg["body"].startswith(b"event: app.version\n")
         await asyncio.sleep(0)
 
         async with AsyncClient(
@@ -228,3 +232,22 @@ async def test_gate_acknowledgement_reaches_sse_before_coordinator_finishes(
         api_module.app.dependency_overrides.pop(api_module.get_current_operator, None)
         api_module.app.dependency_overrides.pop(api_module.get_uow, None)
         api_module._accepted_operations.pop((project_id, f"{project_id}:active"), None)
+
+
+@pytest.mark.asyncio
+async def test_sse_stream_emits_initial_app_version_event(monkeypatch):
+    monkeypatch.setattr(
+        api_module,
+        "_load_version_metadata",
+        lambda: {"version": "0.1.205", "commit_sha": "abc1234", "build_date": "2026-11-24T12:00:00Z"},
+    )
+    response = await api_module.stream_events(_operator=None)
+    stream = response.body_iterator
+    assert await anext(stream) == ": connected\n\n"
+    version_event = await anext(stream)
+    assert version_event.startswith("event: app.version\ndata: ")
+    payload = json.loads(version_event.split("data: ", 1)[1])
+    assert payload["version"] == "0.1.205"
+    assert payload["commit_sha"] == "abc1234"
+    assert payload["build_at"] == "2026-11-24T12:00:00Z"
+    await stream.aclose()

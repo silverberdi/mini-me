@@ -41,6 +41,7 @@ export class RefreshService implements OnDestroy {
   readonly cost = signal<DashboardCost>({ status: 'no_data', providers: [], series: [] });
   readonly temporalTelemetry = signal<Record<string, TemporalTelemetryProjection>>({});
   readonly syncState = signal<'idle' | 'syncing' | 'error'>('idle');
+  readonly updateCheckRequested = signal<number>(0);
   private events: EventSource | null = null;
 
   // Computed
@@ -276,6 +277,14 @@ export class RefreshService implements OnDestroy {
 
     const handleRunEvent = () => void this.refreshRuns();
     const handleProjectEvent = () => void this.refreshProjects();
+    let lastUpdateCheck = 0;
+    const requestUpdateCheck = () => {
+      const now = Date.now();
+      if (now - lastUpdateCheck >= 30_000) {
+        lastUpdateCheck = now;
+        this.updateCheckRequested.update(n => n + 1);
+      }
+    };
 
     this.events.addEventListener('run.transition', handleRunEvent);
     this.events.addEventListener('run.resync', handleRunEvent);
@@ -287,6 +296,17 @@ export class RefreshService implements OnDestroy {
     this.events.addEventListener('request.reactivated', handleRunEvent);
 
     this.events.addEventListener('project.pause_changed', handleProjectEvent);
+
+    this.events.addEventListener('app.version', (event: MessageEvent) => {
+      try {
+        const data = JSON.parse(event.data);
+        if (data && typeof data === 'object') {
+          requestUpdateCheck();
+        }
+      } catch {
+        // Ignored
+      }
+    });
 
     this.events.addEventListener('quota.update', (event: MessageEvent) => {
       try {
@@ -301,6 +321,7 @@ export class RefreshService implements OnDestroy {
       void this.refreshRuns().then(() => {
         if (this.events?.readyState === EventSource.OPEN) {
           this.isConnected.set(true);
+          requestUpdateCheck();
         }
       });
     };

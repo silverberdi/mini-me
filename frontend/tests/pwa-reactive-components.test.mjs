@@ -21,6 +21,8 @@ test('RefreshService has eliminated blind global periodic polling and interval t
   assert.match(refreshSrc, /addEventListener\('run\.transition', handleRunEvent\)/);
   assert.match(refreshSrc, /addEventListener\('project\.pause_changed', handleProjectEvent\)/);
   assert.match(refreshSrc, /addEventListener\('quota\.update',/);
+  assert.match(refreshSrc, /addEventListener\('app\.version',/);
+  assert.match(refreshSrc, /readonly updateCheckRequested = signal<number>\(0\);/);
 });
 
 test('RefreshService provides targeted update methods to avoid disrupting unrelated views', () => {

@@ -1963,10 +1963,30 @@ async def cancel_orchestration_run(
     return result
 
 
+def _load_version_metadata() -> dict[str, Any]:
+    """Load the shipped version.json so /health, SSE and the frontend report the same artifact."""
+    version_file = STATIC_DIR / "version.json"
+    if version_file.is_file():
+        try:
+            data = json.loads(version_file.read_text(encoding="utf-8"))
+            if isinstance(data, dict):
+                return data
+        except (ValueError, OSError):
+            pass
+    return {}
+
+
 @app.get("/api/v1/events", tags=["events"])
 async def stream_events(_operator: AuthenticatedOperatorDep) -> StreamingResponse:
     async def stream():
         yield ": connected\n\n"
+        meta = _load_version_metadata()
+        version_payload = {
+            "version": meta.get("version", "0.1.0"),
+            "commit_sha": meta.get("commit_sha"),
+            "build_at": meta.get("build_date"),
+        }
+        yield f"event: app.version\ndata: {json.dumps(version_payload)}\n\n"
         async for event in event_broker.subscribe():
             yield event
 
@@ -2311,20 +2331,6 @@ class JobRunRequest(BaseModel):
     change_name: str
     project_root: str = "."
 
-
-def _load_version_metadata() -> dict[str, Any]:
-    """Load the shipped version.json so /health and the frontend report the same artifact."""
-    import json
-
-    version_file = STATIC_DIR / "version.json"
-    if version_file.is_file():
-        try:
-            data = json.loads(version_file.read_text(encoding="utf-8"))
-            if isinstance(data, dict):
-                return data
-        except (ValueError, OSError):
-            pass
-    return {}
 
 
 @app.api_route("/health", methods=["GET", "HEAD"])

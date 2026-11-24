@@ -24,3 +24,13 @@ test('the app activates and reloads only after the operator chooses to load the 
   assert.ok(init, 'ngOnInit exists');
   assert.doesNotMatch(init, /location\.reload/);
 });
+
+test('checkForUpdate is reactive and safely guarded for offline resilience', () => {
+  const check = component.match(/async checkForUpdate\(\): Promise<void> \{([\s\S]*?)\n  \}/)?.[1];
+  assert.ok(check, 'checkForUpdate method exists');
+  assert.match(check, /if \(!this\.swUpdate\.isEnabled\)\s*\{\s*return;/);
+  assert.match(check, /await this\.swUpdate\.checkForUpdate\(\);/);
+  assert.match(check, /try\s*\{[\s\S]*?\}\s*catch/);
+
+  assert.match(component, /effect\(\(\) => \{[\s\S]*?this\.refresh\.updateCheckRequested\(\)[\s\S]*?this\.checkForUpdate\(\)/);
+});
