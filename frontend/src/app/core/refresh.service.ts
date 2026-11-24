@@ -229,17 +229,7 @@ export class RefreshService implements OnDestroy {
     try {
       const projRes = await this.api.get<Project[]>("/api/v1/projects");
       if (projRes.ok && Array.isArray(projRes.data)) {
-        const nextList = projRes.data;
-        const current = this.projects();
-        const changed =
-          current.length !== nextList.length ||
-          current.some((p, i) => {
-            const next = nextList[i];
-            return !next || p.project_id !== next.project_id || p.status !== next.status;
-          });
-        if (changed) {
-          this.projects.set(nextList);
-        }
+        this.projects.set(projRes.data);
       }
       this.lastUpdated.set(new Date());
     } catch {
