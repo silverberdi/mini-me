@@ -48,7 +48,7 @@ The system SHALL provide a valid W3C Web App Manifest (`manifest.webmanifest`) s
 - **THEN** the manifest SHALL validate successfully and provide standalone display mode metadata.
 
 ### Requirement: Service Worker Static Shell Caching and Offline Resilience
-The system SHALL cache only public static shell resources and SHALL NOT cache authenticated operational responses, decisions, credentials or Request bodies in service-worker storage or persistent browser stores. Network failure SHALL preserve a usable shell with explicit offline/stale status and observed timestamps; mutations SHALL be unavailable offline and SHALL NOT be queued for later replay. Reconnection SHALL refresh reads before permitting authority-dependent actions. A future Angular frontend and its service worker SHALL preserve these cache boundaries and SHALL not expose secrets or authenticated responses through offline behavior. When a new static shell version is ready, the PWA SHALL present a clear Spanish update notice with an operator action to load it; it SHALL NOT silently reload an active session.
+The system SHALL cache only public static shell resources and SHALL NOT cache authenticated operational responses, decisions, credentials or Request bodies in service-worker storage or persistent browser stores. Network failure SHALL preserve a usable shell with explicit offline/stale status and observed timestamps; mutations SHALL be unavailable offline and SHALL NOT be queued for later replay. Reconnection SHALL refresh reads before permitting authority-dependent actions. A future Angular frontend and its service worker SHALL preserve these cache boundaries and SHALL not expose secrets or authenticated responses through offline behavior. The system SHALL reactively notify connected clients of newly released versions by emitting an `app.version` event over the Server-Sent Events stream (`/api/v1/events`) on connection and startup. The frontend SHALL automatically trigger a background Service Worker update check upon receiving a version change event or upon stream reconnection without requiring blind manual refreshes. When a new static shell version is ready, the PWA SHALL present a clear Spanish update notice with an operator action to load it; it SHALL NOT silently reload an active session.
 
 #### Scenario: Backend disconnection handling
 - **WHEN** the loaded application cannot reach the backend during the next polling cycle
@@ -75,3 +75,17 @@ The system SHALL cache only public static shell resources and SHALL NOT cache au
 #### Scenario: No usable service-worker update
 - **WHEN** service-worker updates are unavailable or no newer shell version is ready
 - **THEN** the PWA does not display a false update notice and the existing shell remains usable.
+
+#### Scenario: Reactive version event triggers background update check
+- **WHEN** the connected frontend receives an `app.version` event with a commit SHA different from its active version, or the SSE stream reconnects after a service restart
+- **THEN** the frontend automatically invokes the Service Worker update check in the background without user intervention or page reload
+- **AND** begins downloading new static assets without disrupting the active user session.
+
+#### Scenario: Immediate Spanish update notice upon version readiness
+- **WHEN** the Service Worker completes downloading the new version assets and emits `VERSION_READY`
+- **THEN** the application presents a prominent Spanish update notice: "Hay una nueva versión de mini me disponible. [Recargar]"
+- **AND** activating the update reloads the application into the latest version in a single step without requiring a prior blind refresh.
+
+#### Scenario: Resilient offline behavior
+- **WHEN** the network is disconnected or the backend is unreachable
+- **THEN** the Service Worker update check fails gracefully without throwing unhandled exceptions or disrupting offline shell usage.
