@@ -6,6 +6,7 @@ import asyncio
 import getpass
 import json
 from pathlib import Path
+from typing import Any
 from uuid import uuid4
 
 import typer
@@ -689,22 +690,28 @@ def scheduler_run_cmd(
     max_iterations: int | None = typer.Option(None, "--max-iterations", help="Exit after N iterations"),
 ) -> None:
     """Run autonomous background runner for active project."""
-    import time
     import hashlib
     import json
+
     from minime.adapters.github import GitHubAdapter
+    from minime.domain.enums import OperatorActionStatus, OperatorActionType, OrchestrationStage
     from minime.services.agent_runner import CliAgentRunner
-    from minime.services.budget_service import BudgetService
     from minime.services.capacity_lifecycle_service import CapacityLifecycleService
     from minime.services.orchestration_coordinator import NativeOrchestrationCoordinator
+    from minime.services.scheduler_wakeup import SchedulerWakeupBridge
     from minime.services.worktree_manager import WorktreeManager
-    from minime.domain.enums import OperatorActionStatus, OperatorActionType, OrchestrationStage
 
     iterations = 0
+    database_url = db_manager.engine.url.set(drivername="postgresql").render_as_string(
+        hide_password=False
+    )
+    wakeup = SchedulerWakeupBridge(database_url)
+    wakeup.start()
     typer.echo(f"Autonomous SDLC scheduler started (poll_interval={poll_interval}s).")
 
     while True:
         if max_iterations is not None and iterations >= max_iterations:
+            wakeup.stop()
             break
         iterations += 1
 
@@ -731,7 +738,7 @@ def scheduler_run_cmd(
                 active_projects = [p for p in projects if not _is_project_paused(p)]
 
                 if not active_projects:
-                    time.sleep(poll_interval)
+                    wakeup.wait(poll_interval)
                     continue
 
                 for proj in active_projects:
@@ -900,7 +907,7 @@ def scheduler_run_cmd(
         except Exception as exc:
             typer.echo(f"Scheduler loop error: {exc}", err=True)
 
-        time.sleep(poll_interval)
+        wakeup.wait(poll_interval)
 
 
 if __name__ == "__main__":

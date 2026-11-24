@@ -59,7 +59,7 @@ from minime.db.models import (
     ReviewModel,
     TaskClassificationSnapshotModel,
 )
-from minime.db.notifications import notify_run_transition
+from minime.db.notifications import notify_run_transition, notify_scheduler_wakeup
 from minime.domain.enums import (
     PRIMARY_PROVIDERS,
     READ_ONLY_REVIEW_PROVIDERS,
@@ -3822,6 +3822,7 @@ class PostgresOperatorActionRepository(OperatorActionRepositoryInterface):
 
     def save(self, record: OperatorActionRecord) -> None:
         existing = self.session.get(OperatorActionRecordModel, record.id)
+        prior_status = existing.status if existing else None
         if existing:
             existing.status = (
                 record.status.value if hasattr(record.status, "value") else str(record.status)
@@ -3841,6 +3842,26 @@ class PostgresOperatorActionRepository(OperatorActionRepositoryInterface):
         else:
             model = operator_action_record_domain_to_model(record)
             self.session.add(model)
+        status_value = record.status.value if hasattr(record.status, "value") else str(record.status)
+        if (
+            status_value == OperatorActionStatus.ACCEPTED.value
+            and prior_status != OperatorActionStatus.ACCEPTED.value
+            and record.run_id
+            and getattr(record.action_type, "value", record.action_type) in {
+                OperatorActionType.RESOLVE_GATE.value,
+                OperatorActionType.CONTINUE.value,
+                OperatorActionType.RESUME.value,
+                OperatorActionType.RETRY.value,
+                OperatorActionType.REASSIGN.value,
+            }
+        ):
+            notify_scheduler_wakeup(
+                self.session,
+                project_id=record.project_id,
+                run_id=record.run_id,
+                action_id=record.action_request_id,
+                reason="accepted_action",
+            )
 
     def get_by_id(self, record_id: str) -> OperatorActionRecord | None:
         model = self.session.get(OperatorActionRecordModel, record_id)
