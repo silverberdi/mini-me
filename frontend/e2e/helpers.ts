@@ -3,6 +3,7 @@ import { APIRequestContext, BrowserContext, Page, expect } from '@playwright/tes
 export const TEST_PROJECT_ID = 'e2e-project';
 export const TEST_MODEL_ID = 'static-deepseek-chat';
 export const E2E_SESSION_TOKEN = 'e2e-session-token-32-chars-long-xxx';
+const PRESERVED_E2E_RUN_IDS = new Set(['e2e-human-gate-run']);
 
 /**
  * Ensures the browser context has the valid E2E session cookie installed.
@@ -45,6 +46,7 @@ export async function resetProjectState(request: APIRequestContext, projectId = 
     if (!run?.run_id || run.project_id !== TEST_PROJECT_ID || run.is_active !== true) {
       throw new Error('Active-run response contained an unexpected or incomplete E2E run identity.');
     }
+    if (PRESERVED_E2E_RUN_IDS.has(run.run_id)) continue;
     if (run.active_job_id) {
       throw new Error(`Cannot reset ${TEST_PROJECT_ID}: run ${run.run_id} still has active job ${run.active_job_id}; left it untouched.`);
     }
@@ -75,8 +77,19 @@ export async function resetProjectState(request: APIRequestContext, projectId = 
     throw new Error(`Unable to verify E2E run cleanup (${remainingResponse.status()}): ${await remainingResponse.text()}`);
   }
   const remainingRuns = await remainingResponse.json();
-  if (!Array.isArray(remainingRuns) || remainingRuns.length > 0) {
-    throw new Error('E2E project still has active runs after the cleanup pass.');
+  if (!Array.isArray(remainingRuns)) {
+    throw new Error('Active-run response is not a list after the cleanup pass.');
+  }
+  for (const run of remainingRuns) {
+    if (
+      !run?.run_id ||
+      run.project_id !== TEST_PROJECT_ID ||
+      run.is_active !== true ||
+      !PRESERVED_E2E_RUN_IDS.has(run.run_id) ||
+      run.active_job_id
+    ) {
+      throw new Error(`E2E project still has an unexpected active run after cleanup: ${JSON.stringify(run)}`);
+    }
   }
 
   const resumeResponse = await request.post(
