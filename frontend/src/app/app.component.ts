@@ -1,4 +1,4 @@
-import { Component, OnInit } from '@angular/core';
+import { Component, OnInit, effect } from '@angular/core';
 import { CommonModule } from '@angular/common';
 import { FormsModule } from '@angular/forms';
 import { RouterModule, Router } from '@angular/router';
@@ -270,7 +270,14 @@ export class AppComponent implements OnInit {
     public version: VersionService,
     private swUpdate: SwUpdate,
     private router: Router
-  ) {}
+  ) {
+    effect(() => {
+      const trigger = this.refresh.updateCheckRequested();
+      if (trigger > 0 && this.swUpdate.isEnabled) {
+        void this.checkForUpdate();
+      }
+    });
+  }
 
   async ngOnInit(): Promise<void> {
     if (this.swUpdate.isEnabled) {
@@ -291,6 +298,17 @@ export class AppComponent implements OnInit {
 
   beginLogin(): void {
     window.location.assign('/api/v1/auth/google/login');
+  }
+
+  async checkForUpdate(): Promise<void> {
+    if (!this.swUpdate.isEnabled) {
+      return;
+    }
+    try {
+      await this.swUpdate.checkForUpdate();
+    } catch {
+      // Gracefully ignored when offline or failed
+    }
   }
 
   async loadAvailableUpdate(): Promise<void> {

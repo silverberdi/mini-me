@@ -30,6 +30,7 @@ import { ModelComboboxComponent, ModelOption } from '../../shared/model-combobox
 
       <!-- Action Feedback Banner -->
       <div *ngIf="actionMsg()"
+           role="status"
            class="p-4 rounded-xl text-xs font-mono flex items-center justify-between"
            [ngClass]="actionOk() ? 'bg-emerald-500/10 text-emerald-400 border border-emerald-500/20' : 'bg-rose-500/10 text-rose-400 border border-rose-500/20'">
         <span>{{ actionMsg() }}</span>
@@ -1178,6 +1179,13 @@ export class ProyectosComponent implements OnInit {
       if (res.ok) {
         this.actionOk.set(true);
         this.actionMsg.set(isCurrentlyPaused ? `Proyecto ${proj.project_id} reanudado.` : `Proyecto ${proj.project_id} pausado.`);
+        this.refresh.projects.update(list =>
+          list.map(p => p.project_id === proj.project_id ? {
+            ...p,
+            status: isCurrentlyPaused ? 'ACTIVE' : 'PAUSED',
+            execution_policy: { ...(p.execution_policy || {}), effective_pause: !isCurrentlyPaused }
+          } : p)
+        );
         await this.refresh.refreshProjects();
       } else {
         this.actionOk.set(false);
