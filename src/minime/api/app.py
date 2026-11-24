@@ -588,7 +588,7 @@ def get_watchdog_settings(_operator: AuthenticatedOperatorDep, uow: UowDep) -> d
 
 
 @app.patch("/api/v1/admin/watchdog/settings", tags=["admin-watchdog"])
-def update_watchdog_settings(
+async def update_watchdog_settings(
     payload: WatchdogSettingsPayload, _operator: AuthenticatedOperatorDep, uow: UowDep
 ) -> dict[str, Any]:
     if payload.provider_id is not None:
@@ -598,7 +598,43 @@ def update_watchdog_settings(
             and model.harness_id == payload.harness_id
             and model.canonical_model_id == payload.canonical_model_id
         ), None)
-        if matching is None or matching.discovery_status != "available" or not matching.is_enabled:
+        registry_eligible = (
+            matching is not None
+            and matching.discovery_status == "available"
+            and matching.is_enabled
+        )
+        stage_catalog_eligible = False
+        if not registry_eligible and payload.provider_id in {"codex", "antigravity"}:
+            if payload.harness_id == payload.provider_id:
+                catalog = await ProjectCatalogService().agent_catalog()
+                agent = next((
+                    item for item in catalog.get("agents", [])
+                    if (item.get("id") or "").lower() == payload.provider_id
+                    and item.get("available") is True
+                ), None)
+                stage_models = (agent.get("models") or {}) if agent is not None else {}
+                registry_models = uow.provider_model_registry.list()
+                harness_entries = [
+                    model for model in registry_models
+                    if model.harness_id.lower() == payload.harness_id
+                    or model.provider_id.lower() == payload.provider_id
+                ]
+                if harness_entries:
+                    enabled_model_ids = {
+                        model.canonical_model_id.lower()
+                        for model in registry_models if model.is_enabled
+                    }
+                    stage_models = {
+                        model_id: efforts for model_id, efforts in stage_models.items()
+                        if model_id.lower() in enabled_model_ids
+                    }
+                stage_catalog_eligible = (
+                    agent is not None
+                    and payload.canonical_model_id in {
+                        model_id.lower() for model_id in stage_models
+                    }
+                )
+        if not registry_eligible and not stage_catalog_eligible:
             raise HTTPException(status_code=409, detail="Watchdog provider/model must be enabled and available in the catalog.")
     try:
         saved = uow.watchdog.save_settings(payload.model_dump())

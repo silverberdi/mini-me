@@ -22,6 +22,21 @@ interface ProviderCatalog {
   models: RegistryModel[];
 }
 
+interface WatchdogModelOption {
+  id: string;
+  provider_id: string;
+  harness_id: string;
+  canonical_model_id: string;
+}
+
+interface AgentCatalog {
+  agents: Array<{
+    id: string;
+    available?: boolean;
+    models?: Record<string, string[] | null>;
+  }>;
+}
+
 interface WatchdogSettings {
   provider_id: string | null;
   harness_id: string | null;
@@ -147,6 +162,7 @@ export class AdminModelsComponent implements OnInit {
   errorMessage = '';
   successMessage = '';
   watchdogSettings: WatchdogSettings | null = null;
+  watchdogModelOptions: WatchdogModelOption[] = [];
   selectedWatchdogModelId = '';
   watchdogThresholdMinutes = 15;
   watchdogMode: WatchdogSettings['mode'] = 'diagnostic_only';
@@ -155,23 +171,32 @@ export class AdminModelsComponent implements OnInit {
   constructor(private readonly api: ApiService) {}
 
   async ngOnInit(): Promise<void> {
-    const [catalogResponse, watchdogResponse] = await Promise.all([
+    const [catalogResponse, watchdogResponse, agentCatalogResponse] = await Promise.all([
       this.api.get<ProviderCatalog>('/api/v1/admin/providers/catalog'),
-      this.api.get<WatchdogSettings>('/api/v1/admin/watchdog/settings')
+      this.api.get<WatchdogSettings>('/api/v1/admin/watchdog/settings'),
+      this.api.get<AgentCatalog>('/api/v1/catalogs/agents')
     ]);
     if (catalogResponse.ok && catalogResponse.data) {
       this.catalog = catalogResponse.data;
     } else {
       this.errorMessage = 'No se pudo cargar el catálogo de proveedores y modelos.';
     }
+    if (agentCatalogResponse.ok && agentCatalogResponse.data) {
+      this.watchdogModelOptions = this.buildWatchdogModelOptions(agentCatalogResponse.data);
+    } else if (!this.errorMessage) {
+      this.errorMessage = 'No se pudo cargar el catálogo global de modelos disponibles para las etapas.';
+    }
     if (watchdogResponse.ok && watchdogResponse.data) {
       this.watchdogSettings = watchdogResponse.data;
       this.watchdogThresholdMinutes = watchdogResponse.data.inactivity_threshold_minutes;
       this.watchdogMode = watchdogResponse.data.mode;
       const selected = this.availableModels().find(model =>
-        model.provider_id === watchdogResponse.data!.provider_id &&
-        model.harness_id === watchdogResponse.data!.harness_id &&
-        model.canonical_model_id === watchdogResponse.data!.canonical_model_id
+        this.watchdogModelKey(model.provider_id, model.harness_id, model.canonical_model_id) ===
+        this.watchdogModelKey(
+          watchdogResponse.data!.provider_id || '',
+          watchdogResponse.data!.harness_id || '',
+          watchdogResponse.data!.canonical_model_id || ''
+        )
       );
       this.selectedWatchdogModelId = selected?.id || '';
     } else if (!this.errorMessage) {
@@ -179,10 +204,47 @@ export class AdminModelsComponent implements OnInit {
     }
   }
 
-  availableModels(): RegistryModel[] {
-    return (this.catalog?.models || []).filter(model =>
-      model.discovery_status === 'available' && model.is_enabled
+  availableModels(): WatchdogModelOption[] {
+    const options = new Map<string, WatchdogModelOption>();
+    for (const model of this.catalog?.models || []) {
+      if (model.discovery_status !== 'available' || !model.is_enabled) continue;
+      const key = this.watchdogModelKey(model.provider_id, model.harness_id, model.canonical_model_id);
+      options.set(key, {
+        id: `registry:${model.id}`,
+        provider_id: model.provider_id,
+        harness_id: model.harness_id,
+        canonical_model_id: model.canonical_model_id
+      });
+    }
+    for (const option of this.watchdogModelOptions) {
+      const key = this.watchdogModelKey(option.provider_id, option.harness_id, option.canonical_model_id);
+      if (!options.has(key)) options.set(key, option);
+    }
+    return [...options.values()].sort((a, b) =>
+      `${a.provider_id}/${a.canonical_model_id}`.localeCompare(`${b.provider_id}/${b.canonical_model_id}`)
     );
+  }
+
+  private buildWatchdogModelOptions(catalog: AgentCatalog): WatchdogModelOption[] {
+    const options = new Map<string, WatchdogModelOption>();
+    for (const agent of catalog.agents || []) {
+      const providerId = (agent.id || '').toLowerCase();
+      if (!agent.available || !['codex', 'antigravity'].includes(providerId)) continue;
+      for (const modelId of Object.keys(agent.models || {})) {
+        const key = this.watchdogModelKey(providerId, providerId, modelId);
+        options.set(key, {
+          id: `stage:${providerId}:${modelId}`,
+          provider_id: providerId,
+          harness_id: providerId,
+          canonical_model_id: modelId
+        });
+      }
+    }
+    return [...options.values()];
+  }
+
+  private watchdogModelKey(providerId: string, harnessId: string, modelId: string): string {
+    return `${providerId.toLowerCase()}|${harnessId.toLowerCase()}|${modelId.toLowerCase()}`;
   }
 
   selectWatchdogModel(modelId: string): void {
