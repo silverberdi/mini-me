@@ -1,7 +1,7 @@
 ## 1. Persistence and configuration
 
 - [x] 1.1 Add the minimal PostgreSQL/Alembic persistence for global Watchdog settings and candidate-bound diagnosis records with optional suggestion/status; preserve safe defaults when no settings row exists.
-- [x] 1.2 Add authenticated API operations to read/update global settings from the registered provider/model catalog and return persisted values without credentials.
+- [x] 1.2 Add authenticated API operations to read/update global settings from the registered provider/model catalog and return persisted values without credentials; selections are validated against the transversal union of enabled/available registry models and stage-selectable Codex/Antigravity models from the global agent catalog.
 - [x] 1.3 Add focused PostgreSQL integration coverage for settings defaults/update, diagnosis idempotency, suggestion status, and migration upgrade on the configured test database.
 
 ## 2. Stall detection and canonical recovery
@@ -13,7 +13,7 @@
 
 ## 3. Operator surfaces and telemetry
 
-- [x] 3.1 Add the global Watchdog controls to provider/model administration with server-confirmed values, validation errors, and no hardcoded provider list.
+- [x] 3.1 Add the global Watchdog controls to provider/model administration with server-confirmed values, validation errors, and no hardcoded provider list; show the transversal union of enabled/available registry models and global stage-selectable Codex/Antigravity models, independent of the focused project.
 - [x] 3.2 Add the authenticated `/mejora-continua` feed with project/status filters, observed recurrence summaries, copy-as-draft, discard, and no GitHub mutation.
 - [x] 3.3 Extend `Diagnóstico & Supervisión` with run-scoped activity, elapsed stage time, persisted Watchdog timeline, improvement-feed navigation, and truthful manual-diagnosis request states.
 - [x] 3.4 Change the autonomy series to the observed completed-run share without operator intervention; preserve active machine-time semantics and explicit no-data for incomplete/ambiguous histories.
