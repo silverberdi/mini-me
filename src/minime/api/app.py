@@ -361,6 +361,7 @@ PUBLIC_EXEMPT_PATHS = {
     "/trabajo-actual",
     "/proyectos",
     "/backlog",
+    "/conexiones-mcp",
     "/sw.js",
     "/manifest.webmanifest",
     "/favicon.ico",
@@ -407,6 +408,7 @@ async def auth_middleware(request: Request, call_next):
     if (
         path in PUBLIC_EXEMPT_PATHS
         or any(path.startswith(prefix) for prefix in PUBLIC_EXEMPT_PREFIXES)
+        or (path.startswith("/api/v1/projects/") and path.endswith("/mcp-connections/oauth/callback"))
         or is_static_file
         or request.method == "OPTIONS"
     ):
@@ -3389,7 +3391,7 @@ def create_mcp_connection(project_id: str, payload: MCPConnectionPayload, _opera
 
 @app.post("/api/v1/projects/{project_id}/mcp-connections/oauth/start", tags=["mcp"])
 def start_mcp_oauth(project_id: str, payload: MCPConnectionPayload, request: Request, _operator: AuthenticatedOperatorDep, uow: UowDep) -> dict[str, str]:
-    session_id = str(getattr(request.state, "session", None) or project_id)
+    session_id = project_id
     authorization = _mcp_oauth_states.issue(session_id, project_id=project_id)
     row = _mcp_service(uow).create_oauth_pending(project_id, payload.model_dump(), authorization.state, authorization.expires_at)
     authorization_endpoint = str((payload.credentials or {}).get("authorization_endpoint") or payload.endpoint)
@@ -3402,8 +3404,8 @@ def start_mcp_oauth(project_id: str, payload: MCPConnectionPayload, request: Req
 
 
 @app.get("/api/v1/projects/{project_id}/mcp-connections/oauth/callback", tags=["mcp"])
-def complete_mcp_oauth(project_id: str, state: str, code: str, request: Request, _operator: AuthenticatedOperatorDep, uow: UowDep) -> dict[str, Any]:
-    session_id = str(getattr(request.state, "session", None) or project_id)
+def complete_mcp_oauth(project_id: str, state: str, code: str, request: Request, uow: UowDep) -> Any:
+    session_id = project_id
     context = _mcp_oauth_states.consume_context(state, session_id)
     if context is not None and context.project_id and context.project_id != project_id:
         context = None
@@ -3425,6 +3427,9 @@ def complete_mcp_oauth(project_id: str, state: str, code: str, request: Request,
     row.oauth_state_hash = None
     row.oauth_state_expires_at = None
     uow.commit()
+    accept = request.headers.get("accept", "")
+    if "text/html" in accept:
+        return RedirectResponse(url="/conexiones-mcp?status=connected", status_code=status.HTTP_302_FOUND)
     return {"status": row.status, "project_id": project_id, "connection_id": row.id, "capabilities": len(row.capabilities)}
 
 

@@ -33,13 +33,26 @@ class MCPConnectionService:
         required = ("token_endpoint", "client_id", "client_secret", "redirect_uri")
         if any(not isinstance(credentials.get(key), str) or not credentials[key] for key in required):
             raise ValueError("OAuth configuration is incomplete")
-        row = MCPConnectionModel(
-            id=str(uuid4()), project_id=project_id, name=payload["name"].strip(),
-            endpoint=payload["endpoint"].strip(), transport=payload["transport"], auth_type="oauth2",
-            status="PENDING", encrypted_credentials=self.cipher.encrypt({"_oauth": credentials}),
-            oauth_state_hash=hashlib.sha256(state.encode()).hexdigest(), oauth_state_expires_at=expires_at,
+        row = self.session.scalar(
+            select(MCPConnectionModel).where(
+                MCPConnectionModel.project_id == project_id,
+                MCPConnectionModel.endpoint == payload["endpoint"].strip(),
+            )
         )
-        self.session.add(row)
+        if row is None:
+            row = MCPConnectionModel(
+                id=str(uuid4()),
+                project_id=project_id,
+                endpoint=payload["endpoint"].strip(),
+            )
+            self.session.add(row)
+        row.name = payload["name"].strip()
+        row.transport = payload["transport"]
+        row.auth_type = "oauth2"
+        row.status = "PENDING"
+        row.encrypted_credentials = self.cipher.encrypt({"_oauth": credentials})
+        row.oauth_state_hash = hashlib.sha256(state.encode()).hexdigest()
+        row.oauth_state_expires_at = expires_at
         self.session.commit()
         self.session.refresh(row)
         return row
