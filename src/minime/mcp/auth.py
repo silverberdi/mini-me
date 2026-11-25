@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import secrets
+import httpx
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from typing import Any
@@ -32,6 +33,30 @@ class OAuthStateStore:
             return False
         self._states.pop(key, None)
         return True
+
+
+class OAuthClient:
+    """Small OAuth token client; token bodies never cross the API boundary."""
+
+    def __init__(self, client: httpx.Client | None = None):
+        self.client = client or httpx.Client(timeout=10.0)
+
+    def exchange_code(self, token_endpoint: str, code: str, redirect_uri: str, client_id: str, client_secret: str) -> dict[str, Any]:
+        return self._token_request(token_endpoint, {"grant_type": "authorization_code", "code": code, "redirect_uri": redirect_uri, "client_id": client_id, "client_secret": client_secret})
+
+    def refresh(self, token_endpoint: str, refresh_token: str, client_id: str, client_secret: str) -> dict[str, Any]:
+        return self._token_request(token_endpoint, {"grant_type": "refresh_token", "refresh_token": refresh_token, "client_id": client_id, "client_secret": client_secret})
+
+    def _token_request(self, endpoint: str, data: dict[str, str]) -> dict[str, Any]:
+        try:
+            response = self.client.post(endpoint, data=data)
+            response.raise_for_status()
+            payload = response.json()
+        except (httpx.HTTPError, ValueError) as exc:
+            raise RuntimeError("OAuth token exchange failed") from exc
+        if not isinstance(payload, dict) or not payload.get("access_token"):
+            raise RuntimeError("OAuth provider returned no access token")
+        return payload
 
 
 def validate_token_credentials(auth_type: str, credentials: dict[str, Any]) -> None:

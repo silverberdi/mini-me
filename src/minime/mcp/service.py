@@ -11,6 +11,7 @@ from sqlalchemy.orm import Session
 
 from minime.db.models import MCPCapabilityModel, MCPConnectionModel
 from minime.mcp.protocol import HTTPMCPTransport, MCPProtocolError, StdioMCPTransport, handshake_and_discover
+from minime.mcp.auth import OAuthClient, validate_token_credentials
 from minime.mcp.security import CredentialCipher, redact
 
 
@@ -33,6 +34,7 @@ class MCPConnectionService:
         if self.cipher is None:
             raise RuntimeError("MCP credential cipher is required")
         credentials = payload.get("credentials") or {}
+        validate_token_credentials(payload["auth_type"], credentials)
         row = MCPConnectionModel(id=str(uuid4()), project_id=project_id, name=payload["name"].strip(), endpoint=payload["endpoint"].strip(), transport=payload["transport"], auth_type=payload["auth_type"], encrypted_credentials=self.cipher.encrypt(credentials))
         self.session.add(row)
         self.session.flush()
@@ -50,6 +52,40 @@ class MCPConnectionService:
         self.session.refresh(row)
         return row
 
+    def refresh(self, project_id: str, connection_id: str) -> MCPConnectionModel:
+        """Revalidate the connection before a Run; never retain a failed refresh."""
+        row = self.session.scalar(select(MCPConnectionModel).where(
+            MCPConnectionModel.project_id == project_id, MCPConnectionModel.id == connection_id
+        ))
+        if row is None:
+            raise LookupError("MCP connection not found")
+        try:
+            discovery = self.discover(row)
+            self._replace_capabilities(row, discovery.tools, discovery.resources)
+            row.status, row.diagnostic_code, row.diagnostic_summary = "ACTIVE", None, None
+        except Exception as exc:
+            row.status, row.diagnostic_code = "ERROR", "MCP_REFRESH_FAILED"
+            row.diagnostic_summary = str(redact(str(exc)))[:500]
+            self.session.commit()
+            raise MCPProtocolError("MCP credential refresh failed") from exc
+        self.session.commit()
+        self.session.refresh(row)
+        return row
+
+    def authorize_oauth(self, row: MCPConnectionModel, token_endpoint: str, code: str, redirect_uri: str, client_id: str, client_secret: str, client: OAuthClient | None = None) -> MCPConnectionModel:
+        if row.auth_type != "oauth2":
+            raise ValueError("MCP connection is not OAuth2")
+        tokens = (client or OAuthClient()).exchange_code(token_endpoint, code, redirect_uri, client_id, client_secret)
+        if self.cipher is None:
+            raise RuntimeError("MCP credential cipher is required")
+        row.encrypted_credentials = self.cipher.encrypt(tokens)
+        discovery = self.discover(row)
+        self._replace_capabilities(row, discovery.tools, discovery.resources)
+        row.status, row.diagnostic_code, row.diagnostic_summary = "ACTIVE", None, None
+        self.session.commit()
+        self.session.refresh(row)
+        return row
+
     def _transport(self, row: MCPConnectionModel):
         credentials = self.cipher.decrypt(row.encrypted_credentials or b"") if self.cipher else {}
         headers = {}
@@ -60,6 +96,24 @@ class MCPConnectionService:
 
     def discover(self, row: MCPConnectionModel):
         return handshake_and_discover(self._transport(row))
+
+    def invoke(self, project_id: str, connection_id: str, tool: str, arguments: dict[str, Any] | None = None) -> dict[str, Any]:
+        row = self.session.scalar(select(MCPConnectionModel).where(
+            MCPConnectionModel.project_id == project_id,
+            MCPConnectionModel.id == connection_id,
+        ))
+        if row is None or row.status != "ACTIVE" or not row.encrypted_credentials:
+            raise PermissionError("MCP connection is not active for this project")
+        if not any(cap.kind == "tool" and cap.name == tool for cap in row.capabilities):
+            raise MCPProtocolError("MCP tool is not available")
+        try:
+            return self._transport(row).call_tool(tool, arguments)
+        except Exception as exc:
+            row.status = "ERROR"
+            row.diagnostic_code = "MCP_INVOCATION_FAILED"
+            row.diagnostic_summary = str(redact(str(exc)))[:500]
+            self.session.commit()
+            raise
 
     def _replace_capabilities(self, row, tools, resources):
         self.session.execute(delete(MCPCapabilityModel).where(MCPCapabilityModel.connection_id == row.id))

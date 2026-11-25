@@ -21,6 +21,8 @@ class MCPDiscovery:
 class MCPTransport(Protocol):
     def request(self, method: str, params: dict[str, Any] | None = None) -> dict[str, Any]: ...
 
+    def call_tool(self, name: str, arguments: dict[str, Any] | None = None) -> dict[str, Any]: ...
+
 
 def _request_payload(method: str, params: dict[str, Any] | None) -> dict[str, Any]:
     return {"jsonrpc": "2.0", "id": 1, "method": method, "params": params or {}}
@@ -33,7 +35,10 @@ class HTTPMCPTransport:
         self.client = client or httpx.Client(timeout=10.0)
 
     def request(self, method: str, params: dict[str, Any] | None = None) -> dict[str, Any]:
-        response = self.client.post(self.endpoint, json=_request_payload(method, params), headers=self.headers)
+        try:
+            response = self.client.post(self.endpoint, json=_request_payload(method, params), headers=self.headers)
+        except httpx.HTTPError as exc:
+            raise MCPProtocolError("MCP endpoint unavailable") from exc
         response.raise_for_status()
         body = response.json()
         if "error" in body:
@@ -42,6 +47,9 @@ class HTTPMCPTransport:
         if not isinstance(result, dict):
             raise MCPProtocolError("MCP response has invalid result")
         return result
+
+    def call_tool(self, name: str, arguments: dict[str, Any] | None = None) -> dict[str, Any]:
+        return self.request("tools/call", {"name": name, "arguments": arguments or {}})
 
 
 class StdioMCPTransport:
@@ -68,6 +76,9 @@ class StdioMCPTransport:
             return body["result"]
         except (json.JSONDecodeError, KeyError, TypeError) as exc:
             raise MCPProtocolError("MCP stdio response is invalid") from exc
+
+    def call_tool(self, name: str, arguments: dict[str, Any] | None = None) -> dict[str, Any]:
+        return self.request("tools/call", {"name": name, "arguments": arguments or {}})
 
 
 def handshake_and_discover(transport: MCPTransport) -> MCPDiscovery:

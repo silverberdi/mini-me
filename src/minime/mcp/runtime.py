@@ -11,6 +11,7 @@ from sqlalchemy.orm import Session
 
 from minime.db.models import MCPConnectionModel
 from minime.mcp.security import CredentialCipher
+from minime.mcp.protocol import MCPProtocolError
 
 
 @dataclass(frozen=True)
@@ -34,6 +35,19 @@ class MCPRuntimeProfileResolver:
             raise PermissionError("MCP connection is not active for this project")
         self.cipher.decrypt(row.encrypted_credentials)
         return EphemeralMCPProfile(row.id, row.endpoint, row.transport, tuple(c.name for c in row.capabilities))
+
+    def invoke(self, project_id: str, run_id: str, agent_id: str, connection_id: str, tool: str, arguments: dict | None = None):
+        profile = self.resolve(project_id, run_id, agent_id, connection_id)
+        row = self.session.get(MCPConnectionModel, profile.connection_id)
+        from minime.mcp.service import MCPConnectionService
+        if row is None:
+            raise PermissionError("MCP connection disappeared before invocation")
+        try:
+            return MCPConnectionService(self.session, self.cipher).invoke(project_id, row.id, tool, arguments)
+        except Exception as exc:
+            if isinstance(exc, (PermissionError, MCPProtocolError)):
+                raise
+            raise MCPProtocolError("MCP runtime invocation failed") from exc
 
 
 class EphemeralMCPRelay:

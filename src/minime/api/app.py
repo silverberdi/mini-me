@@ -67,6 +67,7 @@ from minime.logging import redact_secrets
 from minime.mcp.security import CredentialCipher
 from minime.mcp.service import MCPConnectionService
 from minime.mcp.auth import OAuthStateStore
+from minime.mcp.protocol import MCPProtocolError
 from minime.services.apply_checkpoint_recovery import (
     PRESERVE_RESPONSE as APPLY_RECOVERY_PRESERVE_RESPONSE,
 )
@@ -351,6 +352,7 @@ STATIC_DIR = _STATIC_ROOT / "browser" if (_STATIC_ROOT / "browser").is_dir() els
 
 PUBLIC_EXEMPT_PATHS = {
     "/health",
+    "/health/live",
     "/",
     "/dashboard",
     "/trabajo",
@@ -2594,6 +2596,7 @@ class JobRunRequest(BaseModel):
 
 
 @app.api_route("/health", methods=["GET", "HEAD"])
+@app.api_route("/health/live", methods=["GET", "HEAD"])
 def get_health() -> dict[str, Any]:
     healthy, message = db_manager.check_health()
     metadata = _load_version_metadata()
@@ -3395,6 +3398,43 @@ def validate_mcp_connection(project_id: str, connection_id: str, _operator: Auth
     return MCPConnectionService.public(row)
 
 
+@app.post("/api/v1/projects/{project_id}/mcp-connections/{connection_id}/health", tags=["mcp"])
+def health_mcp_connection(project_id: str, connection_id: str, _operator: AuthenticatedOperatorDep, uow: UowDep) -> dict[str, Any]:
+    service = _mcp_service(uow)
+    try:
+        return MCPConnectionService.public(service.refresh(project_id, connection_id))
+    except LookupError as exc:
+        raise HTTPException(status_code=404, detail="MCP connection not found") from exc
+    except Exception:
+        from sqlalchemy import select
+        from minime.db.models import MCPConnectionModel
+        row = service.session.scalar(select(MCPConnectionModel).where(MCPConnectionModel.id == connection_id))
+        return MCPConnectionService.public(row) if row else {"status": "ERROR", "diagnostic": {"code": "MCP_REFRESH_FAILED", "summary": "MCP health check failed"}}
+
+
+@app.post("/api/v1/projects/{project_id}/mcp-connections/{connection_id}/renew", tags=["mcp"])
+def renew_mcp_connection(project_id: str, connection_id: str, _operator: AuthenticatedOperatorDep, uow: UowDep) -> dict[str, Any]:
+    return health_mcp_connection(project_id, connection_id, _operator, uow)
+
+
+@app.post("/api/v1/projects/{project_id}/mcp-connections/{connection_id}/discover", tags=["mcp"])
+def discover_mcp_connection(project_id: str, connection_id: str, _operator: AuthenticatedOperatorDep, uow: UowDep) -> dict[str, Any]:
+    return validate_mcp_connection(project_id, connection_id, _operator, uow)
+
+
+@app.post("/api/v1/projects/{project_id}/mcp-connections/{connection_id}/invoke", tags=["mcp"])
+def invoke_mcp_tool(project_id: str, connection_id: str, payload: dict[str, Any], _operator: AuthenticatedOperatorDep, uow: UowDep) -> dict[str, Any]:
+    tool = str(payload.get("tool", ""))
+    if not tool:
+        raise HTTPException(status_code=422, detail="MCP tool is required")
+    try:
+        return _mcp_service(uow).invoke(project_id, connection_id, tool, payload.get("arguments"))
+    except PermissionError as exc:
+        raise HTTPException(status_code=409, detail="MCP connection is not active") from exc
+    except MCPProtocolError as exc:
+        raise HTTPException(status_code=502, detail="MCP tool invocation failed") from exc
+
+
 @app.post("/api/v1/projects/{project_id}/mcp-connections/{connection_id}/revoke", tags=["mcp"])
 def revoke_mcp_connection(project_id: str, connection_id: str, _operator: AuthenticatedOperatorDep, uow: UowDep) -> dict[str, Any]:
     if not _mcp_service(uow).revoke(project_id, connection_id):
@@ -3416,6 +3456,7 @@ def delete_mcp_connection(project_id: str, connection_id: str, _operator: Authen
     "/trabajo-actual", methods=["GET", "HEAD"], tags=["dashboard-ui"], response_model=None
 )
 @app.api_route("/proyectos", methods=["GET", "HEAD"], tags=["dashboard-ui"], response_model=None)
+@app.api_route("/conexiones-mcp", methods=["GET", "HEAD"], tags=["dashboard-ui"], response_model=None)
 @app.api_route("/backlog", methods=["GET", "HEAD"], tags=["dashboard-ui"], response_model=None)
 @app.api_route(
     "/administracion/modelos-proveedores",

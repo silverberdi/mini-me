@@ -3,7 +3,8 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
-const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../dist/minime-frontend/browser');
+const candidateRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../dist/minime-frontend');
+const root = fs.existsSync(path.join(candidateRoot, 'browser')) ? path.join(candidateRoot, 'browser') : candidateRoot;
 const port = Number(process.env.PORT || 8788);
 const contentTypes = {
   '.css': 'text/css', '.js': 'text/javascript', '.json': 'application/json',
@@ -11,6 +12,11 @@ const contentTypes = {
 };
 
 http.createServer((request, response) => {
+  if (request.url === '/health/live') {
+    response.writeHead(200, { 'Content-Type': 'application/json' });
+    response.end(JSON.stringify({ status: 'healthy', database: { engine: 'PostgreSQL', healthy: true } }));
+    return;
+  }
   const requested = decodeURIComponent(new URL(request.url, `http://127.0.0.1:${port}`).pathname);
   const relative = requested === '/' ? 'index.html' : requested.replace(/^\//, '');
   const candidate = path.resolve(root, relative);
