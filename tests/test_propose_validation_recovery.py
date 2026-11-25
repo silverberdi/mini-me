@@ -144,3 +144,88 @@ async def test_validation_failure_triggers_correction_loop(test_setup):
     assert correction_called is True
     assert coordinator.openspec_adapter.validate_change_strict.call_count == 2
 
+
+@pytest.mark.asyncio
+async def test_in_progress_complexity_attempt_does_not_pause_validation(test_setup):
+    uow, coordinator, tmp_path = test_setup
+    worktree = tmp_path / "worktree-validating"
+    change_dir = worktree / "openspec" / "changes" / "req-102"
+    change_dir.mkdir(parents=True)
+    (change_dir / "proposal.md").write_text("# Proposal")
+    (change_dir / "design.md").write_text("# Design")
+    (change_dir / "tasks.md").write_text("# Tasks")
+    specs_dir = change_dir / "specs"
+    specs_dir.mkdir()
+    (specs_dir / "spec.md").write_text("# Spec")
+
+    run = OrchestrationRun(
+        project_id="proj-1",
+        run_id="run-102",
+        change_name="req-102",
+        base_sha="main",
+        current_stage=OrchestrationStage.VALIDATING,
+        current_generation=1,
+        stop_details={
+            "issue_number": 102,
+            "issue_title": "Fix something",
+            "issue_body": "Details",
+            "request_normalization": {"normalized_body": "Test request body"},
+            "complexity_attempts": [
+                {
+                    "status": "IN_PROGRESS",
+                    "reason": "feasibility assessment started",
+                    "attempt_id": "interrupted-attempt",
+                }
+            ],
+            "complexity_assessment": {
+                "status": "IN_PROGRESS",
+                "attempt_id": "interrupted-attempt",
+            },
+        },
+    )
+    uow.orchestration_runs.save(run)
+
+    coordinator.openspec_adapter.planning_status = MagicMock(return_value={"status": "PASS"})
+    coordinator.openspec_adapter.validate_change_strict = MagicMock(return_value={"status": "PASS"})
+    coordinator.worktree_manager.get_active_worktree = MagicMock(return_value=MagicMock(path=worktree))
+    coordinator.worktree_manager.create_request_worktree = AsyncMock(
+        return_value=MagicMock(path=worktree, branch="feature/req-102")
+    )
+    coordinator._get_git_head_sha = AsyncMock(return_value="candidate_sha_123")
+    coordinator._git_run = AsyncMock(return_value=MagicMock(exit_code=0, stdout="clean"))
+
+    assessed = False
+
+    async def mock_assess(*args, **kwargs):
+        nonlocal assessed
+        assessed = True
+        return MagicMock(
+            status="VALID",
+            complexity="LOW",
+            evidence="Evidence",
+            reason=None,
+            output="",
+            structured_output="",
+            diagnostic_output="",
+            output_truncated=False,
+            structured_output_missing=False,
+            structured_output_too_large=False,
+            feasibility_status="EXECUTABLE",
+            task_feasibility=[],
+            scenario_coverage=[],
+            feasibility_blockers=[],
+            feasibility_actions=[],
+            exit_code=0,
+            timed_out=False,
+            preflight_error=None,
+        )
+
+    coordinator._assess_complexity = AsyncMock(side_effect=mock_assess)
+    coordinator._configured_model = MagicMock(return_value="gpt-5.6-luna")
+
+    result = await coordinator.execute_project_request("proj-1")
+
+    assert assessed is True
+    assert result.message != "The same proposal and capability evidence were already assessed; no duplicate agent call was made."
+
+
