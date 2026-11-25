@@ -44,12 +44,20 @@ The Watchdog SHALL use the existing scheduler/reconciliation cycle and durable s
 - **AND** it preserves the claim and candidate until the canonical recovery authority evaluates them
 
 ### Requirement: Evidence-bound diagnosis and bounded mechanical recovery
-Every diagnosis SHALL be bound to the observed project, run, stage, candidate SHA, and evidence used. In `Solo diagnóstico` mode the Watchdog SHALL not mutate worktree or run state. In `Auto-remediación mecánica` mode it MAY make at most one idempotent remediation attempt for the same run, stage, and candidate, and only through existing recovery, claim/fencing, process-ownership, and managed-worktree authorities. Unknown, conflicting, or incomplete evidence SHALL fail closed and preserve the candidate and worktree.
+Every diagnosis SHALL be bound to the observed project, run, stage, candidate SHA, and evidence used. In `Solo diagnóstico` mode the Watchdog SHALL not mutate worktree or run state. In `Auto-remediación mecánica` mode it MAY make at most one idempotent remediation attempt for the same run, stage, and candidate, and only through existing recovery, claim/fencing, process-ownership, and managed-worktree authorities. When an active mutating stage (such as `APPLY`) is interrupted and its runner process is proven absent, mechanical remediation SHALL restore the worktree to its candidate entry state before canonical recovery re-evaluates the candidate, eliminating the need for a spurious human gate on the first occurrence. Unknown, conflicting, or incomplete evidence SHALL fail closed and preserve the candidate and worktree.
 
 #### Scenario: Recover proven orphaned process
 - **WHEN** the canonical recovery authority verifies that the prior stage process is absent, the candidate and stage still match, and the current fenced claim permits recovery
 - **THEN** the Watchdog requests the existing recovery path to record the abandoned invocation and retry the same candidate and stage
 - **AND** it does not directly edit claims or dispatch a second recovery authority
+
+#### Scenario: Restore worktree changes made by interrupted apply attempt before retry
+- **WHEN** the Watchdog in `mechanical_remediation` mode proves that the prior stage runner process is absent for an interrupted mutating stage (`APPLY`)
+- **AND** the managed worktree contains uncommitted or untracked modifications left by the dead process
+- **THEN** the Watchdog executes autonomous mechanical worktree restoration to the entry candidate SHA
+- **AND** it preserves `openspec/changes/<change-name>/` while removing uncommitted/untracked code debris
+- **AND** it requests canonical recovery to re-evaluate the restored candidate without generating a human gate
+- **AND** it records the successful mechanical remediation in `watchdog_diagnoses` and emits `WATCHDOG_WORKTREE_REMEDIATED`.
 
 #### Scenario: Remove a proven orphaned Git lock
 - **WHEN** a lock is inside the exact mini me-managed worktree and existing lock-recovery checks prove there is no owning process
