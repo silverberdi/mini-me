@@ -490,11 +490,12 @@ class NativeOrchestrationCoordinator:
         *,
         candidate_matches: bool,
         recovery_count: int,
+        max_recoveries: int = 1,
     ) -> bool:
-        """Pure fail-closed gate for the only automatic stage retry."""
+        """Pure fail-closed gate for automatic stage retry."""
         if (
             not candidate_matches
-            or recovery_count >= 1
+            or recovery_count >= max_recoveries
             or not isinstance(coordinator, dict)
             or not isinstance(workflow_process, dict)
             or not isinstance(current_process, dict)
@@ -754,6 +755,7 @@ class NativeOrchestrationCoordinator:
             current,
             candidate_matches=True,
             recovery_count=int(prev_attempt.get("recovery_count", 0)),
+            max_recoveries=3,
         )
 
     async def _check_stage_feasibility(
@@ -1363,10 +1365,12 @@ class NativeOrchestrationCoordinator:
             return True, None
         previous_workflow = (process_events.get(prior_attempt_id) or {}).get("process_identity")
         current = process_identity()
+        max_recoveries = 3 if self.watchdog_mechanical_remediation else 1
         if not self._stage_recovery_is_safe(
             prior_start.get("coordinator_process"), previous_workflow, current,
             candidate_matches=True,
             recovery_count=int(prior_start.get("recovery_count", 0)),
+            max_recoveries=max_recoveries,
         ):
             return True, None
 
@@ -1536,7 +1540,8 @@ class NativeOrchestrationCoordinator:
         prior_attempt_id, prior_start = incomplete[0]
         prior_candidate = prior_start.get("candidate") or {}
         prior_recovery_count = int(prior_start.get("recovery_count", 0))
-        if prior_recovery_count >= 1 and not allow_human_resume:
+        max_recoveries = 3 if (self.watchdog_mechanical_remediation or allow_human_resume) else 1
+        if prior_recovery_count >= max_recoveries and not allow_human_resume:
             return False, None
 
         canonical_path = str(worktree_path.resolve())
@@ -1559,6 +1564,7 @@ class NativeOrchestrationCoordinator:
                 prior_start.get("coordinator_process"), previous_workflow, current,
                 candidate_matches=True,
                 recovery_count=prior_recovery_count,
+                max_recoveries=max_recoveries,
             ):
                 return True, None
             reclaim_dead_claim = True
@@ -1566,6 +1572,7 @@ class NativeOrchestrationCoordinator:
             prior_start.get("coordinator_process"), previous_workflow, current,
             candidate_matches=True,
             recovery_count=prior_recovery_count,
+            max_recoveries=max_recoveries,
         ):
             return True, None
 
@@ -1760,13 +1767,14 @@ class NativeOrchestrationCoordinator:
 
         prior_attempt_id, prior_start = incomplete[0]
         prior_candidate = prior_start.get("candidate") or {}
+        max_recoveries = 3 if self.watchdog_mechanical_remediation else 1
         if not (
             prior_candidate.get("run_id") == run.run_id
             and prior_candidate.get("stage") == stage
             and prior_candidate.get("worktree") == str(worktree_path.resolve())
             and prior_candidate.get("generation") == int(run.current_generation or 0)
             and prior_candidate.get("candidate_sha")
-            and prior_start.get("recovery_count", 0) == 0
+            and prior_start.get("recovery_count", 0) < max_recoveries
         ):
             return None, None
 
@@ -1782,6 +1790,7 @@ class NativeOrchestrationCoordinator:
             process_identity(),
             candidate_matches=True,
             recovery_count=int(prior_start.get("recovery_count", 0)),
+            max_recoveries=max_recoveries,
         ):
             return None, None
 
@@ -1896,13 +1905,14 @@ class NativeOrchestrationCoordinator:
             return None, None
         attempt_id, prior_start = incomplete[0]
         identity = prior_start.get("candidate") or {}
+        max_recoveries = 3 if self.watchdog_mechanical_remediation else 1
         if not (
             identity.get("run_id") == run.run_id
             and identity.get("stage") == "VERIFY"
             and identity.get("worktree") == str(worktree_path.resolve())
             and identity.get("generation") == int(run.current_generation or 0)
             and identity.get("candidate_sha") == expected_sha
-            and int(prior_start.get("recovery_count", 0)) == 0
+            and int(prior_start.get("recovery_count", 0)) < max_recoveries
         ):
             return None, None
         prior_claim = claims.get_by_key(str(prior_start.get("claim_key") or ""))
@@ -1916,6 +1926,7 @@ class NativeOrchestrationCoordinator:
             process_identity(),
             candidate_matches=True,
             recovery_count=int(prior_start.get("recovery_count", 0)),
+            max_recoveries=max_recoveries,
         ):
             return None, None
 
@@ -2154,6 +2165,7 @@ class NativeOrchestrationCoordinator:
         incomplete = [item for key, item in starts.items() if key not in terminal]
         abandoned_attempt: dict[str, Any] | None = None
         reclaim_dead_process_claim = False
+        max_recoveries = 3 if (self.watchdog_mechanical_remediation or allow_human_resume) else 1
         if prior_claim is not None and prior_claim.is_active and recovery_claim is None:
             if incomplete:
                 prev_attempt = incomplete[-1]
@@ -2171,6 +2183,7 @@ class NativeOrchestrationCoordinator:
                     process_identity(),
                     candidate_matches=prev_attempt.get("candidate") == candidate,
                     recovery_count=int(prev_attempt.get("recovery_count", 0)),
+                    max_recoveries=max_recoveries,
                 ):
                     reclaim_dead_process_claim = True
             if not reclaim_dead_process_claim:
@@ -2201,6 +2214,7 @@ class NativeOrchestrationCoordinator:
                 current,
                 candidate_matches=previous.get("candidate") == candidate,
                 recovery_count=prior_recovery_count,
+                max_recoveries=max_recoveries,
             ):
                 release_recovery_claim()
                 return None
