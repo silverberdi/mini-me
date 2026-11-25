@@ -483,6 +483,80 @@ class NativeOrchestrationCoordinator:
         return [{"id": gate, "description": question[:1000]}]
 
     @staticmethod
+    def _structured_spanish_human_gate(gate: str, question: str, payload: dict[str, Any]) -> dict[str, Any]:
+        """Build bounded presentation fields without changing gate authority."""
+        if gate not in {"proposal_feasibility", "apply_escalation"}:
+            return {}
+
+        def text(value: Any) -> str:
+            return value.strip() if isinstance(value, str) else ""
+
+        def items(value: Any) -> list[str]:
+            if isinstance(value, str):
+                return [part.strip() for part in value.split(";") if part.strip()]
+            if not isinstance(value, (list, tuple)):
+                return []
+            result: list[str] = []
+            for item in value:
+                if isinstance(item, dict):
+                    item_text = next(
+                        (text(item.get(key)) for key in ("description", "reason", "text", "title", "task_id") if text(item.get(key))),
+                        "",
+                    )
+                else:
+                    item_text = text(item)
+                if item_text:
+                    result.append(item_text)
+            return result
+
+        pending = items(payload.get("pending_items"))
+        if not pending:
+            for key in ("blockers", "pending_tasks", "findings", "review_findings"):
+                pending = items(payload.get(key))
+                if pending:
+                    break
+        if not pending:
+            pending = items(payload.get("description"))
+
+        summary = text(payload.get("summary_es"))
+        if not summary:
+            summary = (
+                "La propuesta necesita evidencia verificable antes de continuar."
+                if gate == "proposal_feasibility"
+                else "Apply se detuvo y requiere una decisión explícita para continuar con las validaciones."
+            )
+        summary = " ".join(summary.split())[:240].rstrip()
+
+        option_explanations = NativeOrchestrationCoordinator._human_gate_option_explanations(
+            gate, list(payload.get("options") or []), payload
+        )
+        supplied_options = payload.get("options_es")
+        options_es = (
+            [text(option) for option in supplied_options if text(option)]
+            if isinstance(supplied_options, (list, tuple))
+            else []
+        )
+        if len(options_es) != len(payload.get("options") or []):
+            options_es = []
+            for index, option in enumerate(payload.get("options") or []):
+                original = text(option.get("label") or option.get("id") or option.get("response_text")) if isinstance(option, dict) else text(option)
+                lowered = original.lower()
+                if "update" in lowered:
+                    label = "Actualizar la propuesta"
+                elif "retry" in lowered or "reintentar" in lowered or "continue" in lowered:
+                    label = "Reintentar Apply"
+                elif "cancel" in lowered or "cancelar" in lowered:
+                    label = "Cancelar el Run"
+                elif original:
+                    label = original
+                else:
+                    label = f"Opción {index + 1}"
+                consequence = text(option_explanations[index].get("consequence")) if index < len(option_explanations) else ""
+                options_es.append(f"{label}: {consequence}" if consequence else label)
+
+        return {"summary_es": summary, "pending_items": pending[:20], "options_es": options_es}
+
+    @staticmethod
     def _stage_recovery_is_safe(
         coordinator: Any,
         workflow_process: Any,
@@ -570,6 +644,7 @@ class NativeOrchestrationCoordinator:
         active_payload["option_explanations"] = self._human_gate_option_explanations(
             gate, choice_list, source_payload
         )
+        active_payload.update(self._structured_spanish_human_gate(gate, question, active_payload))
         localized_question = question_es or (payload or {}).get("question_es")
         localized_options = options_es if options_es is not None else (payload or {}).get("options_es")
         if isinstance(localized_question, str) and localized_question.strip():

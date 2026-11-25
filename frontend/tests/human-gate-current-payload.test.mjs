@@ -25,12 +25,12 @@ test('current gate question and options are rendered from the same payload', () 
 test('gate uses Spanish presentation while preserving exact source text and response values', () => {
   assert.match(component, /payload\?\.question_es \|\| 'La pregunta del workflow aún no tiene una presentación en español\.'/);
   assert.match(component, /humanGateOriginalQuestion\(\)/);
-  assert.match(component, /humanGateOptionLabel\(opt, i\)/);
-  assert.match(component, /humanGateOptionOriginalLabel\(opt, i\)/);
-  assert.match(component, /payload\?\.options_es\?\.\[index\] \|\| option\?\.label_es/);
-  assert.match(component, /const responseText = typeof option\?\.response_text === 'string' \? option\.response_text : ''/);
+  assert.match(component, /humanGateDisplayOptions\(\)/);
+  assert.match(component, /normalizeHumanGatePayload/);
+  assert.match(component, /humanGatePresentation\(\)/);
+  assert.match(component, /const responseText = typeof option\?\.value === 'string' \? option\.value : option\?\.response_text/);
   assert.match(component, /this\.operatorResponse\.set\(responseText \|\| option\?\.label \|\| option\?\.id/);
-  assert.match(component, /Texto original:/);
+  assert.match(component, /Valor original:/);
 });
 
 test('proposal-review gate renders structured findings and original reviewer evidence', () => {
@@ -52,8 +52,8 @@ test('proposal-review gate renders structured findings and original reviewer evi
 
 test('proposal-review options identify system suggestions and retain free-text response', () => {
   assert.match(component, /humanGateOptionsSource\(\)/);
-  assert.match(component, /Sugerencia del sistema; puedes responder con otro texto/);
-  assert.match(component, /Opciones originales del workflow/);
+  assert.match(component, /Sugerencia del sistema/);
+  assert.match(component, /Valor original:/);
   assert.match(component, /name="operatorResponse"/);
   assert.match(component, /submitHumanResponse\(\$event\)/);
   assert.match(component, /Respuesta explícita del operador/);
@@ -64,15 +64,15 @@ test('optional gate evidence fields render only when present and preserve old pa
   assert.match(component, /humanGateDiff\(\): string \{[\s\S]*?if \(!diff \|\| typeof diff !== 'object'\) return ''[\s\S]*?diff\.status === 'NOT_APPLICABLE'[\s\S]*?diff\.status === 'UNAVAILABLE'/);
   assert.match(component, /humanGateOptionExplanation\(option: any, index: number\): string/);
   assert.match(component, /humanGateDescription\(\): string/);
-  assert.match(component, /\*ngIf="humanGateAffectedItems\(\)\.length > 0"/);
+  assert.match(component, /data-testid="human-gate-audit"/);
+  assert.match(component, /\*ngIf="humanGateAffectedItems\(\)\.length"/);
   assert.match(component, /\*ngIf="humanGateDiff\(\)"/);
-  assert.match(component, /\*ngIf="humanGateOptionExplanation\(opt, i\)"/);
   assert.match(component, /const value = Array\.isArray\(explanations\)/);
 });
 
 test('selecting a generated correction places its complete response text in the clarification', () => {
   assert.match(component, /selectHumanGateOption\(opt\)/);
-  assert.match(component, /option\?\.response_text/);
+  assert.match(component, /option\?\.value/);
   assert.match(component, /this\.operatorResponse\.set\(responseText \|\| option\?\.label \|\| option\?\.id/);
   assert.match(component, /opt\.source === 'system_generated'/);
   assert.match(component, /opt\.description/);
@@ -101,7 +101,7 @@ test('operator response submits through the existing authorized request endpoint
 
 test('Trabajo actual renders Spanish explanation and Apply diagnostic context', () => {
   assert.match(component, /humanGateExplanationEs\(\)/);
-  assert.match(component, /Contexto Explicativo \(Español\):/);
+  assert.match(component, /Resumen para decidir:/);
   assert.match(component, /humanGateAttempts\(\)/);
   assert.match(component, /Diagnóstico de Implementación \(Apply\):/);
   assert.match(component, /humanGatePendingTasks\(\)/);
@@ -113,4 +113,3 @@ test('Trabajo actual suppresses "Sin anomalías reportadas" when human attention
   assert.match(component, /!targetRun\(\)\?\.error_detail && !isHumanRequired\(\)/);
   assert.match(component, /Intervención humana requerida/);
 });
-
