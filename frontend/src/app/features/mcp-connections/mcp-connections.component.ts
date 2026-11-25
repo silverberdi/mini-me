@@ -67,7 +67,7 @@ const PRESETS: Preset[] = [
       <header class="flex flex-col justify-between gap-4 sm:flex-row sm:items-center">
         <div>
           <div class="flex items-center gap-3">
-            <h1 id="mcp-heading" class="text-2xl font-bold tracking-tight text-white">Conexiones MCP e Integraciones</h1>
+            <h1 id="mcp-heading" class="text-2xl font-bold tracking-tight text-white">Conexiones MCP</h1>
             <span class="rounded-full bg-sky-500/10 px-2.5 py-0.5 text-xs font-semibold text-sky-400 border border-sky-500/20">
               {{ currentProjectId }}
             </span>
