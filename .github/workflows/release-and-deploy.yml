@@ -205,13 +205,6 @@ jobs:
           sudo chown -R minime:minime "$DEPLOY_PATH/src/minime/static" "$DEPLOY_PATH/src/minime" 
           (cd "$DEPLOY_PATH" && sudo -u minime /opt/minime/runtime/venv/bin/alembic -c "$DEPLOY_PATH/alembic.ini" upgrade head)
           sudo systemctl restart minime-api
-          for drain_sec in $(seq 1 120); do
-            if ! sudo pgrep -f 'codex exec|antigravity' >/dev/null; then
-              break
-            fi
-            echo "Active agent runner in flight; waiting for attempt completion before restarting scheduler ($drain_sec/120s)..."
-            sleep 3
-          done
           sudo systemctl restart minime-scheduler
           browser="$(find /opt/minime/runtime/playwright-browsers -type f \( -name headless_shell -o -name chrome-headless-shell \) -perm /111 -print -quit)"
           test -n "$browser"
