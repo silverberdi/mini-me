@@ -22,10 +22,12 @@ time.sleep(60)"""
 SIGTERM_GRACEFUL = """import os, signal, sys
 marker = sys.argv[1]
 def handler(signum, frame):
-    with open(marker, "w") as f:
+    tmp = marker + ".tmp"
+    with open(tmp, "w") as f:
         f.write("sigterm")
         f.flush()
         os.fsync(f.fileno())
+    os.replace(tmp, marker)
     sys.exit(0)
 signal.signal(signal.SIGTERM, handler)
 import time
@@ -35,10 +37,12 @@ time.sleep(60)"""
 SIGTERM_IGNORE = """import os, signal, sys
 marker = sys.argv[1]
 def handler(signum, frame):
-    with open(marker, "w") as f:
+    tmp = marker + ".tmp"
+    with open(tmp, "w") as f:
         f.write("sigterm")
         f.flush()
         os.fsync(f.fileno())
+    os.replace(tmp, marker)
 signal.signal(signal.SIGTERM, handler)
 import time
 time.sleep(60)"""
