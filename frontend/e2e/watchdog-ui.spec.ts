@@ -131,4 +131,58 @@ test.describe('Watchdog operator surfaces', () => {
       }
     }
   });
+
+  test('keeps the saved Gemini model selected after leaving and returning to administration', async ({ page, request }) => {
+    const headers = { Authorization: `Bearer ${E2E_SESSION_TOKEN}` };
+    const original = await request.get('/api/v1/admin/watchdog/settings', { headers });
+    expect(original.ok()).toBe(true);
+    const prior = await original.json();
+    try {
+      runFixture('seed');
+      await page.goto('/administracion/modelos-proveedores');
+      await waitForAppMounted(page);
+      const selector = page.getByLabel('Proveedor y modelo');
+      const geminiOption = selector.locator('option').filter({ hasText: 'gemini-3.8-flash-medium' });
+      await expect(geminiOption).toHaveCount(1);
+      const selectedModelId = await geminiOption.getAttribute('value');
+      expect(selectedModelId).toBeTruthy();
+      await selector.selectOption(selectedModelId!);
+      await page.getByLabel('Umbral de inactividad (minutos)').fill('16');
+      await expect(selector).toHaveValue(selectedModelId!);
+
+      await page.getByRole('button', { name: 'Guardar Watchdog' }).click();
+      await expect(page.getByRole('status')).toContainText('quedó guardada');
+      await expect(selector).toHaveValue(selectedModelId!);
+      const saved = await request.get('/api/v1/admin/watchdog/settings', { headers });
+      expect(await saved.json()).toMatchObject({
+        provider_id: 'antigravity',
+        harness_id: 'antigravity',
+        canonical_model_id: 'gemini-3.8-flash-medium',
+        inactivity_threshold_minutes: 16,
+      });
+
+      await page.goto('/proyectos');
+      await waitForAppMounted(page);
+      await page.goto('/administracion/modelos-proveedores');
+      await waitForAppMounted(page);
+      await expect(page.getByLabel('Proveedor y modelo')).toHaveValue(selectedModelId!);
+      await expect(page.getByText('Guardado: antigravity · 16 min · Solo diagnóstico')).toBeVisible();
+    } finally {
+      try {
+        const restored = await request.patch('/api/v1/admin/watchdog/settings', {
+          headers,
+          data: {
+            provider_id: prior.provider_id,
+            harness_id: prior.harness_id,
+            canonical_model_id: prior.canonical_model_id,
+            inactivity_threshold_minutes: prior.inactivity_threshold_minutes,
+            mode: prior.mode,
+          },
+        });
+        expect(restored.ok()).toBe(true);
+      } finally {
+        runFixture('cleanup');
+      }
+    }
+  });
 });
