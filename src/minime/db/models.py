@@ -147,6 +147,63 @@ class ProjectModel(Base):
     sagas: Mapped[list[DurableSagaModel]] = relationship(
         "DurableSagaModel", back_populates="project", cascade="all, delete-orphan"
     )
+    mcp_connections: Mapped[list["MCPConnectionModel"]] = relationship(
+        "MCPConnectionModel", back_populates="project", cascade="all, delete-orphan"
+    )
+
+
+class MCPConnectionModel(Base):
+    """Project-scoped MCP connection; secret material is always encrypted."""
+
+    __tablename__ = "mcp_connections"
+    __table_args__ = (
+        UniqueConstraint("project_id", "endpoint", name="uq_mcp_connection_project_endpoint"),
+        CheckConstraint("transport IN ('http', 'sse', 'stdio')", name="ck_mcp_connection_transport"),
+        CheckConstraint("auth_type IN ('oauth2', 'api_key', 'bearer')", name="ck_mcp_connection_auth_type"),
+        CheckConstraint("status IN ('PENDING', 'ACTIVE', 'ERROR', 'DISCONNECTED', 'REVOKED')", name="ck_mcp_connection_status"),
+        Index("ix_mcp_connections_project_status", "project_id", "status"),
+    )
+
+    id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    project_id: Mapped[str] = mapped_column(String(64), ForeignKey("projects.id", ondelete="CASCADE"), nullable=False)
+    name: Mapped[str] = mapped_column(String(255), nullable=False)
+    endpoint: Mapped[str] = mapped_column(String(1024), nullable=False)
+    transport: Mapped[str] = mapped_column(String(16), nullable=False)
+    auth_type: Mapped[str] = mapped_column(String(16), nullable=False)
+    status: Mapped[str] = mapped_column(String(16), nullable=False, server_default="PENDING")
+    encrypted_credentials: Mapped[bytes | None] = mapped_column(sa.LargeBinary, nullable=True)
+    diagnostic_code: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    diagnostic_summary: Mapped[str | None] = mapped_column(Text, nullable=True)
+    oauth_state_hash: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    oauth_state_expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    access_token_expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, default=utc_now)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, default=utc_now, onupdate=utc_now)
+
+    project: Mapped[ProjectModel] = relationship("ProjectModel", back_populates="mcp_connections")
+    capabilities: Mapped[list["MCPCapabilityModel"]] = relationship(
+        "MCPCapabilityModel", back_populates="connection", cascade="all, delete-orphan"
+    )
+
+
+class MCPCapabilityModel(Base):
+    """Sanitized, observed MCP tool/resource metadata."""
+
+    __tablename__ = "mcp_capabilities"
+    __table_args__ = (
+        UniqueConstraint("connection_id", "kind", "name", name="uq_mcp_capability_identity"),
+        CheckConstraint("kind IN ('tool', 'resource')", name="ck_mcp_capability_kind"),
+    )
+
+    id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    connection_id: Mapped[str] = mapped_column(String(64), ForeignKey("mcp_connections.id", ondelete="CASCADE"), nullable=False, index=True)
+    kind: Mapped[str] = mapped_column(String(16), nullable=False)
+    name: Mapped[str] = mapped_column(String(255), nullable=False)
+    description: Mapped[str | None] = mapped_column(Text, nullable=True)
+    observed_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, default=utc_now)
+    metadata_json: Mapped[dict[str, Any]] = mapped_column(JSON().with_variant(JSONB, "postgresql"), nullable=False, default=dict)
+
+    connection: Mapped[MCPConnectionModel] = relationship("MCPConnectionModel", back_populates="capabilities")
 
 
 class ProjectBindingModel(Base):

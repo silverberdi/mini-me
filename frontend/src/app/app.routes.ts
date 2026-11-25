@@ -6,6 +6,7 @@ import { ProyectosComponent } from './features/proyectos/proyectos.component';
 import { BacklogComponent } from './features/backlog/backlog.component';
 import { AdminModelsComponent } from './features/admin-models/admin-models.component';
 import { MejoraContinuaComponent } from './features/mejora-continua/mejora-continua.component';
+import { McpConnectionsComponent } from './features/mcp-connections/mcp-connections.component';
 
 export const routes: Routes = [
   { path: '', redirectTo: 'dashboard', pathMatch: 'full' },
@@ -15,6 +16,7 @@ export const routes: Routes = [
   { path: 'proyectos', component: ProyectosComponent },
   { path: 'administracion/modelos-proveedores', component: AdminModelsComponent },
   { path: 'mejora-continua', component: MejoraContinuaComponent },
+  { path: 'conexiones-mcp', component: McpConnectionsComponent },
   { path: 'backlog', component: BacklogComponent },
   { path: '**', redirectTo: 'dashboard' }
 ];

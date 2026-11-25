@@ -3063,6 +3063,7 @@ class NativeOrchestrationCoordinator:
         thinker_provider: str = "antigravity",
         implementer_provider: str = "codex",
         reviewer_provider: str = "antigravity",
+        mcp_connection_id: str | None = None,
         target_run_id: str | None = None,
     ) -> OrchestrationCoordinationResult:
         """Execute or resume the active/next request for a project."""
@@ -3252,6 +3253,39 @@ class NativeOrchestrationCoordinator:
             locked_run = uow.orchestration_runs.get_for_update(active_run.run_id)
             if locked_run is not None:
                 active_run = locked_run
+
+        if mcp_connection_id:
+            # MCP is an opt-in capability of this Run. Preparation is fail-closed
+            # and happens after durable Run admission, before any agent stage.
+            from minime.mcp.runtime import MCPRuntimeProfileResolver
+            from minime.mcp.security import CredentialCipher
+            try:
+                profile = MCPRuntimeProfileResolver(
+                    uow.session, CredentialCipher()
+                ).prepare(project_id, active_run.run_id, implementer_provider, mcp_connection_id)
+            except Exception as exc:
+                active_run.stop_details = {
+                    **(active_run.stop_details or {}),
+                    "mcp_runtime": {"status": "BLOCKED", "connection_id": mcp_connection_id, "reason": type(exc).__name__},
+                }
+                uow.orchestration_runs.save(active_run)
+                if hasattr(uow, "commit"):
+                    uow.commit()
+                return OrchestrationCoordinationResult(
+                    status="BLOCKED", run_id=active_run.run_id, current_stage=active_run.current_stage,
+                    message="MCP runtime preparation failed closed; the agent was not started.",
+                )
+            active_run.stop_details = {
+                **(active_run.stop_details or {}),
+                "mcp_runtime": {
+                    "status": "PREPARED", "connection_id": profile.connection_id,
+                    "transport": profile.transport, "capabilities": list(profile.capabilities),
+                    "relay_path": profile.relay_path,
+                },
+            }
+            uow.orchestration_runs.save(active_run)
+            if hasattr(uow, "commit"):
+                uow.commit()
 
         # Capture the stage this execution *entered* at. Review stages are
         # transition points: if a run enters already sitting on a review stage,

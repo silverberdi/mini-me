@@ -118,6 +118,10 @@ async def test_process_ignoring_sigterm_is_sigkilled(tmp_path):
     runner = CliImplementerRunner([sys.executable, str(script), str(marker)])
     result = await runner.run(tmp_path, "", timeout_seconds=1)
     assert result.timed_out is True
+    for _ in range(20):
+        if marker.exists() and marker.read_text() == "sigterm":
+            break
+        await asyncio.sleep(0.05)
     assert marker.exists()
     assert marker.read_text() == "sigterm"
 

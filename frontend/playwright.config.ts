@@ -47,6 +47,7 @@ export default defineConfig({
     env: {
       MINIME_DATABASE_URL: E2E_DATABASE_URL,
       MINIME_TEST_DATABASE_URL: E2E_DATABASE_URL,
+      MINIME_AUTH_ENABLED: process.env['MINIME_AUTH_ENABLED'] || 'false',
       PYTHONPATH: [SOURCE_ROOT, process.env['PYTHONPATH']].filter(Boolean).join(':'),
     },
     reuseExistingServer: false,

@@ -206,7 +206,7 @@ import { VersionService } from './core/version.service';
     <!-- Main Navigation & Content Layout -->
     <div class="flex min-h-[calc(100vh-4rem)]">
       <!-- Sidebar Navigation -->
-      <aside class="w-64 border-r border-slate-800 bg-slate-900/50 p-4 hidden md:flex flex-col justify-between">
+      <aside class="w-64 border-r border-slate-800 bg-slate-900/50 p-4 hidden sm:flex flex-col justify-between">
         <nav class="space-y-1.5" aria-label="Navegación principal">
           <a routerLink="/dashboard" routerLinkActive="bg-sky-500/10 text-sky-400 border-sky-500/30"
              class="flex items-center gap-3 px-3.5 py-2.5 rounded-xl text-sm font-medium text-slate-400 hover:text-white hover:bg-slate-800/60 border border-transparent transition-colors">
@@ -247,6 +247,11 @@ import { VersionService } from './core/version.service';
              class="flex items-center gap-3 px-3.5 py-2.5 rounded-xl text-sm font-medium text-slate-400 hover:text-white hover:bg-slate-800/60 border border-transparent transition-colors">
             <span class="w-4 text-center">⚙</span>
             Administración
+          </a>
+          <a routerLink="/conexiones-mcp" routerLinkActive="bg-sky-500/10 text-sky-400 border-sky-500/30"
+             class="flex items-center gap-3 px-3.5 py-2.5 rounded-xl text-sm font-medium text-slate-400 hover:text-white hover:bg-slate-800/60 border border-transparent transition-colors">
+            <span class="w-4 text-center">🔌</span>
+            Conexiones MCP
           </a>
         </nav>
 
