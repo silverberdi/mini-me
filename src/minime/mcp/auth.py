@@ -16,23 +16,41 @@ class OAuthAuthorization:
     expires_at: datetime
 
 
+@dataclass(frozen=True)
+class OAuthState:
+    session_id: str
+    project_id: str
+    connection_id: str
+    expires_at: datetime
+
+
 class OAuthStateStore:
     def __init__(self):
-        self._states: dict[str, tuple[str, datetime]] = {}
+        self._states: dict[str, OAuthState] = {}
 
-    def issue(self, session_id: str) -> OAuthAuthorization:
+    def issue(self, session_id: str, *, project_id: str = "", connection_id: str = "") -> OAuthAuthorization:
         state = secrets.token_urlsafe(32)
         expires = datetime.now(UTC) + timedelta(minutes=10)
-        self._states[hashlib.sha256(state.encode()).hexdigest()] = (session_id, expires)
+        self._states[hashlib.sha256(state.encode()).hexdigest()] = OAuthState(
+            session_id, project_id, connection_id, expires
+        )
         return OAuthAuthorization(state, expires)
 
     def consume(self, state: str, session_id: str) -> bool:
         key = hashlib.sha256(state.encode()).hexdigest()
         expected = self._states.get(key)
-        if not expected or expected[0] != session_id or expected[1] <= datetime.now(UTC):
+        if not expected or expected.session_id != session_id or expected.expires_at <= datetime.now(UTC):
             return False
         self._states.pop(key, None)
         return True
+
+    def consume_context(self, state: str, session_id: str) -> OAuthState | None:
+        key = hashlib.sha256(state.encode()).hexdigest()
+        expected = self._states.get(key)
+        if not expected or expected.session_id != session_id or expected.expires_at <= datetime.now(UTC):
+            return None
+        self._states.pop(key, None)
+        return expected
 
 
 class OAuthClient:

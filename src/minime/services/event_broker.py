@@ -3,9 +3,12 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 from collections.abc import AsyncIterator
 from typing import Any
+
+from minime.mcp.security import redact
 
 
 class EventBroker:
@@ -57,3 +60,25 @@ class EventBroker:
 
 
 event_broker = EventBroker()
+
+
+class MCPEventPublisher:
+    """Sanitized, non-durable MCP notifications with operation idempotency."""
+
+    def __init__(self, broker: EventBroker | None = None) -> None:
+        self.broker = broker or event_broker
+        self._published: set[str] = set()
+
+    async def publish(self, event_type: str, data: dict[str, Any], *, operation_id: str) -> bool:
+        safe = redact(data)
+        fingerprint = hashlib.sha256(
+            json.dumps({"event": event_type, "operation": operation_id, "data": safe}, sort_keys=True).encode()
+        ).hexdigest()
+        if fingerprint in self._published:
+            return False
+        self._published.add(fingerprint)
+        await self.broker.publish(event_type, safe)
+        return True
+
+
+mcp_event_publisher = MCPEventPublisher()

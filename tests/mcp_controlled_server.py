@@ -49,3 +49,33 @@ def controlled_server() -> tuple[ThreadingHTTPServer, str]:
     server = ThreadingHTTPServer(("127.0.0.1", 0), ControlledMCPHandler)
     Thread(target=server.serve_forever, daemon=True).start()
     return server, f"http://127.0.0.1:{server.server_port}"
+
+
+class ControlledOAuthHandler(BaseHTTPRequestHandler):
+    """Local OAuth provider used by the candidate-specific integration test."""
+
+    def do_POST(self) -> None:  # noqa: N802
+        length = int(self.headers.get("content-length", "0"))
+        body = self.rfile.read(length).decode()
+        if self.path != "/token" or ("code=consent-code" not in body and "refresh_token=refresh-1" not in body):
+            self.send_response(400)
+            self.end_headers()
+            return
+        payload = {"access_token": "access-1", "refresh_token": "refresh-1", "expires_in": 3600}
+        if "refresh_token=refresh-1" in body:
+            payload["access_token"] = "access-2"
+        encoded = json.dumps(payload).encode()
+        self.send_response(200)
+        self.send_header("content-type", "application/json")
+        self.send_header("content-length", str(len(encoded)))
+        self.end_headers()
+        self.wfile.write(encoded)
+
+    def log_message(self, *_args: Any) -> None:
+        return
+
+
+def controlled_oauth_server() -> tuple[ThreadingHTTPServer, str]:
+    server = ThreadingHTTPServer(("127.0.0.1", 0), ControlledOAuthHandler)
+    Thread(target=server.serve_forever, daemon=True).start()
+    return server, f"http://127.0.0.1:{server.server_port}"

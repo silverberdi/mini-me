@@ -1,0 +1,19 @@
+Sanitized Apply evidence (candidate worktree; candidate SHA is assigned after Apply)
+
+OAuth2 + MCP + PostgreSQL:
+  command: pytest -q tests/test_mcp_e2e.py::test_oauth_e2e_provider_consent_callback_encrypted_refresh_handshake_tools_and_active
+  result: 1 passed, exit code 0
+  database: designated MINIME_TEST_DATABASE_URL (identity intentionally redacted)
+  observed: controlled provider consent-code exchange; encrypted refresh token (plaintext absent from ciphertext); MCP initialize; tools/list; ACTIVE; tools/call effect observed
+
+Runtime integration:
+  command: pytest -q tests/test_mcp_runtime_integration.py
+  result: 2 passed, exit code 0
+  observed: active project/run/agent profile preparation, owner-only ephemeral relay, authenticated tools/call result and controlled-server effect
+
+Events and OAuth unit coverage:
+  command: pytest -q tests/test_mcp_oauth.py tests/test_mcp_events.py
+  result: 4 passed, exit code 0
+  observed: session-bound one-use state, encrypted exchange, atomic refresh, sanitized diagnostics, post-operation event idempotency
+
+No tokens, authorization headers, database credentials, or provider response bodies are retained in this evidence.

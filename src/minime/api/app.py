@@ -28,6 +28,7 @@ from fastapi.responses import (
     StreamingResponse,
 )
 from fastapi.staticfiles import StaticFiles
+from sqlalchemy import select
 from pydantic import BaseModel, Field, field_validator, model_validator
 
 from minime.adapters.provider_adapter import (
@@ -37,6 +38,7 @@ from minime.adapters.provider_adapter import (
 )
 from minime.config import load_config
 from minime.db.notifications import notify_scheduler_wakeup
+from minime.db.models import MCPConnectionModel
 from minime.db.repository import PostgresPersistenceUnitOfWork
 from minime.db.session import db_manager
 from minime.domain.enums import (
@@ -88,7 +90,7 @@ from minime.services.budget_service import BudgetService
 from minime.services.capacity_lifecycle_service import CapacityLifecycleService
 from minime.services.context_discovery_service import ContextDiscoveryService
 from minime.services.dashboard_service import DashboardOverviewResponse, OperationsDashboardService
-from minime.services.event_broker import event_broker
+from minime.services.event_broker import event_broker, mcp_event_publisher
 from minime.services.greenfield_bootstrap import (
     GreenfieldBootstrapCoordinator,
     GreenfieldBootstrapError,
@@ -1441,6 +1443,7 @@ class ProjectRequestRunPayload(BaseModel):
     thinker_provider: str | None = None
     implementer_provider: str | None = None
     reviewer_provider: str | None = None
+    mcp_connection_id: str | None = None
 
 
 def _diagnose_apply_checkpoint_recovery(uow: Any, run: Any) -> dict[str, Any] | None:
@@ -1548,6 +1551,7 @@ async def _execute_request_in_fresh_session(
                 thinker_provider=runner.provider_for_role("thinker"),
                 implementer_provider=runner.provider_for_role("implementer"),
                 reviewer_provider=runner.provider_for_role("reviewer"),
+                mcp_connection_id=body.mcp_connection_id,
                 target_run_id=target_run_id or getattr(body, "target_run_id", None),
             )
             complete_gate_response(worker_uow, intent_key, result)
@@ -3363,16 +3367,43 @@ def create_mcp_connection(project_id: str, payload: MCPConnectionPayload, _opera
 
 @app.post("/api/v1/projects/{project_id}/mcp-connections/oauth/start", tags=["mcp"])
 def start_mcp_oauth(project_id: str, payload: MCPConnectionPayload, request: Request, _operator: AuthenticatedOperatorDep, uow: UowDep) -> dict[str, str]:
-    authorization = _mcp_oauth_states.issue(str(getattr(request.state, "session", None) or project_id))
-    return {"state": authorization.state, "authorization_url": f"{payload.endpoint}?state={authorization.state}"}
+    session_id = str(getattr(request.state, "session", None) or project_id)
+    authorization = _mcp_oauth_states.issue(session_id, project_id=project_id)
+    row = _mcp_service(uow).create_oauth_pending(project_id, payload.model_dump(), authorization.state, authorization.expires_at)
+    authorization_endpoint = str((payload.credentials or {}).get("authorization_endpoint") or payload.endpoint)
+    separator = "&" if "?" in authorization_endpoint else "?"
+    return {
+        "state": authorization.state,
+        "connection_id": row.id,
+        "authorization_url": f"{authorization_endpoint}{separator}state={authorization.state}",
+    }
 
 
 @app.get("/api/v1/projects/{project_id}/mcp-connections/oauth/callback", tags=["mcp"])
-def complete_mcp_oauth(project_id: str, state: str, request: Request, _operator: AuthenticatedOperatorDep, uow: UowDep) -> dict[str, str]:
+def complete_mcp_oauth(project_id: str, state: str, code: str, request: Request, _operator: AuthenticatedOperatorDep, uow: UowDep) -> dict[str, Any]:
     session_id = str(getattr(request.state, "session", None) or project_id)
-    if not _mcp_oauth_states.consume(state, session_id):
+    context = _mcp_oauth_states.consume_context(state, session_id)
+    if context is not None and context.project_id and context.project_id != project_id:
+        context = None
+    row = uow.session.scalar(select(MCPConnectionModel).where(
+        MCPConnectionModel.project_id == project_id,
+        MCPConnectionModel.oauth_state_hash == hashlib.sha256(state.encode()).hexdigest(),
+    ))
+    if context is None or row is None or row.oauth_state_expires_at is None or row.oauth_state_expires_at <= datetime.now(UTC):
         raise HTTPException(status_code=400, detail="Invalid or expired OAuth state")
-    return {"status": "AUTHORIZED", "project_id": project_id}
+    cipher = CredentialCipher()
+    config = cipher.decrypt(row.encrypted_credentials or b"").get("_oauth", {})
+    try:
+        service = MCPConnectionService(uow.session, cipher)
+        service.authorize_oauth(
+            row, config["token_endpoint"], code, config["redirect_uri"], config["client_id"], config["client_secret"]
+        )
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail="OAuth authorization failed") from exc
+    row.oauth_state_hash = None
+    row.oauth_state_expires_at = None
+    uow.commit()
+    return {"status": row.status, "project_id": project_id, "connection_id": row.id, "capabilities": len(row.capabilities)}
 
 
 @app.post("/api/v1/projects/{project_id}/mcp-connections/{connection_id}/validate", tags=["mcp"])
@@ -3413,8 +3444,20 @@ def health_mcp_connection(project_id: str, connection_id: str, _operator: Authen
 
 
 @app.post("/api/v1/projects/{project_id}/mcp-connections/{connection_id}/renew", tags=["mcp"])
-def renew_mcp_connection(project_id: str, connection_id: str, _operator: AuthenticatedOperatorDep, uow: UowDep) -> dict[str, Any]:
-    return health_mcp_connection(project_id, connection_id, _operator, uow)
+async def renew_mcp_connection(project_id: str, connection_id: str, _operator: AuthenticatedOperatorDep, uow: UowDep) -> dict[str, Any]:
+    service = _mcp_service(uow)
+    try:
+        service.ensure_renewed(project_id, connection_id)
+        result = MCPConnectionService.public(service.refresh(project_id, connection_id))
+    except LookupError as exc:
+        raise HTTPException(status_code=404, detail="MCP connection not found") from exc
+    except Exception as exc:
+        raise HTTPException(status_code=409, detail="MCP renewal failed closed") from exc
+    await mcp_event_publisher.publish(
+        "mcp.connection.renewed", {"project_id": project_id, "connection_id": connection_id, "status": result["status"]},
+        operation_id=f"renew:{project_id}:{connection_id}",
+    )
+    return result
 
 
 @app.post("/api/v1/projects/{project_id}/mcp-connections/{connection_id}/discover", tags=["mcp"])
@@ -3436,9 +3479,13 @@ def invoke_mcp_tool(project_id: str, connection_id: str, payload: dict[str, Any]
 
 
 @app.post("/api/v1/projects/{project_id}/mcp-connections/{connection_id}/revoke", tags=["mcp"])
-def revoke_mcp_connection(project_id: str, connection_id: str, _operator: AuthenticatedOperatorDep, uow: UowDep) -> dict[str, Any]:
+async def revoke_mcp_connection(project_id: str, connection_id: str, _operator: AuthenticatedOperatorDep, uow: UowDep) -> dict[str, Any]:
     if not _mcp_service(uow).revoke(project_id, connection_id):
         raise HTTPException(status_code=404, detail="MCP connection not found")
+    await mcp_event_publisher.publish(
+        "mcp.connection.revoked", {"project_id": project_id, "connection_id": connection_id, "status": "REVOKED"},
+        operation_id=f"revoke:{project_id}:{connection_id}",
+    )
     return {"status": "REVOKED", "connection_id": connection_id}
 
 

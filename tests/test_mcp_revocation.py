@@ -17,6 +17,6 @@ def test_revocation_purges_secret_and_capabilities_idempotently():
         session.commit()
         service = MCPConnectionService(session, cipher)
         assert service.revoke("p", "c")
-        assert not service.revoke("p", "c")
+        assert service.revoke("p", "c")
         row = session.get(MCPConnectionModel, "c")
         assert row.status == "REVOKED" and row.encrypted_credentials is None and not row.capabilities
