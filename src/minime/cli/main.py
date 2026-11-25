@@ -843,10 +843,11 @@ def scheduler_run_cmd(
                             and getattr(action.status, "value", action.status) == OperatorActionStatus.ACCEPTED.value
                             and action.parameters_json.get("stage") in {"explore", "propose", "proposal_review", "code_review"}
                         ), None)
+                        is_watchdog_gate = isinstance(gate_payload, dict) and gate_payload.get("gate") == "watchdog_escalation"
                         if getattr(active_run, "human_gate", None) in (
                             "NEEDS_HUMAN",
                             "READY_FOR_HUMAN_MERGE",
-                        ) and accepted_gate_action is None and accepted_recovery_action is None:
+                        ) and accepted_gate_action is None and accepted_recovery_action is None and not is_watchdog_gate:
                             # Awaiting human attention (human_gate is the HumanGate enum,
                             # whose values are NEEDS_HUMAN / READY_FOR_HUMAN_MERGE — not
                             # the legacy "HUMAN_REQUIRED" string, which never matched).
@@ -871,8 +872,7 @@ def scheduler_run_cmd(
                         agent_runner=agent_runner,
                         semantic_pr_agent=True,
                         watchdog_mechanical_remediation=bool(
-                            watchdog_observation
-                            and watchdog_settings
+                            watchdog_settings
                             and watchdog_settings.get("mode") == "mechanical_remediation"
                         ),
                     )
