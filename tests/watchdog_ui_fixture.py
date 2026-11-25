@@ -2,12 +2,14 @@
 
 from __future__ import annotations
 
+import json
 import os
 import sys
+import tempfile
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
-from sqlalchemy import create_engine, text
+from sqlalchemy import create_engine, select, text
 from sqlalchemy.orm import sessionmaker
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
@@ -15,6 +17,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 from minime.db.repository import PostgresPersistenceUnitOfWork
 from minime.domain.enums import OrchestrationStage, OrchestrationStopOutcome
 from minime.domain.models import OrchestrationRun, OrchestrationStageEvent, Project
+from minime.db.models import ProviderModelRegistryModel
 
 
 def main(action: str, suffix: str) -> None:
@@ -25,14 +28,75 @@ def main(action: str, suffix: str) -> None:
     prefix = f"watchdog-ui-{suffix}-"
     projects = [f"{prefix}one", f"{prefix}two"]
     runs = [f"{prefix}active", f"{prefix}complete-one", f"{prefix}complete-two"]
+    model_id = f"watchdog-ui-gemini-{suffix}"
+    model_backup = Path(tempfile.gettempdir()) / f"{model_id}.json"
     try:
         if action == "cleanup":
+            if model_backup.exists():
+                backup = json.loads(model_backup.read_text())
+                with engine.begin() as connection:
+                    if backup["created"]:
+                        connection.execute(
+                            text("DELETE FROM provider_model_registry WHERE id = :id"),
+                            {"id": model_id},
+                        )
+                    else:
+                        connection.execute(
+                            text("""UPDATE provider_model_registry
+                                SET discovery_status = :status, is_enabled = :enabled,
+                                    version = :version, updated_at = :updated_at
+                                WHERE id = :id"""),
+                            {
+                                "status": backup["discovery_status"],
+                                "enabled": backup["is_enabled"],
+                                "version": backup["version"],
+                                "updated_at": datetime.fromisoformat(backup["updated_at"])
+                                if backup["updated_at"] else None,
+                                "id": backup["id"],
+                            },
+                        )
             with engine.begin() as connection:
                 connection.execute(text("DELETE FROM watchdog_diagnoses WHERE project_id LIKE :prefix"), {"prefix": f"{prefix}%"})
                 connection.execute(text("DELETE FROM orchestration_stage_events WHERE run_id LIKE :prefix"), {"prefix": f"{prefix}%"})
                 connection.execute(text("DELETE FROM orchestration_runs WHERE id LIKE :prefix"), {"prefix": f"{prefix}%"})
                 connection.execute(text("DELETE FROM projects WHERE id LIKE :prefix"), {"prefix": f"{prefix}%"})
+            model_backup.unlink(missing_ok=True)
             return
+
+        with sessionmaker(bind=engine, autoflush=False, expire_on_commit=False)() as session:
+            model = session.execute(
+                select(ProviderModelRegistryModel).where(
+                    ProviderModelRegistryModel.provider_id == "antigravity",
+                    ProviderModelRegistryModel.harness_id == "antigravity",
+                    ProviderModelRegistryModel.canonical_model_id == "gemini-3.8-flash-medium",
+                )
+            ).scalar_one_or_none()
+            backup = {"created": model is None}
+            if model is None:
+                model = ProviderModelRegistryModel(
+                    id=model_id,
+                    provider_id="antigravity",
+                    harness_id="antigravity",
+                    canonical_model_id="gemini-3.8-flash-medium",
+                    origin="discovered",
+                    capabilities={"workflow": True, "file_edit": True},
+                    discovery_status="available",
+                    is_enabled=True,
+                    version=1,
+                )
+                session.add(model)
+            else:
+                backup.update({
+                    "id": model.id,
+                    "discovery_status": model.discovery_status,
+                    "is_enabled": model.is_enabled,
+                    "version": model.version,
+                    "updated_at": model.updated_at.isoformat() if model.updated_at else None,
+                })
+                model.discovery_status = "available"
+                model.is_enabled = True
+            model_backup.write_text(json.dumps(backup))
+            session.commit()
 
         with sessionmaker(bind=engine, autoflush=False, expire_on_commit=False)() as session:
             uow = PostgresPersistenceUnitOfWork(session)

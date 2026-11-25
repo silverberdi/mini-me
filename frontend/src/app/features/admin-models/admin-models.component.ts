@@ -81,10 +81,10 @@ interface HarnessResult {
         <div *ngIf="watchdogSettings" class="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
           <label class="space-y-1 text-sm">
             <span class="block text-slate-300">Proveedor y modelo</span>
-            <select [value]="selectedWatchdogModelId" (change)="selectWatchdogModel($any($event.target).value)"
+            <select [(ngModel)]="selectedWatchdogModelId"
                     class="w-full rounded-lg border border-slate-600 bg-slate-900 px-3 py-2 text-slate-100">
               <option value="">Sin modelo asignado</option>
-              <option *ngFor="let model of availableModels()" [value]="model.id">
+              <option *ngFor="let model of availableModels(); trackBy: trackWatchdogModel" [value]="model.id">
                 {{ model.provider_id }} / {{ model.canonical_model_id }}
               </option>
             </select>
@@ -247,8 +247,8 @@ export class AdminModelsComponent implements OnInit {
     return `${providerId.toLowerCase()}|${harnessId.toLowerCase()}|${modelId.toLowerCase()}`;
   }
 
-  selectWatchdogModel(modelId: string): void {
-    this.selectedWatchdogModelId = modelId;
+  trackWatchdogModel(_index: number, model: WatchdogModelOption): string {
+    return model.id;
   }
 
   async saveWatchdogSettings(): Promise<void> {
