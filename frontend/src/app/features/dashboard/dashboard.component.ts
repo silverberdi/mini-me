@@ -100,27 +100,40 @@ import type { OrchestrationRun, QuotaObservation, TemporalTelemetryProjection, T
               <span>Gráfica de Líneas de Efectividad</span>
               <span class="text-xs font-mono font-normal text-slate-400">(Tres Dimensiones Independientes)</span>
             </h2>
-            <p class="text-xs text-slate-400 mt-0.5">Tendencias verificables de los últimos 30 días; las esperas humanas quedan excluidas del tiempo activo.</p>
+            <p class="text-xs text-slate-400 mt-0.5">Tendencias verificables de los últimos {{ selectedWindowDays }} días; las esperas humanas quedan excluidas del tiempo activo.</p>
           </div>
-          <div class="flex flex-wrap items-center gap-1.5 bg-slate-900/80 p-1 rounded-xl border border-slate-800 self-start sm:self-auto">
-            <button
-              (click)="selectedDimension.set('autonomy')"
-              [ngClass]="selectedDimension() === 'autonomy' ? 'bg-emerald-500 text-white shadow' : 'text-slate-400 hover:text-slate-200'"
-              class="px-3 py-1.5 text-xs font-semibold rounded-lg transition-all cursor-pointer">
-              1. Calidad / Autonomía
-            </button>
-            <button
-              (click)="selectedDimension.set('time')"
-              [ngClass]="selectedDimension() === 'time' ? 'bg-sky-500 text-white shadow' : 'text-slate-400 hover:text-slate-200'"
-              class="px-3 py-1.5 text-xs font-semibold rounded-lg transition-all cursor-pointer">
-              2. Tiempos de Entrega
-            </button>
-            <button
-              (click)="selectedDimension.set('cost')"
-              [ngClass]="selectedDimension() === 'cost' ? 'bg-amber-500 text-white shadow' : 'text-slate-400 hover:text-slate-200'"
-              class="px-3 py-1.5 text-xs font-semibold rounded-lg transition-all cursor-pointer">
-              3. Costo liquidado (USD)
-            </button>
+          <div class="flex flex-wrap items-center gap-2 self-start sm:self-auto">
+            <div class="flex items-center gap-1 bg-slate-900/80 p-1 rounded-xl border border-slate-800" role="group" aria-label="Rango temporal">
+              <button
+                *ngFor="let days of availableWindowDays"
+                (click)="setWindowDays(days)"
+                [ngClass]="selectedWindowDays === days ? 'bg-indigo-600 text-white font-bold shadow' : 'text-slate-400 hover:text-slate-200 font-medium'"
+                class="px-2.5 py-1 text-xs rounded-lg transition-all cursor-pointer font-mono"
+                [attr.aria-pressed]="selectedWindowDays === days"
+                [attr.data-testid]="'telemetry-window-' + days + 'd'">
+                {{ days }}d
+              </button>
+            </div>
+            <div class="flex flex-wrap items-center gap-1.5 bg-slate-900/80 p-1 rounded-xl border border-slate-800">
+              <button
+                (click)="selectedDimension.set('autonomy')"
+                [ngClass]="selectedDimension() === 'autonomy' ? 'bg-emerald-500 text-white shadow' : 'text-slate-400 hover:text-slate-200'"
+                class="px-3 py-1.5 text-xs font-semibold rounded-lg transition-all cursor-pointer">
+                1. Calidad / Autonomía
+              </button>
+              <button
+                (click)="selectedDimension.set('time')"
+                [ngClass]="selectedDimension() === 'time' ? 'bg-sky-500 text-white shadow' : 'text-slate-400 hover:text-slate-200'"
+                class="px-3 py-1.5 text-xs font-semibold rounded-lg transition-all cursor-pointer">
+                2. Tiempos de Entrega
+              </button>
+              <button
+                (click)="selectedDimension.set('cost')"
+                [ngClass]="selectedDimension() === 'cost' ? 'bg-amber-500 text-white shadow' : 'text-slate-400 hover:text-slate-200'"
+                class="px-3 py-1.5 text-xs font-semibold rounded-lg transition-all cursor-pointer">
+                3. Costo liquidado (USD)
+              </button>
+            </div>
           </div>
         </div>
 
@@ -297,6 +310,7 @@ import type { OrchestrationRun, QuotaObservation, TemporalTelemetryProjection, T
 })
 export class DashboardComponent {
   readonly selectedDimension = signal<'autonomy' | 'time' | 'cost'>('autonomy');
+  readonly availableWindowDays: readonly (7 | 14 | 30 | 90)[] = [7, 14, 30, 90] as const;
   private readonly visibleSeriesIds = signal<Set<string>>(new Set());
   hoveredSeriesId: string | null = null;
   readonly pipelineStages = PIPELINE_STAGES;
@@ -312,6 +326,14 @@ export class DashboardComponent {
   });
 
   constructor(public refresh: RefreshService) {}
+
+  get selectedWindowDays(): 7 | 14 | 30 | 90 {
+    return this.refresh.telemetryWindowDays();
+  }
+
+  setWindowDays(days: 7 | 14 | 30 | 90): void {
+    void this.refresh.setTelemetryWindowDays(days);
+  }
 
   activeStageIndex(run: OrchestrationRun): number {
     return this.pipelineStages.findIndex(stage => stage.key === run.stage);
