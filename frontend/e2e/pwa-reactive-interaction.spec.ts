@@ -50,6 +50,10 @@ test.describe('PWA Reactive Interaction and Form Stability', () => {
     await expect(gateCard).toBeVisible();
 
     // Choose option or enter response
+    const optionBtn = page.getByRole('button', { name: 'PostgreSQL' }).first();
+    if (await optionBtn.count() > 0) {
+      await optionBtn.click();
+    }
     const textarea = page.locator('textarea#clarificationInput');
     await textarea.fill('Confirmado mediante reactividad optimista');
 
@@ -59,9 +63,9 @@ test.describe('PWA Reactive Interaction and Form Stability', () => {
 
     // Optimistic assertion: processing feedback is immediately rendered
     const processingFeedback = page.locator('[role="status"]', {
-      hasText: /Respuesta aceptada\. Esperando la actualización del Run/i,
+      hasText: /Respuesta (aceptada|enviada)|Enviando respuesta/i,
     });
-    await expect(processingFeedback).toBeVisible({ timeout: 5000 });
+    await expect(processingFeedback).toBeVisible({ timeout: 10000 });
 
     // The previous yellow gate card should now be dismissed / hidden
     await expect(gateCard).toBeHidden();

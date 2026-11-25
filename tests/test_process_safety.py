@@ -22,12 +22,10 @@ time.sleep(60)"""
 SIGTERM_GRACEFUL = """import os, signal, sys
 marker = sys.argv[1]
 def handler(signum, frame):
-    tmp = marker + ".tmp"
-    with open(tmp, "w") as f:
+    with open(marker, "w") as f:
         f.write("sigterm")
         f.flush()
         os.fsync(f.fileno())
-    os.replace(tmp, marker)
     sys.exit(0)
 signal.signal(signal.SIGTERM, handler)
 import time
@@ -37,12 +35,10 @@ time.sleep(60)"""
 SIGTERM_IGNORE = """import os, signal, sys
 marker = sys.argv[1]
 def handler(signum, frame):
-    tmp = marker + ".tmp"
-    with open(tmp, "w") as f:
+    with open(marker, "w") as f:
         f.write("sigterm")
         f.flush()
         os.fsync(f.fileno())
-    os.replace(tmp, marker)
 signal.signal(signal.SIGTERM, handler)
 import time
 time.sleep(60)"""
@@ -122,6 +118,10 @@ async def test_process_ignoring_sigterm_is_sigkilled(tmp_path):
     runner = CliImplementerRunner([sys.executable, str(script), str(marker)])
     result = await runner.run(tmp_path, "", timeout_seconds=1)
     assert result.timed_out is True
+    for _ in range(20):
+        if marker.exists() and marker.read_text() == "sigterm":
+            break
+        await asyncio.sleep(0.05)
     assert marker.exists()
     assert marker.read_text() == "sigterm"
 
