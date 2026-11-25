@@ -114,6 +114,19 @@ class PostgresWatchdogRepository:
         row = self.session.get(WatchdogDiagnosisModel, diagnosis_id)
         return self._diagnosis_payload(row) if row is not None else None
 
+    def update_diagnosis(
+        self, diagnosis_id: str, updates: dict[str, Any]
+    ) -> dict[str, Any] | None:
+        row = self.session.get(WatchdogDiagnosisModel, diagnosis_id)
+        if row is None:
+            return None
+        for key, value in updates.items():
+            if hasattr(row, key):
+                setattr(row, key, value)
+        row.updated_at = datetime.now(UTC)
+        self.session.flush()
+        return self._diagnosis_payload(row)
+
     def list_diagnoses(
         self,
         *,
