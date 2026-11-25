@@ -4774,7 +4774,7 @@ class PostgresRecoveryClaimRepository(RecoveryClaimRepositoryInterface):
         self.session = session
 
     def acquire_or_reacquire(
-        self, claim_key: str, owner_instance_id: str, lease_seconds: int = 60
+        self, claim_key: str, owner_instance_id: str, lease_seconds: int = 60, force: bool = False
     ) -> RecoveryClaim | None:
         try:
             stmt = (
@@ -4806,7 +4806,8 @@ class PostgresRecoveryClaimRepository(RecoveryClaimRepositoryInterface):
                 return recovery_claim_model_to_domain(model)
 
             if (
-                model.released_at is None
+                not force
+                and model.released_at is None
                 and model.lease_expires_at > now
                 and model.owner_instance_id != owner_instance_id
             ):
