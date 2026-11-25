@@ -275,6 +275,7 @@ async def test_watchdog_dirty_worktree_autonomous_recovery_postgres(tmp_path: Pa
             repository="org/dirty-worktree-test",
         )
         uow.projects.save(project)
+        uow.flush()
         setup_managed_repository_fixture(
             uow, project_id, repo, repo / ".minime" / "worktrees",
             canonical_repository_identity="github.com/org/dirty-worktree-test",
