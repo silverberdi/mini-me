@@ -240,3 +240,27 @@ def test_autonomy_returns_no_data_when_completed_run_lacks_intervention_evidence
     assert projection.no_data is True
     assert projection.series[0].no_data is True
     assert projection.excluded["unverified_or_incomplete"] == 1
+
+
+def test_autonomy_recognizes_clean_completed_run_without_explicit_gate_list() -> None:
+    uow, service = _service()
+    run = _run("clean-autonomous", "p1", 1)
+    run.stop_details = {
+        "pr1_url": "https://github.com/silverberdi/test/pull/1",
+        "pr2_url": "https://github.com/silverberdi/test/pull/2",
+        "test_evidence": {"status": "PASSED"},
+    }
+    uow.orchestration_runs.save(run)
+    uow.orchestration_stage_events.save(OrchestrationStageEvent(
+        event_type="RUN_COMPLETED",
+        run_id=run.run_id,
+        to_stage=OrchestrationStage.COMPLETED,
+        from_stage=OrchestrationStage.IMPLEMENTING,
+        created_at=run.created_at,
+    ))
+
+    projection = service.project("autonomy")
+
+    assert projection.no_data is False
+    assert projection.series[1].points[0].value == 100.0
+    assert projection.excluded.get("unverified_or_incomplete", 0) == 0

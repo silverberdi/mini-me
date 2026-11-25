@@ -5845,6 +5845,9 @@ class NativeOrchestrationCoordinator:
 
         active_run.is_active = False
         active_run.stop_outcome = OrchestrationStopOutcome.COMPLETED
+        details = dict(active_run.stop_details or {})
+        details.setdefault("resolved_human_gates", [])
+        active_run.stop_details = details
         self._update_stage(uow, active_run, OrchestrationStage.COMPLETED)
 
         # Clean up the managed worktrees now that the change is complete and merged.
