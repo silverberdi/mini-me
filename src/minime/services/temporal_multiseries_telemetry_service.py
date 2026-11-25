@@ -168,7 +168,20 @@ class TemporalMultiseriesTelemetryService:
             )
             details = _value(run, "stop_details", {}) or {}
             resolved_gates = details.get("resolved_human_gates")
-            if not events or not isinstance(resolved_gates, list):
+            if not events:
+                return None
+            if resolved_gates is None:
+                has_run_evidence = bool(
+                    details.get("pr1_url")
+                    or details.get("pr2_url")
+                    or details.get("test_evidence")
+                    or details.get("complexity")
+                    or details.get("apply_limits")
+                )
+                if not has_run_evidence:
+                    return None
+                resolved_gates = []
+            elif not isinstance(resolved_gates, list):
                 return None
             actions_repo = getattr(self.uow, "operator_actions", None)
             actions = (
