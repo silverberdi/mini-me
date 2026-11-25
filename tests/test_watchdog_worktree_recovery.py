@@ -260,3 +260,86 @@ async def test_watchdog_preserves_unattributed_verify_changes(tmp_path, monkeypa
         )
 
     assert (worktree / "src.py").read_text() == "unattributed Verify edit\n"
+
+
+@pytest.mark.asyncio
+async def test_watchdog_rebaselines_apply_worktree_preserving_openspec_artifacts(
+    tmp_path, monkeypatch
+):
+    repository = tmp_path / "repo"
+    worktree = tmp_path / "worktree"
+    repository.mkdir()
+    _git(repository, "init", "-b", "main")
+    _git(repository, "config", "user.name", "test")
+    _git(repository, "config", "user.email", "test@example.invalid")
+    (repository / ".gitignore").write_text(".minime/\n")
+    (repository / "src.py").write_text("clean candidate code\n")
+    _git(repository, "add", ".gitignore", "src.py")
+    _git(repository, "commit", "-m", "candidate")
+    _git(repository, "worktree", "add", "-b", "run-branch", str(worktree), "HEAD")
+    candidate_sha = _git(worktree, "rev-parse", "HEAD")
+    ownership = SimpleNamespace(
+        project_id="project",
+        job_id="job",
+        run_id="run",
+        change_name="my-change",
+        canonical_worktree_path=str(worktree),
+        branch="run-branch",
+    )
+    manager = WorktreeManager(
+        project_root=repository,
+        uow=SimpleNamespace(
+            orchestration_worktree_ownerships=SimpleNamespace(
+                get_by_canonical_path=lambda _path: ownership
+            ),
+            git_operations=SimpleNamespace(
+                save=lambda _operation: None,
+                update_status=lambda *args, **kwargs: None,
+            ),
+            commit=lambda: None,
+        ),
+    )
+    monkeypatch.setattr(manager, "_authorize_mutating_operation", lambda *args, **kwargs: None)
+
+    async def verify_ownership(**_kwargs):
+        return None
+
+    monkeypatch.setattr(manager, "_verify_worktree_adoption_proof", verify_ownership)
+
+    # 1. Modify tracked file
+    (worktree / "src.py").write_text("dirty uncommitted edits\n")
+
+    # 2. Add untracked code file (scratch debris)
+    (worktree / "scratch.astro").write_text("untracked scratch component\n")
+
+    # 3. Add OpenSpec change artifact (MUST be preserved)
+    change_dir = worktree / "openspec" / "changes" / "my-change"
+    change_dir.mkdir(parents=True)
+    proposal_file = change_dir / "proposal.md"
+    proposal_file.write_text("# Proposal\nVerified proposal artifact\n")
+
+    # Execute rebaseline
+    result = await manager.rebaseline_apply_worktree(
+        worktree,
+        project_id="project",
+        job_id="job",
+        run_id="run",
+        change_name="my-change",
+        candidate_sha=candidate_sha,
+        process_absence_proven=True,
+    )
+
+    assert result["rebaselined"] is True
+    assert result["candidate_sha"] == candidate_sha
+    assert "scratch.astro" in result["cleaned_files"]
+
+    # Assert tracked file was restored to candidate clean state
+    assert (worktree / "src.py").read_text() == "clean candidate code\n"
+
+    # Assert untracked scratch file was deleted
+    assert not (worktree / "scratch.astro").exists()
+
+    # Assert OpenSpec change artifact was strictly preserved
+    assert proposal_file.exists()
+    assert proposal_file.read_text() == "# Proposal\nVerified proposal artifact\n"
+

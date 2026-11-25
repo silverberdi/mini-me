@@ -1888,11 +1888,12 @@ def prepare_gate_response(
                 raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="The idempotency key is bound to a different gate response")
             body.target_run_id = body.target_run_id or accepted_action.run_id
             if accepted_action.status == "COMPLETED":
-                return active_runs, accepted_action, {
-                    **dict(accepted_action.result_payload_json or {}),
-                    "operation_id": accepted_action.action_request_id,
-                    "idempotency_key": client_idempotency_key,
-                }
+                if (accepted_action.result_payload_json or {}).get("status") != "PAUSED":
+                    return active_runs, accepted_action, {
+                        **dict(accepted_action.result_payload_json or {}),
+                        "operation_id": accepted_action.action_request_id,
+                        "idempotency_key": client_idempotency_key,
+                    }
             current_run = next(
                 (item for item in active_runs if item.run_id == accepted_action.run_id), None
             )
@@ -2033,6 +2034,21 @@ def complete_gate_response(uow: Any, action_request_id: str, result: Any) -> Non
         "human_payload": result.human_payload,
     }
     action_repo.save(action)
+
+    # Anti-deadlock: If the gate response ended in PAUSED or failed to transition out of human gate,
+    # renew the active gate_id so subsequent operator submissions generate a fresh idempotency key
+    # and are not blocked by this completed failed action.
+    if getattr(result, "status", None) == "PAUSED" and getattr(result, "run_id", None):
+        run = uow.orchestration_runs.get_by_id(result.run_id)
+        if run and getattr(run, "is_active", False) and getattr(run, "human_gate", None):
+            details = dict(run.stop_details or {})
+            payload = details.get("human_payload")
+            if isinstance(payload, dict):
+                new_payload = dict(payload)
+                new_payload["gate_id"] = str(uuid4())
+                details["human_payload"] = new_payload
+                run.stop_details = details
+                uow.orchestration_runs.save(run)
 
 
 @app.post("/api/v1/projects/{project_id}/requests/run", status_code=status.HTTP_202_ACCEPTED, tags=["requests"])

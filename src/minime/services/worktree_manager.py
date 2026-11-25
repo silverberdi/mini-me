@@ -1855,6 +1855,101 @@ class WorktreeManager:
             raise RuntimeError("Verify output recovery changed the immutable candidate SHA.")
         return {"candidate_sha": candidate_sha, "attempt_id": attempt_id, "outputs": output_manifest}
 
+    async def rebaseline_apply_worktree(
+        self,
+        worktree_path: str | Path,
+        *,
+        project_id: str,
+        job_id: str | None = None,
+        run_id: str,
+        change_name: str,
+        candidate_sha: str,
+        process_absence_proven: bool,
+    ) -> dict[str, Any]:
+        """Revert tracked edits and remove uncommitted code debris from an interrupted Apply, preserving OpenSpec change artifacts."""
+        if not process_absence_proven:
+            raise RuntimeError("Refusing Apply worktree rebaseline without proven process absence.")
+        if not re.fullmatch(r"[0-9a-f]{40,64}", candidate_sha, re.IGNORECASE):
+            raise RuntimeError("Apply worktree rebaseline requires an immutable candidate SHA.")
+
+        path = Path(worktree_path).resolve()
+        ownership_repo = getattr(self.uow, "orchestration_worktree_ownerships", None)
+        ownership = ownership_repo.get_by_canonical_path(str(path)) if ownership_repo else None
+        if ownership is None or (
+            ownership.project_id != project_id
+            or (job_id is not None and ownership.job_id != job_id)
+            or ownership.run_id != run_id
+            or ownership.change_name != change_name
+            or str(Path(ownership.canonical_worktree_path).resolve()) != str(path)
+        ):
+            raise RuntimeError("Refusing Apply worktree rebaseline without matching durable worktree ownership.")
+
+        effective_job_id = job_id or ownership.job_id
+        self._authorize_mutating_operation(
+            project_id,
+            path,
+            WorkspaceOperation.EDIT,
+            require_created_ownership=True,
+            job_id=effective_job_id,
+        )
+        await self._verify_worktree_adoption_proof(
+            path=path,
+            job_id=effective_job_id,
+            eff_project_id=project_id,
+            eff_run_id=run_id,
+            eff_change_name=change_name,
+            expected_branch=ownership.branch,
+            require_clean=False,
+            worktree_kind="Apply rebaseline worktree",
+        )
+        actual_sha = (await self.current_sha(path)).strip()
+        if actual_sha != candidate_sha:
+            raise RuntimeError("Refusing Apply worktree rebaseline because the candidate SHA changed.")
+
+        # Revert all modified tracked files to candidate_sha
+        await self._git(
+            ["restore", "--worktree", "--source", candidate_sha, "--", "."],
+            cwd=path,
+            job_id=effective_job_id,
+            project_id=project_id,
+            operation_type="watchdog_apply_rebaseline_restore",
+            managed_worktree_path=path,
+        )
+
+        # Inspect untracked files
+        untracked_output = await self._git(
+            ["ls-files", "--others", "--exclude-standard", "-z"], cwd=path
+        )
+        change_prefix = f"openspec/changes/{change_name}/"
+        cleaned_files: list[str] = []
+        for rel in untracked_output.split("\0"):
+            rel = rel.strip()
+            if not rel or rel.startswith(change_prefix) or rel == f"openspec/changes/{change_name}":
+                continue
+            target_path = path.joinpath(*PurePosixPath(rel).parts)
+            if target_path.is_file() or target_path.is_symlink():
+                target_path.unlink()
+                cleaned_files.append(rel)
+            elif target_path.is_dir():
+                shutil.rmtree(target_path, ignore_errors=True)
+                cleaned_files.append(rel)
+
+        # Remove empty untracked directories, but do not touch openspec/
+        for root, dirs, files in os.walk(path, topdown=False):
+            if Path(root) == path or "openspec" in Path(root).parts or ".git" in Path(root).parts:
+                continue
+            try:
+                if not os.listdir(root):
+                    os.rmdir(root)
+            except OSError:
+                pass
+
+        return {
+            "rebaselined": True,
+            "candidate_sha": candidate_sha,
+            "cleaned_files": cleaned_files,
+        }
+
     @staticmethod
     def _is_verify_generated_output(relative: str) -> bool:
         path = PurePosixPath(relative)

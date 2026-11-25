@@ -1434,6 +1434,225 @@ class NativeOrchestrationCoordinator:
             logger.exception("DOC_CLOSING invocation recovery did not complete; preserving fail-closed state.")
             return True, None
 
+    async def _recover_dirty_apply_invocation(
+        self, uow: Any, run: OrchestrationRun, worktree_path: Path, stage: str,
+        *, allow_human_resume: bool = False,
+    ) -> tuple[bool, StageInvocation | None]:
+        """Recover an abandoned APPLY operation whose worktree was left dirty by an interrupted runner."""
+        stage = stage.upper()
+        if run.current_stage != OrchestrationStage.IMPLEMENTING or stage != "APPLY":
+            return False, None
+        if not (self.watchdog_mechanical_remediation or allow_human_resume):
+            return False, None
+        claims = getattr(uow, "claims", None)
+        events_repo = getattr(uow, "orchestration_stage_events", None)
+        if claims is None or events_repo is None or not callable(getattr(events_repo, "list_by_run", None)):
+            return False, None
+
+        prefix = f"stage-invocation:{run.run_id}:{stage}:"
+        events = events_repo.list_by_run(run.run_id)
+        starts: dict[str, dict[str, Any]] = {}
+        start_stages: dict[str, str] = {}
+        terminal: set[str] = set()
+        process_events: dict[str, dict[str, Any]] = {}
+        for event in events:
+            evidence = event.evidence_references or {}
+            attempt_id = str(evidence.get("attempt_id") or "")
+            if event.event_type == "STAGE_INVOCATION_STARTED" and str(evidence.get("claim_key") or "").startswith(prefix):
+                starts[attempt_id] = evidence
+                start_stages[attempt_id] = getattr(event.from_stage, "value", event.from_stage)
+            elif event.event_type == "STAGE_INVOCATION_PROCESS_STARTED":
+                process_events[attempt_id] = evidence
+            elif event.event_type in {
+                "STAGE_INVOCATION_COMPLETED", "STAGE_INVOCATION_HUMAN_REQUIRED",
+                "STAGE_INVOCATION_FAILED", "STAGE_INVOCATION_ABANDONED",
+            }:
+                terminal.add(attempt_id)
+        incomplete = [
+            (attempt_id, evidence) for attempt_id, evidence in starts.items()
+            if attempt_id not in terminal
+            and start_stages.get(attempt_id) == OrchestrationStage.IMPLEMENTING.value
+        ]
+        if not incomplete:
+            return False, None
+        if len(incomplete) != 1:
+            return True, None
+
+        prior_attempt_id, prior_start = incomplete[0]
+        prior_candidate = prior_start.get("candidate") or {}
+        prior_recovery_count = int(prior_start.get("recovery_count", 0))
+        if prior_recovery_count >= 1 and not allow_human_resume:
+            return False, None
+
+        canonical_path = str(worktree_path.resolve())
+        if not (
+            prior_candidate.get("run_id") == run.run_id
+            and prior_candidate.get("stage") == stage
+            and prior_candidate.get("worktree") == canonical_path
+            and prior_candidate.get("generation") == int(run.current_generation or 0)
+            and prior_candidate.get("candidate_sha")
+        ):
+            return True, None
+
+        prior_claim_key = str(prior_start.get("claim_key") or "")
+        prior_claim = claims.get_by_key(prior_claim_key) if prior_claim_key else None
+        if prior_claim is not None and prior_claim.is_active:
+            return True, None
+
+        previous_workflow = (process_events.get(prior_attempt_id) or {}).get("process_identity")
+        current = process_identity()
+        if not self._stage_recovery_is_safe(
+            prior_start.get("coordinator_process"), previous_workflow, current,
+            candidate_matches=True,
+            recovery_count=prior_recovery_count,
+        ):
+            return True, None
+
+        owner_id = f"stage:{stage}:{uuid4()}"
+        acquired = claims.acquire_or_reacquire(
+            claim_key=prior_claim_key, owner_instance_id=owner_id, lease_seconds=120
+        )
+        if acquired is None:
+            return True, None
+        old_context = RecoveryClaimContext(
+            claim_key=acquired.claim_key,
+            owner_instance_id=acquired.owner_instance_id,
+            fence_token=acquired.fence_token,
+            lease_expires_at=acquired.lease_expires_at,
+        )
+        successor_context: RecoveryClaimContext | None = None
+        try:
+            uow.commit()
+            rebaseline = getattr(self.worktree_manager, "rebaseline_apply_worktree", None)
+            if not callable(rebaseline):
+                raise RuntimeError("Managed apply-worktree rebaseline is unavailable.")
+            await rebaseline(
+                worktree_path=canonical_path,
+                project_id=run.project_id,
+                job_id=getattr(run, "active_job_id", None),
+                run_id=run.run_id,
+                change_name=run.change_name,
+                candidate_sha=str(prior_candidate["candidate_sha"]),
+                process_absence_proven=True,
+            )
+            candidate = await self._stage_candidate_identity(run, worktree_path, stage)
+            if candidate != prior_candidate:
+                claims.release_claim(old_context)
+                uow.commit()
+                return True, None
+
+            if not claims.validate_cas(
+                old_context.claim_key, old_context.owner_instance_id, old_context.fence_token
+            ):
+                raise RuntimeError("Apply rebaseline cleanup lost its prior claim fence.")
+
+            claim_key = f"{prefix}{candidate['fingerprint']}"
+            if claim_key == old_context.claim_key:
+                successor_context = old_context
+            else:
+                next_claim = claims.acquire_or_reacquire(
+                    claim_key=claim_key, owner_instance_id=owner_id, lease_seconds=120
+                )
+                if next_claim is None:
+                    claims.release_claim(old_context)
+                    uow.commit()
+                    return True, None
+                successor_context = RecoveryClaimContext(
+                    claim_key=next_claim.claim_key,
+                    owner_instance_id=next_claim.owner_instance_id,
+                    fence_token=next_claim.fence_token,
+                    lease_expires_at=next_claim.lease_expires_at,
+                )
+                claims.release_claim(old_context)
+
+            if successor_context is None:
+                raise RuntimeError("Apply successor claim was not acquired.")
+            if not claims.validate_cas(
+                successor_context.claim_key,
+                successor_context.owner_instance_id,
+                successor_context.fence_token,
+                for_update=True,
+            ):
+                raise RuntimeError("Restored Apply candidate lost its successor claim fence.")
+            context = successor_context
+            recovery_count = prior_recovery_count + 1
+            invocation = StageInvocation(
+                attempt_id=str(uuid4()), claim=context, claim_key=claim_key,
+                candidate=candidate, recovery_count=recovery_count,
+                started_monotonic=asyncio.get_running_loop().time(),
+                recovered_from_attempt_id=prior_attempt_id,
+            )
+            previous_coordinator = prior_start.get("coordinator_process") or {}
+            previous_boot = previous_coordinator.get("boot_id") != current.get("boot_id")
+            self._save_stage_invocation_event(
+                uow, run, "STAGE_INVOCATION_ABANDONED", {
+                    "attempt_id": prior_attempt_id,
+                    "claim_key": prior_claim_key,
+                    "fence_token": old_context.fence_token,
+                    "candidate": prior_candidate,
+                    "status": "ABANDONED",
+                    "finished_at": utc_now().isoformat(),
+                    "reason": (
+                        "Prior coordinator and workflow process identities belong to the previous boot on this host; apply worktree rebaselined."
+                        if previous_boot else "Expired lease; coordinator and workflow process proven absent; apply worktree rebaselined."
+                    ),
+                    "recovery_proof": "previous_boot" if previous_boot else "processes_gone",
+                    "worktree_reset": True,
+                    "previous_coordinator_process": previous_coordinator,
+                    "previous_workflow_process": previous_workflow,
+                    "recovery_count": recovery_count,
+                },
+                commit=False,
+            )
+            self._save_stage_invocation_event(
+                uow, run, "STAGE_INVOCATION_STARTED", {
+                    "attempt_id": invocation.attempt_id,
+                    "claim_key": claim_key,
+                    "fence_token": context.fence_token,
+                    "candidate": candidate,
+                    "started_at": utc_now().isoformat(),
+                    "coordinator_process": current,
+                    "recovery_proof": "AWAITING_WORKFLOW_PROCESS_IDENTITY",
+                    "recovery_count": recovery_count,
+                    "recovered_from_attempt_id": prior_attempt_id,
+                    "recovery_reason": "orphaned_apply_process_rebaselined",
+                },
+                commit=False,
+            )
+            self._save_stage_invocation_event(
+                uow, run, "WATCHDOG_WORKTREE_REMEDIATED", {
+                    "stage": stage,
+                    "candidate_sha": str(prior_candidate["candidate_sha"]),
+                    "remediated": True,
+                    "recovery_count": recovery_count,
+                },
+                commit=False,
+            )
+            watchdog_repo = getattr(uow, "watchdog", None)
+            if watchdog_repo is not None:
+                diag = watchdog_repo.get_by_run_stage_generation(
+                    run.run_id, stage, int(run.current_generation or 1)
+                )
+                if diag and diag.get("status") in {"OBSERVED", "DIAGNOSING"}:
+                    diag["status"] = "RESOLVED"
+                    diag["action"] = "mechanical_worktree_rebaseline"
+                    diag["action_result"] = {"status": "SUCCESS", "remediated": True}
+                    watchdog_repo.save_diagnosis(diag)
+
+            uow.commit()
+            return True, invocation
+        except Exception:
+            try:
+                if successor_context is not None and successor_context != old_context:
+                    claims.release_claim(successor_context)
+                claims.release_claim(old_context)
+                uow.commit()
+            except Exception:
+                if callable(getattr(uow, "rollback", None)):
+                    uow.rollback()
+            logger.exception("Apply invocation recovery did not complete; preserving fail-closed state.")
+            return True, None
+
     async def _recover_orphaned_stage_index_lock(
         self, uow: Any, run: OrchestrationRun, worktree_path: Path, stage: str
     ) -> tuple[RecoveryClaimContext | None, dict[str, Any] | None]:
@@ -1733,6 +1952,11 @@ class NativeOrchestrationCoordinator:
             return None
         recovery_handled, recovered_invocation = await self._recover_dirty_documentation_invocation(
             uow, run, worktree_path, stage
+        )
+        if recovery_handled:
+            return recovered_invocation
+        recovery_handled, recovered_invocation = await self._recover_dirty_apply_invocation(
+            uow, run, worktree_path, stage, allow_human_resume=allow_human_resume
         )
         if recovery_handled:
             return recovered_invocation
