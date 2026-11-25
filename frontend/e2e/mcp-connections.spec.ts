@@ -20,6 +20,6 @@ test('desktop and tablet expose the MCP navigation entry', async ({ page }) => {
   for (const width of [1280, 768]) {
     await page.setViewportSize({ width, height: 900 });
     await page.goto('/conexiones-mcp');
-    await expect(page.getByText('Conexiones MCP', { exact: true })).toBeVisible();
+    await expect(page.getByRole('link', { name: 'Conexiones MCP' })).toBeVisible();
   }
 });
