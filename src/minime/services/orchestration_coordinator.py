@@ -3722,9 +3722,14 @@ class NativeOrchestrationCoordinator:
             OrchestrationStage.IMPLEMENTING,
         }:
             stored_feasibility = (active_run.stop_details or {}).get("complexity_assessment")
-            if not isinstance(stored_feasibility, dict) or stored_feasibility.get(
-                "feasibility_status"
-            ) != "EXECUTABLE":
+            is_feasibility_overridden = bool(
+                (active_run.stop_details or {}).get("feasibility_overridden")
+                or (active_run.stop_details or {}).get("feasibility_override_reason")
+            )
+            if not is_feasibility_overridden and (
+                not isinstance(stored_feasibility, dict)
+                or stored_feasibility.get("feasibility_status") != "EXECUTABLE"
+            ):
                 self._update_stage(uow, active_run, OrchestrationStage.VALIDATING)
 
         # Step 6: Propose and Strict Validation Loop
@@ -4067,7 +4072,11 @@ class NativeOrchestrationCoordinator:
                                 stored_payload.get("feasibility"), feasibility_inputs, worktree_path
                             )
                         )
-                        if reval_status == "EXECUTABLE":
+                        is_feasibility_overridden = bool(
+                            (active_run.stop_details or {}).get("feasibility_overridden")
+                            or (active_run.stop_details or {}).get("feasibility_override_reason")
+                        )
+                        if reval_status == "EXECUTABLE" or is_feasibility_overridden:
                             complexity_result = ComplexityAssessment(
                                 status="VALID",
                                 complexity=stored_payload.get("complexity") or "moderate",
@@ -4076,11 +4085,11 @@ class NativeOrchestrationCoordinator:
                                 output=previous_assessment.get("output", ""),
                                 structured_output=stored_so,
                                 diagnostic_output=previous_assessment.get("diagnostic_output", ""),
-                                feasibility_status=reval_status,
+                                feasibility_status="EXECUTABLE" if is_feasibility_overridden else reval_status,
                                 task_feasibility=reval_tasks,
                                 scenario_coverage=reval_scenarios,
-                                feasibility_blockers=reval_blockers,
-                                feasibility_actions=reval_actions,
+                                feasibility_blockers=() if is_feasibility_overridden else reval_blockers,
+                                feasibility_actions=() if is_feasibility_overridden else reval_actions,
                             )
                             self._persist_complexity_assessment(
                                 active_run,

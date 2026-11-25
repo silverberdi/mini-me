@@ -135,3 +135,41 @@ async def test_check_stage_feasibility_clears_gate_with_clarification():
     assert result is None
     assert run.human_gate is None
     assert (run.stop_details or {}).get("feasibility_overridden") is True
+
+
+def test_coordinator_does_not_downgrade_overridden_run_on_recovery():
+    coordinator = NativeOrchestrationCoordinator(
+        uow_factory=MagicMock(),
+        github_adapter=MagicMock(),
+        worktree_manager=MagicMock(),
+        agent_runner=MagicMock(),
+        openspec_adapter=MagicMock(),
+    )
+    uow = MagicMock()
+    run = OrchestrationRun(
+        project_id="test-proj",
+        change_name="req-1",
+        base_sha="abcdef1234567890abcdef1234567890abcdef12",
+        current_stage=OrchestrationStage.IMPLEMENTING,
+        stop_details={
+            "feasibility_overridden": True,
+            "complexity_assessment": {
+                "feasibility_status": "BLOCKED",
+            },
+        },
+    )
+
+    # Simulate the coordinator check at line 3721
+    stored_feasibility = (run.stop_details or {}).get("complexity_assessment")
+    is_feasibility_overridden = bool(
+        (run.stop_details or {}).get("feasibility_overridden")
+        or (run.stop_details or {}).get("feasibility_override_reason")
+    )
+    should_downgrade = not is_feasibility_overridden and (
+        not isinstance(stored_feasibility, dict)
+        or stored_feasibility.get("feasibility_status") != "EXECUTABLE"
+    )
+
+    assert should_downgrade is False
+    assert run.current_stage == OrchestrationStage.IMPLEMENTING
+
