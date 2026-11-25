@@ -248,6 +248,11 @@ import { VersionService } from './core/version.service';
             <span class="w-4 text-center">⚙</span>
             Administración
           </a>
+          <a routerLink="/conexiones-mcp" routerLinkActive="bg-sky-500/10 text-sky-400 border-sky-500/30"
+             class="flex items-center gap-3 px-3.5 py-2.5 rounded-xl text-sm font-medium text-slate-400 hover:text-white hover:bg-slate-800/60 border border-transparent transition-colors">
+            <span class="w-4 text-center">🔌</span>
+            Conexiones MCP
+          </a>
         </nav>
 
         <div class="p-3 bg-slate-800/40 border border-slate-700/40 rounded-xl text-xs text-slate-400 space-y-1">

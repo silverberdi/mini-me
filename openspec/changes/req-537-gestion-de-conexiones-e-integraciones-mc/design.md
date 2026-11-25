@@ -70,7 +70,9 @@ Los errores de transporte, autenticación, renovación, handshake o invocación 
 3. Habilitar el flujo en preview con servidor MCP de prueba controlado y credenciales efímeras; capturar evidencia del navegador, PostgreSQL, handshake y runtime.
 4. Si la verificación falla, retirar la migración y código del candidato mediante la ruta OpenSpec, sin tocar una base productiva ni borrar conexiones activas fuera del Change.
 
-## Open Questions
+## Owner decisions recorded for Apply
 
-- **Decisión del propietario antes de Apply:** ¿el esquema mínimo será una conexión por proyecto con credencial cifrada y caché separada, o conexiones globales reutilizables con vínculos explícitos a proyectos? Recomendación: vínculo por proyecto y una caché separada para minimizar exposición y evitar disponibilidad accidental.
-- **Decisión del propietario antes de Apply:** ¿la inyección de runtime se realizará por argumentos de configuración o socket local de retransmisión? Recomendación: socket local con ACL y vida limitada cuando la CLI lo soporte; argumentos solo si se demuestra que no exponen secretos en proceso/logs.
+- **1.1 — alcance:** se adopta la opción A: una conexión pertenece a un proyecto, su credencial se cifra con la clave maestra de runtime y el catálogo de herramientas/recursos se conserva en caché separada. Esto minimiza exposición accidental y evita que una conexión activa sea reutilizada por otro proyecto.
+- **1.2 — runtime:** se adopta la opción A: un socket local efímero con permisos de propietario y ACL mínima. El puerto devuelve únicamente el perfil efímero al Run/agente autorizado, expira al terminar el Run y no escribe secretos en argv, `/proc`, logs ni evidencia. La resolución falla cerrada si la CLI no puede consumir el puerto.
+
+Estas decisiones son específicas de este Change y no autorizan otros cambios ni sustituyen la política configurable de proveedores.

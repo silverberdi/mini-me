@@ -64,6 +64,9 @@ from minime.domain.models import (
     get_active_human_payload,
 )
 from minime.logging import redact_secrets
+from minime.mcp.security import CredentialCipher
+from minime.mcp.service import MCPConnectionService
+from minime.mcp.auth import OAuthStateStore
 from minime.services.apply_checkpoint_recovery import (
     PRESERVE_RESPONSE as APPLY_RECOVERY_PRESERVE_RESPONSE,
 )
@@ -115,6 +118,7 @@ _RUN_WORKER_LIMIT = 2
 _run_worker_semaphore = asyncio.Semaphore(_RUN_WORKER_LIMIT)
 _run_tasks: set[asyncio.Task[None]] = set()
 _accepted_operations: dict[tuple[str, str], str] = {}
+_mcp_oauth_states = OAuthStateStore()
 
 
 def _run_notification_fingerprint(result: Any, run: Any) -> str:
@@ -342,7 +346,8 @@ def get_context_service(uow: UowDep) -> ContextDiscoveryService:
 ContextServiceDep = Annotated[ContextDiscoveryService, Depends(get_context_service)]
 
 
-STATIC_DIR = Path(__file__).parent.parent / "static"
+_STATIC_ROOT = Path(__file__).parent.parent / "static"
+STATIC_DIR = _STATIC_ROOT / "browser" if (_STATIC_ROOT / "browser").is_dir() else _STATIC_ROOT
 
 PUBLIC_EXEMPT_PATHS = {
     "/health",
@@ -3323,6 +3328,85 @@ if STATIC_DIR.exists():
     app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
 else:
     logger.warning("Dashboard static directory '%s' does not exist.", STATIC_DIR)
+
+
+class MCPConnectionPayload(BaseModel):
+    model_config = {"extra": "forbid"}
+    name: str = Field(min_length=1, max_length=255)
+    endpoint: str = Field(min_length=1, max_length=1024)
+    transport: Literal["http", "sse", "stdio"]
+    auth_type: Literal["oauth2", "api_key", "bearer"]
+    credentials: dict[str, Any] = Field(default_factory=dict)
+
+
+def _mcp_service(uow: UowDep) -> MCPConnectionService:
+    try:
+        cipher = CredentialCipher()
+    except RuntimeError as exc:
+        raise HTTPException(status_code=503, detail="MCP credential service unavailable") from exc
+    return MCPConnectionService(uow.session, cipher)
+
+
+@app.get("/api/v1/projects/{project_id}/mcp-connections", tags=["mcp"])
+def list_mcp_connections(project_id: str, _operator: AuthenticatedOperatorDep, uow: UowDep) -> dict[str, Any]:
+    return {"connections": _mcp_service(uow).list(project_id)}
+
+
+@app.post("/api/v1/projects/{project_id}/mcp-connections", status_code=status.HTTP_201_CREATED, tags=["mcp"])
+def create_mcp_connection(project_id: str, payload: MCPConnectionPayload, _operator: AuthenticatedOperatorDep, uow: UowDep) -> dict[str, Any]:
+    row = _mcp_service(uow).create(project_id, payload.model_dump())
+    return MCPConnectionService.public(row)
+
+
+@app.post("/api/v1/projects/{project_id}/mcp-connections/oauth/start", tags=["mcp"])
+def start_mcp_oauth(project_id: str, payload: MCPConnectionPayload, request: Request, _operator: AuthenticatedOperatorDep, uow: UowDep) -> dict[str, str]:
+    authorization = _mcp_oauth_states.issue(str(getattr(request.state, "session", None) or project_id))
+    return {"state": authorization.state, "authorization_url": f"{payload.endpoint}?state={authorization.state}"}
+
+
+@app.get("/api/v1/projects/{project_id}/mcp-connections/oauth/callback", tags=["mcp"])
+def complete_mcp_oauth(project_id: str, state: str, request: Request, _operator: AuthenticatedOperatorDep, uow: UowDep) -> dict[str, str]:
+    session_id = str(getattr(request.state, "session", None) or project_id)
+    if not _mcp_oauth_states.consume(state, session_id):
+        raise HTTPException(status_code=400, detail="Invalid or expired OAuth state")
+    return {"status": "AUTHORIZED", "project_id": project_id}
+
+
+@app.post("/api/v1/projects/{project_id}/mcp-connections/{connection_id}/validate", tags=["mcp"])
+def validate_mcp_connection(project_id: str, connection_id: str, _operator: AuthenticatedOperatorDep, uow: UowDep) -> dict[str, Any]:
+    service = _mcp_service(uow)
+    from sqlalchemy import select
+    from minime.db.models import MCPConnectionModel
+    row = uow.session.scalar(select(MCPConnectionModel).where(MCPConnectionModel.project_id == project_id, MCPConnectionModel.id == connection_id))
+    if row is None:
+        raise HTTPException(status_code=404, detail="MCP connection not found")
+    try:
+        discovery = service.discover(row)
+        service._replace_capabilities(row, discovery.tools, discovery.resources)
+        row.status = "ACTIVE"
+        row.diagnostic_code = None
+        row.diagnostic_summary = None
+        uow.commit()
+    except Exception:
+        row.status = "ERROR"
+        row.diagnostic_code = "MCP_VALIDATION_FAILED"
+        row.diagnostic_summary = "MCP handshake or discovery failed"
+        uow.commit()
+    return MCPConnectionService.public(row)
+
+
+@app.post("/api/v1/projects/{project_id}/mcp-connections/{connection_id}/revoke", tags=["mcp"])
+def revoke_mcp_connection(project_id: str, connection_id: str, _operator: AuthenticatedOperatorDep, uow: UowDep) -> dict[str, Any]:
+    if not _mcp_service(uow).revoke(project_id, connection_id):
+        raise HTTPException(status_code=404, detail="MCP connection not found")
+    return {"status": "REVOKED", "connection_id": connection_id}
+
+
+@app.delete("/api/v1/projects/{project_id}/mcp-connections/{connection_id}", tags=["mcp"])
+def delete_mcp_connection(project_id: str, connection_id: str, _operator: AuthenticatedOperatorDep, uow: UowDep) -> Response:
+    if not _mcp_service(uow).delete(project_id, connection_id):
+        raise HTTPException(status_code=404, detail="MCP connection not found")
+    return Response(status_code=status.HTTP_204_NO_CONTENT)
 
 
 @app.api_route("/", methods=["GET", "HEAD"], tags=["dashboard-ui"], response_model=None)
