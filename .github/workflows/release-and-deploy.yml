@@ -204,7 +204,8 @@ jobs:
           sudo chown -R minime:minime /opt/minime/runtime/playwright-browsers
           sudo chown -R minime:minime "$DEPLOY_PATH/src/minime/static" "$DEPLOY_PATH/src/minime" 
           (cd "$DEPLOY_PATH" && sudo -u minime /opt/minime/runtime/venv/bin/alembic -c "$DEPLOY_PATH/alembic.ini" upgrade head)
-          sudo systemctl restart minime-api minime-scheduler
+          sudo systemctl restart minime-api
+          sudo systemctl restart minime-scheduler
           browser="$(find /opt/minime/runtime/playwright-browsers -type f \( -name headless_shell -o -name chrome-headless-shell \) -perm /111 -print -quit)"
           test -n "$browser"
           sudo -u minime "$browser" --no-sandbox --headless --disable-gpu --dump-dom about:blank >/dev/null

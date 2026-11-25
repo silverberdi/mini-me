@@ -240,3 +240,55 @@ def test_autonomy_returns_no_data_when_completed_run_lacks_intervention_evidence
     assert projection.no_data is True
     assert projection.series[0].no_data is True
     assert projection.excluded["unverified_or_incomplete"] == 1
+
+
+def test_autonomy_recognizes_clean_completed_run_without_explicit_gate_list() -> None:
+    uow, service = _service()
+    run = _run("clean-autonomous", "p1", 1)
+    run.stop_details = {
+        "pr1_url": "https://github.com/silverberdi/test/pull/1",
+        "pr2_url": "https://github.com/silverberdi/test/pull/2",
+        "test_evidence": {"status": "PASSED"},
+    }
+    uow.orchestration_runs.save(run)
+    uow.orchestration_stage_events.save(OrchestrationStageEvent(
+        event_type="RUN_COMPLETED",
+        run_id=run.run_id,
+        to_stage=OrchestrationStage.COMPLETED,
+        from_stage=OrchestrationStage.IMPLEMENTING,
+        created_at=run.created_at,
+    ))
+
+    projection = service.project("autonomy")
+
+    assert projection.no_data is False
+    assert projection.series[1].points[0].value == 100.0
+    assert projection.excluded.get("unverified_or_incomplete", 0) == 0
+
+
+def test_temporal_telemetry_respects_custom_window_days() -> None:
+    uow, service = _service()
+    projection_7 = service.project("autonomy", window_days=7)
+    assert len(projection_7.axis) == 7
+    assert projection_7.window_days == 7
+    assert projection_7.granularity == "daily"
+
+    projection_14 = service.project("autonomy", window_days=14)
+    assert len(projection_14.axis) == 14
+    assert projection_14.window_days == 14
+    assert projection_14.granularity == "daily"
+
+    projection_90 = service.project("autonomy", window_days=90)
+    assert projection_90.window_days == 90
+    assert projection_90.granularity == "weekly"
+    assert len(projection_90.axis) >= 13
+
+
+def test_dashboard_service_overview_passes_window_days() -> None:
+    from minime.services.dashboard_service import OperationsDashboardService
+
+    uow, _ = _service()
+    dashboard_svc = OperationsDashboardService(uow)
+    overview = dashboard_svc.get_overview(window_days=7)
+    assert len(overview.temporal_telemetry["autonomy"].axis) == 7
+

@@ -1275,7 +1275,7 @@ class TaskClassificationSnapshotRepositoryInterface(ABC):
 class RecoveryClaimRepositoryInterface(ABC):
     @abstractmethod
     def acquire_or_reacquire(
-        self, claim_key: str, owner_instance_id: str, lease_seconds: int = 60
+        self, claim_key: str, owner_instance_id: str, lease_seconds: int = 60, force: bool = False
     ) -> RecoveryClaim | None: ...
 
     @abstractmethod

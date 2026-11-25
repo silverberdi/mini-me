@@ -2232,6 +2232,7 @@ class InMemoryRecoveryClaimRepository(RecoveryClaimRepositoryInterface):
         claim_key: str,
         owner_instance_id: str,
         lease_seconds: int = 60,
+        force: bool = False,
     ) -> RecoveryClaim | None:
         now = utc_now()
         existing = self._claims.get(claim_key)
@@ -2248,7 +2249,7 @@ class InMemoryRecoveryClaimRepository(RecoveryClaimRepositoryInterface):
                 )
                 self._claims[claim_key] = updated
                 return updated
-            if existing.lease_expires_at <= now:
+            if force or existing.lease_expires_at <= now:
                 new_expires = now + timedelta(seconds=lease_seconds)
                 updated = RecoveryClaim(
                     claim_key=claim_key,

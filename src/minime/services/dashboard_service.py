@@ -420,7 +420,9 @@ class OperationsDashboardService:
         self.uow = uow
         self.scheduler_observer = scheduler_observer or SystemdSchedulerObserver()
 
-    def get_overview(self, project_id: str | None = None) -> DashboardOverviewResponse:
+    def get_overview(
+        self, project_id: str | None = None, window_days: int = 30
+    ) -> DashboardOverviewResponse:
         """Construct high-level operational overview."""
         # 1. Capacity & Scheduler Status
         cap_service = CapacityLifecycleService(self.uow)
@@ -962,7 +964,7 @@ class OperationsDashboardService:
             temporal_telemetry={
                 dimension: TemporalMultiseriesTelemetryService(self.uow).project(
                     dimension=dimension,
-                    window_days=30,
+                    window_days=window_days,
                 )
                 for dimension in ("autonomy", "time", "cost")
             },

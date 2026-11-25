@@ -701,6 +701,61 @@ class NativeOrchestrationCoordinator:
             uow, run, reason=reason, evidence=observed_evidence
         )
 
+    def _can_auto_recover_watchdog_escalation(
+        self,
+        uow: Any,
+        run: OrchestrationRun,
+        pending_gate: dict[str, Any],
+    ) -> bool:
+        """Autonomously clear a mechanical watchdog escalation if the obstructing condition has cleared."""
+        if not self.watchdog_mechanical_remediation:
+            return False
+        stage_events_repo = getattr(uow, "orchestration_stage_events", None)
+        if stage_events_repo is None or not callable(getattr(stage_events_repo, "list_by_run", None)):
+            return False
+        events = stage_events_repo.list_by_run(run.run_id)
+        stage_str = run.current_stage.value if hasattr(run.current_stage, "value") else str(run.current_stage)
+        prefix = f"stage-invocation:{run.run_id}:{stage_str}:"
+        stage_events = [
+            e for e in events
+            if str((e.evidence_references or {}).get("claim_key") or "").startswith(prefix)
+        ]
+        starts: dict[str, dict[str, Any]] = {}
+        terminal: set[str] = set()
+        for e in stage_events:
+            ev = e.evidence_references or {}
+            attempt_id = str(ev.get("attempt_id") or "")
+            if e.event_type == "STAGE_INVOCATION_STARTED":
+                starts[attempt_id] = ev
+            elif e.event_type in {
+                "STAGE_INVOCATION_COMPLETED", "STAGE_INVOCATION_HUMAN_REQUIRED",
+                "STAGE_INVOCATION_FAILED", "STAGE_INVOCATION_ABANDONED",
+            }:
+                terminal.add(attempt_id)
+        incomplete = [item for key, item in starts.items() if key not in terminal]
+        if not incomplete:
+            return True
+        prev_attempt = incomplete[-1]
+        prev_cand = prev_attempt.get("candidate") or {}
+        if prev_cand.get("candidate_sha") and run.current_candidate_sha and prev_cand["candidate_sha"] != run.current_candidate_sha:
+            return False
+        prev_proc = prev_attempt.get("coordinator_process")
+        proc_event = next(
+            (e.evidence_references for e in reversed(stage_events)
+             if e.event_type == "STAGE_INVOCATION_PROCESS_STARTED"
+             and (e.evidence_references or {}).get("attempt_id") == prev_attempt.get("attempt_id")),
+            None,
+        )
+        prev_child = (proc_event or {}).get("process_identity")
+        current = process_identity()
+        return self._stage_recovery_is_safe(
+            prev_proc,
+            prev_child,
+            current,
+            candidate_matches=True,
+            recovery_count=int(prev_attempt.get("recovery_count", 0)),
+        )
+
     async def _check_stage_feasibility(
         self,
         uow: Any,
@@ -1496,12 +1551,18 @@ class NativeOrchestrationCoordinator:
 
         prior_claim_key = str(prior_start.get("claim_key") or "")
         prior_claim = claims.get_by_key(prior_claim_key) if prior_claim_key else None
-        if prior_claim is not None and prior_claim.is_active:
-            return True, None
-
         previous_workflow = (process_events.get(prior_attempt_id) or {}).get("process_identity")
         current = process_identity()
-        if not self._stage_recovery_is_safe(
+        reclaim_dead_claim = False
+        if prior_claim is not None and prior_claim.is_active:
+            if not self._stage_recovery_is_safe(
+                prior_start.get("coordinator_process"), previous_workflow, current,
+                candidate_matches=True,
+                recovery_count=prior_recovery_count,
+            ):
+                return True, None
+            reclaim_dead_claim = True
+        elif not self._stage_recovery_is_safe(
             prior_start.get("coordinator_process"), previous_workflow, current,
             candidate_matches=True,
             recovery_count=prior_recovery_count,
@@ -1510,7 +1571,7 @@ class NativeOrchestrationCoordinator:
 
         owner_id = f"stage:{stage}:{uuid4()}"
         acquired = claims.acquire_or_reacquire(
-            claim_key=prior_claim_key, owner_instance_id=owner_id, lease_seconds=120
+            claim_key=prior_claim_key, owner_instance_id=owner_id, lease_seconds=120, force=reclaim_dead_claim
         )
         if acquired is None:
             return True, None
@@ -2092,8 +2153,28 @@ class NativeOrchestrationCoordinator:
                 recovered_from_attempt_id = previous_attempt_id
         incomplete = [item for key, item in starts.items() if key not in terminal]
         abandoned_attempt: dict[str, Any] | None = None
+        reclaim_dead_process_claim = False
         if prior_claim is not None and prior_claim.is_active and recovery_claim is None:
-            return None
+            if incomplete:
+                prev_attempt = incomplete[-1]
+                prev_proc = prev_attempt.get("coordinator_process")
+                proc_event = next(
+                    (event.evidence_references or {} for event in reversed(stage_events)
+                     if event.event_type == "STAGE_INVOCATION_PROCESS_STARTED"
+                     and (event.evidence_references or {}).get("attempt_id") == prev_attempt.get("attempt_id")),
+                    None,
+                )
+                child_proc = (proc_event or {}).get("process_identity")
+                if self._stage_recovery_is_safe(
+                    prev_proc,
+                    child_proc,
+                    process_identity(),
+                    candidate_matches=prev_attempt.get("candidate") == candidate,
+                    recovery_count=int(prev_attempt.get("recovery_count", 0)),
+                ):
+                    reclaim_dead_process_claim = True
+            if not reclaim_dead_process_claim:
+                return None
         if prior_claim is not None and incomplete:
             previous = incomplete[-1]
             if previous.get("candidate") != candidate:
@@ -2132,7 +2213,7 @@ class NativeOrchestrationCoordinator:
             return None
         owner = f"stage:{stage}:{uuid4()}"
         claim = recovery_claim or claims.acquire_or_reacquire(
-            claim_key=claim_key, owner_instance_id=owner, lease_seconds=120
+            claim_key=claim_key, owner_instance_id=owner, lease_seconds=120, force=reclaim_dead_process_claim
         )
         if claim is None:
             release_recovery_claim()
@@ -3245,6 +3326,37 @@ class NativeOrchestrationCoordinator:
                     ),
                 )
         accepted_response = operator_clarification and operator_clarification.strip()
+        accepted_checkpoint_recovery_response = False
+        if (
+            gate_pending
+            and isinstance(pending_gate, dict)
+            and pending_gate.get("gate") == "watchdog_escalation"
+            and not accepted_response
+            and not operator_ack
+            and self._can_auto_recover_watchdog_escalation(uow, active_run, pending_gate)
+        ):
+            self._clear_current_human_gate(
+                uow,
+                active_run,
+                response_text="Autorizo reanudar una vez el mismo Run y candidato después del diagnóstico Watchdog.",
+                commit=True,
+            )
+            watchdog_repo = getattr(uow, "watchdog", None)
+            if watchdog_repo is not None:
+                stage_val = active_run.current_stage.value if hasattr(active_run.current_stage, "value") else str(active_run.current_stage)
+                diagnosis = watchdog_repo.get_by_run_stage_generation(
+                    active_run.run_id,
+                    stage_val,
+                    int(active_run.current_generation or 1),
+                )
+                if diagnosis:
+                    watchdog_repo.update_diagnosis(
+                        diagnosis["id"],
+                        {"status": "RESOLVED", "action": "auto_recovered_by_watchdog"},
+                    )
+            gate_pending = False
+            pending_gate = None
+            accepted_checkpoint_recovery_response = True
         if gate_pending and not accepted_response and not operator_ack:
             if isinstance(pending_gate, dict):
                 return OrchestrationCoordinationResult(
@@ -3270,8 +3382,6 @@ class NativeOrchestrationCoordinator:
             change_name=change_name,
         )
         worktree_path = worktree_info.path
-
-        accepted_checkpoint_recovery_response = False
         if entry_stage == OrchestrationStage.IMPLEMENTING and gate_pending:
             recovery_diagnosis = self._diagnose_apply_checkpoint_recovery(uow, active_run)
             current_gate = get_active_human_payload(active_run) or {}
@@ -3756,9 +3866,14 @@ class NativeOrchestrationCoordinator:
             OrchestrationStage.IMPLEMENTING,
         }:
             stored_feasibility = (active_run.stop_details or {}).get("complexity_assessment")
-            if not isinstance(stored_feasibility, dict) or stored_feasibility.get(
-                "feasibility_status"
-            ) != "EXECUTABLE":
+            is_feasibility_overridden = bool(
+                (active_run.stop_details or {}).get("feasibility_overridden")
+                or (active_run.stop_details or {}).get("feasibility_override_reason")
+            )
+            if not is_feasibility_overridden and (
+                not isinstance(stored_feasibility, dict)
+                or stored_feasibility.get("feasibility_status") != "EXECUTABLE"
+            ):
                 self._update_stage(uow, active_run, OrchestrationStage.VALIDATING)
 
         # Step 6: Propose and Strict Validation Loop
@@ -4101,7 +4216,11 @@ class NativeOrchestrationCoordinator:
                                 stored_payload.get("feasibility"), feasibility_inputs, worktree_path
                             )
                         )
-                        if reval_status == "EXECUTABLE":
+                        is_feasibility_overridden = bool(
+                            (active_run.stop_details or {}).get("feasibility_overridden")
+                            or (active_run.stop_details or {}).get("feasibility_override_reason")
+                        )
+                        if reval_status == "EXECUTABLE" or is_feasibility_overridden:
                             complexity_result = ComplexityAssessment(
                                 status="VALID",
                                 complexity=stored_payload.get("complexity") or "moderate",
@@ -4110,11 +4229,11 @@ class NativeOrchestrationCoordinator:
                                 output=previous_assessment.get("output", ""),
                                 structured_output=stored_so,
                                 diagnostic_output=previous_assessment.get("diagnostic_output", ""),
-                                feasibility_status=reval_status,
+                                feasibility_status="EXECUTABLE" if is_feasibility_overridden else reval_status,
                                 task_feasibility=reval_tasks,
                                 scenario_coverage=reval_scenarios,
-                                feasibility_blockers=reval_blockers,
-                                feasibility_actions=reval_actions,
+                                feasibility_blockers=() if is_feasibility_overridden else reval_blockers,
+                                feasibility_actions=() if is_feasibility_overridden else reval_actions,
                             )
                             self._persist_complexity_assessment(
                                 active_run,
@@ -5879,6 +5998,9 @@ class NativeOrchestrationCoordinator:
 
         active_run.is_active = False
         active_run.stop_outcome = OrchestrationStopOutcome.COMPLETED
+        details = dict(active_run.stop_details or {})
+        details.setdefault("resolved_human_gates", [])
+        active_run.stop_details = details
         self._update_stage(uow, active_run, OrchestrationStage.COMPLETED)
 
         # Clean up the managed worktrees now that the change is complete and merged.

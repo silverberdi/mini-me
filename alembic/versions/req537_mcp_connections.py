@@ -9,7 +9,7 @@ import sqlalchemy as sa
 from alembic import op
 
 revision: str = "req537_mcp_connections"
-down_revision: Union[str, None] = "req466_project_test_database_profile"
+down_revision: Union[str, None] = "watchdog_518_component"
 branch_labels: Union[str, Sequence[str], None] = None
 depends_on: Union[str, Sequence[str], None] = None
 

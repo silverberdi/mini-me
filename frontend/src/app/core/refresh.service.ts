@@ -40,6 +40,7 @@ export class RefreshService implements OnDestroy {
   readonly quotas = signal<QuotaObservation[]>([]);
   readonly cost = signal<DashboardCost>({ status: 'no_data', providers: [], series: [] });
   readonly temporalTelemetry = signal<Record<string, TemporalTelemetryProjection>>({});
+  readonly telemetryWindowDays = signal<7 | 14 | 30 | 90>(30);
   readonly syncState = signal<'idle' | 'syncing' | 'error'>('idle');
   readonly updateCheckRequested = signal<number>(0);
   private events: EventSource | null = null;
@@ -110,6 +111,9 @@ export class RefreshService implements OnDestroy {
     this.syncState.set('syncing');
     const activeId = this.activeProject()?.project_id || this.selectedProjectId();
     const query = activeId ? `?project_id=${encodeURIComponent(activeId)}` : "";
+    const dashboardQuery = activeId
+      ? `?project_id=${encodeURIComponent(activeId)}&window_days=${this.telemetryWindowDays()}`
+      : `?window_days=${this.telemetryWindowDays()}`;
 
     const now = Date.now();
     const shouldFetchDashboard = force || (now - this.lastDashboardFetchTime >= this.DASHBOARD_CACHE_TTL_MS);
@@ -120,7 +124,7 @@ export class RefreshService implements OnDestroy {
         this.api.get<OrchestrationRun[]>(`/api/v1/orchestration/runs${query}`, { signal }),
         activeId ? this.api.get<RequestItem[]>(`/api/v1/projects/${encodeURIComponent(activeId)}/requests`, { signal }) : Promise.resolve(null),
         shouldFetchDashboard
-          ? this.api.get<{ cost: DashboardCost; temporal_telemetry?: Record<string, TemporalTelemetryProjection> }>(`/api/v1/dashboard/overview${query}`, { signal })
+          ? this.api.get<{ cost: DashboardCost; temporal_telemetry?: Record<string, TemporalTelemetryProjection> }>(`/api/v1/dashboard/overview${dashboardQuery}`, { signal })
           : Promise.resolve(null),
         this.api.get<{ providers: QuotaObservation[] }>("/api/v1/providers/quotas", { signal }),
       ]);
@@ -234,6 +238,24 @@ export class RefreshService implements OnDestroy {
       this.lastUpdated.set(new Date());
     } catch {
       // Ignored in background
+    }
+  }
+
+  /**
+   * Update the temporal telemetry projection window (e.g. 7, 14, 30, 90 days)
+   * and fetch updated telemetry projections across all dimensions.
+   */
+  async setTelemetryWindowDays(days: 7 | 14 | 30 | 90): Promise<void> {
+    this.telemetryWindowDays.set(days);
+    try {
+      const res = await this.api.get<Record<string, TemporalTelemetryProjection>>(
+        `/api/v1/dashboard/telemetry?window_days=${days}`
+      );
+      if (res.ok && res.data) {
+        this.temporalTelemetry.set(res.data);
+      }
+    } catch {
+      // Best-effort fetch, preserve existing projection
     }
   }
 
