@@ -232,8 +232,9 @@ import { VersionService } from './core/version.service';
             Trabajo Actual
           </a>
           <a routerLink="/mejora-continua" routerLinkActive="bg-sky-500/10 text-sky-400 border-sky-500/30"
-             class="flex items-center gap-2 rounded-lg border border-transparent px-3 py-2 text-sm text-slate-300 hover:bg-slate-800 hover:text-white">
-            <span>Mejora Continua</span>
+             class="flex items-center gap-3 px-3.5 py-2.5 rounded-xl text-sm font-medium text-slate-400 hover:text-white hover:bg-slate-800/60 border border-transparent transition-colors">
+            <svg aria-hidden="true" class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 3l1.9 5.8L20 11l-6.1 2.2L12 19l-1.9-5.8L4 11l6.1-2.2L12 3zm7 11l1.1 2.9L23 18l-2.9 1.1L19 22l-1.1-2.9L15 18l2.9-1.1L19 14z"/></svg>
+            Mejora Continua
           </a>
 
           <a routerLink="/proyectos" routerLinkActive="bg-sky-500/10 text-sky-400 border-sky-500/30"
