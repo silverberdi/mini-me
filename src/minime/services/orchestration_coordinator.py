@@ -4096,9 +4096,14 @@ class NativeOrchestrationCoordinator:
                                 if hasattr(uow, "commit"):
                                     uow.commit()
 
+                completed_complexity_attempts = [
+                    attempt
+                    for attempt in ((active_run.stop_details or {}).get("complexity_attempts") or [])
+                    if isinstance(attempt, dict) and attempt.get("status") not in ("IN_PROGRESS", None)
+                ]
                 if (
                     complexity_result is None
-                    and (active_run.stop_details or {}).get("complexity_attempts")
+                    and completed_complexity_attempts
                     and previous_context == context_hashes
                 ):
                     return OrchestrationCoordinationResult(
