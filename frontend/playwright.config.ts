@@ -14,7 +14,7 @@ if (!/(^|_)test$/i.test(databaseName)) {
 }
 
 export default defineConfig({
-  testDir: '.',
+  testDir: './e2e',
   timeout: 30000,
   expect: {
     timeout: 5000,
@@ -41,9 +41,9 @@ export default defineConfig({
     },
   ],
   webServer: {
-    command: process.env['E2E_SERVER_CMD'] || 'npm run build && node e2e/static-server.mjs',
+    command: process.env['E2E_SERVER_CMD'] || `python3 -m uvicorn minime.api.app:app --host 127.0.0.1 --port ${PORT}`,
     url: `${BASE_URL}/health/live`,
-    cwd: '.',
+    cwd: '..',
     env: {
       MINIME_DATABASE_URL: E2E_DATABASE_URL,
       MINIME_TEST_DATABASE_URL: E2E_DATABASE_URL,
