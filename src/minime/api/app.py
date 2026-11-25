@@ -1508,7 +1508,6 @@ async def _execute_request_in_fresh_session(
                 return
             from minime.adapters.github import GitHubAdapter
             from minime.services.agent_runner import CliAgentRunner
-            from minime.services.budget_service import BudgetService
             from minime.services.capacity_lifecycle_service import CapacityLifecycleService
             from minime.services.orchestration_coordinator import NativeOrchestrationCoordinator
             from minime.services.worktree_manager import WorktreeManager
@@ -2853,13 +2852,36 @@ def get_dashboard_overview(
     _operator: AuthenticatedOperatorDep,
     uow: UowDep,
     project_id: str | None = None,
+    window_days: int = Query(30, ge=1, le=365),
 ) -> DashboardOverviewResponse:
     """Return the authenticated Dashboard read model and ledger-backed costs."""
     selected_project_id = project_id
     if selected_project_id is None:
         projects = uow.projects.list_all()
         selected_project_id = projects[0].project_id if projects else None
-    return OperationsDashboardService(uow).get_overview(selected_project_id)
+    return OperationsDashboardService(uow).get_overview(
+        selected_project_id, window_days=window_days
+    )
+
+
+@app.get(
+    "/api/v1/dashboard/telemetry",
+    tags=["dashboard"],
+)
+def get_dashboard_telemetry(
+    _operator: AuthenticatedOperatorDep,
+    uow: UowDep,
+    window_days: int = Query(30, ge=1, le=365),
+    granularity: str | None = None,
+) -> dict[str, Any]:
+    """Return the multi-series temporal telemetry projections across dimensions."""
+    svc = OperationsDashboardService(uow)
+    return {
+        dimension: svc.get_temporal_telemetry(
+            dimension=dimension, window_days=window_days, granularity=granularity
+        )
+        for dimension in ("autonomy", "time", "cost")
+    }
 
 
 

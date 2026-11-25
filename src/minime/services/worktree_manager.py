@@ -9,6 +9,7 @@ import json
 import logging
 import os
 import re
+import shutil
 import stat
 import unicodedata
 import uuid
@@ -4564,6 +4565,7 @@ class WorktreeManager:
                 require_clean=False,
                 worktree_kind="request worktree",
             )
+            await self._link_installed_node_dependencies(canonical_path)
             return
         ownership = OrchestrationWorktreeOwnership(
             project_id=project_id,
@@ -4582,6 +4584,7 @@ class WorktreeManager:
         await self._verify_creation_postconditions(
             canonical_path, ownership, expected_branch=branch, expected_base_sha=source_base_sha
         )
+        await self._link_installed_node_dependencies(canonical_path)
 
     async def create_request_worktree(
         self,
@@ -4689,6 +4692,8 @@ class WorktreeManager:
             provision_canonical_capabilities(worktree_path)
         except Exception as exc:
             logger.warning(f"Could not provision canonical capabilities in worktree {worktree_path}: {exc}")
+
+        await self._link_installed_node_dependencies(worktree_path)
 
         return WorktreeInfo(
             path=worktree_path,

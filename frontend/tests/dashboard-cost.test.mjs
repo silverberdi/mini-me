@@ -43,3 +43,12 @@ test('the dashboard cost chart maps API series to the SVG view model', async () 
   ]);
   assert.equal(points.length, 3);
 });
+
+test('dashboard exposes temporal range chips (7d, 14d, 30d, 90d) and queries telemetry with window_days', () => {
+  assert.match(dashboard, /telemetry-window-/);
+  assert.match(dashboard, /availableWindowDays/);
+  assert.match(dashboard, /setWindowDays/);
+  assert.match(refresh, /readonly telemetryWindowDays = signal/);
+  assert.match(refresh, /setTelemetryWindowDays/);
+  assert.match(refresh, /\/api\/v1\/dashboard\/telemetry\?window_days=/);
+});
