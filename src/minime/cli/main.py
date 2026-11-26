@@ -769,14 +769,98 @@ def scheduler_run_cmd(
                                 if active_run.active_job_id and getattr(uow, "job_logs", None)
                                 else []
                             )
-                            observation = WatchdogObservationService().observe(
+                            watchdog_service = WatchdogObservationService()
+                            observation = watchdog_service.observe(
                                 active_run,
                                 stage_events,
                                 job_logs=job_logs,
                                 threshold_minutes=settings["inactivity_threshold_minutes"],
                             )
+                            gate_payload = (active_run.stop_details or {}).get("human_payload")
+                            gate_observation = (
+                                watchdog_service.observe_human_gate(active_run, gate_payload)
+                                if observation is None and isinstance(gate_payload, dict)
+                                else None
+                            )
+                            if gate_observation is not None:
+                                observation = gate_observation
                             watchdog_observation = observation
-                            if observation and not watchdog_repo.get_by_run_stage_generation(
+                            if observation and observation.get("trigger") == "proposal_feasibility_human_gate":
+                                owner_repo = getattr(uow, "orchestration_worktree_ownerships", None)
+                                owner = (
+                                    owner_repo.get_by_job_id(active_run.active_job_id)
+                                    if owner_repo and active_run.active_job_id else None
+                                )
+                                gate_identity = hashlib.sha256(json.dumps({
+                                    "run_id": active_run.run_id,
+                                    "stage": active_run.current_stage.value,
+                                    "gate_id": gate_payload.get("gate_id"),
+                                }, sort_keys=True).encode()).hexdigest()[:40]
+                                attempt_key = f"sre-unblocker:gate-attempt:{gate_identity}"
+                                if (
+                                    owner
+                                    and Path(owner.canonical_worktree_path).is_dir()
+                                    and settings.get("provider_id")
+                                    and not stage_events_repo.get_by_transition_key(attempt_key)
+                                ):
+                                    watchdog_service.record_intervention_event(
+                                        uow, active_run,
+                                        event_type="SRE_UNBLOCKER_ATTEMPTED",
+                                        transition_key=attempt_key,
+                                        evidence={
+                                            "trigger": "proposal_feasibility_human_gate",
+                                            "action": "diagnose_and_preserve_operator_gate",
+                                            "original_question": gate_payload.get("question"),
+                                            "original_options": gate_payload.get("options"),
+                                            "gate_id": gate_payload.get("gate_id"),
+                                        },
+                                    )
+                                    uow.commit()
+                                    observation = asyncio.run(
+                                        watchdog_service.add_semantic_diagnosis(
+                                            observation, settings,
+                                            worktree_path=owner.canonical_worktree_path,
+                                            human_payload=gate_payload,
+                                        )
+                                    )
+                                    analysis = observation.get("evidence", {}).get("semantic_analysis")
+                                    escalation_key = f"sre-unblocker:gate-escalated:{gate_identity}"
+                                    watchdog_service.record_intervention_event(
+                                        uow, active_run,
+                                        event_type="SRE_UNBLOCKER_ESCALATED",
+                                        transition_key=escalation_key,
+                                        evidence={
+                                            "trigger": "proposal_feasibility_human_gate",
+                                            "action": "preserve_operator_gate",
+                                            "observed_result": "NEEDS_HUMAN",
+                                            "root_cause": observation.get("root_cause"),
+                                            "diagnosis": analysis or observation.get("evidence", {}).get("semantic_model_status"),
+                                            "provider_id": observation.get("evidence", {}).get("semantic_model_provider_id"),
+                                            "harness_id": observation.get("evidence", {}).get("semantic_model_harness_id"),
+                                            "model_id": observation.get("evidence", {}).get("semantic_model_id"),
+                                            "original_question": gate_payload.get("question"),
+                                            "original_options": gate_payload.get("options"),
+                                            "gate_id": gate_payload.get("gate_id"),
+                                        },
+                                    )
+                                    has_prior_pattern = watchdog_service.has_prior_sre_pattern(
+                                        watchdog_repo, observation
+                                    )
+                                    if analysis and has_prior_pattern:
+                                        observation["evidence"]["sre_intervention_transition_key"] = escalation_key
+                                        observation["improvement_suggestion"] = analysis
+                                        watchdog_repo.save_diagnosis(observation)
+                                    details = dict(active_run.stop_details or {})
+                                    preserved_payload = dict(gate_payload)
+                                    preserved_payload["sre_unblocker_diagnostic"] = {
+                                        "status": observation.get("evidence", {}).get("semantic_model_status"),
+                                        "analysis": analysis,
+                                    }
+                                    details["human_payload"] = preserved_payload
+                                    active_run.stop_details = details
+                                    uow.orchestration_runs.save(active_run)
+                                    uow.commit()
+                            elif observation and not watchdog_repo.get_by_run_stage_generation(
                                 active_run.run_id,
                                 observation["stage"],
                                 observation["candidate_generation"],
@@ -793,6 +877,29 @@ def scheduler_run_cmd(
                                         worktree_path=(owner.canonical_worktree_path if owner else None),
                                     )
                                 )
+                                if observation.get("evidence", {}).get("semantic_model_status") in {
+                                    "COMPLETED", "UNAVAILABLE",
+                                }:
+                                    attempt_identity = hashlib.sha256(
+                                        f"{active_run.run_id}:{observation['stage']}:{observation['candidate_sha']}:{observation['candidate_generation']}".encode()
+                                    ).hexdigest()[:40]
+                                    attempt_key = f"sre-unblocker:watchdog-attempt:{attempt_identity}"
+                                    watchdog_service.record_intervention_event(
+                                        uow, active_run,
+                                        event_type="SRE_UNBLOCKER_ATTEMPTED",
+                                        transition_key=attempt_key,
+                                        evidence={
+                                            "trigger": observation.get("root_cause"),
+                                            "action": "diagnose_observed_watchdog_stall",
+                                            "observed_result": observation.get("evidence", {}).get("semantic_model_status"),
+                                        },
+                                    )
+                                    observation["evidence"]["sre_intervention_transition_key"] = attempt_key
+                                    has_prior_pattern = watchdog_service.has_prior_sre_pattern(
+                                        watchdog_repo, observation
+                                    )
+                                    if not has_prior_pattern:
+                                        observation["improvement_suggestion"] = None
                                 watchdog_repo.save_diagnosis(observation)
                                 uow.commit()
                         actions = getattr(uow, "operator_actions", None)

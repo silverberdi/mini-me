@@ -195,7 +195,7 @@ import type { OrchestrationRun, QuotaObservation, TemporalTelemetryProjection, T
                   (mouseenter)="hoveredSeriesId = series.series_id"
                   (mouseleave)="hoveredSeriesId = null"
                 >
-                  <title>{{ series.label }}: {{ point.value }} {{ currentProjection?.units || currentDimensionUnit }} ({{ point.timestamp }})</title>
+                  <title>{{ series.label }}: {{ point.value }} {{ currentDimensionUnit }} ({{ point.timestamp }}){{ selectedDimension() === 'autonomy' ? ' · ' + autonomyOutcomeSummary(point.autonomy_outcomes || {}) : '' }}</title>
                 </circle>
               </ng-container>
             </svg>
@@ -209,6 +209,14 @@ import type { OrchestrationRun, QuotaObservation, TemporalTelemetryProjection, T
               <button type="button" class="text-[10px] text-sky-300 hover:text-white" [attr.aria-label]="'Aislar ' + series.label" (click)="soloSeries(series.series_id)">Aislar</button>
             </div>
             <button type="button" class="text-xs text-slate-300 underline" (click)="restoreSeries()">Restaurar</button>
+          </div>
+
+          <div *ngIf="selectedDimension() === 'autonomy'" class="grid gap-2 text-xs text-slate-300 sm:grid-cols-3" aria-label="Resultados de autonomía por serie" data-testid="autonomy-outcome-summary">
+            <div *ngFor="let series of currentProjection?.series || []" class="rounded-lg border border-slate-800 bg-slate-900/50 p-2">
+              <span class="font-semibold">{{ series.label }}</span>
+              <span class="mt-1 block text-slate-400">{{ autonomySeriesSummary(series) }}</span>
+            </div>
+            <p class="text-slate-500 sm:col-span-3">Runs incompletos o con evidencia ambigua excluidos: {{ currentProjection?.excluded?.['unverified_or_incomplete'] || 0 }}</p>
           </div>
 
           <div *ngIf="selectedDimension() === 'cost' && refresh.cost().status === 'available'" class="grid grid-cols-1 md:grid-cols-2 gap-3" aria-label="Costos liquidados por proveedor">
@@ -462,7 +470,7 @@ export class DashboardComponent {
 
   get currentDimensionTitle(): string {
     switch (this.selectedDimension()) {
-      case 'autonomy': return 'Tasa de Autonomía (% éxito directo sin intervención humana)';
+      case 'autonomy': return 'Tasa de autonomía (% de Runs sin intervención del operador)';
       case 'time': return 'Duración Total del Run (minutos transcurridos)';
       case 'cost': return 'Costo liquidado por proveedor / modelo';
     }
@@ -557,6 +565,20 @@ export class DashboardComponent {
       case 'time': return '0h';
       case 'cost': return '$0';
     }
+  }
+
+  autonomyOutcomeSummary(outcomes: Record<string, number>): string {
+    return `Sin intervención: ${outcomes['no_intervention'] || 0}; recuperación autónoma: ${outcomes['autonomous_recovery'] || 0}; requirió operador: ${outcomes['operator_needed'] || 0}`;
+  }
+
+  autonomySeriesSummary(series: TemporalTelemetrySeries): string {
+    const totals = series.points.reduce<Record<string, number>>((sum, point) => {
+      for (const [key, count] of Object.entries(point.autonomy_outcomes || {})) {
+        sum[key] = (sum[key] || 0) + count;
+      }
+      return sum;
+    }, {});
+    return this.autonomyOutcomeSummary(totals);
   }
 
 }

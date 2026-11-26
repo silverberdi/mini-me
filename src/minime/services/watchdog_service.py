@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import Any
 
 from minime.logging import redact_secrets
+from minime.domain.models import OrchestrationStageEvent
 from minime.services.agent_confinement import process_identity_state
 
 
@@ -136,6 +137,73 @@ class WatchdogObservationService:
         result["affected_component"] = self._component_for_stage(stage)
         return result
 
+    def observe_human_gate(self, run: Any, payload: dict[str, Any]) -> dict[str, Any] | None:
+        """Prepare read-only SRE context only for technical feasibility gates."""
+        if not getattr(run, "is_active", False) or payload.get("gate") != "proposal_feasibility":
+            return None
+        stage = getattr(getattr(run, "current_stage", None), "value", run.current_stage)
+        evidence = redact_secrets({
+            "gate_id": payload.get("gate_id"),
+            "question": payload.get("question"),
+            "options": payload.get("options"),
+            "blockers": payload.get("blockers"),
+            "task_feasibility": payload.get("task_feasibility"),
+            "scenario_coverage": payload.get("scenario_coverage"),
+            "candidate_sha": payload.get("candidate_sha"),
+        })
+        result = self._observation(
+            run, str(stage), "proposal_feasibility_human_gate", "HUMAN_REQUIRED",
+            datetime.now(UTC), evidence,
+            "El gate de factibilidad requiere revisión técnica; la pregunta y opciones originales siguen bajo autoridad del operador.",
+        )
+        result["trigger"] = "proposal_feasibility_human_gate"
+        return result
+
+    @staticmethod
+    def record_intervention_event(
+        uow: Any, run: Any, *, event_type: str, transition_key: str, evidence: dict[str, Any]
+    ) -> bool:
+        """Append one idempotent intervention fact without mutating prior events."""
+        repository = getattr(uow, "orchestration_stage_events", None)
+        if repository is None or not callable(getattr(repository, "save", None)):
+            return False
+        get_by_key = getattr(repository, "get_by_transition_key", None)
+        if callable(get_by_key) and get_by_key(transition_key) is not None:
+            return False
+        stage = getattr(run, "current_stage", None)
+        repository.save(OrchestrationStageEvent(
+            run_id=run.run_id,
+            from_stage=stage,
+            to_stage=stage,
+            event_type=event_type,
+            transition_key=transition_key,
+            actor="sre_unblocker",
+            evidence_references=redact_secrets({
+                "project_id": run.project_id,
+                "run_id": run.run_id,
+                "stage": getattr(stage, "value", stage),
+                "candidate_sha": getattr(run, "current_candidate_sha", None),
+                **evidence,
+            }),
+        ))
+        return True
+
+    @staticmethod
+    def has_prior_sre_pattern(watchdog_repository: Any, diagnosis: dict[str, Any]) -> bool:
+        """Require a prior different Run with the same cause/component and event link."""
+        list_diagnoses = getattr(watchdog_repository, "list_diagnoses", None)
+        if not callable(list_diagnoses):
+            return False
+        prior = list_diagnoses(project_id=diagnosis.get("project_id"), limit=200)
+        return any(
+            item.get("run_id") != diagnosis.get("run_id")
+            and item.get("root_cause") == diagnosis.get("root_cause")
+            and item.get("affected_component") == diagnosis.get("affected_component")
+            and isinstance(item.get("evidence"), dict)
+            and item["evidence"].get("sre_intervention_transition_key")
+            for item in prior
+        )
+
     @staticmethod
     def _component_for_stage(stage: Any) -> str:
         return {
@@ -156,6 +224,7 @@ class WatchdogObservationService:
         settings: dict[str, Any],
         *,
         worktree_path: str | Path | None,
+        human_payload: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         """Ask only the explicitly selected model to explain an already observed stall."""
         selection = (
@@ -175,18 +244,27 @@ class WatchdogObservationService:
 
             provider_id, harness_id, model_id = selection
             profile = resolve_cli_invocation(
-                str(harness_id), "thinking", config=load_config(), model=str(model_id), effort="low"
+                str(harness_id), "thinking", config=load_config(), model=str(model_id)
             )
             profile = replace(
                 profile,
                 canonical_provider_id=str(provider_id),
                 harness_id=str(harness_id),
             )
+            observation["evidence"].update({
+                "semantic_model_provider_id": str(provider_id),
+                "semantic_model_harness_id": str(harness_id),
+                "semantic_model_id": str(model_id),
+            })
             runner = CliAgentRunner(invocation=profile)
             prompt = (
-                "Diagnostica este estancamiento con criterio conservador. La evidencia ya fue observada; "
-                "no autorices cambios ni reintentos. Devuelve causa probable, explicación breve y una "
-                "sugerencia preventiva para un operador. Si la evidencia no basta, dilo explícitamente.\n"
+                "Usa la skill canónica minime-sre-unblocker disponible en este worktree para diagnosticar "
+                "este bloqueo. La skill limita las acciones a playbooks probados y preserva las decisiones "
+                "humanas. En esta invocación eres diagnóstico: no respondas gates, no cambies archivos ni "
+                "reintentes operaciones. Devuelve causa, playbook aplicable (A, B, C o ninguno), evidencia "
+                "concreta, acción segura recomendada y cualquier incertidumbre. Si la evidencia no basta, "
+                "dilo explícitamente. La pregunta y opciones originales se incluyen como evidencia; no las "
+                "parafrasees ni sustituyas.\n"
                 + json.dumps(
                     {
                         "project_id": observation["project_id"],
@@ -196,6 +274,8 @@ class WatchdogObservationService:
                         "candidate_sha": observation.get("candidate_sha"),
                         "root_cause_observed": observation["root_cause"],
                         "evidence": observation["evidence"],
+                        "original_human_payload": human_payload,
+                        "skill": "minime-sre-unblocker",
                     },
                     ensure_ascii=False,
                 )
@@ -220,6 +300,18 @@ class WatchdogObservationService:
                 observation["improvement_suggestion"] = answer
             else:
                 observation["evidence"]["semantic_model_status"] = "UNAVAILABLE"
+                observation["evidence"].update({
+                    "semantic_model_exit_code": result.exit_code,
+                    "semantic_model_timed_out": bool(result.timed_out),
+                    "semantic_model_final_response_status": result.final_response_status,
+                    "semantic_model_provider_used": result.provider_used,
+                    "semantic_model_profile_used": result.profile_used,
+                    "semantic_model_model_used": result.model_used,
+                    "semantic_model_final_response_source": result.final_response_source,
+                    "semantic_model_stdout_line_count": len(result.stdout or []),
+                    "semantic_model_stderr_line_count": len(result.stderr or []),
+                    "semantic_model_output_truncated": bool(result.output_truncated),
+                })
         except Exception as exc:
             observation["evidence"]["semantic_model_status"] = "UNAVAILABLE"
             observation["evidence"]["semantic_model_error"] = redact_secrets(type(exc).__name__)

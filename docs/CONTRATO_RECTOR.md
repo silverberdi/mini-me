@@ -1,6 +1,6 @@
 # mini me — Contrato rector de producto y arquitectura
 
-**Versión 2.0 — 3 de noviembre de 2026.**
+**Versión 2.1 — 26 de noviembre de 2026.**
 **Autoridad:** este documento es la dirección funcional y arquitectónica de mini me; sustituye las decisiones incompatibles de planes, specs, fichas y contratos históricos, incluida la versión 1.3. La implementación existente NO se considera conforme por la sola publicación de este documento.
 **Naturaleza:** instalación personal única, no producto comercial. A partir de esta versión, el trabajo se autoriza por **cambios discretos** (un Issue = un Change OpenSpec), sin numeración de fases ni tabla fija de Issues.
 **Modelo de autorización:** el operador es la única autoridad que autoriza cambios. Cada cambio es un Issue con un único Change OpenSpec y un alcance cohesivo. La corrección de bloqueos del propio mini me es un cambio ordinario, no una "excepción".
@@ -21,6 +21,8 @@ Principios no negociables: simplicidad; reutilización antes de crear; una respo
 - **OpenSpec:** autoridad de comportamiento/diseño/tareas y de los workflows nativos usados por agentes.
 - **Agentes:** pensamiento/propuesta/verify, ejecución/apply/correcciones, revisión independiente de solo lectura y respaldo compatible.
 - **mini me:** configura proyectos, identifica y selecciona tickets, prepara worktrees, invoca agentes con skills oficiales, recibe evidencias, publica comentarios/PR, presenta decisiones, ejecuta operaciones Git autorizadas y reanuda trabajo. No produce contenido semántico OpenSpec ni código.
+- **Watchdog/SRE:** capacidad transversal del scheduler que observa detenciones y puede resolver únicamente bloqueos técnicos deterministas mediante los playbooks autorizados de `minime-sre-unblocker` y las autoridades existentes. Los casos ambiguos o que requieren autorización permanecen en el gate humano vigente.
+- **Mejora Continua:** vista operativa `/mejora-continua` para propuestas de prevención respaldadas por intervenciones observadas; el operador decide si las convierte en trabajo. No crea Issues por sí misma.
 - **PostgreSQL:** configuración y mínimo estado operativo necesario para continuidad/idempotencia, autorizaciones y límites de gasto. Nunca es el backlog maestro.
 - **CI/CD propio del proyecto:** todo despliegue productivo, fuera del alcance de mini me.
 
@@ -48,6 +50,8 @@ Para un proyecto habilitado y **cuando exista admisión de trabajo autorizada**,
 
 **Verify (ejecutor):** ejecutado por el mismo agente ejecutor mediante el workflow oficial OpenSpec Verify (y NO por el agente de pensamiento). Ante discrepancias, bucle de autocorrección con Apply. Al aprobar: baja/moderada pasa a preparación de PR; alta complejidad pasa a revisión independiente de código de solo lectura.
 
+**Watchdog/SRE transversal:** ante un bloqueo técnico elegible, invoca el rol configurado y la skill canónica `minime-sre-unblocker`. El modelo propone diagnóstico; la acción solo se ejecuta por una autoridad determinista existente, ligada al mismo Run, etapa, candidato y scope. La primera lista de playbooks cubre fallback PF-03 con evidencia no bloqueante y verificación mapeada, renovación OAuth de una conexión MCP configurada tras un 401, y recuperación de un lock huérfano dentro del worktree administrado con ausencia del proceso probada. El agente no invalida una precondición, no repite una operación de efecto incierto ni amplía alcance. Ante incertidumbre, agota un solo intento y eleva el gate vigente.
+
 **Revisión independiente de código (condicional para alta complejidad):** agente de solo lectura contrasta ticket, propuesta, specs, diff y pruebas. Hallazgos → vuelta a Apply/Verify. Aprobación → preparación de PR.
 
 **Preparación de PR y política de merge:** la skill mínima `minime-pr-preparer` usa referencias estrictamente informativas (`Addresses #...` o `Ref #...`), excluyendo taxativamente palabras de cierre automático (`Fixes`, `Closes`, `Resolves`).
@@ -61,6 +65,7 @@ Para un proyecto habilitado y **cuando exista admisión de trabajo autorizada**,
 En Propose, Apply y Verify, capturar literalmente la solicitud original de OpenSpec/agente, operación, proyecto, ticket, rama/commit y cualquier **opción proporcionada por el workflow**. Distinguir información de pregunta o autorización reservada.
 
 - Si OpenSpec entrega opciones explícitas: mostrarlas fielmente al operador y distinguirlas de cualquier explicación contextual. No inventar opciones atribuidas a OpenSpec.
+- Cuando SRE diagnostique un gate de negocio, costo, alcance, seguridad, acción destructiva/irreversible o cualquier ambigüedad, preservar íntegros el texto y las opciones originales de OpenSpec; añadir el diagnóstico técnico en un campo/contexto separado, sin responder ni sustituir el gate.
 - Si no entrega opciones: el agente de pensamiento contrasta la pregunta con ticket, specs y contexto canónico. Si existe respuesta inequívoca y está autorizado a darla, contestar mediante workflow nativo y reanudar sin interrumpir al operador.
 - Si falta información/autoridad: presentar pregunta breve, causa, opciones razonables elaboradas POR EL AGENTE (etiquetadas como tales), consecuencias y recomendación fundamentada, o entrada libre cuando no haya alternativas.
 - Las autorizaciones expresas humanas, cambios materiales de alcance, presupuesto excepcional, seguridad, políticas y merge de implementación NUNCA los resuelve el modelo por sí mismo.
@@ -70,7 +75,7 @@ La UI tendrá una sola bandeja de atención que responda qué se requiere, por q
 
 ## 6. Persistencia y recuperación mínima
 
-La fuente remota conserva tickets/comentarios; Git conserva ramas/commits; OpenSpec conserva especificaciones; proveedor Git conserva PR/merge. La DB conserva configuración de proyectos y agentes, referencias de ticket/branch/candidato, fase/operación pendiente, intentos y resultados mínimos, decisiones humanas, límites de gasto y datos indispensables para no duplicar acciones ni perder continuidad. No replica historia externa ni añade estados porque sí.
+La fuente remota conserva tickets/comentarios; Git conserva ramas/commits; OpenSpec conserva especificaciones; proveedor Git conserva PR/merge. PostgreSQL conserva configuración de proyectos y agentes, referencias de ticket/branch/candidato, fase/operación pendiente, intentos y resultados mínimos, decisiones humanas, límites de gasto y datos indispensables para no duplicar acciones ni perder continuidad. Los hechos de intervención SRE se agregan al ledger durable de eventos por Run; las correcciones posteriores agregan eventos, no reescriben hechos previos. No replica historia externa ni añade estados porque sí.
 
 Fallos: preservar artefactos, mostrar causa; esperar capacidad sin quemar cuota; respaldo SOLO autorizado/compatible; corregir en ciclos acotados; recuperar tras reinicio; observar antes de repetir creaciones/comentarios/PR/merge. La re-ejecución de una etapa debe ser **idempotente**: observar el estado antes de repetir y no fallar porque el estado ya avanzó (p. ej., un cambio ya archivado no debe re-sincronizarse). Mantener protecciones de workspace, credenciales y permisos. NO nuevas sagas, scheduler ni motores de políticas sin un caso concreto que lo exija.
 

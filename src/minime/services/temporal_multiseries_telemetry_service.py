@@ -27,6 +27,7 @@ class TemporalTelemetryPointDTO(BaseModel):
     value: float
     source_timestamps: list[str] = Field(min_length=1)
     quality: str = "verified"
+    autonomy_outcomes: dict[str, int] = Field(default_factory=dict)
 
     @model_validator(mode="after")
     def require_verifiable_observation(self) -> "TemporalTelemetryPointDTO":
@@ -87,6 +88,9 @@ class TemporalMultiseriesTelemetryService:
         project_ids = [str(_value(p, "project_id")) for p in projects if _value(p, "project_id")]
         runs = list(getattr(self.uow.orchestration_runs, "list_runs", lambda: [])())
         observations: dict[str, dict[str, list[tuple[datetime, float, list[str]]]]] = defaultdict(lambda: defaultdict(list))
+        outcome_observations: dict[str, dict[str, dict[str, int]]] = defaultdict(
+            lambda: defaultdict(lambda: defaultdict(int))
+        )
         excluded: dict[str, int] = defaultdict(int)
         for run in runs:
             observation_time = (
@@ -100,11 +104,13 @@ class TemporalMultiseriesTelemetryService:
             if observed is None:
                 excluded["unverified_or_incomplete"] += 1
                 continue
-            timestamp, value, sources, excluded_waits = observed
+            timestamp, value, sources, excluded_waits, outcome = observed
             if excluded_waits:
                 excluded["human_gate_wait_intervals"] += excluded_waits
             bucket = self._bucket(timestamp, granularity)
             observations[str(_value(run, "project_id"))][bucket].append((timestamp, value, sources))
+            if outcome:
+                outcome_observations[str(_value(run, "project_id"))][bucket][outcome] += 1
 
         axis = self._axis(start, now.date(), granularity)
         series: list[TemporalTelemetrySeriesDTO] = []
@@ -113,6 +119,7 @@ class TemporalMultiseriesTelemetryService:
                 observations.get(project_id, {}),
                 axis,
                 percentage=dimension == "autonomy",
+                outcomes=outcome_observations.get(project_id, {}),
             )
             series.append(TemporalTelemetrySeriesDTO(
                 series_id=f"project:{project_id}",
@@ -129,8 +136,15 @@ class TemporalMultiseriesTelemetryService:
                 item for project in observations.values() for item in project.get(bucket, [])
             ]
             if values:
+                outcomes: dict[str, int] = defaultdict(int)
+                for project in outcome_observations.values():
+                    for outcome, count in project.get(bucket, {}).items():
+                        outcomes[outcome] += count
                 global_points.append(
-                    self._point(bucket, values, percentage=dimension == "autonomy")
+                    self._point(
+                        bucket, values, percentage=dimension == "autonomy",
+                        outcomes=outcomes,
+                    )
                 )
         series.insert(0, TemporalTelemetrySeriesDTO(
             series_id="global",
@@ -150,7 +164,9 @@ class TemporalMultiseriesTelemetryService:
             excluded=dict(excluded),
         )
 
-    def _observation(self, run: Any, dimension: str) -> tuple[datetime, float, list[str], int] | None:
+    def _observation(
+        self, run: Any, dimension: str
+    ) -> tuple[datetime, float, list[str], int, str | None] | None:
         timestamp = _timestamp(_value(run, "completed_at")) or _timestamp(_value(run, "updated_at")) or _timestamp(_value(run, "created_at"))
         if timestamp is None:
             return None
@@ -188,19 +204,37 @@ class TemporalMultiseriesTelemetryService:
                 list(actions_repo.list_by_run(_value(run, "run_id")))
                 if actions_repo and hasattr(actions_repo, "list_by_run") else []
             )
+            outcome = self._autonomy_outcome(events, resolved_gates, actions)
+            if outcome is None:
+                return None
             source_times = [
                 _iso(_timestamp(_value(event, "created_at")) or timestamp) for event in events
             ]
-            return timestamp, 0.0 if resolved_gates or actions else 1.0, source_times, 0
+            return timestamp, 0.0 if outcome == "operator_needed" else 1.0, source_times, 0, outcome
         if dimension == "time":
             duration, sources, excluded = self._machine_duration(run)
             if duration is None:
                 return None
-            return timestamp, round(duration / 60000.0, 3), sources, excluded
+            return timestamp, round(duration / 60000.0, 3), sources, excluded, None
         amount = self._liquidated_cost(run)
         if amount is None:
             return None
-        return timestamp, float(amount), [_iso(timestamp)], 0
+        return timestamp, float(amount), [_iso(timestamp)], 0, None
+
+    @staticmethod
+    def _autonomy_outcome(events: list[Any], resolved_gates: Any, actions: list[Any]) -> str | None:
+        if not isinstance(resolved_gates, list):
+            return None
+        if resolved_gates or actions:
+            return "operator_needed"
+        event_types = {str(_value(event, "event_type", "")) for event in events}
+        if "SRE_UNBLOCKER_ESCALATED" in event_types:
+            return None
+        if "SRE_UNBLOCKER_ATTEMPTED" in event_types:
+            if "SRE_UNBLOCKER_RESOLVED" in event_types:
+                return "autonomous_recovery"
+            return None
+        return "no_intervention"
 
     def _metrics(self, run: Any) -> Any | None:
         repo = getattr(self.uow, "provider_efficiency", None)
@@ -283,10 +317,12 @@ class TemporalMultiseriesTelemetryService:
         axis: list[str],
         *,
         percentage: bool = False,
+        outcomes: dict[str, dict[str, int]] | None = None,
     ) -> list[TemporalTelemetryPointDTO]:
         return [
-            TemporalMultiseriesTelemetryService._point(
-                bucket, values[bucket], percentage=percentage
+                TemporalMultiseriesTelemetryService._point(
+                    bucket, values[bucket], percentage=percentage,
+                    outcomes=(outcomes or {}).get(bucket, {}),
             )
             for bucket in axis
             if bucket in values
@@ -298,6 +334,7 @@ class TemporalMultiseriesTelemetryService:
         values: list[tuple[datetime, float, list[str]]],
         *,
         percentage: bool = False,
+        outcomes: dict[str, int] | None = None,
     ) -> TemporalTelemetryPointDTO:
         average = sum(value for _, value, _ in values) / len(values)
         if percentage:
@@ -308,6 +345,7 @@ class TemporalMultiseriesTelemetryService:
             source_timestamps=sorted(
                 {source for _, _, sources in values for source in sources}
             ),
+            autonomy_outcomes=outcomes or {},
         )
 
     @staticmethod

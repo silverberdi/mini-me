@@ -62,6 +62,7 @@ from minime.services.apply_checkpoint_recovery import (
     recovery_gate_payload,
 )
 from minime.services.budget_service import ObservedCost, ObservedCostSettlementService
+from minime.services.watchdog_service import WatchdogObservationService
 from minime.services.openspec_tasks import OpenSpecTaskTracker
 from minime.services.pr_preparer_service import PrPreparationInput, PrPreparerService
 from minime.services.proposal_feasibility import ProposalFeasibilityEvaluator
@@ -697,6 +698,26 @@ class NativeOrchestrationCoordinator:
         reason: str,
         evidence: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
+        existing_payload = (run.stop_details or {}).get("human_payload")
+        preserve_existing_gate = (
+            isinstance(existing_payload, dict)
+            and existing_payload.get("gate") != "watchdog_escalation"
+            and isinstance(existing_payload.get("question"), str)
+            and isinstance(existing_payload.get("options"), list)
+        )
+        payload = None
+        if preserve_existing_gate:
+            # Enrich the gate while leaving the source question and options intact.
+            payload = dict(existing_payload)
+            payload["sre_unblocker_diagnostic"] = {
+                "reason": reason[:1000],
+                "evidence": redact_secrets(evidence or {}),
+                "observed_at": utc_now().isoformat(),
+            }
+            details = dict(run.stop_details or {})
+            details["human_payload"] = payload
+            run.stop_details = details
+            uow.orchestration_runs.save(run)
         hold_response = "__WATCHDOG_HOLD_AND_PRESERVE__"
         options = [
             {
@@ -717,16 +738,20 @@ class NativeOrchestrationCoordinator:
             f"No pudo completar una recuperación mecánica segura: {reason}. "
             "¿Cómo quieres continuar?"
         )
-        payload = self._record_current_human_gate(
-            uow,
-            run,
-            gate="watchdog_escalation",
-            question=question,
-            options=options,
-            question_es=question,
-            options_es=[option["label"] for option in options],
-            payload={"watchdog_evidence": redact_secrets(evidence or {})},
-        )
+        if payload is None:
+            payload = self._record_current_human_gate(
+                uow,
+                run,
+                gate="watchdog_escalation",
+                question=question,
+                options=options,
+                question_es=question,
+                options_es=[option["label"] for option in options],
+                payload={"watchdog_evidence": redact_secrets(evidence or {})},
+            )
+        event_identity = hashlib.sha256(
+            f"{run.run_id}:{run.current_stage.value}:{run.current_candidate_sha}:escalated".encode()
+        ).hexdigest()[:40]
         self._save_stage_invocation_event(
             uow,
             run,
@@ -740,6 +765,29 @@ class NativeOrchestrationCoordinator:
                 "gate_id": payload.get("gate_id"),
             },
             commit=False,
+        )
+        self._save_stage_invocation_event(
+            uow,
+            run,
+            "SRE_UNBLOCKER_ESCALATED",
+            {
+                "project_id": run.project_id,
+                "run_id": run.run_id,
+                "stage": run.current_stage.value,
+                "candidate_sha": run.current_candidate_sha,
+                "trigger": "watchdog_recovery_not_proven",
+                "action": "preserve_and_escalate",
+                "observed_result": "NEEDS_HUMAN",
+                "root_cause": reason[:1000],
+                "original_gate": {
+                    "question": payload.get("question"),
+                    "options": payload.get("options"),
+                } if preserve_existing_gate else None,
+                "diagnosis": redact_secrets(evidence or {}),
+            },
+            commit=False,
+            transition_key=f"sre-unblocker:escalated:{event_identity}",
+            actor="sre_unblocker",
         )
         watchdog_repo = getattr(uow, "watchdog", None)
         if watchdog_repo is not None:
@@ -1294,17 +1342,22 @@ class NativeOrchestrationCoordinator:
 
     def _save_stage_invocation_event(
         self, uow: Any, run: OrchestrationRun, event_type: str, evidence: dict[str, Any],
-        *, commit: bool = True,
+        *, commit: bool = True, transition_key: str | None = None, actor: str = "system",
     ) -> None:
         repository = getattr(uow, "orchestration_stage_events", None)
         if repository is None or not callable(getattr(repository, "save", None)):
             raise RuntimeError("Durable stage invocation journal is unavailable")
+        if transition_key and callable(getattr(repository, "get_by_transition_key", None)):
+            if repository.get_by_transition_key(transition_key) is not None:
+                return
         repository.save(
             OrchestrationStageEvent(
                 run_id=run.run_id,
                 from_stage=run.current_stage,
                 to_stage=run.current_stage,
                 event_type=event_type,
+                transition_key=transition_key,
+                actor=actor,
                 evidence_references=redact_secrets(evidence),
             )
         )
@@ -1926,6 +1979,23 @@ class NativeOrchestrationCoordinator:
                 },
                 commit=False,
             )
+            sre_attempt_id = hashlib.sha256(
+                f"{run.run_id}:{run.current_stage.value}:{prior_candidate['candidate_sha']}:{run.current_generation}".encode()
+            ).hexdigest()[:40]
+            sre_attempt_key = f"sre-unblocker:watchdog-attempt:{sre_attempt_id}"
+            if events_repo.get_by_transition_key(sre_attempt_key) is not None:
+                WatchdogObservationService.record_intervention_event(
+                    uow, run,
+                    event_type="SRE_UNBLOCKER_RESOLVED",
+                    transition_key=f"sre-unblocker:watchdog-resolved:{sre_attempt_id}",
+                    evidence={
+                        "trigger": "orphaned_managed_worktree_lock",
+                        "action": "recover_orphaned_index_lock",
+                        "observed_result": "canonical_recovery_claim_reacquired",
+                        "root_cause": "runner_process_absent_with_exact_owned_candidate",
+                        "recovery_evidence": evidence,
+                    },
+                )
             uow.commit()
             return claim_context, evidence
         except Exception:

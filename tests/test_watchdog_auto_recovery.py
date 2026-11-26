@@ -101,6 +101,42 @@ def test_watchdog_can_auto_recover_escalation_when_process_is_gone(monkeypatch):
     assert coordinator._can_auto_recover_watchdog_escalation(uow, run, pending_gate) is True
 
 
+def test_watchdog_escalation_preserves_original_gate_question_and_options():
+    uow = InMemoryPersistenceUnitOfWork()
+    question = "¿Qué opción de producto eliges?"
+    options = [
+        {"id": "keep", "label": "Mantener alcance", "response_text": "keep"},
+        {"id": "expand", "label": "Ampliar alcance", "response_text": "expand"},
+    ]
+    run = OrchestrationRun(
+        project_id="gate-preservation",
+        change_name="gate-preservation",
+        base_sha="main",
+        current_stage=OrchestrationStage.PROPOSING,
+        human_gate=HumanGate.NEEDS_HUMAN,
+        stop_details={"human_payload": {
+            "gate_id": "original-gate-id", "gate": "propose_clarification",
+            "question": question, "options": options,
+        }},
+    )
+    uow.orchestration_runs.save(run)
+    coordinator = _coordinator(uow)
+
+    payload = coordinator._record_watchdog_escalation(
+        uow, run, reason="ambiguous technical context", evidence={"finding": "not deterministic"}
+    )
+    events = uow.orchestration_stage_events.list_by_run(run.run_id)
+
+    assert payload["gate_id"] == "original-gate-id"
+    assert payload["question"] == question
+    assert payload["options"] == options
+    assert payload["sre_unblocker_diagnostic"]["reason"] == "ambiguous technical context"
+    assert [event.event_type for event in events].count("SRE_UNBLOCKER_ESCALATED") == 1
+    assert events[-1].evidence_references["original_gate"] == {
+        "question": question, "options": options,
+    }
+
+
 @pytest.mark.asyncio
 async def test_begin_stage_invocation_reclaims_dead_claim_with_unexpired_lease(tmp_path, monkeypatch):
     uow = InMemoryPersistenceUnitOfWork()

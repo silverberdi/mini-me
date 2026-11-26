@@ -21,12 +21,14 @@ test('renders the real temporal projection and preserves active work', async ({ 
   await waitForAppMounted(page);
   const response = await overviewResponse;
   expect(response.status()).toBe(200);
-  const payload = await response.json() as { temporal_telemetry: Record<string, { axis: string[]; series: Array<{ series_id: string }> }> };
+  const payload = await response.json() as { temporal_telemetry: Record<string, { axis: string[]; series: Array<{ series_id: string; points?: Array<{ autonomy_outcomes?: Record<string, number> }> }> }> };
   expect(Object.keys(payload.temporal_telemetry)).toEqual(expect.arrayContaining(['autonomy', 'time', 'cost']));
   expect(payload.temporal_telemetry.autonomy.series[0].series_id).toBe('global');
   expect(payload.temporal_telemetry.autonomy.axis.length).toBeGreaterThan(0);
+  expect(payload.temporal_telemetry.autonomy.series.flatMap(series => series.points || []).every(point => point.autonomy_outcomes !== undefined)).toBe(true);
 
   await expect(page.getByTestId('temporal-telemetry-chart')).toBeVisible();
+  await expect(page.getByTestId('autonomy-outcome-summary')).toBeVisible();
   await page.getByRole('button', { name: '2. Tiempos de Entrega' }).click();
   await page.getByRole('button', { name: '3. Costo liquidado (USD)' }).click();
   await expect(page.getByRole('button', { name: /Restaurar/ })).toBeVisible();

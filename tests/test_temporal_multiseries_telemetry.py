@@ -266,6 +266,43 @@ def test_autonomy_recognizes_clean_completed_run_without_explicit_gate_list() ->
     assert projection.excluded.get("unverified_or_incomplete", 0) == 0
 
 
+def test_autonomy_projection_exposes_clean_recovered_and_operator_outcomes() -> None:
+    uow, service = _service()
+    clean = _run("outcome-clean", "p1", 1)
+    recovered = _run("outcome-recovered", "p1", 1)
+    operator = _run("outcome-operator", "p2", 1)
+    clean.stop_details = {"resolved_human_gates": []}
+    recovered.stop_details = {"resolved_human_gates": []}
+    operator.stop_details = {"resolved_human_gates": [{"gate_id": "gate-1"}]}
+    for run in (clean, recovered, operator):
+        uow.orchestration_runs.save(run)
+        uow.orchestration_stage_events.save(OrchestrationStageEvent(
+            run_id=run.run_id,
+            from_stage=OrchestrationStage.IMPLEMENTING,
+            to_stage=OrchestrationStage.COMPLETED,
+            event_type="RUN_COMPLETED",
+            created_at=run.updated_at,
+        ))
+    for kind in ("SRE_UNBLOCKER_ATTEMPTED", "SRE_UNBLOCKER_RESOLVED"):
+        uow.orchestration_stage_events.save(OrchestrationStageEvent(
+            run_id=recovered.run_id,
+            from_stage=OrchestrationStage.IMPLEMENTING,
+            to_stage=OrchestrationStage.IMPLEMENTING,
+            event_type=kind,
+            created_at=recovered.updated_at,
+        ))
+
+    projection = service.project("autonomy")
+    points = {series.project_id: series.points[0] for series in projection.series if series.project_id}
+
+    assert points["p1"].value == 100.0
+    assert points["p1"].autonomy_outcomes == {
+        "no_intervention": 1, "autonomous_recovery": 1,
+    }
+    assert points["p2"].value == 0.0
+    assert points["p2"].autonomy_outcomes == {"operator_needed": 1}
+
+
 def test_temporal_telemetry_respects_custom_window_days() -> None:
     uow, service = _service()
     projection_7 = service.project("autonomy", window_days=7)

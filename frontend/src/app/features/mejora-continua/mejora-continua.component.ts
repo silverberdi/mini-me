@@ -17,6 +17,7 @@ interface WatchdogSuggestion {
   summary: string;
   evidence: Record<string, unknown>;
   improvement_suggestion: string | null;
+  source_intervention_transition_key?: string | null;
   suggestion_status: 'pending' | 'converted' | 'discarded';
   created_at: string;
 }
@@ -62,6 +63,7 @@ interface WatchdogSuggestion {
           <p class="text-sm text-slate-300">{{ item.summary }}</p>
           <p class="text-xs text-slate-400">Componente: {{ item.affected_component }}</p>
           <p class="whitespace-pre-wrap rounded-lg bg-slate-900/70 p-3 text-sm text-slate-200">{{ item.improvement_suggestion }}</p>
+          <p *ngIf="item.source_intervention_transition_key" class="text-xs text-slate-500">Intervención fuente: {{ item.source_intervention_transition_key }}</p>
           <div class="text-xs text-slate-400">{{ item.project_id }} · {{ item.change_name }} · Run {{ item.run_id }} · {{ item.created_at | date:'medium' }}</div>
           <div *ngIf="item.suggestion_status === 'pending'" class="flex gap-2">
             <button type="button" (click)="copy(item)" class="rounded-lg bg-sky-500 px-3 py-2 text-sm font-semibold text-slate-950">Copiar borrador</button>

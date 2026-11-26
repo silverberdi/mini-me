@@ -1,10 +1,18 @@
 from datetime import UTC, datetime, timedelta
 
 from cryptography.fernet import Fernet
+import httpx
 from sqlalchemy import create_engine
 from sqlalchemy.orm import Session
 
-from minime.db.models import Base, MCPCapabilityModel, MCPConnectionModel
+from minime.db.models import (
+    Base,
+    MCPCapabilityModel,
+    MCPConnectionModel,
+    OrchestrationRunModel,
+    OrchestrationStageEventModel,
+    ProjectModel,
+)
 from minime.mcp.auth import OAuthStateStore
 from minime.mcp.service import MCPConnectionService
 from minime.mcp.security import CredentialCipher
@@ -66,3 +74,78 @@ def test_oauth_authorization_encrypts_tokens_and_atomic_refresh_updates_access_t
         assert renewed.status == "ACTIVE"
         assert renewed.diagnostic_code is None
         assert len(provider.calls) == 3
+
+
+def test_mcp_oauth_401_renews_once_and_retries_the_rejected_call(monkeypatch):
+    engine = create_engine("sqlite://")
+    Base.metadata.create_all(engine)
+    cipher = CredentialCipher(Fernet.generate_key())
+    request = httpx.Request("POST", "https://mcp.example.invalid")
+    unauthorized = httpx.HTTPStatusError(
+        "401 Unauthorized", request=request, response=httpx.Response(401, request=request)
+    )
+
+    class Provider:
+        def __init__(self):
+            self.refresh_calls = []
+
+        def refresh(self, endpoint, refresh_token, client_id, client_secret):
+            self.refresh_calls.append((endpoint, refresh_token, client_id, client_secret))
+            return {"access_token": "new-access", "expires_in": 3600}
+
+    provider = Provider()
+    monkeypatch.setattr("minime.mcp.service.OAuthClient", lambda: provider)
+    with Session(engine) as session:
+        session.add(ProjectModel(id="project", display_name="Project", repository="owner/project"))
+        session.add(OrchestrationRunModel(
+            id="run-401", project_id="project", change_name="oauth-refresh",
+            base_sha="a" * 40, current_stage="IMPLEMENTING",
+            current_candidate_sha="b" * 40,
+        ))
+        connection = MCPConnectionModel(
+            id="oauth-401", project_id="project", name="oauth",
+            endpoint="https://mcp.example.invalid", transport="http", auth_type="oauth2",
+            status="ACTIVE",
+            encrypted_credentials=cipher.encrypt({
+                "access_token": "old-access", "refresh_token": "refresh-secret",
+                "_oauth": {
+                    "token_endpoint": "https://auth.example.invalid/token",
+                    "client_id": "client-id", "client_secret": "client-secret",
+                },
+            }),
+            access_token_expires_at=datetime.now(UTC) + timedelta(hours=1),
+        )
+        session.add(connection)
+        session.add(MCPCapabilityModel(
+            id="capability", connection_id="oauth-401", kind="tool", name="read_status",
+        ))
+        session.commit()
+        service = MCPConnectionService(session, cipher)
+        attempts = []
+
+        class Transport:
+            def call_tool(self, _tool, _arguments):
+                attempts.append("call")
+                if len(attempts) == 1:
+                    raise unauthorized
+                return {"result": "ok"}
+
+        monkeypatch.setattr(service, "_transport", lambda _row: Transport())
+        result = service.invoke(
+            "project", "oauth-401", "read_status", {"detail": True}, run_id="run-401"
+        )
+
+        assert result == {"result": "ok"}
+        assert attempts == ["call", "call"]
+        assert provider.refresh_calls == [(
+            "https://auth.example.invalid/token", "refresh-secret", "client-id", "client-secret"
+        )]
+        assert connection.status == "ACTIVE"
+        stored = cipher.decrypt(connection.encrypted_credentials)
+        assert stored["access_token"] == "new-access"
+        assert stored["refresh_token"] == "refresh-secret"
+        events = session.query(OrchestrationStageEventModel).filter_by(run_id="run-401").all()
+        assert {event.event_type for event in events} == {
+            "SRE_UNBLOCKER_ATTEMPTED", "SRE_UNBLOCKER_RESOLVED",
+        }
+        assert all("refresh-secret" not in str(event.evidence_references) for event in events)

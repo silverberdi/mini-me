@@ -123,8 +123,88 @@ def test_human_gate_is_not_reclassified_as_watchdog_stall():
     assert WatchdogObservationService().observe(run, [], now=now) is None
 
 
+def test_only_proposal_feasibility_gate_gets_sre_diagnostic_context():
+    run = _run(updated_at=datetime.now(UTC))
+    run.human_gate = "NEEDS_HUMAN"
+    run.stop_details = {}
+    gate = {
+        "gate": "proposal_feasibility", "gate_id": "gate-1",
+        "question": "Original question", "options": ["Option A", "Option B"],
+        "blockers": ["fallback warning"], "task_feasibility": [{"task_id": "1.1"}],
+    }
+
+    observation = WatchdogObservationService().observe_human_gate(run, gate)
+    assert observation is not None
+    assert observation["trigger"] == "proposal_feasibility_human_gate"
+    assert observation["evidence"]["question"] == "Original question"
+    assert observation["evidence"]["options"] == ["Option A", "Option B"]
+    assert WatchdogObservationService().observe_human_gate(run, {**gate, "gate": "business_decision"}) is None
+
+
+def test_intervention_event_write_is_idempotent():
+    from minime.domain.enums import OrchestrationStage
+    from minime.domain.models import OrchestrationRun
+    from tests.conftest import InMemoryPersistenceUnitOfWork
+
+    uow = InMemoryPersistenceUnitOfWork()
+    run = OrchestrationRun(
+        project_id="project", change_name="change", base_sha="main",
+        current_stage=OrchestrationStage.IMPLEMENTING,
+        current_candidate_sha="a" * 40,
+    )
+    assert WatchdogObservationService.record_intervention_event(
+        uow, run, event_type="SRE_UNBLOCKER_ATTEMPTED",
+        transition_key="sre-unblocker:test-attempt",
+        evidence={"trigger": "test", "secret": "refresh_token=private"},
+    ) is True
+    assert WatchdogObservationService.record_intervention_event(
+        uow, run, event_type="SRE_UNBLOCKER_ATTEMPTED",
+        transition_key="sre-unblocker:test-attempt", evidence={"trigger": "test"},
+    ) is False
+    events = uow.orchestration_stage_events.list_by_run(run.run_id)
+    assert len(events) == 1
+    assert events[0].actor == "sre_unblocker"
+    assert "private" not in str(events[0].evidence_references)
+
+
+def test_improvement_feed_requires_prior_run_with_linked_intervention():
+    diagnosis = {
+        "project_id": "project", "run_id": "current", "root_cause": "no_recent_activity",
+        "affected_component": "apply",
+    }
+    history = [
+        {**diagnosis, "run_id": "old-unlinked", "evidence": {}},
+        {**diagnosis, "run_id": "old-linked", "evidence": {
+            "sre_intervention_transition_key": "sre-unblocker:attempt:123",
+        }},
+    ]
+    repo = SimpleNamespace(list_diagnoses=lambda **_kwargs: history)
+    assert WatchdogObservationService.has_prior_sre_pattern(repo, diagnosis) is True
+    assert WatchdogObservationService.has_prior_sre_pattern(
+        SimpleNamespace(list_diagnoses=lambda **_kwargs: history[:1]), diagnosis
+    ) is False
+
+
+def test_watchdog_suggestion_payload_exposes_source_intervention_event():
+    from minime.services.watchdog_repository import PostgresWatchdogRepository
+
+    row = SimpleNamespace(
+        id="diagnosis-1", project_id="project", run_id="run-1", change_name="change",
+        stage="APPLY", candidate_sha="a" * 40, candidate_generation=1,
+        status="OBSERVED", root_cause="no_recent_activity", affected_component="apply",
+        summary="Observed stall", evidence={
+            "sre_intervention_transition_key": "sre-unblocker:attempt:123",
+        }, action=None, action_result={}, improvement_suggestion="Improve prevention",
+        suggestion_status="pending", created_at=datetime.now(UTC), updated_at=datetime.now(UTC),
+    )
+    payload = PostgresWatchdogRepository._diagnosis_payload(row)
+    assert payload["source_intervention_transition_key"] == "sre-unblocker:attempt:123"
+
+
 @pytest.mark.asyncio
 async def test_unavailable_semantic_model_is_recorded_without_changing_observed_playbook(tmp_path, monkeypatch):
+    from minime.config import CliInvocationProfile
+
     observation = {
         "project_id": "boxio",
         "run_id": "run-1",
@@ -140,7 +220,10 @@ async def test_unavailable_semantic_model_is_recorded_without_changing_observed_
     monkeypatch.setattr(
         config_module,
         "resolve_cli_invocation",
-        lambda *_args, **_kwargs: SimpleNamespace(),
+        lambda *_args, **_kwargs: CliInvocationProfile(
+            provider="codex", role="thinking", executable="codex", args=("exec", "-"),
+            prompt_transport="stdin",
+        ),
     )
 
     class UnavailableRunner:
@@ -148,6 +231,9 @@ async def test_unavailable_semantic_model_is_recorded_without_changing_observed_
             pass
 
         async def run(self, **_kwargs):
+            assert "minime-sre-unblocker" in _kwargs["prompt_context"]
+            assert "Original OpenSpec question" in _kwargs["prompt_context"]
+            assert '"Original option A"' in _kwargs["prompt_context"]
             return SimpleNamespace(
                 exit_code=1,
                 final_response_status="FAILED",
@@ -159,8 +245,15 @@ async def test_unavailable_semantic_model_is_recorded_without_changing_observed_
         observation,
         {"provider_id": "provider", "harness_id": "codex", "canonical_model_id": "model"},
         worktree_path=tmp_path,
+        human_payload={
+            "question": "Original OpenSpec question",
+            "options": ["Original option A", "Original option B"],
+        },
     )
 
     assert result["evidence"]["semantic_model_status"] == "UNAVAILABLE"
+    assert result["evidence"]["semantic_model_provider_id"] == "provider"
+    assert result["evidence"]["semantic_model_harness_id"] == "codex"
+    assert result["evidence"]["semantic_model_id"] == "model"
     assert result["action_result"] == {"status": "NOT_ATTEMPTED"}
     assert result["candidate_sha"] == "a" * 40

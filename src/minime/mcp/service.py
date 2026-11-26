@@ -6,10 +6,17 @@ from datetime import UTC, datetime, timedelta
 from typing import Any
 from uuid import uuid4
 
+import httpx
+
 from sqlalchemy import delete, or_, select
 from sqlalchemy.orm import Session
 
-from minime.db.models import MCPCapabilityModel, MCPConnectionModel
+from minime.db.models import (
+    MCPCapabilityModel,
+    MCPConnectionModel,
+    OrchestrationRunModel,
+    OrchestrationStageEventModel,
+)
 from minime.mcp.protocol import HTTPMCPTransport, MCPProtocolError, StdioMCPTransport, handshake_and_discover
 from minime.mcp.auth import OAuthClient, validate_token_credentials
 from minime.mcp.security import CredentialCipher, redact
@@ -271,7 +278,10 @@ class MCPConnectionService:
     def discover(self, row: MCPConnectionModel):
         return handshake_and_discover(self._transport(row))
 
-    def invoke(self, project_id: str, connection_id: str, tool: str, arguments: dict[str, Any] | None = None) -> dict[str, Any]:
+    def invoke(
+        self, project_id: str, connection_id: str, tool: str,
+        arguments: dict[str, Any] | None = None, *, run_id: str | None = None,
+    ) -> dict[str, Any]:
         row = self.get_accessible(project_id, connection_id)
         if row is None or row.status != "ACTIVE" or not row.encrypted_credentials:
             raise PermissionError("MCP connection is not active for this project")
@@ -280,11 +290,78 @@ class MCPConnectionService:
         try:
             return self._transport(row).call_tool(tool, arguments)
         except Exception as exc:
+            if (
+                row.auth_type == "oauth2"
+                and isinstance(exc, httpx.HTTPStatusError)
+                and exc.response.status_code == 401
+            ):
+                # HTTP 401 rejects this authenticated request before an MCP tool
+                # call is accepted. Renew once through encrypted credential
+                # storage, then replay once without exposing token material.
+                intervention_id = uuid4().hex
+                self._record_sre_intervention(
+                    run_id, project_id, row.id, "SRE_UNBLOCKER_ATTEMPTED",
+                    intervention_id, {"trigger": "mcp_authentication_401", "action": "renew_oauth_and_retry_once"},
+                )
+                try:
+                    row = self.renew_oauth(project_id, connection_id)
+                    result = self._transport(row).call_tool(tool, arguments)
+                    self._record_sre_intervention(
+                        run_id, project_id, row.id, "SRE_UNBLOCKER_RESOLVED",
+                        intervention_id, {"trigger": "mcp_authentication_401", "action": "renew_oauth_and_retry_once", "observed_result": "tool_call_succeeded"},
+                    )
+                    return result
+                except Exception as renewal_or_retry_error:
+                    self._record_sre_intervention(
+                        run_id, project_id, row.id, "SRE_UNBLOCKER_ESCALATED",
+                        intervention_id, {"trigger": "mcp_authentication_401", "action": "renew_oauth_and_retry_once", "observed_result": "renewal_or_retry_failed", "root_cause": type(renewal_or_retry_error).__name__},
+                    )
+                    row.status = "ERROR"
+                    row.diagnostic_code = "MCP_OAUTH_REFRESH_FAILED"
+                    row.diagnostic_summary = str(redact(str(renewal_or_retry_error)))[:500]
+                    self.session.commit()
+                    raise MCPProtocolError(
+                        "MCP OAuth refresh after authentication failure failed"
+                    ) from renewal_or_retry_error
             row.status = "ERROR"
             row.diagnostic_code = "MCP_INVOCATION_FAILED"
             row.diagnostic_summary = str(redact(str(exc)))[:500]
             self.session.commit()
             raise
+
+    def _record_sre_intervention(
+        self, run_id: str | None, project_id: str, connection_id: str,
+        event_type: str, intervention_id: str, evidence: dict[str, Any],
+    ) -> None:
+        if not run_id:
+            return
+        run = self.session.get(OrchestrationRunModel, run_id)
+        if run is None or run.project_id != project_id:
+            return
+        transition_key = f"sre-mcp:{intervention_id}:{event_type.lower()}"
+        existing = self.session.scalar(
+            select(OrchestrationStageEventModel).where(
+                OrchestrationStageEventModel.transition_key == transition_key
+            )
+        )
+        if existing is not None:
+            return
+        stage = run.current_stage
+        refs = redact({
+            "project_id": project_id,
+            "run_id": run_id,
+            "stage": stage,
+            "candidate_sha": run.current_candidate_sha,
+            "connection_id": connection_id,
+            "root_cause": evidence.get("root_cause", "mcp_authentication_401"),
+            **evidence,
+        })
+        self.session.add(OrchestrationStageEventModel(
+            id=str(uuid4()), run_id=run_id, from_stage=stage, to_stage=stage,
+            event_type=event_type, transition_key=transition_key,
+            evidence_references=refs, actor="sre_unblocker",
+        ))
+        self.session.commit()
 
     def _replace_capabilities(self, row, tools, resources):
         self.session.execute(delete(MCPCapabilityModel).where(MCPCapabilityModel.connection_id == row.id))

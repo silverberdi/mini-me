@@ -1,6 +1,6 @@
-# mini me — Instrucciones de agentes (contrato rector 2.0)
+# mini me — Instrucciones de agentes (contrato rector 2.1)
 
-**Leer primero** [docs/CONTRATO_RECTOR.md](docs/CONTRATO_RECTOR.md) y [docs/RECONCILIACION_LEGADO.md](docs/RECONCILIACION_LEGADO.md). Luego leer el Change OpenSpec del Issue autorizado, README y openspec/config.yaml. Otros documentos pueden reflejar decisiones HISTÓRICAS ya sustituidas; no son autoridad cuando contradicen el contrato 2.0.
+**Leer primero** [docs/CONTRATO_RECTOR.md](docs/CONTRATO_RECTOR.md) y [docs/RECONCILIACION_LEGADO.md](docs/RECONCILIACION_LEGADO.md). Luego leer el Change OpenSpec del Issue autorizado, README y openspec/config.yaml. Otros documentos pueden reflejar decisiones HISTÓRICAS ya sustituidas; no son autoridad cuando contradicen el contrato 2.1.
 
 ## No negociable
 - Un Issue = un Change OpenSpec de alcance cohesivo; jamás microchanges técnicos ni agrupación de Issues independientes.

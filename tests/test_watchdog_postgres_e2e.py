@@ -83,7 +83,42 @@ def test_watchdog_migration_and_postgres_persistence_are_idempotent():
             current_generation=3,
         )
         uow.orchestration_runs.save(run)
+        uow.orchestration_stage_events.save(OrchestrationStageEvent(
+            run_id=run_id,
+            from_stage=OrchestrationStage.IMPLEMENTING,
+            to_stage=OrchestrationStage.IMPLEMENTING,
+            event_type="SRE_UNBLOCKER_ATTEMPTED",
+            transition_key=f"sre-unblocker:attempt:{run_id}",
+            actor="sre_unblocker",
+            evidence_references={"trigger": "no_recent_activity"},
+        ))
         uow.commit()
+        attempt_key = f"sre-unblocker:attempt:{run_id}"
+        assert WatchdogObservationService.record_intervention_event(
+            uow,
+            run,
+            event_type="SRE_UNBLOCKER_ATTEMPTED",
+            transition_key=attempt_key,
+            evidence={"trigger": "no_recent_activity", "action": "inspect"},
+        ) is False
+        assert WatchdogObservationService.record_intervention_event(
+            uow,
+            run,
+            event_type="SRE_UNBLOCKER_RESOLVED",
+            transition_key=f"sre-unblocker:resolved:{run_id}",
+            evidence={"observed_result": "recovered"},
+        ) is True
+        uow.commit()
+        intervention_events = [
+            event for event in uow.orchestration_stage_events.list_by_run(run_id)
+            if event.event_type.startswith("SRE_UNBLOCKER_")
+        ]
+        assert [event.event_type for event in intervention_events] == [
+            "SRE_UNBLOCKER_ATTEMPTED",
+            "SRE_UNBLOCKER_RESOLVED",
+        ]
+        assert intervention_events[0].evidence_references["trigger"] == "no_recent_activity"
+        assert "action" not in intervention_events[0].evidence_references
 
         diagnosis = {
             "project_id": project_id,
@@ -96,7 +131,10 @@ def test_watchdog_migration_and_postgres_persistence_are_idempotent():
             "root_cause": "no_recent_activity",
             "affected_component": "apply",
             "summary": "No durable activity observed.",
-            "evidence": {"inactive_seconds": 1200},
+            "evidence": {
+                "inactive_seconds": 1200,
+                "sre_intervention_transition_key": f"sre-unblocker:attempt:{run_id}",
+            },
             "action": None,
             "action_result": {"status": "NOT_ATTEMPTED"},
             "improvement_suggestion": "Review observable stage activity.",
@@ -108,6 +146,7 @@ def test_watchdog_migration_and_postgres_persistence_are_idempotent():
         assert first["id"] == second["id"]
         assert second["candidate_sha"] == "candidate-sha"
         assert second["affected_component"] == "apply"
+        assert second["source_intervention_transition_key"] == f"sre-unblocker:attempt:{run_id}"
         mismatched_candidate = {**diagnosis, "candidate_sha": "different-candidate"}
         with pytest.raises(ValueError, match="identity changed"):
             uow.watchdog.save_diagnosis(mismatched_candidate)
@@ -564,3 +603,239 @@ async def test_watchdog_recovery_and_ambiguous_escalation_use_postgres_git_and_c
             session.commit()
             session.close()
             engine.dispose()
+
+
+@pytest.mark.skipif(
+    not all(os.environ.get(name) for name in (
+        "MINIME_SRE_E2E_PROVIDER_ID",
+        "MINIME_SRE_E2E_HARNESS_ID",
+        "MINIME_SRE_E2E_MODEL_ID",
+    )),
+    reason="Set the configured Watchdog provider, harness and model to authorize the real SRE E2E",
+)
+def test_watchdog_real_configured_role_invocation_is_persisted_in_postgres(tmp_path, monkeypatch):
+    from minime.cli import main as cli_main
+    from minime.config import load_config, resolve_cli_invocation
+
+    provider_id = os.environ["MINIME_SRE_E2E_PROVIDER_ID"]
+    harness_id = os.environ["MINIME_SRE_E2E_HARNESS_ID"]
+    model_id = os.environ["MINIME_SRE_E2E_MODEL_ID"]
+    config = load_config()
+    invocation = resolve_cli_invocation(
+        harness_id, "thinking", config=config, model=model_id
+    )
+    assert invocation.provider == harness_id
+    assert invocation.model == model_id
+
+    engine = create_engine(DATABASE_URL, pool_pre_ping=True)
+    session_factory = sessionmaker(bind=engine, autoflush=False, expire_on_commit=False)
+    suffix = uuid4().hex
+    project_id = f"sre-role-e2e-{suffix}"
+    run_id = f"sre-role-run-{suffix}"
+    job_id = f"sre-role-job-{suffix}"
+    change_name = f"sre-role-change-{suffix}"
+    repository_root = Path(__file__).resolve().parents[1]
+    candidate_sha = subprocess.run(
+        ["git", "rev-parse", "HEAD"], cwd=repository_root, check=True,
+        capture_output=True, text=True,
+    ).stdout.strip()
+    before_worktree_status = subprocess.run(
+        ["git", "status", "--porcelain=v1", "-z"], cwd=repository_root, check=True,
+        capture_output=True,
+    ).stdout
+    session = session_factory()
+    settings_before = None
+    try:
+        database_name = session.execute(text("select current_database()")).scalar_one()
+        assert database_name.lower().endswith("_test"), "Refusing to invoke a role outside test DB"
+        uow = PostgresPersistenceUnitOfWork(session)
+        settings_before = uow.watchdog.get_settings()
+        selected_settings = uow.watchdog.save_settings({
+            "provider_id": provider_id,
+            "harness_id": harness_id,
+            "canonical_model_id": model_id,
+            "inactivity_threshold_minutes": 1,
+            "mode": "diagnostic_only",
+        })
+        assert selected_settings["provider_id"] == provider_id
+        uow.projects.save(Project(
+            project_id=project_id,
+            display_name="SRE real role PostgreSQL E2E",
+            repository="test/sre-role-e2e",
+        ))
+        uow.project_managed_repository_bindings.save(ProjectManagedRepositoryBinding(
+            project_id=project_id,
+            canonical_repository_identity="test/sre-role-e2e",
+            managed_repository_root=str(repository_root),
+            worktree_parent_dir=str(repository_root),
+            default_base_branch="main",
+            is_valid=True,
+        ))
+        uow.jobs.save(Job(
+            job_id=job_id,
+            project_id=project_id,
+            change_name=change_name,
+            implementer_role="codex",
+        ))
+        original_question = "Should this technical feasibility gate continue?"
+        original_options = [
+            {"id": "continue", "label": "Continue with mapped fallback"},
+            {"id": "wait", "label": "Wait for operator review"},
+        ]
+        human_payload = {
+            "gate": "proposal_feasibility",
+            "gate_id": f"sre-gate-{suffix}",
+            "question": original_question,
+            "options": original_options,
+            "blockers": ["Fallback status is under technical review."],
+            "task_feasibility": [{"task_id": "1.1", "status": "FEASIBLE_WITH_FALLBACK"}],
+        }
+        now = datetime.now(UTC)
+        run = OrchestrationRun(
+            run_id=run_id,
+            project_id=project_id,
+            change_name=change_name,
+            base_sha=candidate_sha,
+            current_stage=OrchestrationStage.IMPLEMENTING,
+            current_candidate_sha=candidate_sha,
+            current_generation=1,
+            active_job_id=job_id,
+            is_active=True,
+            human_gate="NEEDS_HUMAN",
+            stop_details={"human_payload": human_payload},
+            updated_at=now,
+        )
+        uow.orchestration_runs.save(run)
+        uow.orchestration_worktree_ownerships.save(OrchestrationWorktreeOwnership(
+            project_id=project_id,
+            job_id=job_id,
+            run_id=run_id,
+            change_name=change_name,
+            canonical_worktree_path=str(repository_root.resolve()),
+            source_repository_identity="test/sre-role-e2e",
+            source_base_sha=candidate_sha,
+            branch=f"sre-role-{suffix[:12]}",
+            creation_state=WorktreeCreationState.CREATED,
+        ))
+        uow.commit()
+
+        class Wakeup:
+            def __init__(self, *_args, **_kwargs):
+                pass
+
+            def start(self):
+                pass
+
+            def wait(self, *_args, **_kwargs):
+                pass
+
+            def stop(self):
+                pass
+
+        class Runner:
+            @classmethod
+            def for_project_profiles(cls, *_args, **_kwargs):
+                return cls()
+
+            @staticmethod
+            def provider_for_role(_role):
+                return provider_id
+
+        class Coordinator:
+            def __init__(self, **_kwargs):
+                pass
+
+            async def execute_project_request(self, **_kwargs):
+                return SimpleNamespace(
+                    status="PAUSED",
+                    run_id=run_id,
+                    current_stage=OrchestrationStage.IMPLEMENTING,
+                    message="Real SRE provider PostgreSQL fixture.",
+                    human_payload=human_payload,
+                )
+
+        @contextmanager
+        def scheduler_session():
+            scheduler_db_session = session_factory()
+            try:
+                yield scheduler_db_session
+            finally:
+                scheduler_db_session.close()
+
+        monkeypatch.setattr(
+            cli_main, "db_manager", SimpleNamespace(engine=engine, session=scheduler_session)
+        )
+        monkeypatch.setattr("minime.services.scheduler_wakeup.SchedulerWakeupBridge", Wakeup)
+        monkeypatch.setattr("minime.adapters.github.GitHubAdapter", lambda: object())
+        monkeypatch.setattr("minime.services.worktree_manager.WorktreeManager", lambda **_: object())
+        monkeypatch.setattr(
+            "minime.services.capacity_lifecycle_service.CapacityLifecycleService",
+            lambda _uow: object(),
+        )
+        monkeypatch.setattr(
+            "minime.services.agent_runner.CliAgentRunner.for_project_profiles",
+            Runner.for_project_profiles,
+        )
+        monkeypatch.setattr(
+            "minime.services.orchestration_coordinator.NativeOrchestrationCoordinator",
+            Coordinator,
+        )
+
+        cli_main.scheduler_run_cmd(poll_interval=0, max_iterations=1)
+
+        verification_uow = PostgresPersistenceUnitOfWork(session_factory())
+        try:
+            persisted_run = verification_uow.orchestration_runs.get_by_id(run_id)
+            persisted_gate = persisted_run.stop_details["human_payload"]
+            assert persisted_gate["question"] == original_question
+            assert persisted_gate["options"] == original_options
+            assert persisted_gate["sre_unblocker_diagnostic"]["status"] == "COMPLETED"
+            events = verification_uow.orchestration_stage_events.list_by_run(run_id)
+            intervention_events = [
+                event for event in events if event.event_type.startswith("SRE_UNBLOCKER_")
+            ]
+            assert [event.event_type for event in intervention_events] == [
+                "SRE_UNBLOCKER_ATTEMPTED",
+                "SRE_UNBLOCKER_ESCALATED",
+            ]
+            assert intervention_events[1].evidence_references["provider_id"] == provider_id
+            assert intervention_events[1].evidence_references["harness_id"] == harness_id
+            assert intervention_events[1].evidence_references["model_id"] == model_id
+            assert intervention_events[1].evidence_references["original_question"] == original_question
+            assert intervention_events[1].evidence_references["original_options"] == original_options
+        finally:
+            verification_uow.session.close()
+        after_worktree_status = subprocess.run(
+            ["git", "status", "--porcelain=v1", "-z"], cwd=repository_root, check=True,
+            capture_output=True,
+        )
+        assert after_worktree_status.stdout == before_worktree_status
+    finally:
+        session.rollback()
+        session.execute(text("DELETE FROM orchestration_stage_events WHERE run_id = :run_id"),
+                        {"run_id": run_id})
+        session.execute(text(
+            "DELETE FROM orchestration_worktree_ownerships WHERE project_id = :project_id"
+        ), {"project_id": project_id})
+        session.execute(text("DELETE FROM orchestration_runs WHERE id = :run_id"), {"run_id": run_id})
+        session.execute(text("DELETE FROM jobs WHERE id = :job_id"), {"job_id": job_id})
+        session.execute(text(
+            "DELETE FROM project_managed_repository_bindings WHERE project_id = :project_id"
+        ), {"project_id": project_id})
+        session.execute(text("DELETE FROM projects WHERE id = :project_id"), {"project_id": project_id})
+        if settings_before is not None:
+            session.execute(text("DELETE FROM watchdog_settings WHERE settings_id = 'global'"))
+            session.execute(text("""INSERT INTO watchdog_settings
+                (settings_id, provider_id, harness_id, canonical_model_id,
+                 inactivity_threshold_minutes, mode, updated_at)
+                VALUES ('global', :provider_id, :harness_id, :canonical_model_id,
+                        :threshold, :mode, CURRENT_TIMESTAMP)"""), {
+                "provider_id": settings_before["provider_id"],
+                "harness_id": settings_before["harness_id"],
+                "canonical_model_id": settings_before["canonical_model_id"],
+                "threshold": settings_before["inactivity_threshold_minutes"],
+                "mode": settings_before["mode"],
+            })
+        session.commit()
+        session.close()
+        engine.dispose()
