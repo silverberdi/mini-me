@@ -142,6 +142,12 @@ class MCPConnectionService:
         row = self.get_accessible(project_id, connection_id)
         if row is None:
             raise LookupError("MCP connection not found")
+        if row.auth_type == "oauth2" and row.encrypted_credentials:
+            try:
+                row = self.ensure_renewed(project_id, connection_id)
+            except Exception:
+                # If proactive renewal fails, discover will fail and record diagnostic
+                pass
         try:
             discovery = self.discover(row)
             self._replace_capabilities(row, discovery.tools, discovery.resources)
@@ -155,18 +161,26 @@ class MCPConnectionService:
         self.session.refresh(row)
         return row
 
-    def ensure_renewed(self, project_id: str, connection_id: str) -> MCPConnectionModel:
+    def ensure_renewed(
+        self,
+        project_id: str,
+        connection_id: str,
+        *,
+        client: OAuthClient | None = None,
+    ) -> MCPConnectionModel:
         """Renew OAuth just before runtime use; token connections are unchanged."""
         row = self.get_accessible(project_id, connection_id)
         if row is None:
             raise LookupError("MCP connection not found")
-        if row.status != "ACTIVE" or not row.encrypted_credentials:
+        if not row.encrypted_credentials or (row.status != "ACTIVE" and row.status != "ERROR"):
             raise PermissionError("MCP connection is not active for this project")
         if row.auth_type != "oauth2" or not row.access_token_expires_at:
+            if row.status == "ERROR":
+                raise PermissionError("MCP connection is not active for this project")
             return row
-        if row.access_token_expires_at > datetime.now(UTC) + timedelta(seconds=30):
+        if row.status == "ACTIVE" and row.access_token_expires_at > datetime.now(UTC) + timedelta(seconds=30):
             return row
-        return self.renew_oauth(project_id, connection_id)
+        return self.renew_oauth(project_id, connection_id, client=client)
 
     def authorize_oauth(self, row: MCPConnectionModel, token_endpoint: str, code: str, redirect_uri: str, client_id: str, client_secret: str, client: OAuthClient | None = None) -> MCPConnectionModel:
         if row.auth_type != "oauth2":
@@ -240,6 +254,7 @@ class MCPConnectionService:
             tokens["refresh_token"] = refresh_token
         row.encrypted_credentials = self.cipher.encrypt(tokens)
         row.access_token_expires_at = self._expires_at(tokens)
+        row.status, row.diagnostic_code, row.diagnostic_summary = "ACTIVE", None, None
         self.session.commit()
         self.session.refresh(row)
         return row
