@@ -3611,13 +3611,16 @@ class WorktreeManager:
         )
 
     async def _ensure_generated_cache_excludes(self, worktree_path: Path) -> None:
-        """Keep generated build caches out of Git status for this worktree only."""
+        """Keep generated build caches out of Git status for this repository clone."""
         exclude_value = await self._git(
             ["rev-parse", "--git-path", "info/exclude"], cwd=worktree_path
         )
-        exclude_file = Path(str(exclude_value).strip()).resolve()
+        exclude_file = Path(str(exclude_value).strip())
+        if not exclude_file.is_absolute():
+            exclude_file = worktree_path / exclude_file
         if exclude_file.is_symlink():
             raise RuntimeError("Worktree Git exclude path must not be a symlink.")
+        exclude_file = exclude_file.resolve()
         exclude_file.parent.mkdir(parents=True, exist_ok=True)
         existing_text = exclude_file.read_text(encoding="utf-8") if exclude_file.exists() else ""
         existing_lines = set(existing_text.splitlines())
@@ -3628,7 +3631,7 @@ class WorktreeManager:
         if prefix and not prefix.endswith("\n"):
             prefix += "\n"
         if not any(line.startswith("# mini me generated build caches") for line in existing_lines):
-            prefix += "# mini me generated build caches (worktree local)\n"
+            prefix += "# mini me generated build caches (shared clone)\n"
         exclude_file.write_text(prefix + "\n".join(missing) + "\n", encoding="utf-8")
 
     async def _link_installed_node_dependencies(self, worktree_path: Path) -> None:
