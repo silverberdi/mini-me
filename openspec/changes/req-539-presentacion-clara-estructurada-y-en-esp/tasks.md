@@ -18,13 +18,13 @@
 ## 3. Real browser and response integration
 
 - [x] 3.1 Add or update an isolated Playwright fixture/spec for a structured Human Gate in Trabajo actual, covering both technical disclosure and Spanish option presentation; verify with `npm --prefix frontend run test:e2e -- e2e/human-gate-structured-presentation.spec.ts` against the served Angular/FastAPI stack and configured Chromium.
-  - Evidence: real Chromium command completed with exit 0 and 1 passed after the isolated PostgreSQL fixture seeded the durable Run.
+  - Evidence: real Chromium command completed with exit 0 and 1 passed after the isolated PostgreSQL fixture seeded the durable Run; the fixture now supplies all four required agent profiles, eliminating the runtime profile error.
 - [x] 3.2 In that real-browser scenario, select and submit an option and observe the existing response request plus the refreshed authoritative Run outcome; verify no simulated DOM-only transition is used and the backend state transition remains unchanged.
-  - Evidence: browser observed the real POST `/api/v1/projects/{project_id}/requests/run` response and queried the refreshed `/api/v1/orchestration/runs` projection for `e2e-human-gate-run`.
+  - Evidence: browser observed the real POST `/api/v1/projects/{project_id}/requests/run` with `202`/`ACCEPTED`, then queried the refreshed `/api/v1/orchestration/runs` projection and asserted the authoritative `e2e-human-gate-run` remained `PROPOSING` + `HUMAN_REQUIRED` + `NEEDS_HUMAN` with its current gate; no DOM-only transition was accepted.
 - [x] 3.3 Run focused frontend unit checks for the new normalizer/component behavior with `npm --prefix frontend run test -- tests/human-gate-structured-presentation.test.mjs tests/human-gate-current-payload.test.mjs` and retain the observable command output as candidate evidence.
 
 ## 4. Change verification
 
 - [x] 4.1 Verify the delta against the exact candidate SHA with `openspec validate --change req-539-presentacion-clara-estructurada-y-en-esp --strict` and inspect the generated artifact/status output; correct only issues within this Change through the native workflow.
 - [x] 4.2 Verify the bounded backend tests, frontend unit tests and real-browser Playwright scenario after retirement of the old rendering path; record invocation, exit status, candidate SHA and observable UI/backend effects, failing closed if any required evidence is absent.
-  - Evidence: backend 84 passed/exit 0; frontend focused command 80 passed/exit 0; Playwright 1 passed/exit 0; strict OpenSpec validation passed. Candidate SHA at Apply evidence capture: `60242bf7ba4ffa6fa72e5520b75ea718a5659b5d`.
+  - Evidence: backend `84 passed`/exit 0; frontend focused command `80 passed`/exit 0; Playwright `1 passed`/exit 0; strict OpenSpec validation passed with the installed CLI syntax (`openspec validate --changes req-539-presentacion-clara-estructurada-y-en-esp --strict`). Correction evidence was captured in the active worktree after `git rev-parse HEAD`=`06224748`; the final immutable candidate SHA remains established by Apply consolidation.

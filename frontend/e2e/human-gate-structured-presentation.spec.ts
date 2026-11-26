@@ -47,20 +47,31 @@ test('structured Human Gate keeps audit collapsed and submits the authoritative 
   await page.getByRole('button', { name: /Enviar respuesta y continuar/i }).click();
   const response = await responsePromise;
   expect(response.status()).toBeLessThan(300);
+  const responseBody = await response.json();
+  expect(responseBody.status).toBe('ACCEPTED');
   await expect(page.getByText(/Respuesta aceptada\./i)).toBeVisible();
 
-  await page.reload();
-  await waitForAppMounted(page);
-    await expect(page.locator('app-root')).toBeVisible();
+  await expect.poll(async () => {
     const authoritativeRun = await page.request.get(
       `/api/v1/orchestration/runs?project_id=${encodeURIComponent(HUMAN_GATE_PROJECT_ID)}&is_active=true`,
       { headers: { Authorization: `Bearer ${E2E_SESSION_TOKEN}` } },
     );
     expect(authoritativeRun.ok()).toBeTruthy();
     const runs = await authoritativeRun.json();
-    expect(runs).toEqual(expect.arrayContaining([
-      expect.objectContaining({ run_id: 'e2e-human-gate-run', project_id: HUMAN_GATE_PROJECT_ID }),
-    ]));
+    const run = runs.find((candidate: { run_id?: string }) => candidate.run_id === 'e2e-human-gate-run');
+    return run;
+  }, { timeout: 15000 }).toEqual(expect.objectContaining({
+    run_id: 'e2e-human-gate-run',
+    project_id: HUMAN_GATE_PROJECT_ID,
+    current_stage: 'PROPOSING',
+    status: 'HUMAN_REQUIRED',
+    human_gate: 'HUMAN_REQUIRED',
+    stop_outcome: 'NEEDS_HUMAN',
+  }));
+
+  await page.reload();
+  await waitForAppMounted(page);
+  await expect(page.locator('app-root')).toBeVisible();
   } finally {
     prepareFixture('cleanup');
   }

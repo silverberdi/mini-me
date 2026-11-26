@@ -16,6 +16,7 @@ from minime.domain.enums import HumanGate, OrchestrationStage, OrchestrationStop
 from minime.domain.models import (
     OrchestrationRun,
     Project,
+    ProjectAgentProfile,
     ProjectManagedRepositoryBinding,
 )
 
@@ -62,6 +63,14 @@ def create(engine) -> None:
             project_id=PROJECT_ID,
             display_name="Structured Human Gate E2E",
             repository="test/structured-human-gate",
+            agent_profiles={
+                role: ProjectAgentProfile(
+                    agent_id="codex",
+                    model_id="gpt-5.6-luna",
+                    effort="medium",
+                ).model_dump()
+                for role in ("thinking", "execution", "independent_review", "fallback")
+            },
         ))
         uow.project_managed_repository_bindings.save(ProjectManagedRepositoryBinding(
             project_id=PROJECT_ID,
