@@ -28,6 +28,8 @@ By role/provider/model: executions, duration, timeouts, technical failures, quot
 - ambiguity/block counts
 - successful restart/failure recovery
 - preserved jobs after quota exhaustion
+- completed Runs by evidence-backed outcome: no intervention, autonomous SRE recovery, operator needed
+- incomplete or conflicting intervention evidence excluded and surfaced as unverified; never inferred as autonomous
 
 ## Cost
 - DeepSeek Direct cost

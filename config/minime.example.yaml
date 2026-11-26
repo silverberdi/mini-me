@@ -21,8 +21,11 @@ providers:
     type: cli
     command: codex
     enabled: true
-    roles: [implementer, reviewer]
+    roles: [thinking, implementer, reviewer]
     invocation:
+      thinking:
+        args: [exec, "-", --sandbox, read-only, --ephemeral]
+        prompt_transport: stdin
       implementer:
         args: [exec, "-", --approve-for-me, --ephemeral]
         prompt_transport: stdin
@@ -38,8 +41,11 @@ providers:
     type: cli
     command: agy
     enabled: true
-    roles: [implementer, reviewer]
+    roles: [thinking, implementer, reviewer]
     invocation:
+      thinking:
+        args: [--mode, plan, --dangerously-skip-permissions, --print-timeout, "1h", "--print={prompt}"]
+        prompt_transport: argument
       implementer:
         args: [--mode, accept-edits, --dangerously-skip-permissions, --print-timeout, "1h", "--print={prompt}"]
         prompt_transport: argument

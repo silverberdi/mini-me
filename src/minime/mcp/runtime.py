@@ -121,7 +121,7 @@ class MCPRuntimeProfileResolver:
         relay = EphemeralMCPRelay(
             tools=tools,
             invoke=lambda conn_id, tool_name, args: self._invoke(
-                session_factory, self.cipher, project_id, conn_id, tool_name, args
+                session_factory, self.cipher, project_id, run_id, conn_id, tool_name, args
             ),
         )
         effective_cwd = agent_cwd or os.getcwd()
@@ -159,13 +159,13 @@ class MCPRuntimeProfileResolver:
         return routes
 
     @staticmethod
-    def _invoke(session_factory: Callable[[], Session], cipher: CredentialCipher, project_id: str, connection_id: str, tool: str, arguments: dict[str, Any]):
+    def _invoke(session_factory: Callable[[], Session], cipher: CredentialCipher, project_id: str, run_id: str, connection_id: str, tool: str, arguments: dict[str, Any]):
         from minime.mcp.service import MCPConnectionService
 
         with session_factory() as session:
             service = MCPConnectionService(session, cipher)
             service.ensure_renewed(project_id, connection_id)
-            return service.invoke(project_id, connection_id, tool, arguments)
+            return service.invoke(project_id, connection_id, tool, arguments, run_id=run_id)
 
     def close(self, run_id: str) -> None:
         relay = self._relays.pop(run_id, None)

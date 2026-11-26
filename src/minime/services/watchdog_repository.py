@@ -199,6 +199,9 @@ class PostgresWatchdogRepository:
             "action": row.action,
             "action_result": dict(row.action_result or {}),
             "improvement_suggestion": row.improvement_suggestion,
+            "source_intervention_transition_key": (row.evidence or {}).get(
+                "sre_intervention_transition_key"
+            ),
             "suggestion_status": row.suggestion_status,
             "created_at": row.created_at,
             "updated_at": row.updated_at,
