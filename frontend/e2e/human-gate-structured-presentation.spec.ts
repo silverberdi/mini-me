@@ -1,10 +1,29 @@
 import { test, expect } from '@playwright/test';
-import { TEST_PROJECT_ID, setupAuthSession, waitForAppMounted } from './helpers';
+import { execFileSync } from 'node:child_process';
+import { resolve } from 'node:path';
+import { HUMAN_GATE_PROJECT_ID, setupAuthSession, waitForAppMounted, E2E_SESSION_TOKEN } from './helpers';
+
+const fixture = resolve(process.cwd(), '../tests/human_gate_ui_fixture.py');
+
+function prepareFixture(action: 'create' | 'cleanup'): void {
+  execFileSync(process.env['PYTHON'] || 'python3', [fixture, action], {
+    cwd: resolve(process.cwd(), '..'),
+    env: { ...process.env, MINIME_TEST_DATABASE_URL: process.env['MINIME_TEST_DATABASE_URL'] },
+    stdio: 'inherit',
+  });
+}
 
 test('structured Human Gate keeps audit collapsed and submits the authoritative option', async ({ context, page }) => {
-  await setupAuthSession(context, undefined, TEST_PROJECT_ID);
-  await page.goto('/trabajo-actual?run=e2e-human-gate-run');
-  await waitForAppMounted(page);
+  prepareFixture('create');
+  try {
+    await setupAuthSession(context, E2E_SESSION_TOKEN, HUMAN_GATE_PROJECT_ID);
+    const runsLoaded = page.waitForResponse(response =>
+      response.url().includes('/api/v1/orchestration/runs?project_id=e2e-human-gate-project') &&
+      response.status() === 200);
+    await page.goto(`/trabajo-actual?run=${encodeURIComponent('e2e-human-gate-run')}`);
+    await runsLoaded;
+    await page.reload();
+    await waitForAppMounted(page);
 
   await expect(page.getByTestId('human-gate-summary')).toBeVisible({ timeout: 15000 });
   await expect(page.getByText('Resumen para decidir:')).toBeVisible();
@@ -32,5 +51,17 @@ test('structured Human Gate keeps audit collapsed and submits the authoritative 
 
   await page.reload();
   await waitForAppMounted(page);
-  await expect(page.locator('app-root')).toBeVisible();
+    await expect(page.locator('app-root')).toBeVisible();
+    const authoritativeRun = await page.request.get(
+      `/api/v1/orchestration/runs?project_id=${encodeURIComponent(HUMAN_GATE_PROJECT_ID)}&is_active=true`,
+      { headers: { Authorization: `Bearer ${E2E_SESSION_TOKEN}` } },
+    );
+    expect(authoritativeRun.ok()).toBeTruthy();
+    const runs = await authoritativeRun.json();
+    expect(runs).toEqual(expect.arrayContaining([
+      expect.objectContaining({ run_id: 'e2e-human-gate-run', project_id: HUMAN_GATE_PROJECT_ID }),
+    ]));
+  } finally {
+    prepareFixture('cleanup');
+  }
 });
