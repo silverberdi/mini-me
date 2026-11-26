@@ -14,7 +14,7 @@ The system SHALL parse `tasks.md` from the active OpenSpec change directory and 
 - **THEN** all tasks defined in `tasks.md` are extracted, preserving requirement sections and task IDs, and provided to the implementer execution payload.
 
 ### Requirement: Task completion verification
-The system SHALL inspect task checkbox states in `tasks.md` upon implementer completion to evaluate implementation progress, SHALL verify that completed tasks correspond to actual implementation evidence, and SHALL detect and reject mass-checked tasks where checkboxes are marked complete without corresponding implementation evidence in the candidate diff. During Apply, an implementation task MAY be marked complete when its work is present in the active worktree and its relevant automated tests have passed with exit code 0; this marking SHALL NOT wait for the coordinator to consolidate the candidate or produce its immutable candidate SHA. A task that depends on an intentionally untracked or externally published immutable asset MAY use a deterministic SHA-256 check and passing local tests as Apply evidence without requiring a Git commit for that asset. Task checkboxes SHALL NOT by themselves certify that Apply, Verify, or the Change is complete. Candidate-specific published-version evidence SHALL retain its source identity and SHALL satisfy candidate-specific criteria only when its immutable SHA matches the candidate being verified.
+The system SHALL inspect task checkbox states in `tasks.md` upon implementer completion to evaluate implementation progress, SHALL verify that completed tasks correspond to actual implementation evidence, and SHALL detect and reject mass-checked tasks where checkboxes are marked complete without corresponding implementation evidence in the candidate diff. During Apply, an implementation task MAY be marked complete when its work is present in the active worktree and its relevant automated tests have passed with exit code 0; this marking SHALL NOT wait for the coordinator to consolidate the candidate or produce its immutable candidate SHA. A task that depends on an intentionally untracked or externally published immutable asset MAY use a deterministic SHA-256 check and passing local tests as Apply evidence without requiring a Git commit for that asset. Task checkboxes SHALL NOT by themselves certify that Apply, Verify, or the Change is complete. Static mentions of publication services or deployment status in task descriptions SHALL NOT invalidate a candidate or act as publication evidence; task completion SHALL be evaluated from Git tree/diff evidence and relevant automated test results, together with any direct integration evidence explicitly required by the approved Change and the canonical contract. Where an approved criterion explicitly requires immutable candidate-specific external evidence, that evidence SHALL retain its source identity and satisfy the criterion only when its immutable SHA matches the candidate being verified.
 
 #### Scenario: All tasks marked complete by implementer
 - **WHEN** the implementer finishes and all tasks in `tasks.md` are checked `- [x]`
@@ -54,11 +54,24 @@ The system SHALL inspect task checkbox states in `tasks.md` upon implementer com
 - **THEN** the task MAY be marked complete without requiring a Git commit for the excluded asset
 - **AND** the coordinator continues to verify tracked candidate changes and tests through its existing checks.
 
+#### Scenario: Publication-service wording does not invalidate a candidate
+- **GIVEN** a completed task description contains a static mention of a publication service or deployment status
+- **AND** the relevant candidate tree and automated tests pass
+- **WHEN** task completion verification evaluates that candidate
+- **THEN** the static wording alone SHALL NOT reject the task or candidate
+- **AND** the wording SHALL NOT be treated as evidence that an external integration occurred.
+
+#### Scenario: Required real integration retains direct evidence
+- **GIVEN** an approved Change has a criterion that requires a real external integration
+- **WHEN** task completion and candidate verification evaluate that criterion
+- **THEN** the criterion SHALL require observable evidence of the integration invocation, its result, and its effects as required by the canonical contract
+- **AND** static task wording or passing unrelated tests SHALL NOT substitute for that evidence.
+
 #### Scenario: Candidate-specific evidence remains bound to candidate SHA
-- **GIVEN** evidence claims that a published version satisfies a criterion for the current candidate
-- **AND** the published version's immutable SHA is absent or differs from the candidate SHA
+- **GIVEN** an approved criterion explicitly requires external evidence for the current candidate
+- **AND** the evidence source SHA is absent or differs from the candidate SHA
 - **WHEN** the coordinator evaluates candidate verification
-- **THEN** it SHALL retain the evidence's published-version source identity
+- **THEN** it SHALL retain the evidence's source identity
 - **AND** SHALL NOT treat the criterion as proven for the candidate.
 
 ### Requirement: Runtime isolation of OpenSpec files
