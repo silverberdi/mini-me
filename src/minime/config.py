@@ -4,13 +4,14 @@ from __future__ import annotations
 
 import os
 from dataclasses import dataclass
-from decimal import Decimal
 from enum import Enum
 from pathlib import Path
 from typing import Any
 
 import yaml
 from pydantic import BaseModel, Field, field_validator
+
+PLAYWRIGHT_BROWSERS_PATH = "/opt/minime/runtime/playwright-browsers"
 
 
 class OpenSpecStage(str, Enum):

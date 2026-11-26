@@ -288,10 +288,14 @@ def test_tooling_inventory_is_bounded_and_reports_declared_browser_capability(tm
         '{"scripts": {"test:e2e": "playwright test --project=chromium"}, '
         '"devDependencies": {"@playwright/test": "^1.65.0"}}', encoding="utf-8"
     )
-    monkeypatch.setattr("minime.services.candidate_test_resolver.shutil.which", lambda name: "/usr/bin/chromium" if name == "chromium" else None)
-    empty_browser_cache = tmp_path / "empty-browser-cache"
-    empty_browser_cache.mkdir()
-    monkeypatch.setenv("PLAYWRIGHT_BROWSERS_PATH", str(empty_browser_cache))
+    runtime_browser = tmp_path / "playwright-browsers" / "chromium-headless-shell-123" / "chrome-headless-shell"
+    runtime_browser.parent.mkdir(parents=True)
+    runtime_browser.write_text("#!/bin/sh\necho Chromium 123\n", encoding="utf-8")
+    runtime_browser.chmod(0o755)
+    monkeypatch.setattr(
+        "minime.services.candidate_test_resolver.PLAYWRIGHT_BROWSERS_PATH",
+        str(runtime_browser.parents[1]),
+    )
     monkeypatch.setattr(
         "minime.services.candidate_test_resolver.subprocess.run",
         lambda *args, **kwargs: type("Result", (), {"returncode": 0, "stdout": "Chromium 123", "stderr": ""})(),
@@ -305,6 +309,31 @@ def test_tooling_inventory_is_bounded_and_reports_declared_browser_capability(tm
     assert inventory["declared_test_commands"][0]["declared_command"] == "playwright test --project=chromium"
     assert inventory["chromium_runtime"] == {
         "available": True,
-        "executable": "/usr/bin/chromium",
+        "executable": str(runtime_browser),
         "version": "Chromium 123",
+    }
+
+
+def test_playwright_runtime_path_is_fixed_and_missing_browser_has_no_fallback(tmp_path: Path, monkeypatch):
+    from minime.config import PLAYWRIGHT_BROWSERS_PATH
+    from minime.services.agent_confinement import AgentProcessConfinement
+
+    environment = AgentProcessConfinement.prepare_candidate_test_environment(
+        {
+            "HOME": str(tmp_path / "home"),
+            "PATH": "/usr/bin",
+            "PLAYWRIGHT_BROWSERS_PATH": str(tmp_path / "user-cache"),
+        }
+    )
+    assert environment["PLAYWRIGHT_BROWSERS_PATH"] == PLAYWRIGHT_BROWSERS_PATH
+
+    monkeypatch.setattr(
+        "minime.services.candidate_test_resolver.PLAYWRIGHT_BROWSERS_PATH",
+        str(tmp_path / "missing-runtime-browsers"),
+    )
+    inventory = CandidateTestResolver.inspect_tooling(tmp_path)
+    assert inventory["chromium_runtime"] == {
+        "available": False,
+        "executable": None,
+        "version": None,
     }

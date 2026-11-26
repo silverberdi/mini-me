@@ -3,28 +3,21 @@
 from __future__ import annotations
 
 import http.server
-import os
-import shutil
 import socket
 import subprocess
-import sys
 import threading
 from pathlib import Path
 
 import pytest
 
+from minime.config import PLAYWRIGHT_BROWSERS_PATH
 from minime.services.agent_confinement import AgentProcessConfinement
 from minime.services.candidate_test_resolver import CandidateTestResolver
 from minime.services.checks_runner import ChecksRunner
 
 
 def _has_chromium() -> bool:
-    if any(shutil.which(name) for name in ("chromium", "chromium-browser", "google-chrome")):
-        return True
-    cache_root = Path(
-        os.environ.get("PLAYWRIGHT_BROWSERS_PATH")
-        or (Path.home() / "Library" / "Caches" / "ms-playwright" if sys.platform == "darwin" else Path.home() / ".cache" / "ms-playwright")
-    )
+    cache_root = Path(PLAYWRIGHT_BROWSERS_PATH)
     return any(cache_root.glob("chromium_headless_shell-*/**/chrome-headless-shell"))
 
 
@@ -42,7 +35,7 @@ def test_darwin_check_sandbox_allows_only_the_validated_private_cache(tmp_path: 
 @pytest.mark.asyncio
 @pytest.mark.skipif(not AgentProcessConfinement.is_host_confinement_available(), reason="confined checks require host confinement")
 @pytest.mark.skipif(not _has_chromium(), reason="a Playwright Chromium runtime is required")
-async def test_declared_playwright_runs_against_served_candidate_and_binds_sha(tmp_path: Path):
+async def test_declared_playwright_runs_against_served_candidate_and_binds_sha(tmp_path: Path, monkeypatch):
     frontend_node_modules = Path(__file__).parents[1] / "frontend" / "node_modules"
     if not (frontend_node_modules / "@playwright" / "test").exists():
         pytest.skip("frontend Playwright dependency is not installed")
@@ -121,10 +114,11 @@ async def test_declared_playwright_runs_against_served_candidate_and_binds_sha(t
         assert check.candidate_sha == candidate_sha
         assert "navigation, async state, viewport, and isolated sessions passed" in check.output_snippet
 
-        empty_browser_cache = tmp_path / "missing-playwright-cache"
+        empty_browser_cache = tmp_path / "missing-runtime-browsers"
         empty_browser_cache.mkdir()
+        monkeypatch.setattr("minime.config.PLAYWRIGHT_BROWSERS_PATH", str(empty_browser_cache))
         unavailable = await run_check(
-            f"PLAYWRIGHT_BROWSERS_PATH={empty_browser_cache} {base_command} npm run test:e2e",
+            f"{base_command} npm run test:e2e",
             "playwright-missing-browser",
         )
         assert not unavailable.passed

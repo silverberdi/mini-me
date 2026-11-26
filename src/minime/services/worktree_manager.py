@@ -67,6 +67,13 @@ class WorktreeState:
 class WorktreeManager:
     """Creates isolated candidate worktrees under `.minime/worktrees/<job_id>` with Git operation tracking."""
 
+    GENERATED_CACHE_EXCLUDES = (
+        "**/.angular/cache/",
+        "**/.turbo/",
+        "**/.next/cache/",
+        "**/node_modules/.cache/",
+    )
+
     def __init__(
         self,
         project_root: str | Path,
@@ -3432,6 +3439,7 @@ class WorktreeManager:
                 change_name=eff_change_name,
                 ownership=historical_ownership,
             )
+            await self._ensure_generated_cache_excludes(path)
             return WorktreeInfo(
                 path=path,
                 branch_name=historical_ownership.branch,
@@ -3508,6 +3516,7 @@ class WorktreeManager:
                         job_id=job_id,
                         recovery_snapshot_sha=recovery_snapshot_sha,
                     )
+                    await self._ensure_generated_cache_excludes(path)
                     return WorktreeInfo(
                         path=path,
                         branch_name=branch_name,
@@ -3524,6 +3533,7 @@ class WorktreeManager:
                     require_clean=False,
                     worktree_kind="worktree",
                 )
+                await self._ensure_generated_cache_excludes(path)
                 return WorktreeInfo(path=path, branch_name=branch_name, base_sha=base_sha)
 
         if not run_id and self.uow and hasattr(self.uow, "jobs"):
@@ -3564,6 +3574,8 @@ class WorktreeManager:
             managed_worktree_path=path,
         )
 
+        await self._ensure_generated_cache_excludes(path)
+
         # 4. Write marker, prove postconditions, and transition to CREATED
         self._write_ownership_marker(path, ownership)
         if recovered_head_sha:
@@ -3597,6 +3609,30 @@ class WorktreeManager:
             branch_name=branch_name,
             base_sha=recreation_source_base or base_sha,
         )
+
+    async def _ensure_generated_cache_excludes(self, worktree_path: Path) -> None:
+        """Keep generated build caches out of Git status for this repository clone."""
+        exclude_value = await self._git(
+            ["rev-parse", "--git-path", "info/exclude"], cwd=worktree_path
+        )
+        exclude_file = Path(str(exclude_value).strip())
+        if not exclude_file.is_absolute():
+            exclude_file = worktree_path / exclude_file
+        if exclude_file.is_symlink():
+            raise RuntimeError("Worktree Git exclude path must not be a symlink.")
+        exclude_file = exclude_file.resolve()
+        exclude_file.parent.mkdir(parents=True, exist_ok=True)
+        existing_text = exclude_file.read_text(encoding="utf-8") if exclude_file.exists() else ""
+        existing_lines = set(existing_text.splitlines())
+        missing = [pattern for pattern in self.GENERATED_CACHE_EXCLUDES if pattern not in existing_lines]
+        if not missing:
+            return
+        prefix = existing_text
+        if prefix and not prefix.endswith("\n"):
+            prefix += "\n"
+        if not any(line.startswith("# mini me generated build caches") for line in existing_lines):
+            prefix += "# mini me generated build caches (shared clone)\n"
+        exclude_file.write_text(prefix + "\n".join(missing) + "\n", encoding="utf-8")
 
     async def _link_installed_node_dependencies(self, worktree_path: Path) -> None:
         """Expose already-installed repo dependencies in a new worktree without fetching."""
