@@ -56,3 +56,13 @@ def test_oauth_authorization_encrypts_tokens_and_atomic_refresh_updates_access_t
         assert provider.calls == ["exchange", "refresh"]
         assert cipher.decrypt(row.encrypted_credentials)["access_token"] == "access-2"
         assert cipher.decrypt(row.encrypted_credentials)["refresh_token"] == "refresh-1"
+
+        # Verify ensure_renewed recovers from ERROR status and restores ACTIVE
+        row.status = "ERROR"
+        row.diagnostic_code = "MCP_REFRESH_FAILED"
+        row.access_token_expires_at = datetime.now(UTC) - timedelta(seconds=1)
+        session.commit()
+        renewed = service.ensure_renewed("p", "oauth", client=provider)
+        assert renewed.status == "ACTIVE"
+        assert renewed.diagnostic_code is None
+        assert len(provider.calls) == 3
