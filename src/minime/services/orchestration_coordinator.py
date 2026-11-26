@@ -5520,6 +5520,27 @@ class NativeOrchestrationCoordinator:
                 self._clear_current_human_gate(uow, active_run)
                 self._update_stage(uow, active_run, OrchestrationStage.READY_FOR_PR)
             elif action == _REVIEW_REJECTED:
+                if isinstance(operator_clarification, str) and operator_clarification.strip():
+                    details = dict(active_run.stop_details or {})
+                    findings = (stored_code_review or {}).get("findings") or []
+                    details["pending_corrections"] = findings
+                    details["code_review"] = {
+                        **(stored_code_review or {}),
+                        "round": 0,
+                        "operator_clarification": operator_clarification.strip(),
+                    }
+                    active_run.stop_details = details
+                    self._clear_current_human_gate(uow, active_run, response_text=operator_clarification)
+                    self._update_stage(uow, active_run, OrchestrationStage.IMPLEMENTING)
+                    return OrchestrationCoordinationResult(
+                        status="RUNNING",
+                        run_id=active_run.run_id,
+                        current_stage=OrchestrationStage.IMPLEMENTING,
+                        message=(
+                            "Operator authorized candidate corrections following code review escalation; "
+                            "dispatching corrections to the implementer."
+                        ),
+                    )
                 return self._route_changes_required(
                     uow, project_id, active_run, stored_code_review
                 )
@@ -6539,7 +6560,7 @@ class NativeOrchestrationCoordinator:
             if isinstance(policy, dict):
                 candidate = policy.get("max_review_rounds")
                 if isinstance(candidate, int) and candidate >= 1:
-                    max_rounds = min(candidate, 2)
+                    max_rounds = min(candidate, 3)
         return round_num, max_rounds
 
     def _apply_attempts(self, run: OrchestrationRun) -> int:

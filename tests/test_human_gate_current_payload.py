@@ -1,5 +1,5 @@
 from pathlib import Path
-from unittest.mock import MagicMock
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 from fastapi.testclient import TestClient
@@ -17,6 +17,7 @@ from minime.domain.models import (
     Project,
 )
 from minime.services.orchestration_coordinator import NativeOrchestrationCoordinator
+from minime.services.worktree_manager import WorktreeInfo
 
 
 def _coordinator(uow: InMemoryPersistenceUnitOfWork) -> NativeOrchestrationCoordinator:
@@ -296,6 +297,9 @@ def test_code_review_escalation_replaces_and_persists_payload(in_memory_uow):
     run = _run(
         OrchestrationStage.CODE_REVIEW,
         details={
+            "issue_number": 1,
+            "issue_title": "Test Issue",
+            "issue_body": "Test normalized body",
             "code_review": {"round": 1},
             "human_payload": {"question": "resolved old question", "options": ["old"]},
         },
@@ -963,3 +967,77 @@ def test_explore_checkpoint_accepts_response_without_409_and_resolves(
         app.dependency_overrides.clear()
         from minime.api.app import _accepted_operations
         _accepted_operations.pop(("project-explore-test", "explore-clarification-key-1"), None)
+
+
+@pytest.mark.asyncio
+async def test_code_review_escalation_operator_clarification_resumes_to_implementing(in_memory_uow, tmp_path):
+    run = _run(
+        OrchestrationStage.CODE_REVIEW,
+        details={
+            "issue_number": 1,
+            "issue_title": "Test Issue",
+            "request_normalization": {
+                "normalized_body": "## Gherkin\n\n```gherkin\nScenario: test\n```"
+            },
+            "code_review": {
+                "status": "changes_required",
+                "candidate_sha": "candidate_sha_123",
+                "round": 2,
+                "findings": [
+                    {
+                        "severity": "BLOCKER",
+                        "location": "src/auth.ts",
+                        "violated_requirement": "Auth check",
+                        "expected_correction": "Fix auth",
+                    }
+                ],
+            },
+            "human_payload": {"gate": "code_review_escalation"},
+        },
+    )
+    run.change_name = "req-1-test-issue"
+    setup_managed_repository_fixture(
+        in_memory_uow,
+        run.project_id,
+        tmp_path / "repo",
+        tmp_path / "worktrees",
+        canonical_repository_identity="github.com/org/test-repo",
+    )
+    in_memory_uow.projects.save(
+        Project(
+            project_id=run.project_id,
+            display_name="Code review test",
+            repository="org/test-repo",
+        )
+    )
+    in_memory_uow.orchestration_runs.save(run)
+    coordinator = _coordinator(in_memory_uow)
+    coordinator.github_adapter.get_issue = AsyncMock(
+        return_value={
+            "number": 1,
+            "title": "Test Issue",
+            "body": "## Gherkin\n\n```gherkin\nScenario: test\n```",
+        }
+    )
+    coordinator.worktree_manager = MagicMock()
+    coordinator.worktree_manager.create_request_worktree = AsyncMock(
+        return_value=WorktreeInfo(
+            path=Path("/tmp/fake-worktree"), branch_name="feature/test", base_sha="base_123"
+        )
+    )
+    coordinator._get_git_head_sha = AsyncMock(return_value="candidate_sha_123")
+    coordinator._ensure_candidate_commit = AsyncMock()
+
+    result = await coordinator.execute_project_request(
+        run.project_id,
+        operator_clarification="Proceder con la corrección del hallazgo de autenticación",
+    )
+
+    assert result.status == "RUNNING"
+    assert result.current_stage == OrchestrationStage.IMPLEMENTING
+    stored = in_memory_uow.orchestration_runs.get_by_id(run.run_id)
+    assert stored.current_stage == OrchestrationStage.IMPLEMENTING
+    assert stored.human_gate is None
+    assert "pending_corrections" in stored.stop_details
+    assert len(stored.stop_details["pending_corrections"]) == 1
+    assert stored.stop_details["code_review"]["round"] == 0
