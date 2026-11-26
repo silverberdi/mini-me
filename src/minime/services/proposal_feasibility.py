@@ -873,7 +873,7 @@ class ProposalFeasibilityEvaluator:
                                     "actor": {"type": "string", "enum": ["thinking", "execution", "operator", "project_ci_cd", "external"]},
                                     "execution_stage": {"type": "string", "enum": list(ProposalFeasibilityEvaluator.STAGE_ORDER)},
                                     "fallback_assessment": {
-                                        "type": "object",
+                                        "type": ["object", "null"],
                                         "description": "Include only when a locally evidenced contingency replaces an unavailable integration. `fallback_applied` with `blocking: false` requires existing local path evidence and a mapped Apply/Verify scenario.",
                                         "properties": {
                                             "status": {"type": "string", "enum": ["fallback_applied"]},
@@ -910,7 +910,7 @@ class ProposalFeasibilityEvaluator:
                                     },
                                     "completion_evidence": {"type": "string"},
                                 },
-                                "required": ["task_id", "actor", "execution_stage", "capability_evidence_refs", "depends_on_task_ids", "preconditions", "completion_evidence"],
+                                "required": ["task_id", "actor", "execution_stage", "fallback_assessment", "capability_evidence_refs", "depends_on_task_ids", "preconditions", "completion_evidence"],
                                 "additionalProperties": False,
                             },
                         },
@@ -942,3 +942,50 @@ class ProposalFeasibilityEvaluator:
             "required": ["complexity", "evidence", "feasibility"],
             "additionalProperties": False,
         }
+
+
+def validate_openai_strict_schema(schema: dict[str, Any], path: str = "root") -> None:
+    """Validate that a JSON schema strictly adheres to OpenAI Structured Outputs rules.
+
+    Rules enforced:
+    - Every object schema with 'properties' must specify 'additionalProperties': False.
+    - Every object schema with 'properties' must have 'required' listing ALL property keys.
+    - Recursively validates nested objects, array items, and union schemas.
+    """
+    if not isinstance(schema, dict):
+        return
+    schema_type = schema.get("type")
+    # If it is an object with properties
+    if schema_type == "object" or (isinstance(schema_type, list) and "object" in schema_type):
+        if "properties" in schema:
+            if schema.get("additionalProperties") is not False:
+                raise ValueError(
+                    f"Strict schema violation at {path}: 'additionalProperties' must be explicitly False."
+                )
+            properties = schema["properties"]
+            required = schema.get("required") or []
+            if not isinstance(required, list):
+                raise ValueError(
+                    f"Strict schema violation at {path}: 'required' must be an array."
+                )
+            missing = set(properties.keys()) - set(required)
+            if missing:
+                raise ValueError(
+                    f"Strict schema violation at {path}: every key in 'properties' must be listed in 'required'. "
+                    f"Missing: {sorted(missing)}."
+                )
+            for prop_name, prop_schema in properties.items():
+                if isinstance(prop_schema, dict):
+                    validate_openai_strict_schema(
+                        prop_schema, path=f"{path}.properties['{prop_name}']"
+                    )
+
+    if "items" in schema and isinstance(schema["items"], dict):
+        validate_openai_strict_schema(schema["items"], path=f"{path}.items")
+
+    for union_key in ("anyOf", "oneOf", "allOf"):
+        if union_key in schema and isinstance(schema[union_key], list):
+            for idx, sub_schema in enumerate(schema[union_key]):
+                if isinstance(sub_schema, dict):
+                    validate_openai_strict_schema(sub_schema, path=f"{path}.{union_key}[{idx}]")
+

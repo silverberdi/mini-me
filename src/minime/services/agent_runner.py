@@ -1026,6 +1026,8 @@ class CliAgentRunner:
 
         try:
             if response_path and schema_path and normalized_provider == "codex":
+                from minime.services.proposal_feasibility import validate_openai_strict_schema
+                validate_openai_strict_schema(output_schema)
                 cmd.extend(
                     [
                         "--output-schema",

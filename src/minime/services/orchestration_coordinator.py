@@ -4357,7 +4357,8 @@ class NativeOrchestrationCoordinator:
                 completed_complexity_attempts = [
                     attempt
                     for attempt in ((active_run.stop_details or {}).get("complexity_attempts") or [])
-                    if isinstance(attempt, dict) and attempt.get("status") not in ("IN_PROGRESS", None)
+                    if isinstance(attempt, dict)
+                    and attempt.get("status") not in ("IN_PROGRESS", "PREFLIGHT_FAILED", "EXECUTION_FAILED", None)
                 ]
                 if (
                     complexity_result is None

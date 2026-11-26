@@ -59,6 +59,9 @@ async def preflight_cli_invocation(
             )
             if not supported:
                 return PreflightResult(ok=False, reason=reason or "UNSUPPORTED_ACCOUNT_CAPABILITY")
+            if hasattr(adapter, "check_auth_ready"):
+                if not await adapter.check_auth_ready(timeout_seconds=min(5.0, timeout)):
+                    return PreflightResult(ok=False, reason="CREDENTIAL_EXPIRED_OR_UNAVAILABLE")
         except Exception as exc:
             return PreflightResult(
                 ok=False, reason=f"CAPABILITY_DISCOVERY_UNAVAILABLE:{type(exc).__name__}"
