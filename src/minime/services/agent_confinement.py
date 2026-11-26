@@ -768,6 +768,7 @@ class AgentProcessConfinement:
         antigravity_auth_source: str | None = None,
         *,
         extra_env: dict[str, str] | None = None,
+        antigravity_mcp_config: dict[str, Any] | None = None,
     ) -> Iterator[AgentRuntimeState]:
         """Create one private runtime with only explicitly authorized provider credentials."""
         temp_parent = self._validate_temp_parent(
@@ -875,6 +876,22 @@ class AgentProcessConfinement:
                         reverse=True,
                     )
                 )
+
+            if antigravity_mcp_config is not None:
+                if not isinstance(antigravity_mcp_config, dict) or not isinstance(
+                    antigravity_mcp_config.get("mcpServers"), dict
+                ):
+                    raise AgentConfinementError("Antigravity MCP configuration is invalid.")
+                gemini_home = subdirs["home"] / ".gemini"
+                config_dir = gemini_home / "config"
+                config_dir.mkdir(parents=True, mode=0o700, exist_ok=True)
+                os.chmod(gemini_home, 0o700)
+                os.chmod(config_dir, 0o700)
+                config_path = config_dir / "mcp_config.json"
+                config_path.write_text(
+                    json.dumps(antigravity_mcp_config, sort_keys=True), encoding="utf-8"
+                )
+                os.chmod(config_path, 0o600)
 
             runtime = AgentRuntimeState(
                 host_root=host_root,
@@ -1328,6 +1345,7 @@ class AgentProcessConfinement:
         unshare_network: bool = False,
         read_only_worktree: bool = False,
         extra_env: dict[str, str] | None = None,
+        antigravity_mcp_config: dict[str, Any] | None = None,
         process_start_observer: Callable[[dict[str, Any]], None] | None = None,
     ) -> AgentProcessResult:
         """Run an async subprocess, guaranteeing process and private-state cleanup."""
@@ -1337,7 +1355,8 @@ class AgentProcessConfinement:
         runtime_state = None
         try:
             with self.runtime_session(
-                env, codex_auth_source, antigravity_auth_source, extra_env=extra_env
+                env, codex_auth_source, antigravity_auth_source, extra_env=extra_env,
+                antigravity_mcp_config=antigravity_mcp_config,
             ) as runtime_state:
                 command = self.wrap_command(
                     cmd,

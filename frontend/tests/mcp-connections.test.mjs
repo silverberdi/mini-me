@@ -17,3 +17,11 @@ test('MCP UI renders sanitized status and observed capabilities', () => {
   assert.doesNotMatch(source, /localStorage|sessionStorage|serviceWorker/);
   assert.match(source, /mcp-connections/);
 });
+
+test('MCP UI exposes scope registration, badges and catalog filtering', () => {
+  assert.match(source, /name="isGlobal"/);
+  assert.match(source, /connection\.is_global \? 'Global · heredada'/);
+  assert.match(source, /id="mcp-scope-filter"/);
+  assert.match(source, /filteredConnections\(\)/);
+  assert.match(source, /is_global: this\.draft\.is_global/);
+});

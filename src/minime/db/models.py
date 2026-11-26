@@ -153,7 +153,7 @@ class ProjectModel(Base):
 
 
 class MCPConnectionModel(Base):
-    """Project-scoped MCP connection; secret material is always encrypted."""
+    """Local or global MCP connection; secret material is always encrypted."""
 
     __tablename__ = "mcp_connections"
     __table_args__ = (
@@ -162,10 +162,17 @@ class MCPConnectionModel(Base):
         CheckConstraint("auth_type IN ('oauth2', 'api_key', 'bearer')", name="ck_mcp_connection_auth_type"),
         CheckConstraint("status IN ('PENDING', 'ACTIVE', 'ERROR', 'DISCONNECTED', 'REVOKED')", name="ck_mcp_connection_status"),
         Index("ix_mcp_connections_project_status", "project_id", "status"),
+        Index(
+            "uq_mcp_connection_global_endpoint",
+            "endpoint",
+            unique=True,
+            postgresql_where=text("project_id IS NULL"),
+            sqlite_where=text("project_id IS NULL"),
+        ),
     )
 
     id: Mapped[str] = mapped_column(String(64), primary_key=True)
-    project_id: Mapped[str] = mapped_column(String(64), ForeignKey("projects.id", ondelete="CASCADE"), nullable=False)
+    project_id: Mapped[str | None] = mapped_column(String(64), ForeignKey("projects.id", ondelete="CASCADE"), nullable=True)
     name: Mapped[str] = mapped_column(String(255), nullable=False)
     endpoint: Mapped[str] = mapped_column(String(1024), nullable=False)
     transport: Mapped[str] = mapped_column(String(16), nullable=False)
@@ -180,7 +187,7 @@ class MCPConnectionModel(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, default=utc_now)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, default=utc_now, onupdate=utc_now)
 
-    project: Mapped[ProjectModel] = relationship("ProjectModel", back_populates="mcp_connections")
+    project: Mapped[ProjectModel | None] = relationship("ProjectModel", back_populates="mcp_connections")
     capabilities: Mapped[list["MCPCapabilityModel"]] = relationship(
         "MCPCapabilityModel", back_populates="connection", cascade="all, delete-orphan"
     )

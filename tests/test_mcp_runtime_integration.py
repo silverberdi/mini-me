@@ -1,5 +1,6 @@
 from cryptography.fernet import Fernet
 from sqlalchemy import create_engine
+from sqlalchemy.pool import StaticPool
 from sqlalchemy.orm import Session
 
 from minime.db.models import Base, MCPCapabilityModel, MCPConnectionModel
@@ -18,7 +19,7 @@ def test_runtime_uses_ephemeral_relay_without_process_arguments():
 def test_runtime_prepare_and_invoke_uses_active_connection_and_observable_effect():
     server, endpoint = controlled_server()
     ControlledMCPHandler.require_auth = True
-    engine = create_engine("sqlite://")
+    engine = create_engine("sqlite://", connect_args={"check_same_thread": False}, poolclass=StaticPool)
     Base.metadata.create_all(engine)
     cipher = CredentialCipher(Fernet.generate_key())
     try:

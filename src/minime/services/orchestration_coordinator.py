@@ -332,6 +332,15 @@ class NativeOrchestrationCoordinator:
         self.watchdog_mechanical_remediation = watchdog_mechanical_remediation
 
     @staticmethod
+    def _mcp_capabilities_for_project(uow: Any, project_id: str) -> list[dict[str, Any]]:
+        session = getattr(uow, "session", None)
+        if session is None:
+            return []
+        from minime.mcp.service import MCPConnectionService
+
+        return MCPConnectionService(session).resolved_capabilities(project_id)
+
+    @staticmethod
     def _safe_human_payload(payload: Any) -> dict[str, Any]:
         """Redact agent text once before it becomes durable or operator-visible."""
         clean = redact_secrets(payload)
@@ -891,6 +900,7 @@ class NativeOrchestrationCoordinator:
             preview_sessions=getattr(uow, "preview_sessions", None),
             thinker_provider=thinker_provider,
             implementer_provider=implementer_provider,
+            mcp_capabilities=self._mcp_capabilities_for_project(uow, project_id),
         )
         blockers = list(
             self.proposal_feasibility.blockers_before_stage(
@@ -3329,15 +3339,21 @@ class NativeOrchestrationCoordinator:
             if locked_run is not None:
                 active_run = locked_run
 
-        if mcp_connection_id:
-            # MCP is an opt-in capability of this Run. Preparation is fail-closed
-            # and happens after durable Run admission, before any agent stage.
+        if mcp_connection_id or any(
+            item.get("is_global") for item in self._mcp_capabilities_for_project(uow, project_id)
+        ):
+            # Global MCP capabilities are inherited by authorized Runs; local
+            # connections remain opt-in. Preparation is fail-closed before dispatch.
             from minime.mcp.runtime import MCPRuntimeProfileResolver
             from minime.mcp.security import CredentialCipher
             try:
                 profile = MCPRuntimeProfileResolver(
                     uow.session, CredentialCipher()
-                ).prepare(project_id, active_run.run_id, implementer_provider, mcp_connection_id)
+                ).prepare(
+                    project_id, active_run.run_id, implementer_provider, mcp_connection_id,
+                    relay_parent=str(worktree_path / ".minime"),
+                    agent_cwd=str(worktree_path),
+                )
             except Exception as exc:
                 active_run.stop_details = {
                     **(active_run.stop_details or {}),
@@ -4212,6 +4228,7 @@ class NativeOrchestrationCoordinator:
                 preview_sessions=getattr(uow, "preview_sessions", None),
                 thinker_provider=thinker_provider,
                 implementer_provider=implementer_provider,
+                mcp_capabilities=self._mcp_capabilities_for_project(uow, project_id),
             )
             capability_fingerprint = json.dumps(
                 {
@@ -7246,6 +7263,7 @@ class NativeOrchestrationCoordinator:
             preview_sessions=getattr(uow, "preview_sessions", None),
             thinker_provider=thinker_provider,
             implementer_provider=implementer_provider,
+            mcp_capabilities=self._mcp_capabilities_for_project(uow, project_id),
         )
         capabilities = {
             str(item.get("ref")): item.get("available") is True
