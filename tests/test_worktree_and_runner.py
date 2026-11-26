@@ -80,11 +80,42 @@ async def test_worktree_manager_create_collision_and_cleanup(tmp_path):
     assert info.branch_name.startswith("minime/002-implementation-pipeline-job-1")
     assert await manager.current_sha(info.path) == info.base_sha
 
+    from minime.services.lifecycle_gates import ApplyAttributionGate
+
+    cache_paths = (
+        ".angular/cache/compiler/entry.bin",
+        ".turbo/cache.bin",
+        ".next/cache/webpack/entry.bin",
+        "node_modules/.cache/tool/entry.bin",
+    )
+    for relative in cache_paths:
+        cache_file = info.path / relative
+        cache_file.parent.mkdir(parents=True, exist_ok=True)
+        cache_file.write_bytes(b"generated")
+    ordinary = info.path / "unrelated.tmp"
+    ordinary.write_text("keep visible", encoding="utf-8")
+    exclude_path = Path(
+        await manager._git(["rev-parse", "--git-path", "info/exclude"], cwd=info.path)
+    )
+    await manager._ensure_generated_cache_excludes(info.path)
+    exclude_text = exclude_path.read_text(encoding="utf-8")
+    assert all(pattern in exclude_text.splitlines() for pattern in manager.GENERATED_CACHE_EXCLUDES)
+    for relative in cache_paths:
+        assert await manager._git(
+            ["check-ignore", "--quiet", "--no-index", "--", relative], cwd=info.path
+        ) == ""
+    assert "unrelated.tmp" in ApplyAttributionGate._implementation_paths(info.path, info.base_sha, "openspec")
+    assert all(
+        path not in ApplyAttributionGate._implementation_paths(info.path, info.base_sha, "openspec")
+        for path in cache_paths
+    )
+
     with pytest.raises(ValueError, match="not empty"):
         await manager.create_worktree(
             "job-1", "002-implementation-pipeline", "main", project_id="job-1-proj", run_id="run-1"
         )
 
+    ordinary.unlink()
     await manager.cleanup_worktree("job-1", project_id="job-1-proj")
     assert not info.path.exists()
 

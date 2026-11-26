@@ -1305,7 +1305,7 @@ def test_published_version_evidence_needs_exact_candidate_sha_to_complete():
     ) == ["4.2"]
 
 
-def test_external_published_asset_is_not_mistaken_for_published_candidate_evidence():
+def test_publication_wording_is_not_used_as_candidate_or_integration_evidence():
     asset = "- [x] 1.1 Verify published GitHub release asset SHA-256 and local fixture tests"
     deployed_app = "- [x] 1.2 Validate published application in GitHub Pages"
 
@@ -1314,7 +1314,7 @@ def test_external_published_asset_is_not_mistaken_for_published_candidate_eviden
     ) == []
     assert NativeOrchestrationCoordinator._invalid_published_evidence_completions(
         deployed_app, "a" * 40
-    ) == ["1.2"]
+    ) == []
 
 
 @pytest.mark.asyncio

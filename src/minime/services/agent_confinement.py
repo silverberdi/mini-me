@@ -1635,6 +1635,8 @@ class AgentProcessConfinement:
         base_env: dict[str, str] | None = None,
     ) -> dict[str, str]:
         """Build a candidate-test environment from the OS/toolchain runtime allowlist."""
+        from minime.config import PLAYWRIGHT_BROWSERS_PATH
+
         source = os.environ if base_env is None else base_env
         allowed_runtime_keys = {
             "PATH",
@@ -1664,11 +1666,13 @@ class AgentProcessConfinement:
             "RUSTUP_HOME",
             "RUSTUP_TOOLCHAIN",
         }
-        return {
+        environment = {
             key: value
             for key, value in source.items()
             if key.upper() in allowed_runtime_keys or key.upper().startswith("LC_")
         }
+        environment["PLAYWRIGHT_BROWSERS_PATH"] = PLAYWRIGHT_BROWSERS_PATH
+        return environment
 
     def prepare_environment(self, base_env: dict[str, str] | None = None) -> dict[str, str]:
         """Return a sanitized inherited environment before per-attempt paths are set."""

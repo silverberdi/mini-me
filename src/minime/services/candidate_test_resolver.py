@@ -6,7 +6,6 @@ import json
 import os
 import re
 import shlex
-import shutil
 import subprocess
 import sys
 import tomllib
@@ -15,6 +14,7 @@ from enum import Enum
 from pathlib import Path
 from typing import Any
 
+from minime.config import PLAYWRIGHT_BROWSERS_PATH
 from minime.logging import redact_secrets
 
 
@@ -158,24 +158,14 @@ class CandidateTestResolver:
                     add("Makefile", target, f"make {target}")
 
         browser_candidates: list[str] = []
-        shared_path = os.environ.get("PLAYWRIGHT_BROWSERS_PATH") or str(
-            Path.home() / "Library" / "Caches" / "ms-playwright"
-            if sys.platform == "darwin"
-            else Path.home() / ".cache" / "ms-playwright"
-        )
-        if shared_path:
-            cache = Path(shared_path)
-            if cache.is_dir():
-                browser_candidates.extend(
-                    str(path)
-                    for pattern in ("**/chrome-headless-shell", "**/headless_shell", "**/chrome")
-                    for path in cache.glob(pattern)
-                    if path.is_file() and os.access(path, os.X_OK)
-                )
-        browser_candidates.extend(
-            path for name in ("chromium", "chromium-browser", "google-chrome")
-            if (path := shutil.which(name))
-        )
+        runtime_browsers = Path(PLAYWRIGHT_BROWSERS_PATH)
+        if runtime_browsers.is_dir():
+            browser_candidates.extend(
+                str(path)
+                for pattern in ("**/chrome-headless-shell", "**/headless_shell", "**/chrome")
+                for path in runtime_browsers.glob(pattern)
+                if path.is_file() and os.access(path, os.X_OK)
+            )
         chromium = next(iter(dict.fromkeys(browser_candidates)), None)
         browser: dict[str, Any] = {"available": False, "executable": None, "version": None}
         if chromium:

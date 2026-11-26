@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+from copy import deepcopy
 from pathlib import Path
+
 from minime.services.proposal_feasibility import ProposalFeasibilityEvaluator
 
 
@@ -101,6 +103,13 @@ def test_validate_report_accepts_tasks_with_directory_preconditions(tmp_path: Pa
                         "satisfied": True,
                     }
                 ],
+                "fallback_assessment": {
+                    "status": "fallback_applied",
+                    "blocking": False,
+                    "explanation": "The local reference page covers this scenario and the mapped browser check validates its behavior.",
+                    "evidence_refs": ["path:src/new_file.js"],
+                    "verification_scenario_id": "SC-1",
+                },
             }
         ],
         "scenario_coverage": [
@@ -122,3 +131,37 @@ def test_validate_report_accepts_tasks_with_directory_preconditions(tmp_path: Pa
 
     assert status == "EXECUTABLE"
     assert len(blockers) == 0
+    assert tasks[0]["fallback_assessment"]["status"] == "fallback_applied"
+    assert tasks[0]["fallback_assessment"]["blocking"] is False
+
+    missing_fallback = deepcopy(report)
+    missing_fallback["tasks"][0]["fallback_assessment"]["evidence_refs"] = [
+        "path:missing/local-reference.html"
+    ]
+    status, _, _, blockers, _ = ProposalFeasibilityEvaluator.validate_report(
+        report=missing_fallback,
+        inputs=inputs,
+        worktree_path=tmp_path,
+    )
+    assert status == "BLOCKED"
+    assert "task 1.1 fallback path evidence is missing or invalid" in blockers
+
+    blocked_fallback = deepcopy(report)
+    blocked_fallback["tasks"][0]["fallback_assessment"]["blocking"] = True
+    status, _, _, blockers, _ = ProposalFeasibilityEvaluator.validate_report(
+        report=blocked_fallback,
+        inputs=inputs,
+        worktree_path=tmp_path,
+    )
+    assert status == "BLOCKED"
+    assert "task 1.1 fallback is still blocking or has unknown status" in blockers
+
+    unverified_fallback = deepcopy(report)
+    unverified_fallback["tasks"][0]["fallback_assessment"]["verification_scenario_id"] = "SC-MISSING"
+    status, _, _, blockers, _ = ProposalFeasibilityEvaluator.validate_report(
+        report=unverified_fallback,
+        inputs=inputs,
+        worktree_path=tmp_path,
+    )
+    assert status == "BLOCKED"
+    assert "task 1.1 fallback has no mapped executor verification scenario" in blockers

@@ -3339,45 +3339,6 @@ class NativeOrchestrationCoordinator:
             if locked_run is not None:
                 active_run = locked_run
 
-        if mcp_connection_id or any(
-            item.get("is_global") for item in self._mcp_capabilities_for_project(uow, project_id)
-        ):
-            # Global MCP capabilities are inherited by authorized Runs; local
-            # connections remain opt-in. Preparation is fail-closed before dispatch.
-            from minime.mcp.runtime import MCPRuntimeProfileResolver
-            from minime.mcp.security import CredentialCipher
-            try:
-                profile = MCPRuntimeProfileResolver(
-                    uow.session, CredentialCipher()
-                ).prepare(
-                    project_id, active_run.run_id, implementer_provider, mcp_connection_id,
-                    relay_parent=str(worktree_path / ".minime"),
-                    agent_cwd=str(worktree_path),
-                )
-            except Exception as exc:
-                active_run.stop_details = {
-                    **(active_run.stop_details or {}),
-                    "mcp_runtime": {"status": "BLOCKED", "connection_id": mcp_connection_id, "reason": type(exc).__name__},
-                }
-                uow.orchestration_runs.save(active_run)
-                if hasattr(uow, "commit"):
-                    uow.commit()
-                return OrchestrationCoordinationResult(
-                    status="BLOCKED", run_id=active_run.run_id, current_stage=active_run.current_stage,
-                    message="MCP runtime preparation failed closed; the agent was not started.",
-                )
-            active_run.stop_details = {
-                **(active_run.stop_details or {}),
-                "mcp_runtime": {
-                    "status": "PREPARED", "connection_id": profile.connection_id,
-                    "transport": profile.transport, "capabilities": list(profile.capabilities),
-                    "relay_path": profile.relay_path,
-                },
-            }
-            uow.orchestration_runs.save(active_run)
-            if hasattr(uow, "commit"):
-                uow.commit()
-
         # Capture the stage this execution *entered* at. Review stages are
         # transition points: if a run enters already sitting on a review stage,
         # that is a resume and must fail closed on absent/ambiguous evidence.
@@ -3487,6 +3448,44 @@ class NativeOrchestrationCoordinator:
             change_name=change_name,
         )
         worktree_path = worktree_info.path
+        if mcp_connection_id or any(
+            item.get("is_global") for item in self._mcp_capabilities_for_project(uow, project_id)
+        ):
+            # Global MCP capabilities are inherited by authorized Runs; local
+            # connections remain opt-in. Preparation is fail-closed before dispatch.
+            from minime.mcp.runtime import MCPRuntimeProfileResolver
+            from minime.mcp.security import CredentialCipher
+            try:
+                profile = MCPRuntimeProfileResolver(
+                    uow.session, CredentialCipher()
+                ).prepare(
+                    project_id, active_run.run_id, implementer_provider, mcp_connection_id,
+                    relay_parent=str(worktree_path / ".minime"),
+                    agent_cwd=str(worktree_path),
+                )
+            except Exception as exc:
+                active_run.stop_details = {
+                    **(active_run.stop_details or {}),
+                    "mcp_runtime": {"status": "BLOCKED", "connection_id": mcp_connection_id, "reason": type(exc).__name__},
+                }
+                uow.orchestration_runs.save(active_run)
+                if hasattr(uow, "commit"):
+                    uow.commit()
+                return OrchestrationCoordinationResult(
+                    status="BLOCKED", run_id=active_run.run_id, current_stage=active_run.current_stage,
+                    message="MCP runtime preparation failed closed; the agent was not started.",
+                )
+            active_run.stop_details = {
+                **(active_run.stop_details or {}),
+                "mcp_runtime": {
+                    "status": "PREPARED", "connection_id": profile.connection_id,
+                    "transport": profile.transport, "capabilities": list(profile.capabilities),
+                    "relay_path": profile.relay_path,
+                },
+            }
+            uow.orchestration_runs.save(active_run)
+            if hasattr(uow, "commit"):
+                uow.commit()
         if entry_stage == OrchestrationStage.IMPLEMENTING and gate_pending:
             recovery_diagnosis = self._diagnose_apply_checkpoint_recovery(uow, active_run)
             current_gate = get_active_human_payload(active_run) or {}
@@ -6485,11 +6484,6 @@ class NativeOrchestrationCoordinator:
         r"\[PUBLISHED_EVIDENCE\s+source=(?:\"[^\"]+\"|[^;\]]+);\s*sha=([^\]]+)\]",
         re.IGNORECASE,
     )
-    _PUBLISHED_CANDIDATE_CLAIM = re.compile(
-        r"\b(?:published|deployed|production|live)\s+(?:app(?:lication)?|build|version|site|candidate)\b"
-        r"|\bgithub\s+pages\b",
-        re.IGNORECASE,
-    )
 
     @classmethod
     def _deferred_task_ids(cls, tasks_text: str) -> list[str]:
@@ -6597,8 +6591,6 @@ class NativeOrchestrationCoordinator:
                 continue
             marker = cls._PUBLISHED_EVIDENCE_MARKER.search(line)
             if not marker:
-                if cls._PUBLISHED_CANDIDATE_CLAIM.search(line):
-                    invalid.append(completed.group(1))
                 continue
             source_sha = marker.group(1).strip()
             if (

@@ -557,6 +557,69 @@ class ProposalFeasibilityEvaluator:
             completion_evidence = str(item.get("completion_evidence") or "")
             if not completion_evidence.strip():
                 blockers.append(f"task {task_id} has no observable completion evidence")
+            fallback_assessment = item.get("fallback_assessment")
+            validated_fallback: dict[str, Any] | None = None
+            if fallback_assessment is not None:
+                if not isinstance(fallback_assessment, dict):
+                    blockers.append(f"task {task_id} has a malformed fallback assessment")
+                else:
+                    fallback_status = str(fallback_assessment.get("status") or "")
+                    fallback_blocking = fallback_assessment.get("blocking")
+                    fallback_explanation = str(fallback_assessment.get("explanation") or "").strip()
+                    fallback_refs = (
+                        [str(ref) for ref in fallback_assessment.get("evidence_refs", [])]
+                        if isinstance(fallback_assessment.get("evidence_refs"), list)
+                        else []
+                    )
+                    verification_scenario_id = str(
+                        fallback_assessment.get("verification_scenario_id") or ""
+                    )
+                    scenario = next(
+                        (
+                            row for row in scenario_rows
+                            if isinstance(row, dict)
+                            and str(row.get("scenario_id") or "") == verification_scenario_id
+                        ),
+                        None,
+                    )
+                    scenario_tasks = (
+                        {str(value) for value in scenario.get("task_ids", [])}
+                        if isinstance(scenario, dict) and isinstance(scenario.get("task_ids"), list)
+                        else set()
+                    )
+                    if fallback_status != "fallback_applied":
+                        blockers.append(f"task {task_id} has an unsupported fallback status")
+                    if fallback_blocking is not False:
+                        blockers.append(f"task {task_id} fallback is still blocking or has unknown status")
+                    if not fallback_explanation:
+                        blockers.append(f"task {task_id} fallback assessment has no functional explanation")
+                    if not fallback_refs or any(not ref.startswith("path:") for ref in fallback_refs):
+                        blockers.append(f"task {task_id} fallback lacks local path evidence")
+                    verified_fallback, unknown_fallback = cls.verified_evidence_refs(
+                        fallback_refs,
+                        available_refs,
+                        worktree_path,
+                        openspec_path=openspec_path,
+                        change_name=change_name,
+                    )
+                    if unknown_fallback or verified_fallback != set(fallback_refs):
+                        blockers.append(f"task {task_id} fallback path evidence is missing or invalid")
+                    if (
+                        not scenario
+                        or task_id not in scenario_tasks
+                        or scenario.get("evidence_stage") not in {"apply", "verify"}
+                        or scenario.get("verification_mode") not in {"browser", "other"}
+                        or actor != "execution"
+                        or execution_stage not in {"apply", "verify"}
+                    ):
+                        blockers.append(f"task {task_id} fallback has no mapped executor verification scenario")
+                    validated_fallback = {
+                        "status": fallback_status,
+                        "blocking": fallback_blocking,
+                        "explanation": fallback_explanation,
+                        "evidence_refs": fallback_refs,
+                        "verification_scenario_id": verification_scenario_id,
+                    }
             validated_tasks.append(
                 {
                     "task_id": task_id,
@@ -582,6 +645,7 @@ class ProposalFeasibilityEvaluator:
                     if isinstance(item.get("depends_on_task_ids"), list) else [],
                     "preconditions": validated_preconditions,
                     "completion_evidence": completion_evidence,
+                    "fallback_assessment": validated_fallback,
                 }
             )
         if seen_tasks != expected_tasks:
@@ -808,6 +872,19 @@ class ProposalFeasibilityEvaluator:
                                     "task_id": {"type": "string"},
                                     "actor": {"type": "string", "enum": ["thinking", "execution", "operator", "project_ci_cd", "external"]},
                                     "execution_stage": {"type": "string", "enum": list(ProposalFeasibilityEvaluator.STAGE_ORDER)},
+                                    "fallback_assessment": {
+                                        "type": "object",
+                                        "description": "Include only when a locally evidenced contingency replaces an unavailable integration. `fallback_applied` with `blocking: false` requires existing local path evidence and a mapped Apply/Verify scenario.",
+                                        "properties": {
+                                            "status": {"type": "string", "enum": ["fallback_applied"]},
+                                            "blocking": {"type": "boolean"},
+                                            "explanation": {"type": "string", "minLength": 1},
+                                            "evidence_refs": {"type": "array", "items": {"type": "string"}},
+                                            "verification_scenario_id": {"type": "string"},
+                                        },
+                                        "required": ["status", "blocking", "explanation", "evidence_refs", "verification_scenario_id"],
+                                        "additionalProperties": False,
+                                    },
                                     "capability_evidence_refs": {
                                         "type": "array",
                                         "description": "Exact ref values from the supplied capabilities inventory; do not use descriptive prose or unprefixed paths.",
