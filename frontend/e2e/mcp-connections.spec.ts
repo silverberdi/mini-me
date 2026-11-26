@@ -58,7 +58,7 @@ test('operator sees and filters global MCP connections and can register one', as
   await page.getByRole('button', { name: 'Nueva integración MCP' }).click();
   await page.locator('input[name="name"]').fill('Shared design tools');
   await page.locator('input[name="endpoint"]').fill('http://shared.test/mcp');
-  await page.locator('input[type="radio"][name="auth_type"][value="bearer"]').check({ force: true });
+  await page.locator('label:has(input[value="bearer"])').click();
   await page.locator('input[name="bearerToken"]').fill('test-token');
   await page.getByLabel('Disponible globalmente').check({ force: true });
   await page.getByRole('button', { name: 'Registrar y comprobar' }).click();
