@@ -969,8 +969,6 @@ class CliAgentRunner:
             response_path.parent.mkdir(parents=True, exist_ok=True)
             if output_schema is None:
                 raise ValueError("An output schema is required with --output-last-message.")
-            from minime.services.proposal_feasibility import validate_openai_strict_schema
-            validate_openai_strict_schema(output_schema)
             schema_path.write_text(json.dumps(output_schema, sort_keys=True), encoding="utf-8")
 
         def cleanup_structured_output() -> None:
@@ -1028,6 +1026,8 @@ class CliAgentRunner:
 
         try:
             if response_path and schema_path and normalized_provider == "codex":
+                from minime.services.proposal_feasibility import validate_openai_strict_schema
+                validate_openai_strict_schema(output_schema)
                 cmd.extend(
                     [
                         "--output-schema",
