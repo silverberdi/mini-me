@@ -9786,12 +9786,33 @@ class NativeOrchestrationCoordinator:
         prompt_suffix = "\n\n"
         context_limit = self._configured_review_context_tokens(uow, project_id)
         review_input["provider_context_limit_tokens"] = context_limit
+
+        # When the reviewer CLI uses argument transport (e.g. agy --print), the OS kernel
+        # enforces MAX_ARG_STRLEN (128 KiB on Linux). Bound prompt byte budget safely <= 96 KiB
+        # so large diffs are partitioned cleanly instead of crashing execve with E2BIG.
+        runner_profile = (
+            self.agent_runner._profile_for("reviewer", provider)
+            if hasattr(self.agent_runner, "_profile_for")
+            else None
+        )
+        is_arg_transport = bool(
+            runner_profile and getattr(runner_profile, "prompt_transport", None) == "argument"
+        )
+        arg_transport_ceiling = 96 * 1024 if is_arg_transport else None
+
+        effective_prompt_budget = None
+        if context_limit:
+            effective_prompt_budget = (context_limit * 65) // 100
+            if arg_transport_ceiling:
+                effective_prompt_budget = min(effective_prompt_budget, arg_transport_ceiling)
+        elif arg_transport_ceiling:
+            effective_prompt_budget = arg_transport_ceiling
+
         partitions = [diff]
         partition_error = None
-        if context_limit:
+        if effective_prompt_budget:
             # UTF-8 byte count is a conservative upper bound for tokenizer input;
             # reserve 35% of the configured context for system prompt and response.
-            prompt_byte_budget = (context_limit * 65) // 100
             def partition_note(index: int, total: int) -> str:
                 return (
                     f"Partition {index} of {total} for the same candidate. Review this complete partition; "
@@ -9803,7 +9824,7 @@ class NativeOrchestrationCoordinator:
                 len(re.findall(r"^diff --git ", diff, re.MULTILINE))
                 + len(re.findall(r"^@@ ", diff, re.MULTILINE)),
             )
-            diff_byte_budget = prompt_byte_budget - len(
+            diff_byte_budget = effective_prompt_budget - len(
                 (prompt_prefix + prompt_suffix + partition_note(max_partition_count, max_partition_count)).encode("utf-8")
             )
             partitions, partition_error = self._partition_review_diff(diff, diff_byte_budget)

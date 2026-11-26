@@ -278,3 +278,50 @@ async def test_review_correction_reentry_is_same_candidate_only_and_keeps_retry_
     assert NativeOrchestrationCoordinator._review_correction_identity_mismatches(
         review, run.run_id, "other-change", resumed.candidate
     ) == ["Change"]
+
+
+@pytest.mark.asyncio
+async def test_argument_transport_partitions_large_diff_without_model_context_limit(tmp_path):
+    sections = [
+        f"diff --git a/file-{index}.py b/file-{index}.py\n"
+        f"index {index:07x}..{index + 1:07x} 100644\n"
+        f"--- a/file-{index}.py\n+++ b/file-{index}.py\n"
+        f"@@ -1 +1 @@\n+" + ("A" * 2500) + "\n"
+        for index in range(1, 50)
+    ]
+    diff = "".join(sections)
+    uow = SimpleNamespace(
+        projects=SimpleNamespace(get_by_id=MagicMock(return_value=None)),
+        provider_model_registry=None,
+    )
+    complete = AgentExecutionResult(
+        exit_code=0,
+        timed_out=False,
+        stdout=[],
+        stderr=[],
+        duration_ms=1,
+        final_response='{"verdict":"READY_TO_MERGE","summary":"Limpio","findings":[]}',
+        final_response_status="COMPLETE",
+    )
+    runner = SimpleNamespace(
+        run=AsyncMock(return_value=complete),
+        _profile_for=MagicMock(return_value=SimpleNamespace(prompt_transport="argument")),
+    )
+    coordinator = NativeOrchestrationCoordinator(
+        uow_factory=lambda: uow,
+        github_adapter=MagicMock(),
+        worktree_manager=MagicMock(),
+        agent_runner=runner,
+    )
+    coordinator._code_review_input = AsyncMock(return_value=(diff, {"source_coverage_complete": True}))
+
+    result = await coordinator._run_code_review(
+        tmp_path, "antigravity", "large-argument-diff", project_id="project-1", candidate_sha="sha-1",
+        uow=uow, base_sha="base-sha",
+    )
+
+    assert result["status"] == "approved"
+    assert result["review_input"]["coverage_complete"] is True
+    assert runner.run.await_count > 1
+    prompts = [call.kwargs["prompt_context"] for call in runner.run.await_args_list]
+    assert all(len(p.encode("utf-8")) <= 96 * 1024 for p in prompts)
