@@ -1,5 +1,6 @@
 from minime.mcp.protocol import HTTPMCPTransport, handshake_and_discover
 from cryptography.fernet import Fernet
+from datetime import UTC, datetime, timedelta
 import os
 from uuid import uuid4
 from sqlalchemy import create_engine
@@ -58,3 +59,45 @@ def test_oauth_e2e_provider_consent_callback_encrypted_refresh_handshake_tools_a
         provider.shutdown()
         mcp.shutdown()
     assert ControlledMCPHandler.effect == [{"tool": "stitch_get", "arguments": {"oauth": True}}]
+
+
+def test_global_oauth_connection_is_usable_from_another_project_without_copying_credentials():
+    provider, token_endpoint = controlled_oauth_server()
+    mcp, endpoint = controlled_server()
+    engine = create_engine("sqlite://")
+    Base.metadata.create_all(engine)
+    cipher = CredentialCipher(Fernet.generate_key())
+    try:
+        with Session(engine) as session:
+            service = MCPConnectionService(session, cipher)
+            row = service.create_oauth_pending(
+                "owner-project",
+                {
+                    "name": "Global Stitch",
+                    "endpoint": endpoint,
+                    "transport": "http",
+                    "credentials": {
+                        "token_endpoint": f"{token_endpoint}/token",
+                        "client_id": "client",
+                        "client_secret": "secret",
+                        "redirect_uri": "http://localhost/callback",
+                    },
+                    "is_global": True,
+                },
+                "global-oauth-state",
+                datetime.now(UTC) + timedelta(minutes=10),
+            )
+            assert row.project_id is None
+            service.authorize_oauth(
+                row, f"{token_endpoint}/token", "consent-code", "http://localhost/callback",
+                "client", "secret", OAuthClient(),
+            )
+            assert service.public(row)["is_global"] is True
+            assert "encrypted_credentials" not in service.public(row)
+            assert any(cap["name"] == "stitch_get" for cap in service.resolved_capabilities("other-project"))
+            result = service.invoke("other-project", row.id, "stitch_get", {"global": True})
+            assert result["isError"] is False
+    finally:
+        provider.shutdown()
+        mcp.shutdown()
+    assert ControlledMCPHandler.effect[-1] == {"tool": "stitch_get", "arguments": {"global": True}}

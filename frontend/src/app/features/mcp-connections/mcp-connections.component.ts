@@ -18,6 +18,7 @@ interface MCPConnection {
   transport: string;
   auth_type: string;
   status: string;
+  is_global: boolean;
   diagnostic?: { code: string; summary: string } | null;
   capabilities: MCPCapability[];
   access_token_expires_at?: string | null;
@@ -164,6 +165,14 @@ const PRESETS: Preset[] = [
               </select>
             </div>
           </div>
+
+          <label class="flex items-start gap-3 rounded-xl border border-violet-400/20 bg-violet-500/5 p-4 text-sm text-slate-200">
+            <input name="isGlobal" type="checkbox" [(ngModel)]="draft.is_global" class="mt-0.5 accent-violet-400">
+            <span>
+              <span class="block font-medium">Disponible globalmente</span>
+              <span class="mt-1 block text-xs text-slate-400">Comparte esta conexión y sus herramientas con todos los proyectos registrados.</span>
+            </span>
+          </label>
 
           <!-- Selector de Autenticación -->
           <div class="pt-2">
@@ -320,10 +329,24 @@ const PRESETS: Preset[] = [
         Cargando integraciones del proyecto...
       </p>
 
+      <div *ngIf="connections().length" class="flex items-center justify-between gap-3">
+        <label for="mcp-scope-filter" class="text-xs font-medium text-slate-400">Filtrar conexiones</label>
+        <select
+          id="mcp-scope-filter"
+          name="scopeFilter"
+          [(ngModel)]="scopeFilter"
+          class="rounded-lg border border-slate-700 bg-slate-900 px-3 py-2 text-xs text-slate-200 focus:border-sky-500 focus:outline-none"
+        >
+          <option value="all">Globales y locales</option>
+          <option value="global">Globales</option>
+          <option value="local">Locales</option>
+        </select>
+      </div>
+
       <!-- Lista de Conexiones Registradas -->
       <div class="grid gap-6">
         <article
-          *ngFor="let connection of connections()"
+          *ngFor="let connection of filteredConnections()"
           class="rounded-2xl border border-slate-700/80 bg-slate-800/40 p-6 shadow-md transition-all hover:border-slate-600"
         >
           <!-- Fila superior: Título, estado y acciones principales -->
@@ -331,6 +354,10 @@ const PRESETS: Preset[] = [
             <div>
               <div class="flex items-center gap-3">
                 <h2 class="text-lg font-bold text-white">{{ connection.name }}</h2>
+                <span
+                  class="rounded-full px-2.5 py-0.5 text-[10px] font-semibold uppercase tracking-wide"
+                  [ngClass]="connection.is_global ? 'border border-violet-400/30 bg-violet-500/10 text-violet-300' : 'border border-slate-600 bg-slate-700/40 text-slate-300'"
+                >{{ connection.is_global ? 'Global · heredada' : 'Local · ' + currentProjectId }}</span>
                 <!-- Badge de Estado -->
                 <span
                   class="inline-flex items-center gap-1.5 rounded-full px-3 py-0.5 text-xs font-semibold"
@@ -465,6 +492,9 @@ const PRESETS: Preset[] = [
         <p class="text-sm font-medium text-slate-300">No hay conexiones MCP registradas para este proyecto.</p>
         <p class="mt-1 text-xs text-slate-500">Haz clic en «Nueva integración MCP» para vincular Google Stitch, servidores locales o APIs remotas.</p>
       </div>
+      <p *ngIf="!loading && connections().length && !filteredConnections().length" role="status" class="rounded-xl border border-dashed border-slate-700 p-6 text-center text-sm text-slate-400">
+        No hay conexiones con el alcance seleccionado.
+      </p>
 
       <!-- Modal de Invocación / Prueba de Herramienta -->
       <div *ngIf="invokeModal.open" class="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/80 p-4 backdrop-blur-sm">
@@ -527,6 +557,7 @@ export class McpConnectionsComponent implements OnInit {
   showSecret = false;
   actionLoading: Record<string, boolean> = {};
   toolFilters: Record<string, string> = {};
+  scopeFilter: 'all' | 'global' | 'local' = 'all';
 
   presets = PRESETS;
 
@@ -537,6 +568,7 @@ export class McpConnectionsComponent implements OnInit {
     endpoint: '',
     transport: 'http',
     auth_type: 'oauth2',
+    is_global: false,
   };
 
   oauthForm = {
@@ -596,6 +628,7 @@ export class McpConnectionsComponent implements OnInit {
       endpoint: '',
       transport: 'http',
       auth_type: 'oauth2',
+      is_global: false,
     };
     this.oauthForm = {
       clientId: '',
@@ -642,6 +675,11 @@ export class McpConnectionsComponent implements OnInit {
     );
   }
 
+  filteredConnections(): MCPConnection[] {
+    if (this.scopeFilter === 'all') return this.connections();
+    return this.connections().filter(connection => connection.is_global === (this.scopeFilter === 'global'));
+  }
+
   async load(): Promise<void> {
     this.loading = true;
     const response = await this.api.get<{ connections: MCPConnection[] }>(
@@ -670,6 +708,7 @@ export class McpConnectionsComponent implements OnInit {
         endpoint: this.draft.endpoint,
         transport: this.draft.transport,
         auth_type: 'oauth2',
+        is_global: this.draft.is_global,
         credentials: {
           authorization_endpoint: `${this.oauthForm.authEndpoint}&client_id=${encodeURIComponent(this.oauthForm.clientId.trim())}&redirect_uri=${encodeURIComponent(this.callbackUrl)}`,
           token_endpoint: this.oauthForm.tokenEndpoint,

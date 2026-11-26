@@ -28,7 +28,7 @@ from fastapi.responses import (
     StreamingResponse,
 )
 from fastapi.staticfiles import StaticFiles
-from sqlalchemy import select
+from sqlalchemy import or_, select
 from pydantic import BaseModel, Field, field_validator, model_validator
 
 from minime.adapters.provider_adapter import (
@@ -3368,6 +3368,7 @@ class MCPConnectionPayload(BaseModel):
     transport: Literal["http", "sse", "stdio"]
     auth_type: Literal["oauth2", "api_key", "bearer"]
     credentials: dict[str, Any] = Field(default_factory=dict)
+    is_global: bool = False
 
 
 def _mcp_service(uow: UowDep) -> MCPConnectionService:
@@ -3410,8 +3411,8 @@ def complete_mcp_oauth(project_id: str, state: str, code: str, request: Request,
     if context is not None and context.project_id and context.project_id != project_id:
         context = None
     row = uow.session.scalar(select(MCPConnectionModel).where(
-        MCPConnectionModel.project_id == project_id,
         MCPConnectionModel.oauth_state_hash == hashlib.sha256(state.encode()).hexdigest(),
+        or_(MCPConnectionModel.project_id == project_id, MCPConnectionModel.project_id.is_(None)),
     ))
     if context is None or row is None or row.oauth_state_expires_at is None or row.oauth_state_expires_at <= datetime.now(UTC):
         raise HTTPException(status_code=400, detail="Invalid or expired OAuth state")
@@ -3438,7 +3439,7 @@ def validate_mcp_connection(project_id: str, connection_id: str, _operator: Auth
     service = _mcp_service(uow)
     from sqlalchemy import select
     from minime.db.models import MCPConnectionModel
-    row = uow.session.scalar(select(MCPConnectionModel).where(MCPConnectionModel.project_id == project_id, MCPConnectionModel.id == connection_id))
+    row = service.get_accessible(project_id, connection_id)
     if row is None:
         raise HTTPException(status_code=404, detail="MCP connection not found")
     try:
@@ -3466,7 +3467,7 @@ def health_mcp_connection(project_id: str, connection_id: str, _operator: Authen
     except Exception:
         from sqlalchemy import select
         from minime.db.models import MCPConnectionModel
-        row = service.session.scalar(select(MCPConnectionModel).where(MCPConnectionModel.id == connection_id))
+        row = service.get_accessible(project_id, connection_id)
         return MCPConnectionService.public(row) if row else {"status": "ERROR", "diagnostic": {"code": "MCP_REFRESH_FAILED", "summary": "MCP health check failed"}}
 
 

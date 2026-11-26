@@ -72,6 +72,7 @@ def test_validate_report_accepts_tasks_with_directory_preconditions(tmp_path: Pa
         "capabilities": [
             {"ref": "profile:execution", "available": True},
             {"ref": "workflow:execution:apply", "available": True},
+            {"ref": "mcp:tool:stitch_get", "kind": "mcp_tool", "available": True},
         ],
     }
 
@@ -84,6 +85,7 @@ def test_validate_report_accepts_tasks_with_directory_preconditions(tmp_path: Pa
                 "capability_evidence_refs": [
                     "profile:execution",
                     "workflow:execution:apply",
+                    "mcp:tool:stitch_get",
                     "path:src",
                     "path:src/new_file.js",
                 ],

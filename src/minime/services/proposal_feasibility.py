@@ -91,6 +91,7 @@ class ProposalFeasibilityEvaluator:
         preview_sessions: Any,
         thinker_provider: str,
         implementer_provider: str,
+        mcp_capabilities: list[dict[str, Any]] | None = None,
     ) -> dict[str, Any]:
         """Collect task/scenario facts and capabilities observable for this candidate."""
         if not re.fullmatch(r"[0-9a-f]{40,64}", candidate_sha, re.IGNORECASE):
@@ -168,6 +169,10 @@ class ProposalFeasibilityEvaluator:
                 "Database-backed project checks are configured without an isolated project test_database profile."
             )
         capabilities: list[dict[str, Any]] = []
+        capabilities.extend(
+            item for item in (mcp_capabilities or [])
+            if isinstance(item, dict) and item.get("available") is True
+        )
         capabilities.append(
             {
                 "ref": "project:test_database",

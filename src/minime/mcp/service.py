@@ -6,7 +6,7 @@ from datetime import UTC, datetime, timedelta
 from typing import Any
 from uuid import uuid4
 
-from sqlalchemy import delete, select
+from sqlalchemy import delete, or_, select
 from sqlalchemy.orm import Session
 
 from minime.db.models import MCPCapabilityModel, MCPConnectionModel
@@ -23,8 +23,63 @@ class MCPConnectionService:
         self.cipher = cipher
 
     def list(self, project_id: str) -> list[dict[str, Any]]:
-        rows = self.session.scalars(select(MCPConnectionModel).where(MCPConnectionModel.project_id == project_id)).all()
+        rows = self.session.scalars(
+            select(MCPConnectionModel)
+            .where(self._scope_filter(project_id))
+            .order_by(MCPConnectionModel.project_id.is_(None), MCPConnectionModel.id)
+        ).all()
         return [self.public(row) for row in rows]
+
+    @staticmethod
+    def _scope_filter(project_id: str):
+        return or_(
+            MCPConnectionModel.project_id == project_id,
+            MCPConnectionModel.project_id.is_(None),
+        )
+
+    def get_accessible(self, project_id: str, connection_id: str) -> MCPConnectionModel | None:
+        return self.session.scalar(
+            select(MCPConnectionModel).where(
+                MCPConnectionModel.id == connection_id,
+                self._scope_filter(project_id),
+            )
+        )
+
+    def resolved_capabilities(
+        self, project_id: str, *, local_connection_id: str | None = None,
+        include_project_locals: bool = True,
+    ) -> list[dict[str, Any]]:
+        """Return active, observed project and global capabilities without collisions."""
+        scope = self._scope_filter(project_id)
+        if not include_project_locals:
+            scope = or_(MCPConnectionModel.project_id.is_(None), MCPConnectionModel.id == local_connection_id)
+        rows = self.session.scalars(
+            select(MCPConnectionModel)
+            .where(
+                scope,
+                MCPConnectionModel.status == "ACTIVE",
+                MCPConnectionModel.encrypted_credentials.is_not(None),
+            )
+            .order_by(MCPConnectionModel.project_id.is_(None), MCPConnectionModel.id)
+        ).all()
+        resolved: dict[tuple[str, str], dict[str, Any]] = {}
+        for row in rows:
+            for capability in row.capabilities:
+                identity = (capability.kind, capability.name)
+                resolved.setdefault(
+                    identity,
+                    {
+                        "ref": f"mcp:{capability.kind}:{capability.name}",
+                        "kind": f"mcp_{capability.kind}",
+                        "name": capability.name,
+                        "description": capability.description,
+                        "input_schema": (capability.metadata_json or {}).get("inputSchema", {"type": "object", "properties": {}}),
+                        "connection_id": row.id,
+                        "is_global": row.project_id is None,
+                        "available": True,
+                    },
+                )
+        return list(resolved.values())
 
     def create_oauth_pending(self, project_id: str, payload: dict[str, Any], state: str, expires_at: datetime) -> MCPConnectionModel:
         if self.cipher is None:
@@ -33,16 +88,15 @@ class MCPConnectionService:
         required = ("token_endpoint", "client_id", "client_secret", "redirect_uri")
         if any(not isinstance(credentials.get(key), str) or not credentials[key] for key in required):
             raise ValueError("OAuth configuration is incomplete")
-        row = self.session.scalar(
-            select(MCPConnectionModel).where(
-                MCPConnectionModel.project_id == project_id,
-                MCPConnectionModel.endpoint == payload["endpoint"].strip(),
-            )
-        )
+        scope = None if payload.get("is_global") is True else project_id
+        scope_predicate = MCPConnectionModel.project_id.is_(None) if scope is None else MCPConnectionModel.project_id == scope
+        row = self.session.scalar(select(MCPConnectionModel).where(
+            scope_predicate, MCPConnectionModel.endpoint == payload["endpoint"].strip()
+        ))
         if row is None:
             row = MCPConnectionModel(
                 id=str(uuid4()),
-                project_id=project_id,
+                project_id=scope,
                 endpoint=payload["endpoint"].strip(),
             )
             self.session.add(row)
@@ -59,14 +113,14 @@ class MCPConnectionService:
 
     @staticmethod
     def public(row: MCPConnectionModel) -> dict[str, Any]:
-        return {"id": row.id, "name": row.name, "endpoint": row.endpoint, "transport": row.transport, "auth_type": row.auth_type, "status": row.status, "diagnostic": {"code": row.diagnostic_code, "summary": row.diagnostic_summary} if row.diagnostic_code else None, "capabilities": [{"kind": c.kind, "name": c.name, "description": c.description, "observed_at": c.observed_at.isoformat()} for c in row.capabilities]}
+        return {"id": row.id, "name": row.name, "endpoint": row.endpoint, "transport": row.transport, "auth_type": row.auth_type, "status": row.status, "is_global": row.project_id is None, "diagnostic": {"code": row.diagnostic_code, "summary": row.diagnostic_summary} if row.diagnostic_code else None, "capabilities": [{"kind": c.kind, "name": c.name, "description": c.description, "observed_at": c.observed_at.isoformat()} for c in row.capabilities]}
 
     def create(self, project_id: str, payload: dict[str, Any]) -> MCPConnectionModel:
         if self.cipher is None:
             raise RuntimeError("MCP credential cipher is required")
         credentials = payload.get("credentials") or {}
         validate_token_credentials(payload["auth_type"], credentials)
-        row = MCPConnectionModel(id=str(uuid4()), project_id=project_id, name=payload["name"].strip(), endpoint=payload["endpoint"].strip(), transport=payload["transport"], auth_type=payload["auth_type"], encrypted_credentials=self.cipher.encrypt(credentials))
+        row = MCPConnectionModel(id=str(uuid4()), project_id=None if payload.get("is_global") is True else project_id, name=payload["name"].strip(), endpoint=payload["endpoint"].strip(), transport=payload["transport"], auth_type=payload["auth_type"], encrypted_credentials=self.cipher.encrypt(credentials))
         self.session.add(row)
         self.session.flush()
         try:
@@ -85,9 +139,7 @@ class MCPConnectionService:
 
     def refresh(self, project_id: str, connection_id: str) -> MCPConnectionModel:
         """Revalidate the connection before a Run; never retain a failed refresh."""
-        row = self.session.scalar(select(MCPConnectionModel).where(
-            MCPConnectionModel.project_id == project_id, MCPConnectionModel.id == connection_id
-        ))
+        row = self.get_accessible(project_id, connection_id)
         if row is None:
             raise LookupError("MCP connection not found")
         try:
@@ -105,9 +157,7 @@ class MCPConnectionService:
 
     def ensure_renewed(self, project_id: str, connection_id: str) -> MCPConnectionModel:
         """Renew OAuth just before runtime use; token connections are unchanged."""
-        row = self.session.scalar(select(MCPConnectionModel).where(
-            MCPConnectionModel.project_id == project_id, MCPConnectionModel.id == connection_id
-        ))
+        row = self.get_accessible(project_id, connection_id)
         if row is None:
             raise LookupError("MCP connection not found")
         if row.status != "ACTIVE" or not row.encrypted_credentials:
@@ -163,7 +213,7 @@ class MCPConnectionService:
         """Refresh and replace OAuth credentials in one database transaction."""
         row = self.session.scalar(
             select(MCPConnectionModel)
-            .where(MCPConnectionModel.project_id == project_id, MCPConnectionModel.id == connection_id)
+            .where(MCPConnectionModel.id == connection_id, self._scope_filter(project_id))
             .with_for_update()
         )
         if row is None:
@@ -207,10 +257,7 @@ class MCPConnectionService:
         return handshake_and_discover(self._transport(row))
 
     def invoke(self, project_id: str, connection_id: str, tool: str, arguments: dict[str, Any] | None = None) -> dict[str, Any]:
-        row = self.session.scalar(select(MCPConnectionModel).where(
-            MCPConnectionModel.project_id == project_id,
-            MCPConnectionModel.id == connection_id,
-        ))
+        row = self.get_accessible(project_id, connection_id)
         if row is None or row.status != "ACTIVE" or not row.encrypted_credentials:
             raise PermissionError("MCP connection is not active for this project")
         if not any(cap.kind == "tool" and cap.name == tool for cap in row.capabilities):
@@ -233,7 +280,7 @@ class MCPConnectionService:
                 self.session.add(MCPCapabilityModel(id=str(uuid4()), connection_id=row.id, kind=kind, name=name, description=str(value.get("description", ""))[:1000], metadata_json=redact({k: v for k, v in value.items() if k not in {"name", "description"}})))
 
     def revoke(self, project_id: str, connection_id: str) -> bool:
-        row = self.session.scalar(select(MCPConnectionModel).where(MCPConnectionModel.project_id == project_id, MCPConnectionModel.id == connection_id))
+        row = self.get_accessible(project_id, connection_id)
         if not row: return False
         if row.status == "REVOKED": return True
         row.encrypted_credentials = None
@@ -243,7 +290,7 @@ class MCPConnectionService:
         return True
 
     def delete(self, project_id: str, connection_id: str) -> bool:
-        row = self.session.scalar(select(MCPConnectionModel).where(MCPConnectionModel.project_id == project_id, MCPConnectionModel.id == connection_id))
+        row = self.get_accessible(project_id, connection_id)
         if not row: return False
         self.session.delete(row)
         self.session.commit()

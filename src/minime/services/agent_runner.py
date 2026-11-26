@@ -8,6 +8,7 @@ import json
 import os
 import re
 import shutil
+import sys
 from dataclasses import dataclass, replace
 from datetime import datetime
 from decimal import Decimal
@@ -626,6 +627,39 @@ class CliAgentRunner:
                 raw_cmd[0] = resolved
         return raw_cmd
 
+    @staticmethod
+    def _configure_mcp_command(
+        command: list[str], provider: str, socket_path: str, working_directory: str | None = None
+    ) -> list[str]:
+        import json
+
+        adapter = {
+            "command": sys.executable,
+            "args": ["-m", "minime.mcp.agent_bridge", socket_path],
+        }
+        normalized = provider.lower()
+        if normalized == "codex":
+            # Codex accepts TOML overrides on exec; values contain only the local socket path.
+            options = [
+                "-c", f"mcp_servers.mini_me.command={json.dumps(adapter['command'])}",
+                "-c", f"mcp_servers.mini_me.args={json.dumps(adapter['args'])}",
+            ]
+            if working_directory:
+                options.extend(["-c", f"mcp_servers.mini_me.cwd={json.dumps(working_directory)}"])
+            insertion = command.index("exec") + 1 if "exec" in command else len(command)
+            return [*command[:insertion], *options, *command[insertion:]]
+        raise ValueError("The selected agent CLI has no supported ephemeral MCP stdio configuration.")
+
+    @staticmethod
+    def _antigravity_mcp_config(socket_path: str, working_directory: str | None) -> dict[str, Any]:
+        adapter: dict[str, Any] = {
+            "command": sys.executable,
+            "args": ["-m", "minime.mcp.agent_bridge", socket_path],
+        }
+        if working_directory:
+            adapter["cwd"] = working_directory
+        return {"mcpServers": {"mini_me": adapter}}
+
     async def run(
         self,
         worktree_path: Path,
@@ -647,6 +681,20 @@ class CliAgentRunner:
         provider, selected_profile_name = self.check_capacity_preflight(
             project_id, provider, role, run_id=run_id, workflow=workflow
         )
+        from minime.mcp.runtime import MCPRuntimeProfileResolver
+
+        mcp_profile = (
+            MCPRuntimeProfileResolver.agent_profile(run_id)
+            if run_id and role in {"implementer", "execution"}
+            else None
+        )
+        if mcp_profile and provider.lower() not in {"codex", "agy", "antigravity"}:
+            MCPRuntimeProfileResolver.close_active(run_id)
+            return AgentExecutionResult(
+                exit_code=-2, timed_out=False, stdout=[],
+                stderr=["The selected agent CLI has no supported ephemeral MCP stdio configuration."],
+                duration_ms=0, environment_error=True,
+            )
         invocation_profile = self._profile_for(role, provider, profile_name=selected_profile_name)
         provider_evidence = (
             (invocation_profile.canonical_provider_id or provider)
@@ -666,6 +714,8 @@ class CliAgentRunner:
         confinement = AgentProcessConfinement(allowed_worktree_path=str(worktree_path))
         preflight_check = confinement.validate_command_preflight(cwd=str(worktree_path))
         if preflight_check.outcome != ExternalOutcome.SUCCESS:
+            if mcp_profile and run_id:
+                MCPRuntimeProfileResolver.close_active(run_id)
             env_err = confinement.is_local_environment_preflight_error(
                 preflight_check.error_message
             )
@@ -933,6 +983,8 @@ class CliAgentRunner:
         handoff_required = False
         cmd = self._command_for_prompt(prompt_context, profile)
         if not cmd:
+            if mcp_profile and run_id:
+                MCPRuntimeProfileResolver.close_active(run_id)
             cleanup_structured_output()
             return AgentExecutionResult(
                 exit_code=-1,
@@ -942,6 +994,25 @@ class CliAgentRunner:
                 duration_ms=0,
                 workflow=workflow,
             )
+
+        antigravity_mcp_config = None
+        if mcp_profile and provider.lower() in {"agy", "antigravity"}:
+            antigravity_mcp_config = self._antigravity_mcp_config(
+                mcp_profile.relay_path, mcp_profile.working_directory
+            )
+        elif mcp_profile:
+            try:
+                cmd = self._configure_mcp_command(
+                    cmd, provider, mcp_profile.relay_path, mcp_profile.working_directory
+                )
+            except ValueError as exc:
+                MCPRuntimeProfileResolver.close_active(run_id)
+                return AgentExecutionResult(
+                    exit_code=-2, timed_out=False, stdout=[], stderr=[str(exc)], duration_ms=0,
+                    environment_error=True, workflow=workflow,
+                    provider_used=provider_evidence, profile_used=selected_profile_name,
+                    model_used=model_evidence,
+                )
 
         start = asyncio.get_running_loop().time()
         is_stdin = profile.prompt_transport == "stdin"
@@ -974,6 +1045,7 @@ class CliAgentRunner:
                 input_bytes=stdin_data,
                 timeout_seconds=timeout_seconds,
                 env=env,
+                antigravity_mcp_config=antigravity_mcp_config,
                 **auth_kwargs,
                 process_start_observer=process_start_observer,
             )
@@ -1002,6 +1074,10 @@ class CliAgentRunner:
                 environment_error=True,
                 workflow=workflow,
             )
+
+        finally:
+            if mcp_profile and run_id:
+                MCPRuntimeProfileResolver.close_active(run_id)
 
         raw_stdout_lines = result.stdout.decode("utf-8", errors="replace").splitlines()
         raw_stderr_lines = result.stderr.decode("utf-8", errors="replace").splitlines()
