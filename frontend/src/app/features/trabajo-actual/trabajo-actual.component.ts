@@ -10,6 +10,7 @@ import {
   getStagePanelClass,
   PIPELINE_STAGES,
 } from '../../shared/pipeline-stage-presentation';
+import { normalizeHumanGatePayload, HumanGateDisplayOption } from './human-gate-presentation';
 
 interface RunWatchdogData {
   run_id: string;
@@ -182,23 +183,22 @@ interface RunWatchdogData {
             </div>
           </div>
 
-          <!-- Question Prompt -->
-          <div class="p-4 rounded-xl bg-slate-900/90 border border-amber-500/30 space-y-2">
-            <span class="text-xs font-semibold uppercase tracking-wider text-amber-400 font-mono">Pregunta del Workflow:</span>
-            <p class="text-sm text-slate-100 font-medium whitespace-pre-wrap">{{ humanGateQuestion() }}</p>
-            <p *ngIf="humanGateDescription() && humanGateDescription() !== humanGateQuestion()" class="text-sm text-slate-200 whitespace-pre-wrap">
-              <strong>Descripción:</strong> {{ humanGateDescription() }}
-            </p>
+          <div class="p-4 rounded-xl bg-slate-900/90 border border-amber-500/30 space-y-2" data-testid="human-gate-summary">
+            <span class="text-xs font-semibold uppercase tracking-wider text-amber-400 font-mono">Resumen para decidir:</span>
+            <p class="text-sm text-slate-100 font-medium whitespace-pre-wrap">{{ humanGatePresentation().summary || humanGateExplanationEs() || humanGateQuestion() }}</p>
             <p *ngIf="humanGateOriginalQuestion()" class="text-xs text-slate-400 whitespace-pre-wrap">
-              <strong>Texto original:</strong> {{ humanGateOriginalQuestion() }}
+              <strong>Pregunta original del workflow:</strong> {{ humanGateOriginalQuestion() }}
             </p>
           </div>
 
-          <!-- Spanish Actionable Explanation (if available) -->
-          <div *ngIf="humanGateExplanationEs()" class="p-4 rounded-xl bg-slate-900/90 border border-sky-500/30 space-y-2">
-            <span class="text-xs font-semibold uppercase tracking-wider text-sky-400 font-mono">Contexto Explicativo (Español):</span>
-            <p class="text-sm text-slate-100 font-medium whitespace-pre-wrap">{{ humanGateExplanationEs() }}</p>
-          </div>
+          <section *ngIf="humanGatePendingItems().length" class="space-y-2" aria-label="Pendientes del gate">
+            <h4 class="text-xs font-semibold uppercase tracking-wider text-amber-300">Pendientes y advertencias</h4>
+            <ul class="space-y-2">
+              <li *ngFor="let item of humanGatePendingItems()" class="p-3 rounded-xl bg-amber-500/10 border border-amber-500/20 text-sm text-amber-100 flex gap-2">
+                <span aria-hidden="true">⚠️</span><span>{{ item }}</span>
+              </li>
+            </ul>
+          </section>
 
           <!-- Apply Diagnostic Context (if available) -->
           <div *ngIf="humanGateAttempts() !== null" class="p-4 rounded-xl bg-slate-900/80 border border-slate-700/60 space-y-2 text-xs font-mono">
@@ -218,7 +218,7 @@ interface RunWatchdogData {
             </div>
           </div>
 
-          <div *ngIf="humanGateFindings().length > 0" class="space-y-3" aria-label="Hallazgos de la revisión independiente">
+          <section *ngIf="humanGateFindings().length > 0" class="space-y-3" aria-label="Hallazgos de la revisión independiente">
             <section *ngFor="let finding of humanGateFindings(); let i = index" class="p-4 rounded-xl bg-slate-900/70 border border-amber-500/20 space-y-2">
               <h4 class="text-xs font-bold uppercase tracking-wider text-amber-300">Hallazgo {{ i + 1 }}</h4>
               <p class="text-sm text-slate-200">La revisión marcó un hallazgo {{ humanGateSeverityLabel(finding.severity) }} en {{ finding.location || 'una ubicación no indicada' }}.</p>
@@ -228,41 +228,38 @@ interface RunWatchdogData {
             <div *ngIf="humanGateReviewerSummary()" class="text-xs text-slate-400 whitespace-pre-wrap">
               <strong>Resumen original del reviewer:</strong> {{ humanGateReviewerSummary() }}
             </div>
-          </div>
-
-          <section *ngIf="humanGateAffectedItems().length > 0" class="space-y-2" aria-label="Elementos afectados">
-            <h4 class="text-xs font-semibold uppercase tracking-wider text-slate-300">Elementos afectados</h4>
-            <ul class="list-disc pl-5 text-sm text-slate-200 space-y-1">
-              <li *ngFor="let item of humanGateAffectedItems()">{{ humanGateAffectedItemLabel(item) }}</li>
-            </ul>
-          </section>
-          <section *ngIf="humanGateDiff()" class="space-y-2" aria-label="Diferencias del gate">
-            <h4 class="text-xs font-semibold uppercase tracking-wider text-slate-300">Diferencias</h4>
-            <pre class="p-3 rounded-xl bg-slate-900/80 border border-slate-700 text-xs text-slate-200 whitespace-pre-wrap overflow-x-auto">{{ humanGateDiff() }}</pre>
           </section>
 
-          <!-- Options (if available) -->
-          <div *ngIf="humanGateOptions().length > 0" class="space-y-2">
-            <span class="text-xs font-semibold text-slate-300 font-mono">
-              {{ humanGateOptionsSource() === 'system_generated' ? 'Sugerencia del sistema; puedes responder con otro texto:' : humanGateOptionsSource() === 'native' ? 'Opciones originales del workflow:' : 'Opciones para responder a este gate:' }}
-            </span>
+          <section *ngIf="humanGateDisplayOptions().length > 0" class="space-y-2" aria-label="Opciones para decidir">
+            <span class="text-xs font-semibold text-slate-300 font-mono">Opciones para responder a este gate: elige una acción; el efecto se valida en el workflow:</span>
             <div class="grid grid-cols-1 sm:grid-cols-2 gap-2">
-              <button *ngFor="let opt of humanGateOptions(); let i = index"
+              <button *ngFor="let opt of humanGateDisplayOptions()"
                       type="button"
                       (click)="selectHumanGateOption(opt)"
                       class="p-3 text-left rounded-xl bg-slate-900/60 hover:bg-slate-800 border border-slate-700 hover:border-sky-500 transition-colors cursor-pointer group">
-                <div class="text-xs font-bold text-white group-hover:text-sky-300">{{ humanGateOptionLabel(opt, i) }}</div>
-                <div *ngIf="humanGateOptionOriginalLabel(opt, i)" class="text-[11px] text-slate-400 mt-1 whitespace-pre-wrap">
-                  <strong>Texto original:</strong> {{ humanGateOptionOriginalLabel(opt, i) }}
+                <div class="text-xs font-bold text-white group-hover:text-sky-300">{{ opt.label }}</div>
+                <div *ngIf="opt.description" class="text-[11px] text-slate-400 mt-1">{{ opt.description }}</div>
+                <div *ngIf="opt.original && opt.original !== opt.label" class="text-[11px] text-slate-500 mt-1 whitespace-pre-wrap">
+                  <strong>Valor original:</strong> {{ opt.original }}
                 </div>
                 <div *ngIf="opt.source === 'system_generated'" class="text-[10px] uppercase tracking-wide text-sky-300 mt-1">Sugerencia del sistema</div>
-                <div *ngIf="opt.description" class="text-[11px] text-slate-400 mt-0.5">{{ opt.description }}</div>
-                <div *ngIf="humanGateOptionExplanation(opt, i)" class="text-[11px] text-slate-300 mt-1 whitespace-pre-wrap">
-                  {{ humanGateOptionExplanation(opt, i) }}
-                </div>
               </button>
             </div>
-          </div>
+          </section>
+
+          <details class="rounded-xl border border-slate-700/70 bg-slate-950/50" data-testid="human-gate-audit">
+            <summary class="cursor-pointer px-4 py-3 text-xs font-semibold text-slate-300">Detalles técnicos y auditoría</summary>
+            <div class="p-4 space-y-3 text-xs text-slate-400">
+              <p><strong>Gate:</strong> {{ targetRun()?.stop_details?.['human_payload']?.gate || targetRun()?.human_gate }}</p>
+              <p><strong>Etapa:</strong> {{ targetRun()?.stage }}</p>
+              <p *ngIf="humanGateDescription()"><strong>Descripción técnica:</strong> {{ humanGateDescription() }}</p>
+              <pre *ngIf="humanGateDiff()" class="p-3 rounded-xl bg-slate-900/80 border border-slate-700 whitespace-pre-wrap overflow-x-auto">{{ humanGateDiff() }}</pre>
+              <div *ngIf="humanGateAffectedItems().length" class="space-y-1">
+                <strong>Elementos afectados:</strong>
+                <div *ngFor="let item of humanGateAffectedItems()">{{ humanGateAffectedItemLabel(item) }}</div>
+              </div>
+            </div>
+          </details>
 
           <!-- Response Form -->
           <form (submit)="submitHumanResponse($event)" class="space-y-3 pt-2">
@@ -848,6 +845,18 @@ export class TrabajoActualComponent {
     return payload?.question_es || 'La pregunta del workflow aún no tiene una presentación en español.';
   }
 
+  humanGatePresentation(): ReturnType<typeof normalizeHumanGatePayload> {
+    return normalizeHumanGatePayload(this.targetRun()?.stop_details?.['human_payload']);
+  }
+
+  humanGatePendingItems(): string[] {
+    return this.humanGatePresentation().pendingItems;
+  }
+
+  humanGateDisplayOptions(): HumanGateDisplayOption[] {
+    return this.humanGatePresentation().options;
+  }
+
   humanGateDescription(): string {
     const payload = this.targetRun()?.stop_details?.['human_payload'];
     return typeof payload?.description === 'string' ? payload.description : '';
@@ -887,7 +896,7 @@ export class TrabajoActualComponent {
   }
 
   selectHumanGateOption(option: any): void {
-    const responseText = typeof option?.response_text === 'string' ? option.response_text : '';
+    const responseText = typeof option?.value === 'string' ? option.value : option?.response_text;
     this.operatorResponse.set(responseText || option?.label || option?.id || option || '');
   }
 

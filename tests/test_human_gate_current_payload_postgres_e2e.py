@@ -23,7 +23,7 @@ from sqlalchemy.orm import sessionmaker
 from minime.api.app import app, get_current_operator, get_uow
 from minime.cli import main as cli_main
 from minime.db.repository import PostgresPersistenceUnitOfWork
-from minime.domain.enums import HumanGate, OrchestrationStage, OrchestrationStopOutcome
+from minime.domain.enums import HumanGate, OrchestrationStage, OrchestrationStopOutcome, ProjectStatus
 from minime.domain.models import (
     AuthorizedOperator,
     ExternalActionResult,
@@ -354,6 +354,7 @@ def test_doc_closing_gate_api_acceptance_is_consumed_once_by_scheduler(monkeypat
     setup_uow = None
     inspection_uow = None
     calls = []
+    paused_projects = []
     try:
         with engine.connect() as connection:
             database_name = connection.execute(text("select current_database()")).scalar_one()
@@ -371,6 +372,18 @@ def test_doc_closing_gate_api_acceptance_is_consumed_once_by_scheduler(monkeypat
             managed_repository_root=str(tmp_path / "managed-repo"),
             worktree_parent_dir=str(tmp_path / "worktrees"),
         ))
+        # The configured disposable database is also used by the browser E2E
+        # fixture, which leaves its bound project available to the scheduler.
+        # Pause every unrelated project for this scheduler handoff and restore
+        # its exact durable status in the finally block.  This keeps the test
+        # isolated without changing the scheduler's production-wide scan.
+        for project in setup_uow.projects.list_all():
+            if project.project_id == project_id or project.status == ProjectStatus.PAUSED:
+                continue
+            paused_projects.append((project, project.status))
+            project.status = ProjectStatus.PAUSED
+            setup_uow.projects.save(project)
+        setup_uow.commit()
         gate_payload = {
             "gate_id": "doc-closing-test-gate",
             "gate": "doc_closing_sync",
@@ -487,6 +500,9 @@ def test_doc_closing_gate_api_acceptance_is_consumed_once_by_scheduler(monkeypat
         if inspection_uow is not None:
             inspection_uow.session.close()
         if setup_uow is not None:
+            for project, original_status in paused_projects:
+                project.status = original_status
+                setup_uow.projects.save(project)
             setup_uow.session.execute(
                 text("delete from operator_action_records where run_id = :run_id"), {"run_id": run_id}
             )

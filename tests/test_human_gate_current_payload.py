@@ -44,6 +44,46 @@ def _run(
     )
 
 
+def test_structured_spanish_fields_are_bounded_and_redacted(in_memory_uow):
+    run = _run(OrchestrationStage.VALIDATING)
+    coordinator = _coordinator(in_memory_uow)
+    in_memory_uow.orchestration_runs.save(run)
+    payload = coordinator._record_current_human_gate(
+        in_memory_uow,
+        run,
+        gate="proposal_feasibility",
+        question="Provide evidence; secret sk-12345678901234567890 must not leak",
+        options=[{"id": "retry", "label": "Continue"}],
+        payload={
+            "blockers": ["Missing test evidence; secret sk-12345678901234567890"],
+            "option_explanations": [{"action": "Continue", "consequence": "Bearer abcdefghijklmnop"}],
+        },
+    )
+
+    assert payload["summary_es"]
+    assert payload["pending_items"] == ["Missing test evidence; secret [REDACTED_KEY]"]
+    assert "sk-12345678901234567890" not in repr(payload)
+    assert "Bearer abcdefghijklmnop" not in repr(payload)
+    assert run.stop_details["human_payload"] == payload
+
+
+def test_structured_fields_are_not_added_to_ambiguous_or_legacy_gates(in_memory_uow):
+    run = _run(OrchestrationStage.EXPLORING)
+    coordinator = _coordinator(in_memory_uow)
+    in_memory_uow.orchestration_runs.save(run)
+    payload = coordinator._record_current_human_gate(
+        in_memory_uow,
+        run,
+        gate="explore_clarification",
+        question="Legacy question; keep the original response",
+        options=["Keep"],
+    )
+
+    assert "summary_es" not in payload
+    assert payload["question"] == "Legacy question; keep the original response"
+    assert payload["options"] == ["Keep"]
+
+
 @pytest.mark.asyncio
 async def test_proposal_review_escalation_replaces_and_persists_payload(in_memory_uow):
     run = _run(
@@ -923,4 +963,3 @@ def test_explore_checkpoint_accepts_response_without_409_and_resolves(
         app.dependency_overrides.clear()
         from minime.api.app import _accepted_operations
         _accepted_operations.pop(("project-explore-test", "explore-clarification-key-1"), None)
-
