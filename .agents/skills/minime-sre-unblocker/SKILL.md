@@ -22,7 +22,7 @@ Inspect the exact feasibility finding and its local evidence. Continue through t
 
 ### B. MCP OAuth refresh after authentication 401
 
-Use this only for a classified MCP authentication 401 on a configured `oauth2` connection. Ask the existing MCP credential service to renew the credential using its encrypted refresh token; never read token values into the prompt or logs and never substitute credentials. Retry the original MCP operation only if the transport evidence proves the rejected request had no effect and the operation is safe to repeat. If a token/configuration is absent, renewal fails, the response is not an authentication 401, or execution effect is uncertain, preserve diagnostics and escalate without retrying.
+Use this only for a classified MCP authentication 401 on a configured `oauth2` connection. Ask the existing MCP credential service to renew the credential using its encrypted refresh token; never read token values into the prompt or logs and never substitute credentials. Replay the original operation only when the rejected request is proven to have had no effect and discovered MCP tool metadata explicitly sets `readOnlyHint: true` or `idempotentHint: true`, without `destructiveHint: true`. Missing, conflicting, or destructive metadata means refresh the credential but do not replay the operation; preserve diagnostics and escalate. If a token/configuration is absent, renewal fails, the response is not an authentication 401, or execution effect is uncertain, preserve diagnostics and escalate without retrying.
 
 ### C. Stale managed-worktree lock
 

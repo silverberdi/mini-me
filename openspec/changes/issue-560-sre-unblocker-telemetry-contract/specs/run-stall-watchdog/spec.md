@@ -27,6 +27,8 @@ When an active Run is paused or reaches `HUMAN_REQUIRED` for a technical precond
 - **WHEN** an MCP connection reports an authentication 401, is configured for OAuth, and the existing credential service confirms a renewable refresh token without exposing credential values
 - **THEN** the Unblocker requests renewal through the existing OAuth credential service
 - **AND** retries an MCP operation only when evidence proves the rejected request had no effect and the operation is safe to repeat
+- **AND** repeatability is proven by the discovered tool metadata explicitly setting `readOnlyHint: true` or `idempotentHint: true`, with `destructiveHint` not set to `true`
+- **AND** when that metadata is absent, conflicting, or destructive, it stores the renewed credential but does not replay the operation and escalates with the original gate intact
 - **AND** records success or failure without logging tokens
 
 #### Scenario: OAuth refresh is unavailable or fails

@@ -118,6 +118,7 @@ def test_mcp_oauth_401_renews_once_and_retries_the_rejected_call(monkeypatch):
         session.add(connection)
         session.add(MCPCapabilityModel(
             id="capability", connection_id="oauth-401", kind="tool", name="read_status",
+            metadata_json={"annotations": {"readOnlyHint": True}},
         ))
         session.commit()
         service = MCPConnectionService(session, cipher)
@@ -148,4 +149,72 @@ def test_mcp_oauth_401_renews_once_and_retries_the_rejected_call(monkeypatch):
         assert {event.event_type for event in events} == {
             "SRE_UNBLOCKER_ATTEMPTED", "SRE_UNBLOCKER_RESOLVED",
         }
+        assert all("refresh-secret" not in str(event.evidence_references) for event in events)
+
+
+def test_mcp_oauth_401_refresh_does_not_replay_tool_without_repeatability_evidence(monkeypatch):
+    engine = create_engine("sqlite://")
+    Base.metadata.create_all(engine)
+    cipher = CredentialCipher(Fernet.generate_key())
+    request = httpx.Request("POST", "https://mcp.example.invalid")
+    unauthorized = httpx.HTTPStatusError(
+        "401 Unauthorized", request=request, response=httpx.Response(401, request=request)
+    )
+
+    class Provider:
+        def __init__(self):
+            self.refresh_calls = 0
+
+        def refresh(self, *_args):
+            self.refresh_calls += 1
+            return {"access_token": "new-access", "expires_in": 3600}
+
+    provider = Provider()
+    monkeypatch.setattr("minime.mcp.service.OAuthClient", lambda: provider)
+    with Session(engine) as session:
+        session.add(ProjectModel(id="project", display_name="Project", repository="owner/project"))
+        session.add(OrchestrationRunModel(
+            id="run-401-unsafe", project_id="project", change_name="oauth-refresh",
+            base_sha="a" * 40, current_stage="IMPLEMENTING", current_candidate_sha="b" * 40,
+        ))
+        connection = MCPConnectionModel(
+            id="oauth-401-unsafe", project_id="project", name="oauth",
+            endpoint="https://mcp.example.invalid", transport="http", auth_type="oauth2",
+            status="ACTIVE",
+            encrypted_credentials=cipher.encrypt({
+                "access_token": "old-access", "refresh_token": "refresh-secret",
+                "_oauth": {
+                    "token_endpoint": "https://auth.example.invalid/token",
+                    "client_id": "client-id", "client_secret": "client-secret",
+                },
+            }),
+        )
+        session.add(connection)
+        session.add(MCPCapabilityModel(
+            id="capability-unsafe", connection_id="oauth-401-unsafe", kind="tool", name="write_record",
+            metadata_json={},
+        ))
+        session.commit()
+        service = MCPConnectionService(session, cipher)
+        attempts = []
+
+        class Transport:
+            def call_tool(self, _tool, _arguments):
+                attempts.append("call")
+                raise unauthorized
+
+        monkeypatch.setattr(service, "_transport", lambda _row: Transport())
+        try:
+            service.invoke("project", "oauth-401-unsafe", "write_record", {"value": 1}, run_id="run-401-unsafe")
+        except Exception as exc:
+            assert "repeatability was not proven" in str(exc)
+        else:
+            raise AssertionError("unsafe operation should not be replayed")
+
+        assert attempts == ["call"]
+        assert provider.refresh_calls == 1
+        assert connection.status == "ACTIVE"
+        events = session.query(OrchestrationStageEventModel).filter_by(run_id="run-401-unsafe").all()
+        assert [event.event_type for event in events] == ["SRE_UNBLOCKER_ATTEMPTED", "SRE_UNBLOCKER_ESCALATED"]
+        assert "tool_repeatability_unproven" in str(events[-1].evidence_references)
         assert all("refresh-secret" not in str(event.evidence_references) for event in events)
