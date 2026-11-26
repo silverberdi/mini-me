@@ -1,6 +1,8 @@
 import { test, expect } from '@playwright/test';
 import { setupAuthSession } from './helpers';
 
+test.use({ serviceWorkers: 'block' });
+
 test.beforeEach(async ({ context, page }) => {
   await setupAuthSession(context);
   await page.route('**/api/**', async route => {
@@ -60,7 +62,7 @@ test('operator sees and filters global MCP connections and can register one', as
   await page.locator('input[name="endpoint"]').fill('http://shared.test/mcp');
   await page.locator('label:has(input[value="bearer"])').click();
   await page.locator('input[name="bearerToken"]').fill('test-token');
-  await page.getByLabel('Disponible globalmente').check({ force: true });
+  await page.locator('input[name="isGlobal"]').check({ force: true });
   await page.getByRole('button', { name: 'Registrar y comprobar' }).click();
 
   await expect.poll(() => registeredPayload?.['is_global']).toBe(true);
