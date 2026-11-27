@@ -955,9 +955,13 @@ def scheduler_run_cmd(
                             "NEEDS_HUMAN",
                             "READY_FOR_HUMAN_MERGE",
                         ) and accepted_gate_action is None and accepted_recovery_action is None and not is_watchdog_gate:
-                            # Awaiting human attention (human_gate is the HumanGate enum,
-                            # whose values are NEEDS_HUMAN / READY_FOR_HUMAN_MERGE — not
-                            # the legacy "HUMAN_REQUIRED" string, which never matched).
+                            # Awaiting human attention: check if the remote issue was closed in GitHub
+                            if proj and getattr(proj, "repository", None):
+                                from minime.services.remote_request_intake import RemoteRequestIntakeService
+                                intake_check = RemoteRequestIntakeService(github_adapter=GitHubAdapter(), uow=uow)
+                                if intake_check.reconcile_closed_issue(project_id, proj.repository, active_run):
+                                    typer.echo(f"[{project_id}] Stale active run {active_run.run_id} was reconciled (issue closed remotely on GitHub).")
+                                    continue
                             continue
 
                     repo_root = Path(binding.managed_repository_root)

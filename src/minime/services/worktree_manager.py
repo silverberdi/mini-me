@@ -68,6 +68,10 @@ class WorktreeManager:
     """Creates isolated candidate worktrees under `.minime/worktrees/<job_id>` with Git operation tracking."""
 
     GENERATED_CACHE_EXCLUDES = (
+        "node_modules",
+        "node_modules/",
+        "**/node_modules",
+        "**/node_modules/",
         "**/.angular/cache/",
         "**/.turbo/",
         "**/.next/cache/",
@@ -3654,6 +3658,33 @@ class WorktreeManager:
 
             relative_target = target.relative_to(worktree_path).as_posix()
             try:
+                exclude_file = canonical_root / ".git" / "info" / "exclude"
+                git_ref = worktree_path / ".git"
+                if git_ref.is_file():
+                    content_ref = git_ref.read_text(encoding="utf-8").strip()
+                    if content_ref.startswith("gitdir:"):
+                        gitdir_path = Path(content_ref[7:].strip())
+                        if not gitdir_path.is_absolute():
+                            gitdir_path = (worktree_path / gitdir_path).resolve()
+                        cand_exclude = gitdir_path / "info" / "exclude"
+                        if cand_exclude.parent.exists():
+                            exclude_file = cand_exclude
+                elif git_ref.is_dir():
+                    exclude_file = git_ref / "info" / "exclude"
+
+                exclude_file.parent.mkdir(parents=True, exist_ok=True)
+                existing_text = exclude_file.read_text(encoding="utf-8") if exclude_file.exists() else ""
+                existing_lines = set(existing_text.splitlines())
+                patterns_to_add = [p for p in (relative_target, f"{relative_target}/") if p not in existing_lines]
+                if patterns_to_add:
+                    prefix = existing_text
+                    if prefix and not prefix.endswith("\n"):
+                        prefix += "\n"
+                    exclude_file.write_text(prefix + "\n".join(patterns_to_add) + "\n", encoding="utf-8")
+            except Exception as exc:
+                logger.debug(f"Could not record exclude for {relative_target}: {exc}")
+
+            try:
                 await self._git(
                     ["check-ignore", "--quiet", "--no-index", "--", relative_target],
                     cwd=worktree_path,
@@ -4162,7 +4193,8 @@ class WorktreeManager:
                 provider_detail=f"Durable DB ownership contains synthetic placeholders for '{path}'.",
             )
 
-        if ownership.job_id != job_id or (project_id and ownership.project_id != project_id):
+        job_matches = (ownership.job_id == job_id) or (getattr(ownership, "run_id", None) == job_id)
+        if not job_matches or (project_id and ownership.project_id != project_id):
             logger.warning(
                 f"Refusing deletion of worktree at '{path}': DB ownership job_id/project_id mismatch (CONFLICT)"
             )
