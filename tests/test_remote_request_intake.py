@@ -15,6 +15,24 @@ class MockGitHubAdapter:
         self.issues = issues
         self.list_issues_calls: list[dict] = []
 
+    def get_issue(self, repository: str, issue_number: int):
+        for issue in self.issues:
+            if issue.get("number") == issue_number:
+                return ExternalActionResult(
+                    outcome=ExternalOutcome.SUCCESS,
+                    source_adapter="mock_github",
+                    reason_code=ExternalReasonCode.EXECUTION_SUCCESS,
+                    retry_safety=RetrySafety.SAFE,
+                    data=dict(issue),
+                )
+        return ExternalActionResult(
+            outcome=ExternalOutcome.FAILURE,
+            source_adapter="mock_github",
+            reason_code=ExternalReasonCode.NOT_FOUND,
+            retry_safety=RetrySafety.UNSAFE,
+            data={},
+        )
+
     def list_issues(self, repository: str, state: str = "open", limit: int | None = None):
         self.list_issues_calls.append({"repository": repository, "state": state, "limit": limit})
         return ExternalActionResult(
@@ -172,3 +190,60 @@ def test_select_next_request_picks_first_fifo_when_idle():
     assert selected["re_entrant"] is False
     assert selected["issue_number"] == 10
     assert selected["title"] == "First"
+
+
+def test_reconcile_closed_issue_completes_stale_active_run():
+    from unittest.mock import MagicMock
+    from minime.domain.enums import OrchestrationStage, OrchestrationStopOutcome
+
+    mock_run = MagicMock()
+    mock_run.run_id = "run-stale-42"
+    mock_run.is_active = True
+    mock_run.issue_number = 42
+    mock_run.current_stage = OrchestrationStage.IMPLEMENTING
+    mock_run.stop_outcome = None
+    mock_run.human_gate = "NEEDS_HUMAN"
+
+    mock_uow = MagicMock()
+    mock_runs_repo = MagicMock()
+    mock_uow.orchestration_runs = mock_runs_repo
+
+    # GitHub reports issue 42 as closed
+    adapter = MockGitHubAdapter([{"number": 42, "state": "closed"}])
+    service = RemoteRequestIntakeService(github_adapter=adapter, uow=mock_uow)
+
+    reconciled = service.reconcile_closed_issue("proj-1", "owner/repo", mock_run)
+    assert reconciled is True
+    assert mock_run.is_active is False
+    assert mock_run.current_stage == OrchestrationStage.COMPLETED
+    assert mock_run.stop_outcome == OrchestrationStopOutcome.COMPLETED
+    assert mock_run.human_gate is None
+    assert "closed remotely" in mock_run.stop_reason
+    mock_runs_repo.save.assert_called_once_with(mock_run)
+    mock_uow.commit.assert_called_once()
+
+
+def test_reconcile_closed_issue_leaves_open_issue_intact():
+    from unittest.mock import MagicMock
+    from minime.domain.enums import OrchestrationStage
+
+    mock_run = MagicMock()
+    mock_run.run_id = "run-active-42"
+    mock_run.is_active = True
+    mock_run.issue_number = 42
+    mock_run.current_stage = OrchestrationStage.IMPLEMENTING
+    mock_run.human_gate = "NEEDS_HUMAN"
+
+    mock_uow = MagicMock()
+    mock_runs_repo = MagicMock()
+    mock_uow.orchestration_runs = mock_runs_repo
+
+    # GitHub reports issue 42 as still open
+    adapter = MockGitHubAdapter([{"number": 42, "state": "open"}])
+    service = RemoteRequestIntakeService(github_adapter=adapter, uow=mock_uow)
+
+    reconciled = service.reconcile_closed_issue("proj-1", "owner/repo", mock_run)
+    assert reconciled is False
+    assert mock_run.is_active is True
+    assert mock_run.human_gate == "NEEDS_HUMAN"
+    mock_runs_repo.save.assert_not_called()

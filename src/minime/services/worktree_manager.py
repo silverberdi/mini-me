@@ -68,6 +68,10 @@ class WorktreeManager:
     """Creates isolated candidate worktrees under `.minime/worktrees/<job_id>` with Git operation tracking."""
 
     GENERATED_CACHE_EXCLUDES = (
+        "node_modules",
+        "node_modules/",
+        "**/node_modules",
+        "**/node_modules/",
         "**/.angular/cache/",
         "**/.turbo/",
         "**/.next/cache/",
@@ -162,6 +166,7 @@ class WorktreeManager:
                 if not ownership or ownership.creation_state not in (
                     WorktreeCreationState.CREATED,
                     WorktreeCreationState.PENDING,
+                    WorktreeCreationState.RECONCILED,
                 ):
                     raise RuntimeError(
                         f"Mutating operation '{operation.value}' denied: no valid worktree ownership found for '{canonical_path}'."
@@ -3654,6 +3659,25 @@ class WorktreeManager:
 
             relative_target = target.relative_to(worktree_path).as_posix()
             try:
+                exclude_val = await self._git(
+                    ["rev-parse", "--git-path", "info/exclude"], cwd=worktree_path
+                )
+                exclude_file = Path(str(exclude_val).strip())
+                if not exclude_file.is_absolute():
+                    exclude_file = worktree_path / exclude_file
+                if not exclude_file.is_symlink():
+                    existing_text = exclude_file.read_text(encoding="utf-8") if exclude_file.exists() else ""
+                    existing_lines = set(existing_text.splitlines())
+                    patterns_to_add = [p for p in (relative_target, f"{relative_target}/") if p not in existing_lines]
+                    if patterns_to_add:
+                        prefix = existing_text
+                        if prefix and not prefix.endswith("\n"):
+                            prefix += "\n"
+                        exclude_file.write_text(prefix + "\n".join(patterns_to_add) + "\n", encoding="utf-8")
+            except Exception as exc:
+                logger.debug(f"Could not record exclude for {relative_target}: {exc}")
+
+            try:
                 await self._git(
                     ["check-ignore", "--quiet", "--no-index", "--", relative_target],
                     cwd=worktree_path,
@@ -4162,7 +4186,8 @@ class WorktreeManager:
                 provider_detail=f"Durable DB ownership contains synthetic placeholders for '{path}'.",
             )
 
-        if ownership.job_id != job_id or (project_id and ownership.project_id != project_id):
+        job_matches = (ownership.job_id == job_id) or (getattr(ownership, "run_id", None) == job_id)
+        if not job_matches or (project_id and ownership.project_id != project_id):
             logger.warning(
                 f"Refusing deletion of worktree at '{path}': DB ownership job_id/project_id mismatch (CONFLICT)"
             )
@@ -4729,6 +4754,7 @@ class WorktreeManager:
         except Exception as exc:
             logger.warning(f"Could not provision canonical capabilities in worktree {worktree_path}: {exc}")
 
+        await self._ensure_generated_cache_excludes(worktree_path)
         await self._link_installed_node_dependencies(worktree_path)
 
         return WorktreeInfo(

@@ -187,6 +187,79 @@ class RemoteRequestIntakeService:
             return runs[0] if runs else None
         return None
 
+    def reconcile_closed_issue(
+        self,
+        project_id: str,
+        repository: str,
+        active_run: Any,
+        worktree_manager: Any = None,
+    ) -> bool:
+        """Check if an active run's underlying GitHub issue was closed remotely; if so, reconcile it."""
+        if not active_run or not getattr(active_run, "is_active", False):
+            return False
+
+        details = getattr(active_run, "stop_details", None) or {}
+        issue_number = getattr(active_run, "issue_number", None) or details.get("issue_number")
+        if not isinstance(issue_number, int):
+            return False
+
+        try:
+            res = self.github_adapter.get_issue(repository, issue_number)
+            if getattr(res, "outcome", None) != ExternalOutcome.SUCCESS:
+                return False
+            data = getattr(res, "data", None) or {}
+            if data.get("state") != "closed":
+                return False
+        except Exception as exc:
+            logger.warning(f"Error checking remote issue {repository}#{issue_number}: {exc}")
+            return False
+
+        from minime.domain.enums import OrchestrationStage, OrchestrationStopOutcome
+
+        active_run.is_active = False
+        active_run.current_stage = OrchestrationStage.COMPLETED
+        active_run.stop_outcome = OrchestrationStopOutcome.COMPLETED
+        active_run.human_gate = None
+        active_run.stop_reason = f"Issue #{issue_number} closed remotely on GitHub."
+
+        if self.uow and hasattr(self.uow, "orchestration_runs"):
+            self.uow.orchestration_runs.save(active_run)
+
+        # Release any active claims or ownership
+        if self.uow and hasattr(self.uow, "recovery_claims"):
+            try:
+                claims = self.uow.recovery_claims.list_by_run(active_run.run_id)
+                for claim in claims:
+                    if hasattr(claim, "released") and not claim.released:
+                        claim.released = True
+                        self.uow.recovery_claims.save(claim)
+            except Exception:
+                pass
+
+        if self.uow:
+            self.uow.commit()
+
+        # Clean up worktree if worktree_manager is provided
+        if worktree_manager:
+            try:
+                import asyncio
+                import inspect
+                cleanup_coro = worktree_manager.remove_clean_worktree(
+                    active_run.run_id, project_id=project_id
+                )
+                if inspect.iscoroutine(cleanup_coro):
+                    asyncio.run(cleanup_coro)
+            except Exception as exc:
+                logger.warning(
+                    f"Cleanup of worktree for reconciled run {active_run.run_id} skipped: {exc}"
+                )
+
+        logger.info(
+            f"Reconciled stale active run {active_run.run_id} for {project_id}: "
+            f"remote Issue #{issue_number} is closed on GitHub."
+        )
+        return True
+
     def select_next_request(
         self,
         project_id: str,
@@ -201,7 +274,10 @@ class RemoteRequestIntakeService:
         """
         active_run = self.get_active_project_run(project_id)
         if active_run is not None:
-            details = getattr(active_run, "stop_details", {}) or {}
+            if self.reconcile_closed_issue(project_id, repository, active_run):
+                active_run = None
+            else:
+                details = getattr(active_run, "stop_details", {}) or {}
             issue_number = getattr(active_run, "issue_number", None) or details.get("issue_number")
             run_id = getattr(active_run, "run_id", None)
             if not isinstance(run_id, str):
