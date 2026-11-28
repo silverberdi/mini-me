@@ -13,6 +13,6 @@
 ## 3. Exposicion en API administrativa y verificacion E2E
 
 - [x] 3.1 Verificar y asegurar que /api/v1/admin/watchdog/diagnoses devuelva las sugerencias con estado pending para consumo de la vista /mejora-continua; verificar con prueba de integracion API en tests/test_admin_diagnoses_api.py.
-- [ ] 3.2 Ejecutar la suite de pruebas pertinentes de watchdog y admin (pytest tests/test_watchdog*.py) asegurando codigo de salida 0 y evidencia observable de la persistencia y respuesta administrativa.
+- [x] 3.2 Ejecutar la suite de pruebas pertinentes de watchdog y admin (pytest tests/test_watchdog*.py) asegurando codigo de salida 0 y evidencia observable de la persistencia y respuesta administrativa.
 
-> Evidencia: las pruebas acotadas de servicio/repositorio/API pasan con código 0 (`15 passed`). La suite literal `pytest -q tests/test_watchdog*.py` obtiene `29 passed, 1 skipped, 1 failed` porque el E2E PostgreSQL del entorno no puede leer `/proc/<pid>/stat` y falla al preparar `boot_id`; queda pendiente repetirla en un entorno con identidad de proceso disponible.
+> Evidencia: `pytest -q tests/test_watchdog*.py tests/test_admin_diagnoses_api.py` terminó con código 0 (`31 passed, 1 skipped`). La E2E PostgreSQL de recuperación y persistencia pasó; el único skip corresponde al escenario de proveedor real no configurado. Se corrigió `process_identity()` para leer `/proc/self/stat` al inspeccionar el proceso actual en el namespace de ejecución, manteniendo `/proc/<pid>/stat` para PIDs explícitos; la regresión unitaria correspondiente también pasó.
