@@ -408,3 +408,87 @@ async def test_watchdog_can_recover_apply_invocation_with_prior_recovery_count_1
     assert recovered.recovery_count == 2
 
 
+@pytest.mark.asyncio
+async def test_recover_dirty_apply_invocation_allows_worktree_fingerprint_change(
+    base_setup, monkeypatch
+):
+    uow, candidate, coordinator = base_setup
+    run = uow.orchestration_runs.get_by_id("run-watchdog-1")
+    run.current_stage = OrchestrationStage.IMPLEMENTING
+    uow.orchestration_runs.save(run)
+
+    attempt_id = str(uuid4())
+    prior_fingerprint = "initial_fingerprint"
+    claim_key = f"stage-invocation:{run.run_id}:APPLY:{prior_fingerprint}"
+    candidate_dict = {
+        "run_id": run.run_id,
+        "stage": "APPLY",
+        "worktree": str(candidate.resolve()),
+        "generation": 1,
+        "branch": "req-1",
+        "candidate_sha": "a" * 40,
+        "candidate_fingerprint": "initial_candidate_fp",
+        "fingerprint": prior_fingerprint,
+    }
+
+    uow.orchestration_stage_events.save(
+        OrchestrationStageEvent(
+            run_id=run.run_id,
+            event_type="STAGE_INVOCATION_STARTED",
+            from_stage=OrchestrationStage.IMPLEMENTING,
+            to_stage=OrchestrationStage.IMPLEMENTING,
+            evidence_references={
+                "attempt_id": attempt_id,
+                "claim_key": claim_key,
+                "candidate": candidate_dict,
+                "coordinator_process": {"status": "AVAILABLE", "host": "testhost", "boot_id": "boot1", "pid": 99999, "start_marker": "marker1"},
+                "recovery_count": 0,
+            },
+        )
+    )
+    uow.orchestration_stage_events.save(
+        OrchestrationStageEvent(
+            run_id=run.run_id,
+            event_type="STAGE_INVOCATION_PROCESS_STARTED",
+            from_stage=OrchestrationStage.IMPLEMENTING,
+            to_stage=OrchestrationStage.IMPLEMENTING,
+            evidence_references={
+                "attempt_id": attempt_id,
+                "claim_key": claim_key,
+                "process_identity": {"status": "AVAILABLE", "host": "testhost", "boot_id": "boot1", "pid": 99998, "start_marker": "marker2"},
+            },
+        )
+    )
+
+    uow.claims.acquire_or_reacquire(claim_key, "owner1", lease_seconds=120)
+
+    monkeypatch.setattr(
+        "minime.services.orchestration_coordinator.process_identity",
+        lambda _pid=None: {"status": "AVAILABLE", "host": "testhost", "boot_id": "boot1", "pid": 11111, "start_marker": "marker3"},
+    )
+    monkeypatch.setattr(
+        "minime.services.orchestration_coordinator.process_identity_state",
+        lambda proc: "GONE",
+    )
+    monkeypatch.setattr(
+        "minime.services.orchestration_coordinator.process_group_state",
+        lambda pgid: "GONE",
+    )
+    coordinator.worktree_manager.rebaseline_apply_worktree = AsyncMock(return_value={})
+
+    # Simulate stage candidate identity returning changed working directory fingerprint
+    new_candidate_dict = dict(candidate_dict)
+    new_candidate_dict["candidate_fingerprint"] = "modified_candidate_fp"
+    new_candidate_dict["fingerprint"] = "new_fingerprint"
+    coordinator._stage_candidate_identity = AsyncMock(return_value=new_candidate_dict)
+
+    handled, recovered = await coordinator._recover_dirty_apply_invocation(
+        uow, run, candidate, "APPLY", allow_human_resume=False
+    )
+    assert handled is True
+    assert recovered is not None
+    assert recovered.candidate["fingerprint"] == "new_fingerprint"
+    assert recovered.recovery_count == 1
+
+
+

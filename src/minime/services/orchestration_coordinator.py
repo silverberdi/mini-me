@@ -1742,7 +1742,11 @@ class NativeOrchestrationCoordinator:
                 process_absence_proven=True,
             )
             candidate = await self._stage_candidate_identity(run, worktree_path, stage)
-            if candidate != prior_candidate:
+            candidate_mismatch = any(
+                candidate.get(k) != prior_candidate.get(k)
+                for k in ("run_id", "stage", "worktree", "branch", "generation", "candidate_sha")
+            )
+            if candidate_mismatch:
                 claims.release_claim(old_context)
                 uow.commit()
                 return True, None
