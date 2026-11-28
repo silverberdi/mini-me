@@ -530,6 +530,27 @@ def test_process_identity_is_unavailable_on_unsupported_platform(monkeypatch):
     assert identity["pid"] == 123
 
 
+def test_process_identity_uses_proc_self_for_current_process(monkeypatch):
+    paths = []
+    real_path = confinement_module.Path
+
+    class RecordingPath:
+        def __init__(self, path):
+            paths.append(path)
+            self._path = real_path(path)
+
+        def read_text(self):
+            if str(self._path) == "/proc/self/stat":
+                return "(python) R " + " ".join(["0"] * 19)
+            return self._path.read_text()
+
+    monkeypatch.setattr(confinement_module, "Path", RecordingPath)
+    identity = process_identity()
+
+    assert identity["status"] == "AVAILABLE"
+    assert "/proc/self/stat" in paths
+
+
 def test_absent_and_unobservable_processes_are_distinguished(monkeypatch):
     monkeypatch.setattr(
         confinement_module, "process_identity",

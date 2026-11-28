@@ -32,7 +32,8 @@ def process_identity(pid: int | None = None) -> dict[str, Any]:
     system = platform.system().lower()
     try:
         if system == "linux":
-            raw = Path(f"/proc/{target}/stat").read_text()
+            stat_path = Path("/proc/self/stat") if pid is None else Path(f"/proc/{target}/stat")
+            raw = stat_path.read_text()
             fields = raw[raw.rfind(")") + 2 :].split()
             start_marker = fields[19]  # proc stat field 22 (starttime), split begins at field 3.
             boot_marker = Path("/proc/sys/kernel/random/boot_id").read_text().strip()

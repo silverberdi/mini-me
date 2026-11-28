@@ -42,7 +42,7 @@ def _git(cwd: Path, *args: str) -> str:
 
 def _setup_git_environment(tmp_path: Path, change_name: str):
     repo = tmp_path / "repo"
-    worktree = tmp_path / "worktree"
+    worktree = tmp_path / f"worktree-{uuid4().hex}"
     repo.mkdir(parents=True, exist_ok=True)
     _git(repo, "init", "-b", "main")
     _git(repo, "config", "user.name", "minime-tester")

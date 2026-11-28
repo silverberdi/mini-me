@@ -87,6 +87,57 @@ def test_stale_run_produces_candidate_bound_read_only_observation():
     assert result["candidate_generation"] == 2
     assert result["action"] is None
     assert result["action_result"] == {"status": "NOT_ATTEMPTED"}
+    assert result["evidence"]["event_identity"]
+
+
+def test_recurrence_matches_the_persisted_transition_key():
+    diagnosis = {
+        "project_id": "project",
+        "run_id": "current",
+        "root_cause": "no_recent_activity",
+        "affected_component": "apply",
+        "evidence": {"sre_intervention_transition_key": "watchdog:repeatable"},
+    }
+    prior = {
+        **diagnosis,
+        "run_id": "previous",
+        "evidence": {
+            "sre_intervention_transition_key": "watchdog:repeatable",
+            "event_identity": "previous-event",
+        },
+    }
+    repo = SimpleNamespace(list_diagnoses=lambda **_kwargs: [prior])
+
+    assert WatchdogObservationService.has_prior_sre_pattern(repo, diagnosis) is True
+
+
+def test_event_deduplication_does_not_hide_distinct_events_in_same_run_slot():
+    diagnosis = {
+        "project_id": "project",
+        "run_id": "run-1",
+        "stage": "APPLY",
+        "candidate_generation": 1,
+        "evidence": {"event_identity": "event-2"},
+    }
+    prior = {
+        "project_id": "project",
+        "run_id": "run-1",
+        "stage": "APPLY",
+        "candidate_generation": 1,
+        "evidence": {"event_identity": "event-1"},
+    }
+    repo = SimpleNamespace(
+        list_diagnoses=lambda **_kwargs: [prior],
+        get_by_event_identity=lambda identity: next(
+            (item for item in [prior] if item["evidence"]["event_identity"] == identity),
+            None,
+        ),
+    )
+
+    assert WatchdogObservationService.has_persisted_event(repo, diagnosis) is False
+    assert WatchdogObservationService.has_persisted_event(
+        repo, {**diagnosis, "evidence": {"event_identity": "event-1"}}
+    ) is True
 
 
 def test_proven_absent_child_is_detected_before_threshold(monkeypatch):

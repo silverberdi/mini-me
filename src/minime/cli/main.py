@@ -843,13 +843,12 @@ def scheduler_run_cmd(
                                             "gate_id": gate_payload.get("gate_id"),
                                         },
                                     )
-                                    has_prior_pattern = watchdog_service.has_prior_sre_pattern(
+                                    observation["evidence"]["sre_intervention_transition_key"] = escalation_key
+                                    if analysis and watchdog_service.has_prior_sre_pattern(
                                         watchdog_repo, observation
-                                    )
-                                    if analysis and has_prior_pattern:
-                                        observation["evidence"]["sre_intervention_transition_key"] = escalation_key
+                                    ):
                                         observation["improvement_suggestion"] = analysis
-                                        watchdog_repo.save_diagnosis(observation)
+                                    watchdog_repo.save_diagnosis(observation)
                                     details = dict(active_run.stop_details or {})
                                     preserved_payload = dict(gate_payload)
                                     preserved_payload["sre_unblocker_diagnostic"] = {
@@ -860,10 +859,8 @@ def scheduler_run_cmd(
                                     active_run.stop_details = details
                                     uow.orchestration_runs.save(active_run)
                                     uow.commit()
-                            elif observation and not watchdog_repo.get_by_run_stage_generation(
-                                active_run.run_id,
-                                observation["stage"],
-                                observation["candidate_generation"],
+                            elif observation and not watchdog_service.has_persisted_event(
+                                watchdog_repo, observation
                             ):
                                 owner_repo = getattr(uow, "orchestration_worktree_ownerships", None)
                                 owner = (
@@ -895,10 +892,9 @@ def scheduler_run_cmd(
                                         },
                                     )
                                     observation["evidence"]["sre_intervention_transition_key"] = attempt_key
-                                    has_prior_pattern = watchdog_service.has_prior_sre_pattern(
+                                    if not watchdog_service.has_prior_sre_pattern(
                                         watchdog_repo, observation
-                                    )
-                                    if not has_prior_pattern:
+                                    ):
                                         observation["improvement_suggestion"] = None
                                 watchdog_repo.save_diagnosis(observation)
                                 uow.commit()
