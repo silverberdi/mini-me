@@ -5,18 +5,23 @@ from minime.services.watchdog_repository import PostgresWatchdogRepository
 
 class _Session:
     def __init__(self):
-        self.row = None
+        self.rows = []
 
-    def scalar(self, _statement):
-        return self.row
+    def scalar(self, statement):
+        event_identity = statement.compile().params.get("event_identity_1")
+        for row in self.rows:
+            if event_identity is None or row.event_identity == event_identity:
+                return row
+        return None
 
     def add(self, row):
-        self.row = row
+        self.rows.append(row)
 
     def flush(self):
-        if self.row.created_at is None:
-            self.row.created_at = datetime.now(UTC)
-        self.row.updated_at = self.row.created_at
+        for row in self.rows:
+            if row.created_at is None:
+                row.created_at = datetime.now(UTC)
+            row.updated_at = row.created_at
 
 
 def _diagnosis():
@@ -50,3 +55,18 @@ def test_save_diagnosis_is_idempotent_and_preserves_event_link():
     assert second["event_identity"] == "event-1"
     assert second["source_intervention_transition_key"] == "watchdog:attempt-1"
     assert second["suggestion_status"] == "pending"
+
+
+def test_distinct_events_share_candidate_without_colliding():
+    repository = PostgresWatchdogRepository(_Session())
+    first = repository.save_diagnosis(_diagnosis())
+    second = repository.save_diagnosis({
+        **_diagnosis(),
+        "evidence": {
+            "event_identity": "event-2",
+            "sre_intervention_transition_key": "watchdog:attempt-2",
+        },
+    })
+
+    assert second["id"] != first["id"]
+    assert second["event_identity"] == "event-2"

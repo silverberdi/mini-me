@@ -1588,7 +1588,13 @@ class WatchdogDiagnosisModel(Base):
 
     __tablename__ = "watchdog_diagnoses"
     __table_args__ = (
-        UniqueConstraint("run_id", "stage", "candidate_generation", name="uq_watchdog_run_stage_generation"),
+        UniqueConstraint(
+            "run_id",
+            "stage",
+            "candidate_generation",
+            "event_identity",
+            name="uq_watchdog_run_stage_generation_event",
+        ),
         CheckConstraint("suggestion_status IN ('pending', 'converted', 'discarded')", name="ck_watchdog_suggestion_status"),
         Index("ix_watchdog_diagnoses_feed", "project_id", "suggestion_status", "created_at"),
         Index("ix_watchdog_diagnoses_run", "run_id", "created_at"),
@@ -1601,6 +1607,8 @@ class WatchdogDiagnosisModel(Base):
     stage: Mapped[str] = mapped_column(String(32), nullable=False)
     candidate_sha: Mapped[str | None] = mapped_column(String(64), nullable=True)
     candidate_generation: Mapped[int] = mapped_column(Integer, nullable=False)
+    event_identity: Mapped[str] = mapped_column(String(128), nullable=False, index=True)
+    transition_key: Mapped[str | None] = mapped_column(String(255), nullable=True, index=True)
     status: Mapped[str] = mapped_column(String(32), nullable=False)
     root_cause: Mapped[str] = mapped_column(String(128), nullable=False)
     affected_component: Mapped[str] = mapped_column(String(128), nullable=False, index=True)
