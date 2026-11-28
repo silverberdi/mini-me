@@ -568,7 +568,7 @@ export class DashboardComponent {
   }
 
   autonomyOutcomeSummary(outcomes: Record<string, number>): string {
-    return `Sin intervención: ${outcomes['no_intervention'] || 0}; recuperación autónoma: ${outcomes['autonomous_recovery'] || 0}; requirió operador: ${outcomes['operator_needed'] || 0}`;
+    return `Sin intervención: ${outcomes['no_intervention'] || 0}; recuperación autónoma: ${outcomes['autonomous_recovery'] || 0}; gobernanza: ${outcomes['governance_authorization'] || 0}; bloqueo técnico: ${outcomes['technical_block'] || 0}; requirió operador: ${outcomes['operator_needed'] || 0}`;
   }
 
   autonomySeriesSummary(series: TemporalTelemetrySeries): string {

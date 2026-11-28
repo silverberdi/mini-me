@@ -126,6 +126,9 @@ export interface TemporalTelemetryPoint {
   source_timestamps: string[];
   quality: string;
   autonomy_outcomes?: Record<string, number>;
+  eligible_run_count?: number;
+  eligible_stage_count?: number;
+  autonomous_stage_count?: number;
 }
 
 export interface TemporalTelemetrySeries {
