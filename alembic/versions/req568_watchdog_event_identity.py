@@ -49,8 +49,8 @@ def upgrade() -> None:
     op.execute(
         sa.text(
             "UPDATE watchdog_diagnoses "
-            "SET event_identity = COALESCE(evidence ->> event_identity, id), "
-            "transition_key = evidence ->> sre_intervention_transition_key "
+            "SET event_identity = COALESCE(evidence ->> 'event_identity', id), "
+            "transition_key = evidence ->> 'sre_intervention_transition_key' "
             "WHERE event_identity IS NULL"
         )
     )
