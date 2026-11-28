@@ -408,3 +408,87 @@ async def test_watchdog_can_recover_apply_invocation_with_prior_recovery_count_1
     assert recovered.recovery_count == 2
 
 
+@pytest.mark.asyncio
+async def test_recover_dirty_apply_invocation_allows_worktree_fingerprint_change(
+    tmp_path, monkeypatch
+):
+    candidate = tmp_path / "worktree"
+    _git_candidate(candidate)
+    head_sha = subprocess.check_output(
+        ["git", "-C", str(candidate), "rev-parse", "HEAD"], text=True
+    ).strip()
+
+    uow = InMemoryPersistenceUnitOfWork()
+    run = OrchestrationRun(
+        project_id="test-proj",
+        change_name="test-change",
+        base_sha="main",
+        current_stage=OrchestrationStage.IMPLEMENTING,
+        current_candidate_sha=head_sha,
+        current_generation=1,
+    )
+    uow.orchestration_runs.save(run)
+
+    coordinator = _coordinator(uow)
+    real_candidate = await coordinator._stage_candidate_identity(run, candidate, "APPLY")
+
+    claim_prefix = f"stage-invocation:{run.run_id}:APPLY:"
+    claim_key = f"{claim_prefix}{real_candidate['fingerprint']}"
+    attempt_id = "attempt-recovery-fp-change"
+
+    uow.orchestration_stage_events.save(
+        OrchestrationStageEvent(
+            run_id=run.run_id,
+            event_type="STAGE_INVOCATION_STARTED",
+            from_stage=OrchestrationStage.IMPLEMENTING,
+            to_stage=OrchestrationStage.IMPLEMENTING,
+            evidence_references={
+                "attempt_id": attempt_id,
+                "claim_key": claim_key,
+                "candidate": real_candidate,
+                "coordinator_process": {"status": "AVAILABLE", "host": "testhost", "boot_id": "boot1", "pid": 99999, "start_marker": "marker1"},
+                "recovery_count": 0,
+            },
+        )
+    )
+    uow.orchestration_stage_events.save(
+        OrchestrationStageEvent(
+            run_id=run.run_id,
+            event_type="STAGE_INVOCATION_PROCESS_STARTED",
+            from_stage=OrchestrationStage.IMPLEMENTING,
+            to_stage=OrchestrationStage.IMPLEMENTING,
+            evidence_references={
+                "attempt_id": attempt_id,
+                "claim_key": claim_key,
+                "process_identity": {"status": "AVAILABLE", "host": "testhost", "boot_id": "boot1", "pid": 99998, "start_marker": "marker2"},
+            },
+        )
+    )
+
+    uow.claims.acquire_or_reacquire(claim_key, "owner1", lease_seconds=120)
+
+    monkeypatch.setattr(
+        "minime.services.orchestration_coordinator.process_identity",
+        lambda _pid=None: {"status": "AVAILABLE", "host": "testhost", "boot_id": "boot1", "pid": 11111, "start_marker": "marker3"},
+    )
+    monkeypatch.setattr(
+        "minime.services.orchestration_coordinator.process_identity_state",
+        lambda proc: "GONE",
+    )
+    monkeypatch.setattr(
+        "minime.services.orchestration_coordinator.process_group_state",
+        lambda pgid: "GONE",
+    )
+
+    # Modify an untracked file to simulate partial progress / task marking
+    (candidate / "new_debris.txt").write_text("debris from interrupted apply\n")
+
+    handled, recovered = await coordinator._recover_dirty_apply_invocation(
+        uow, run, candidate, "APPLY", allow_human_resume=False
+    )
+    assert handled is True
+    assert recovered is not None
+    assert recovered.recovery_count == 1
+
+
+
