@@ -48,6 +48,8 @@ class PostgresWatchdogRepository:
         return self._settings_payload(row)
 
     def save_diagnosis(self, values: dict[str, Any]) -> dict[str, Any]:
+        evidence = dict(values.get("evidence") or {})
+        event_identity = evidence.get("event_identity")
         row = self.session.scalar(
             select(WatchdogDiagnosisModel)
             .where(
@@ -70,7 +72,7 @@ class PostgresWatchdogRepository:
                 root_cause=str(values["root_cause"]),
                 affected_component=str(values["affected_component"]),
                 summary=str(values["summary"]),
-                evidence=dict(values.get("evidence") or {}),
+                evidence=evidence,
                 action=values.get("action"),
                 action_result=dict(values.get("action_result") or {}),
                 improvement_suggestion=values.get("improvement_suggestion"),
@@ -89,7 +91,12 @@ class PostgresWatchdogRepository:
             row.status = str(values["status"])
             row.root_cause = str(values["root_cause"])
             row.summary = str(values["summary"])
-            row.evidence = dict(values.get("evidence") or {})
+            existing_evidence = dict(row.evidence or {})
+            existing_identity = existing_evidence.get("event_identity")
+            if existing_identity and event_identity and existing_identity != event_identity:
+                raise ValueError("Watchdog diagnosis event identity changed for an existing run/stage generation")
+            # Preserve the first immutable event link on duplicate delivery.
+            row.evidence = {**existing_evidence, **evidence}
             row.action = values.get("action")
             row.action_result = dict(values.get("action_result") or {})
             if values.get("improvement_suggestion"):
@@ -152,6 +159,18 @@ class PostgresWatchdogRepository:
         ).all()
         return [self._diagnosis_payload(row) for row in rows]
 
+    def get_by_transition_key(self, transition_key: str) -> dict[str, Any] | None:
+        for row in self.session.scalars(select(WatchdogDiagnosisModel)).all():
+            if (row.evidence or {}).get("sre_intervention_transition_key") == transition_key:
+                return self._diagnosis_payload(row)
+        return None
+
+    def get_by_event_identity(self, event_identity: str) -> dict[str, Any] | None:
+        for row in self.session.scalars(select(WatchdogDiagnosisModel)).all():
+            if (row.evidence or {}).get("event_identity") == event_identity:
+                return self._diagnosis_payload(row)
+        return None
+
     def set_suggestion_status(self, diagnosis_id: str, value: str) -> dict[str, Any] | None:
         if value not in {"converted", "discarded"}:
             raise ValueError("Unsupported suggestion status")
@@ -202,6 +221,7 @@ class PostgresWatchdogRepository:
             "source_intervention_transition_key": (row.evidence or {}).get(
                 "sre_intervention_transition_key"
             ),
+            "event_identity": (row.evidence or {}).get("event_identity"),
             "suggestion_status": row.suggestion_status,
             "created_at": row.created_at,
             "updated_at": row.updated_at,

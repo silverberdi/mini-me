@@ -87,6 +87,28 @@ def test_stale_run_produces_candidate_bound_read_only_observation():
     assert result["candidate_generation"] == 2
     assert result["action"] is None
     assert result["action_result"] == {"status": "NOT_ATTEMPTED"}
+    assert result["evidence"]["event_identity"]
+
+
+def test_recurrence_matches_the_persisted_transition_key():
+    diagnosis = {
+        "project_id": "project",
+        "run_id": "current",
+        "root_cause": "no_recent_activity",
+        "affected_component": "apply",
+        "evidence": {"sre_intervention_transition_key": "watchdog:repeatable"},
+    }
+    prior = {
+        **diagnosis,
+        "run_id": "previous",
+        "evidence": {
+            "sre_intervention_transition_key": "watchdog:repeatable",
+            "event_identity": "previous-event",
+        },
+    }
+    repo = SimpleNamespace(list_diagnoses=lambda **_kwargs: [prior])
+
+    assert WatchdogObservationService.has_prior_sre_pattern(repo, diagnosis) is True
 
 
 def test_proven_absent_child_is_detected_before_threshold(monkeypatch):

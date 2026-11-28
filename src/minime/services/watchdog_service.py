@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import hashlib
 from dataclasses import replace
 from datetime import UTC, datetime
 from pathlib import Path
@@ -190,19 +191,34 @@ class WatchdogObservationService:
 
     @staticmethod
     def has_prior_sre_pattern(watchdog_repository: Any, diagnosis: dict[str, Any]) -> bool:
-        """Require a prior different Run with the same cause/component and event link."""
+        """Find a prior supported diagnosis without requiring a seed row."""
         list_diagnoses = getattr(watchdog_repository, "list_diagnoses", None)
         if not callable(list_diagnoses):
             return False
         prior = list_diagnoses(project_id=diagnosis.get("project_id"), limit=200)
-        return any(
-            item.get("run_id") != diagnosis.get("run_id")
-            and item.get("root_cause") == diagnosis.get("root_cause")
-            and item.get("affected_component") == diagnosis.get("affected_component")
-            and isinstance(item.get("evidence"), dict)
-            and item["evidence"].get("sre_intervention_transition_key")
-            for item in prior
-        )
+        current_evidence = diagnosis.get("evidence") or {}
+        current_key = current_evidence.get("sre_intervention_transition_key")
+        current_identity = current_evidence.get("event_identity")
+        for item in prior:
+            if item.get("run_id") == diagnosis.get("run_id"):
+                continue
+            if (
+                item.get("root_cause") != diagnosis.get("root_cause")
+                or item.get("affected_component") != diagnosis.get("affected_component")
+            ):
+                continue
+            evidence = item.get("evidence") or {}
+            prior_key = evidence.get("sre_intervention_transition_key")
+            prior_identity = evidence.get("event_identity")
+            if current_key and prior_key == current_key:
+                return True
+            if current_identity and prior_identity == current_identity:
+                return True
+            # Keep compatibility with older persisted rows that predate the
+            # explicit event identity while requiring a linked intervention.
+            if not current_key and not current_identity and prior_key:
+                return True
+        return False
 
     @staticmethod
     def _component_for_stage(stage: Any) -> str:
@@ -328,13 +344,30 @@ class WatchdogObservationService:
         summary: str | None = None,
     ) -> dict[str, Any]:
         candidate_sha = getattr(run, "current_candidate_sha", None)
+        candidate_generation = int(getattr(run, "current_generation", 1) or 1)
+        event_identity = hashlib.sha256(
+            json.dumps(
+                {
+                    "run_id": run.run_id,
+                    "stage": str(stage),
+                    "candidate_sha": candidate_sha,
+                    "candidate_generation": candidate_generation,
+                    "attempt_id": evidence.get("attempt_id"),
+                    "gate_id": evidence.get("gate_id"),
+                    "root_cause": root_cause,
+                },
+                sort_keys=True,
+                ensure_ascii=False,
+            ).encode()
+        ).hexdigest()
+        evidence = {**evidence, "event_identity": event_identity}
         return {
             "project_id": run.project_id,
             "run_id": run.run_id,
             "change_name": run.change_name,
             "stage": str(stage),
             "candidate_sha": candidate_sha,
-            "candidate_generation": int(getattr(run, "current_generation", 1) or 1),
+            "candidate_generation": candidate_generation,
             "status": status,
             "root_cause": root_cause,
             "affected_component": WatchdogObservationService._component_for_stage(stage),
