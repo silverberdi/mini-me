@@ -3493,6 +3493,22 @@ class NativeOrchestrationCoordinator:
             gate_pending = False
             pending_gate = None
             accepted_checkpoint_recovery_response = True
+        details = dict(active_run.stop_details or {})
+        if (
+            gate_pending
+            and isinstance(pending_gate, dict)
+            and pending_gate.get("gate") == "apply_gate_update"
+            and not (details.get("apply_gate_update") or {}).get("operator_action_id")
+        ):
+            self._clear_current_human_gate(
+                uow,
+                active_run,
+                response_text="Auto-cleared spurious apply_gate_update without operator action.",
+                commit=True,
+            )
+            gate_pending = False
+            pending_gate = None
+            accepted_checkpoint_recovery_response = True
         if gate_pending and not accepted_response and not operator_ack:
             if isinstance(pending_gate, dict):
                 return OrchestrationCoordinationResult(
@@ -8425,9 +8441,11 @@ class NativeOrchestrationCoordinator:
 
     @staticmethod
     def _same_apply_gate_response_has_unvalidated_update(
-        checkpoint: dict[str, Any], operator_action_id: str
+        checkpoint: dict[str, Any] | None, operator_action_id: str | None
     ) -> bool:
         """Prevent replaying the same accepted response before its Update validates."""
+        if not operator_action_id or not checkpoint:
+            return False
         return (
             checkpoint.get("operator_action_id") == operator_action_id
             and checkpoint.get("status") != "VALIDATED"
