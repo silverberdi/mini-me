@@ -859,10 +859,8 @@ def scheduler_run_cmd(
                                     active_run.stop_details = details
                                     uow.orchestration_runs.save(active_run)
                                     uow.commit()
-                            elif observation and not watchdog_repo.get_by_run_stage_generation(
-                                active_run.run_id,
-                                observation["stage"],
-                                observation["candidate_generation"],
+                            elif observation and not watchdog_service.has_persisted_event(
+                                watchdog_repo, observation
                             ):
                                 owner_repo = getattr(uow, "orchestration_worktree_ownerships", None)
                                 owner = (

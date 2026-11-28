@@ -221,6 +221,25 @@ class WatchdogObservationService:
         return False
 
     @staticmethod
+    def has_persisted_event(watchdog_repository: Any, diagnosis: dict[str, Any]) -> bool:
+        """Deduplicate retries by the immutable event identity, not by its run slot."""
+        evidence = diagnosis.get("evidence") or {}
+        event_identity = diagnosis.get("event_identity") or evidence.get("event_identity")
+        if not event_identity:
+            return False
+        get_by_event_identity = getattr(watchdog_repository, "get_by_event_identity", None)
+        if callable(get_by_event_identity):
+            return get_by_event_identity(event_identity) is not None
+        list_diagnoses = getattr(watchdog_repository, "list_diagnoses", None)
+        if not callable(list_diagnoses):
+            return False
+        return any(
+            (item.get("event_identity") or (item.get("evidence") or {}).get("event_identity"))
+            == event_identity
+            for item in list_diagnoses(project_id=diagnosis.get("project_id"), limit=200)
+        )
+
+    @staticmethod
     def _component_for_stage(stage: Any) -> str:
         return {
             "EXPLORING": "exploration",
