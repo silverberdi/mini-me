@@ -1649,6 +1649,19 @@ def test_same_accepted_response_cannot_replay_an_unvalidated_update():
     assert not NativeOrchestrationCoordinator._same_apply_gate_response_has_unvalidated_update(
         other_action, "same-action"
     )
+    # Absence of human operator action or empty checkpoint must NEVER trigger unvalidated update block
+    assert not NativeOrchestrationCoordinator._same_apply_gate_response_has_unvalidated_update(
+        {}, None
+    )
+    assert not NativeOrchestrationCoordinator._same_apply_gate_response_has_unvalidated_update(
+        None, None
+    )
+    assert not NativeOrchestrationCoordinator._same_apply_gate_response_has_unvalidated_update(
+        {"status": "UPDATE_STARTED"}, None
+    )
+    assert not NativeOrchestrationCoordinator._same_apply_gate_response_has_unvalidated_update(
+        {}, "same-action"
+    )
 
 
 @pytest.mark.asyncio
