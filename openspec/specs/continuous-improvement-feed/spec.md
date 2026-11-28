@@ -7,7 +7,7 @@ Give operators a cross-project view of persisted, evidence-backed recurrence-pre
 ## Requirements
 
 ### Requirement: Cross-project improvement feed
-The system SHALL provide an authenticated `Mejora Continua` view at `/mejora-continua` over persisted Watchdog suggestions, with project and status filters, root cause, affected component, source run, and evidence-bound summary. The feed SHALL expose only sanitized data authorized for the operator and SHALL distinguish pending, converted-to-draft, and discarded suggestions.
+The system SHALL provide an authenticated `Mejora Continua` view at `/mejora-continua` over persisted Watchdog suggestions, with project and status filters, root cause, affected component, source run, and evidence-bound summary. The authenticated administration endpoint `/api/v1/admin/watchdog/diagnoses` SHALL return persisted diagnoses that have an improvement suggestion, including the suggestion, its source diagnosis and evidence, and its current status. A newly cataloged Watchdog suggestion SHALL be returned with status `pending` and SHALL be visible to the `Mejora Continua` view. The feed SHALL expose only sanitized data authorized for the operator and SHALL distinguish pending, converted-to-draft, and discarded suggestions.
 
 #### Scenario: Browse and filter suggestions
 - **WHEN** the operator opens the feed and filters by a project or status
@@ -18,6 +18,11 @@ The system SHALL provide an authenticated `Mejora Continua` view at `/mejora-con
 - **WHEN** multiple persisted suggestions have the same supported root-cause classification and affected component
 - **THEN** the feed may summarize that observed recurrence with its actual count and linked source records
 - **AND** it does not claim a pattern from missing or ambiguous evidence
+
+#### Scenario: Persisted pending diagnosis appears in administration
+- **WHEN** an authorized operator requests `/api/v1/admin/watchdog/diagnoses` after Watchdog has persisted a diagnosis with an improvement suggestion
+- **THEN** the response includes the diagnosis, its source event and transition or intervention identity, the suggestion, and status `pending`
+- **AND** the same persisted suggestion is available to `/mejora-continua`
 
 ### Requirement: Operator-controlled suggestion handling
 The system SHALL let an authorized operator copy a formatted suggestion as an Issue draft or discard it. Copying SHALL mark it converted-to-draft only after the copy action succeeds; discarding SHALL persist the discarded status. Neither action SHALL create, edit, or close a GitHub Issue.
