@@ -182,13 +182,15 @@ def test_autonomy_derived_from_stage_events_when_metrics_absent() -> None:
     ))
     projection = service.project("autonomy")
     point = projection.series[1].points[0]
-    assert point.value == 100.0
+    assert point.value == 50.0
+    assert point.autonomy_outcomes == {"no_intervention": 1, "technical_block": 1}
+    assert point.eligible_stage_count == 2
 
 
 def test_autonomy_penalizes_failed_abandoned_and_human_required_events() -> None:
     uow, service = _service()
     run = _run("event-penalties", "p1", 1)
-    run.stop_details = {"resolved_human_gates": [{"gate_id": "gate-1", "response": "continue"}]}
+    run.stop_details = {"resolved_human_gates": [{"gate_id": "gate-1", "response": "continue", "type": "technical"}]}
     uow.orchestration_runs.save(run)
     # 4 completed stages
     for _ in range(4):
@@ -220,7 +222,8 @@ def test_autonomy_penalizes_failed_abandoned_and_human_required_events() -> None
     ))
     projection = service.project("autonomy")
     point = projection.series[1].points[0]
-    assert point.value == 0.0
+    assert point.value == 50.0
+    assert point.autonomy_outcomes == {"no_intervention": 1, "operator_needed": 1}
 
 
 def test_autonomy_returns_no_data_when_completed_run_lacks_intervention_evidence() -> None:
@@ -273,7 +276,7 @@ def test_autonomy_projection_exposes_clean_recovered_and_operator_outcomes() -> 
     operator = _run("outcome-operator", "p2", 1)
     clean.stop_details = {"resolved_human_gates": []}
     recovered.stop_details = {"resolved_human_gates": []}
-    operator.stop_details = {"resolved_human_gates": [{"gate_id": "gate-1"}]}
+    operator.stop_details = {"resolved_human_gates": [{"gate_id": "gate-1", "response": "retry", "type": "technical"}]}
     for run in (clean, recovered, operator):
         uow.orchestration_runs.save(run)
         uow.orchestration_stage_events.save(OrchestrationStageEvent(
@@ -303,6 +306,68 @@ def test_autonomy_projection_exposes_clean_recovered_and_operator_outcomes() -> 
     assert points["p2"].autonomy_outcomes == {"operator_needed": 1}
 
 
+def test_autonomy_counts_governance_as_one_non_autonomous_stage() -> None:
+    uow, service = _service()
+    run = _run("governance-5-of-6", "p1", 1)
+    run.stop_details = {"resolved_human_gates": [{
+        "gate_id": "scope-1", "response": "approved", "type": "governance", "stage": "PROPOSING",
+    }]}
+    uow.orchestration_runs.save(run)
+    stages = [OrchestrationStage.EXPLORING, OrchestrationStage.PROPOSING, OrchestrationStage.IMPLEMENTING,
+              OrchestrationStage.VERIFYING, OrchestrationStage.CODE_REVIEW, OrchestrationStage.COMPLETED]
+    for stage in stages:
+        uow.orchestration_stage_events.save(OrchestrationStageEvent(
+            run_id=run.run_id, from_stage=stage, to_stage=stage,
+            event_type="STAGE_INVOCATION_COMPLETED", created_at=run.created_at,
+            evidence_references={"status": "COMPLETE"},
+        ))
+
+    point = service.project("autonomy").series[1].points[0]
+
+    assert point.value == pytest.approx(83.333, abs=0.001)
+    assert point.autonomy_outcomes == {"no_intervention": 5, "governance_authorization": 1}
+    assert point.eligible_stage_count == 6
+    assert point.autonomous_stage_count == 5
+
+
+def test_autonomy_excludes_contradictory_evidence_fail_closed() -> None:
+    uow, service = _service()
+    run = _run("ambiguous-outcome", "p1", 1)
+    run.stop_details = {"resolved_human_gates": []}
+    uow.orchestration_runs.save(run)
+    uow.orchestration_stage_events.save(OrchestrationStageEvent(
+        run_id=run.run_id, from_stage=OrchestrationStage.IMPLEMENTING,
+        to_stage=OrchestrationStage.IMPLEMENTING, event_type="INTERVENTION_AMBIGUOUS",
+        created_at=run.created_at,
+    ))
+
+    projection = service.project("autonomy")
+
+    assert projection.no_data is True
+    assert projection.excluded == {"unverified_or_incomplete": 1}
+
+
+def test_reprojection_is_stable_and_includes_project_represented_by_runs() -> None:
+    uow, service = _service()
+    run = _run("unregistered-project", "boxio", 1)
+    run.stop_details = {"resolved_human_gates": []}
+    uow.orchestration_runs.save(run)
+    uow.orchestration_stage_events.save(OrchestrationStageEvent(
+        run_id=run.run_id, from_stage=OrchestrationStage.IMPLEMENTING,
+        to_stage=OrchestrationStage.IMPLEMENTING, event_type="STAGE_INVOCATION_COMPLETED",
+        created_at=run.created_at, evidence_references={"status": "COMPLETE"},
+    ))
+    before = (uow.orchestration_runs.list_runs(), uow.orchestration_stage_events.list_by_run(run.run_id))
+
+    first = service.project("autonomy").model_dump(mode="json")
+    second = service.project("autonomy").model_dump(mode="json")
+    after = (uow.orchestration_runs.list_runs(), uow.orchestration_stage_events.list_by_run(run.run_id))
+
+    assert first == second
+    assert any(series.project_id == "boxio" for series in service.project("autonomy").series)
+    assert before == after
+
+
 def test_temporal_telemetry_respects_custom_window_days() -> None:
     uow, service = _service()
     projection_7 = service.project("autonomy", window_days=7)
@@ -328,4 +393,3 @@ def test_dashboard_service_overview_passes_window_days() -> None:
     dashboard_svc = OperationsDashboardService(uow)
     overview = dashboard_svc.get_overview(window_days=7)
     assert len(overview.temporal_telemetry["autonomy"].axis) == 7
-
